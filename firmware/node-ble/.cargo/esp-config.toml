@@ -1,0 +1,4 @@
+# Keep user/runtime configuration values in this file.
+[env]
+# Bare level only (off|error|warn|info|debug|trace); records become JSON lines.
+ESP_LOG="warn"

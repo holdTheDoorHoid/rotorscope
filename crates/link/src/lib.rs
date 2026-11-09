@@ -31,7 +31,8 @@ pub struct Detection {
     /// Wi-Fi channel number, or BLE advertising channel (37-39) when known, else 0.
     pub channel: u8,
     pub rssi: i8,
-    /// Wi-Fi transmitter address or BLE advertiser address.
+    /// Wi-Fi transmitter address or BLE advertiser address, in display order
+    /// (most significant byte first, as printed `aa:bb:..`).
     pub mac: [u8; 6],
     /// F3411 message counter from the frame.
     pub counter: u8,
@@ -50,11 +51,15 @@ pub enum Frame {
     },
     Detection(Detection),
     /// Once a second: frames seen vs. Remote ID found, for the health screen.
+    /// Every count is a running total since boot; the hub takes differences.
     Stats {
         uptime_us: u64,
         frames_seen: u32,
         rid_found: u32,
         dropped: u32,
+        /// Frames seen per transport, for nodes that can tell them apart (the
+        /// BLE node splits legacy / extended / Long Range). Empty otherwise.
+        by_transport: Vec<(Transport, u32), 5>,
     },
 }
 
@@ -161,6 +166,15 @@ mod tests {
                 frames_seen: u32::MAX,
                 rid_found: 7,
                 dropped: 0,
+                by_transport: [
+                    (Transport::BleLegacy, u32::MAX),
+                    (Transport::BleExtended, u32::MAX),
+                    (Transport::BleLongRange, u32::MAX),
+                    (Transport::WifiBeacon, u32::MAX),
+                    (Transport::WifiNan, u32::MAX),
+                ]
+                .into_iter()
+                .collect(),
             },
         ]
     }

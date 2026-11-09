@@ -1,0 +1,85 @@
+[package]
+edition      = "2024"
+name         = "node-ble"
+rust-version = "1.95"
+version      = "0.1.0"
+description  = "Node B: Bluetooth Remote ID listener (BLE4 legacy + BLE5 extended / Long Range)"
+
+# Own workspace: firmware builds for its own target and toolchain, and must not
+# be swept into the host workspace at the repository root.
+[workspace]
+
+[[bin]]
+name = "node-ble"
+path = "./src/bin/main.rs"
+test = false
+bench = false
+
+[features]
+default = ["esp32s3"]
+# Exactly one chip feature. The S3 needs the `esp` toolchain (Xtensa); the C5
+# builds on stable for riscv32imac-unknown-none-elf. See README.md.
+esp32s3 = [
+  "esp-hal/esp32s3",
+  "esp-rtos/esp32s3",
+  "esp-bootloader-esp-idf/esp32s3",
+  "esp-alloc/esp32s3",
+  "esp-backtrace/esp32s3",
+  "esp-println/esp32s3",
+  "esp-radio/esp32s3",
+]
+esp32c5 = [
+  "esp-hal/esp32c5",
+  "esp-rtos/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-alloc/esp32c5",
+  "esp-backtrace/esp32c5",
+  "esp-println/esp32c5",
+  "esp-radio/esp32c5",
+]
+
+[dependencies]
+rid  = { path = "../../crates/rid", features = ["serde"] }
+link = { path = "../../crates/link" }
+
+esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["log-04"] }
+esp-alloc = { version = "0.11.0" }
+# custom-halt: reboot after a panic (see `custom_halt` in main.rs) instead of halting.
+esp-backtrace = { version = "0.20.0", default-features = false, features = ["panic-handler", "println", "custom-halt"] }
+# Only the panic handler prints directly; normal output goes through the async
+# USB-Serial-JTAG driver (see out.rs). `jtag-serial` makes the panic text land
+# on the same USB port on both chips.
+esp-println = { version = "0.18.0", default-features = false, features = ["jtag-serial", "critical-section"] }
+# beta.0 or later is required (beta.2 is yanked): it fixes the extended-scan assert on the C5.
+esp-radio = { version = "=1.0.0-beta.1", features = ["ble", "esp-alloc", "log-04", "unstable"] }
+log = "0.4.27"
+
+bt-hci = "0.10"
+# 0.8 speaks bt-hci 0.10 while esp-radio beta.1 is built on 0.9; they meet at
+# bt-hci-transport 0.1, whose Transport trait both re-export.
+trouble-host = { version = "0.8.0", default-features = false, features = ["scan", "default-packet-pool", "log"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.1", features = ["log"] }
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+embedded-io-async = "0.7"
+
+critical-section = "1.2.0"
+static_cell = "2.1.1"
+
+heapless = { version = "0.8", features = ["serde"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde-json-core = { version = "0.6", default-features = false }
+postcard = { version = "1", default-features = false, features = ["heapless"] }
+
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = 'fat'
+opt-level     = 's'

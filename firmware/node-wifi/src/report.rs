@@ -118,6 +118,8 @@ pub fn stats_hub(line: &StatsLine) {
         frames_seen: line.seen,
         rid_found: line.rid,
         dropped: line.drop,
+        // Beacons and NAN are told apart only after decoding, so no split here.
+        by_transport: heapless::Vec::new(),
     });
 }
 

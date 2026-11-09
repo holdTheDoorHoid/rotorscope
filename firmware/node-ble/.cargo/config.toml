@@ -1,0 +1,20 @@
+# Keep compilation settings in this file and user/runtime settings in `esp-config.toml`.
+include = ["esp-config.toml"]
+
+# Default target is the S3 (Xtensa, `esp` toolchain from rust-toolchain.toml).
+# The C5 build overrides target, toolchain and features on the command line;
+# see README.md.
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[target.riscv32imac-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c5"
+# Needed for esp-backtrace to walk the stack on RISC-V.
+rustflags = ["-C", "force-frame-pointers"]
+
+[unstable]
+build-std = ["alloc", "core"]
