@@ -1,8 +1,6 @@
 # Rotorscope
 
 An affordable, receive-only detector for drones that broadcast Remote ID, built from several
-
-A receive-only drone detector.
 ESP32 chips with firmware written in Rust. See [PLAN.md](PLAN.md) for requirements and phases,
 and [RESEARCH.md](RESEARCH.md) for the survey behind them.
 
