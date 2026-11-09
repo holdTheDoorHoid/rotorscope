@@ -1,0 +1,12 @@
+[package]
+name = "odid-ref"
+description = "Host-only: builds the official opendroneid-core-c so tests can compare our decoder against it"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"

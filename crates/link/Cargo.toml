@@ -1,0 +1,12 @@
+[package]
+name = "link"
+description = "Node-to-hub wire protocol: postcard + COBS frames over UART"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rid = { workspace = true, features = ["serde"] }
+serde.workspace = true
+heapless.workspace = true
+postcard.workspace = true

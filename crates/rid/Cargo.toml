@@ -1,0 +1,18 @@
+[package]
+name = "rid"
+description = "no_std Remote ID (ASTM F3411 / ASD-STAN EN 4709-002) frame extraction and message decoding"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+serde = ["dep:serde"]
+# Message, Message Pack and frame builders, for test transmitters.
+encode = []
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+odid-ref = { path = "../odid-ref" }
+serde_json = "1"

@@ -1,0 +1,12 @@
+[package]
+name = "tracker"
+description = "Hub logic: merge detections into drone tracks, range/bearing, output formats"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+rid = { workspace = true, features = ["serde"] }
+link.workspace = true
+heapless.workspace = true
+serde.workspace = true

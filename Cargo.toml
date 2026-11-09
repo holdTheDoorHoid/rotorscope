@@ -1,0 +1,19 @@
+# Host-buildable crates. Firmware lives in firmware/*, each its own workspace
+# (different targets and toolchains), and depends on these by path.
+[workspace]
+resolver = "2"
+members = ["crates/rid", "crates/link", "crates/tracker", "crates/odid-ref", "tools/rid-view"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "TBD"   # owner still choosing (see PLAN.md, open question 2)
+repository = "https://github.com/holdTheDoorHoid/drone-detector"
+
+[workspace.dependencies]
+rid = { path = "crates/rid" }
+link = { path = "crates/link" }
+tracker = { path = "crates/tracker" }
+serde = { version = "1", default-features = false, features = ["derive"] }
+heapless = { version = "0.8", features = ["serde"] }
+postcard = { version = "1", default-features = false, features = ["heapless"] }

@@ -1,0 +1,9 @@
+[package]
+name = "rid-view"
+description = "Laptop tool: read a node's USB output and show live Remote ID tracks"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
