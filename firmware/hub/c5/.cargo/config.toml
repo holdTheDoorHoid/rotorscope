@@ -1,0 +1,15 @@
+# Hub on an ESP32-C5. Build from this directory; cargo finds ../Cargo.toml.
+#   cargo fw        -> ../target/riscv32imac-unknown-none-elf/release/hub
+[alias]
+fw = "build --release --features esp32c5"
+
+[build]
+target = "riscv32imac-unknown-none-elf"
+# Frame pointers make esp-backtrace's panic backtraces usable on RISC-V.
+rustflags = ["-C", "force-frame-pointers"]
+
+[target.riscv32imac-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c5"
+
+[env]
+ESP_LOG = "warn"

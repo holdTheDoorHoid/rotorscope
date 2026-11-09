@@ -1,0 +1,19 @@
+# Hub on an ESP32-S3. Build from this directory; cargo finds ../Cargo.toml.
+#   cargo fw                       -> ../target/xtensa-esp32s3-none-elf/release/hub
+#   cargo fw --features demo       (two synthetic drones, no nodes needed)
+[alias]
+fw = "build --release --features esp32s3"
+
+[build]
+target    = "xtensa-esp32s3-none-elf"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3"
+
+[unstable]
+build-std = ["alloc", "core"]
+
+[env]
+# Diagnostic log level for esp-radio etc. (bare level: off|error|warn|info|debug).
+ESP_LOG = "warn"

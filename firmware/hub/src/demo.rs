@@ -1,0 +1,181 @@
+//! `demo` feature: two synthetic drones, so every output can be exercised
+//! with no radio nodes attached.
+//!
+//! Conduct: the identities are deliberately and obviously fake (`DEMO-...`,
+//! Self-ID "DEMO - NOT AN AIRCRAFT"). Nothing is transmitted: the detections
+//! are built with `rid::encode` and pushed into the same queue the node UARTs
+//! feed, exactly as if Node A or Node B had heard them.
+//!
+//! - DEMO-ALPHA-0001: 120 m circle, 90 s lap, heard as a Wi-Fi beacon (pack).
+//! - DEMO-BRAVO-0002: 250 m circle the other way, 150 s lap, heard over BLE
+//!   Long Range (pack) and, every third second, as BT4 legacy single messages,
+//!   so the cross-transport merge is exercised.
+
+use core::f64::consts::PI;
+
+use embassy_time::{Duration, Ticker};
+use link::{Detection, Frame};
+use rid::message::{
+    BasicId, Category, ClassificationType, DescType, FixedStr, HeightType, HorizontalAccuracy, IdType, LatLon,
+    Location, Message, OperatorId, OperatorIdType, OperatorLocationType, SelfId, SpeedAccuracy, Status, System,
+    UaClass, UaType, VerticalAccuracy,
+};
+use rid::{RawMessage, Transport, encode};
+
+use crate::hub::now_ms;
+use crate::links::FRAMES;
+
+/// Detections carry this node number; no real link uses it.
+pub const NODE: u8 = 9;
+
+const GROUND_M: f32 = 15.0;
+const EARTH_R: f64 = 6_371_000.0;
+
+struct Drone {
+    uas_id: &'static [u8],
+    operator_id: &'static [u8],
+    radius_m: f64,
+    period_s: f64,
+    /// +1 clockwise, -1 counter-clockwise.
+    dir: f64,
+    height_m: f32,
+    mac: [u8; 6],
+    transport: Transport,
+    channel: u8,
+    rssi: i8,
+}
+
+const ALPHA: Drone = Drone {
+    uas_id: b"DEMO-ALPHA-0001",
+    operator_id: b"DEMO-OPERATOR-A",
+    radius_m: 120.0,
+    period_s: 90.0,
+    dir: 1.0,
+    height_m: 60.0,
+    // Locally administered, obviously synthetic.
+    mac: [0x02, 0xde, 0x40, 0x00, 0x00, 0x01],
+    transport: Transport::WifiBeacon,
+    channel: 6,
+    rssi: -58,
+};
+
+const BRAVO: Drone = Drone {
+    uas_id: b"DEMO-BRAVO-0002",
+    operator_id: b"DEMO-OPERATOR-B",
+    radius_m: 250.0,
+    period_s: 150.0,
+    dir: -1.0,
+    height_m: 90.0,
+    mac: [0x02, 0xde, 0x40, 0x00, 0x00, 0x02],
+    transport: Transport::BleLongRange,
+    channel: 37,
+    rssi: -77,
+};
+
+const SELF_ID: &[u8] = b"DEMO - NOT AN AIRCRAFT";
+
+/// Position, heading and speed on the circle at `t_s`.
+fn at(d: &Drone, (clat, clon): (f64, f64), t_s: f64) -> (f64, f64, f32, f32) {
+    let theta = d.dir * 2.0 * PI * (t_s % d.period_s) / d.period_s;
+    let north = d.radius_m * libm::cos(theta);
+    let east = d.radius_m * libm::sin(theta);
+    let lat = clat + (north / EARTH_R).to_degrees();
+    let lon = clon + (east / (EARTH_R * libm::cos(clat.to_radians()))).to_degrees();
+    // Velocity is d/dt (cos, sin) * R * omega * dir = (-sin, cos) * ...
+    let heading = (libm::atan2(d.dir * libm::cos(theta), -d.dir * libm::sin(theta)).to_degrees() + 360.0) % 360.0;
+    let speed = 2.0 * PI * d.radius_m / d.period_s;
+    (lat, lon, heading as f32, speed as f32)
+}
+
+fn messages(d: &Drone, centre: (f64, f64), t_s: f64) -> Result<[RawMessage; 5], rid::Error> {
+    let (lat, lon, heading, speed) = at(d, centre, t_s);
+    let basic = Message::BasicId(BasicId {
+        id_type: IdType::SerialNumber,
+        ua_type: UaType::HelicopterOrMultirotor,
+        uas_id: FixedStr::new(d.uas_id)?,
+    });
+    let location = Message::Location(Location {
+        status: Status::Airborne,
+        height_type: HeightType::AboveTakeoff,
+        direction: Some(heading),
+        speed_horizontal: Some(speed),
+        speed_vertical: Some(0.0),
+        position: Some(LatLon { lat, lon }),
+        altitude_pressure: None,
+        altitude_geodetic: Some(GROUND_M + d.height_m),
+        height: Some(d.height_m),
+        horizontal_accuracy: HorizontalAccuracy::M10,
+        vertical_accuracy: VerticalAccuracy::M10,
+        baro_accuracy: VerticalAccuracy::Unknown,
+        speed_accuracy: SpeedAccuracy::Mps1,
+        timestamp: Some(((t_s % 3600.0) * 10.0) as u32 as f32 / 10.0),
+        timestamp_accuracy: Some(0.1),
+    });
+    let self_id = Message::SelfId(SelfId { desc_type: DescType::Text, description: FixedStr::new(SELF_ID)? });
+    let system = Message::System(System {
+        operator_location_type: OperatorLocationType::Takeoff,
+        classification_type: ClassificationType::Undeclared,
+        operator_position: Some(LatLon { lat: centre.0, lon: centre.1 }),
+        area_count: 1,
+        area_radius: 0,
+        area_ceiling: None,
+        area_floor: None,
+        category: Category::Undeclared,
+        class: UaClass::Undeclared,
+        operator_altitude: Some(GROUND_M),
+        timestamp: None,
+    });
+    let operator = Message::OperatorId(OperatorId {
+        operator_id_type: OperatorIdType::OperatorId,
+        operator_id: FixedStr::new(d.operator_id)?,
+    });
+    Ok([
+        encode::message(&basic)?,
+        encode::message(&location)?,
+        encode::message(&self_id)?,
+        encode::message(&system)?,
+        encode::message(&operator)?,
+    ])
+}
+
+fn detection(d: &Drone, transport: Transport, counter: u8, msgs: &[RawMessage]) -> Frame {
+    Frame::Detection(Detection {
+        transport,
+        channel: d.channel,
+        rssi: d.rssi,
+        mac: d.mac,
+        counter,
+        uptime_us: now_ms() * 1000,
+        messages: msgs.iter().copied().collect(),
+    })
+}
+
+fn inject(frame: Frame) {
+    // Same queue as the UARTs; a full queue drops, as it would for a node.
+    let _ = FRAMES.try_send((NODE, frame));
+}
+
+#[embassy_executor::task]
+pub async fn task(centre: (f64, f64)) {
+    let mut ticker = Ticker::every(Duration::from_secs(1));
+    let mut counter: u8 = 0;
+    loop {
+        ticker.next().await;
+        counter = counter.wrapping_add(1);
+        let t_s = now_ms() as f64 / 1000.0;
+        for d in [&ALPHA, &BRAVO] {
+            match messages(d, centre, t_s) {
+                Ok(msgs) => {
+                    inject(detection(d, d.transport, counter, &msgs));
+                    // Bravo also "heard" as BT4 legacy: one message per advert,
+                    // Basic ID then Location, as a real BT4 transmitter rotates.
+                    if d.transport == Transport::BleLongRange && counter % 3 == 0 {
+                        inject(detection(d, Transport::BleLegacy, counter, &msgs[..1]));
+                        inject(detection(d, Transport::BleLegacy, counter, &msgs[1..2]));
+                    }
+                }
+                Err(_) => crate::usb::msg("err", "demo encode"),
+            }
+        }
+    }
+}

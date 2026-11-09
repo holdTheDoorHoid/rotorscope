@@ -2,3 +2,5 @@ target/
 **/target/
 *.bin
 *.elf
+# Hub station-mode credentials: created by the owner, never committed.
+firmware/hub/wifi.local.toml

@@ -1,0 +1,3 @@
+target/
+# Station-mode credentials (see README.md). Never commit.
+wifi.local.toml

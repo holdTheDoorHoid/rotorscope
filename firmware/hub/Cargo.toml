@@ -1,0 +1,113 @@
+# Rotorscope hub. One source tree, two chips (like the nodes):
+#   s3/  -> ESP32-S3 (Xtensa, `esp` toolchain). The real hub.
+#   c5/  -> ESP32-C5 (RISC-V, stable). Kept compiling so the hub can move to a
+#           C5 if that ever makes sense; it has only two HP UARTs (see pins.rs).
+# Each chip directory holds only the toolchain pin and cargo config; build from
+# inside it with `cargo fw` (see README.md). Exactly one chip feature.
+[package]
+name         = "hub"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.88"
+license      = "TBD"
+publish      = false
+
+[[bin]]
+name = "hub"
+path = "src/main.rs"
+test = false
+bench = false
+
+# Firmware is its own workspace (different targets/toolchains from crates/*).
+[workspace]
+
+[features]
+esp32s3 = [
+  "esp-hal/esp32s3",
+  "esp-rtos/esp32s3",
+  "esp-bootloader-esp-idf/esp32s3",
+  "esp-alloc/esp32s3",
+  "esp-backtrace/esp32s3",
+  "esp-println/esp32s3",
+  "esp-radio/esp32s3",
+  "dep:esp-wifi-sys-esp32s3",
+]
+esp32c5 = [
+  "esp-hal/esp32c5",
+  "esp-rtos/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-alloc/esp32c5",
+  "esp-backtrace/esp32c5",
+  "esp-println/esp32c5",
+  "esp-radio/esp32c5",
+  "dep:esp-wifi-sys-esp32c5",
+]
+# Two synthetic, obviously fake drones circling the hub, injected as if a
+# node had heard them. Exercises every output without any radio nodes.
+demo = ["rid/encode"]
+# Build the hotspot without a password. For bench tests only: anyone nearby
+# could then join and read the track list.
+open-hotspot = []
+
+[dependencies]
+rid     = { path = "../../crates/rid", features = ["serde"] }
+link    = { path = "../../crates/link" }
+tracker = { path = "../../crates/tracker" }
+# The phone page, gzipped at build time (web/index.html).
+webui   = { path = "../../crates/webui" }
+
+esp-hal                = { version = "~1.2.2", features = ["unstable"] }
+esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+esp-bootloader-esp-idf = { version = "0.6.0" }
+esp-alloc              = { version = "0.11.0" }
+# custom-halt: reboot after a panic (see `custom_halt` in main.rs).
+esp-backtrace = { version = "0.20.0", default-features = false, features = ["panic-handler", "println", "custom-halt"] }
+# Only the panic handler and the boot banner print directly; everything else
+# goes through the async USB-Serial-JTAG driver (usb.rs). `jtag-serial` keeps
+# the panic text on the same USB port, never on UART0 (whose pins we reuse).
+esp-println = { version = "0.18.0", default-features = false, features = ["jtag-serial", "critical-section"] }
+# beta.2 was yanked (it only fixed ESP32-S31 builds); beta.1 is the newest usable release.
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp-alloc", "unstable", "wifi"] }
+# esp-radio keeps its blob bindings private; the country code call is not
+# wrapped (same reason as the nodes). Same version esp-radio links.
+esp-wifi-sys-esp32s3 = { version = "0.3.0", optional = true }
+esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
+
+embassy-executor = { version = "0.10.0" }
+embassy-time     = { version = "0.5.0" }
+embassy-sync     = { version = "0.7" }
+embassy-futures  = "0.1"
+embassy-net = { version = "0.9", features = ["tcp", "udp", "proto-ipv4", "medium-ethernet", "dhcpv4", "multicast"] }
+embedded-io-async = "0.7"
+
+# HTTP server: async, no_std, no alloc, on embassy-net. MIT/Apache.
+picoserve = { version = "0.20", default-features = false, features = ["embassy"] }
+# DHCP server and captive-portal DNS on embassy-net sockets. MIT/Apache.
+edge-dhcp        = { version = "0.8", default-features = false, features = ["io"] }
+edge-captive     = { version = "0.8", default-features = false, features = ["io"] }
+edge-nal         = "0.7"
+edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "tcp"] }
+
+critical-section = "1.2.0"
+static_cell      = "2.1.1"
+heapless         = { version = "0.8", features = ["serde"] }
+serde            = { version = "1", default-features = false, features = ["derive"] }
+serde-json-core  = { version = "0.6", default-features = false }
+libm             = "0.2"
+# Hotspot password derivation (hotspot.rs).
+sha2 = { version = "0.11", default-features = false }
+
+[build-dependencies]
+# Parses the owner's optional, gitignored wifi.local.toml (station mode).
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.dev]
+# The default debug profile is too slow and too big for these chips.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"
