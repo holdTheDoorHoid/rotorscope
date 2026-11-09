@@ -1,4 +1,5 @@
-//! FFI to the vendored opendroneid-core-c (Apache-2.0), for differential tests.
+//! FFI to the vendored opendroneid-core-c (Apache-2.0), including its GB 46750
+//! variant, for differential tests.
 //!
 //! Hand-written mirrors of the C structs in `opendroneid.h`, built with the
 //! library's defaults (`ODID_BASIC_ID_MAX_MESSAGES = 2`,
@@ -160,10 +161,22 @@ unsafe extern "C" {
     /// Reads `ODID_MESSAGE_SIZE` bytes, or a whole pack if the type is 0xF.
     pub fn decodeOpenDroneID(uas: *mut ODID_UAS_Data, msg: *const u8) -> c_int;
 
-    pub fn odid_message_build_pack(uas: *const ODID_UAS_Data, pack: *mut u8, buflen: usize) -> c_int;
-    pub fn odid_message_process_pack(uas: *mut ODID_UAS_Data, pack: *const u8, buflen: usize) -> c_int;
+    pub fn odid_message_build_pack(
+        uas: *const ODID_UAS_Data,
+        pack: *mut u8,
+        buflen: usize,
+    ) -> c_int;
+    pub fn odid_message_process_pack(
+        uas: *mut ODID_UAS_Data,
+        pack: *const u8,
+        buflen: usize,
+    ) -> c_int;
 
-    pub fn odid_wifi_build_nan_sync_beacon_frame(mac: *const c_char, buf: *mut u8, size: usize) -> c_int;
+    pub fn odid_wifi_build_nan_sync_beacon_frame(
+        mac: *const c_char,
+        buf: *mut u8,
+        size: usize,
+    ) -> c_int;
     pub fn odid_wifi_build_message_pack_nan_action_frame(
         uas: *const ODID_UAS_Data,
         mac: *const c_char,
@@ -211,16 +224,36 @@ pub fn check_layout() {
         (5, size_of::<ODID_OperatorID_data>(), "OperatorID_data"),
         (6, size_of::<ODID_UAS_Data>(), "UAS_Data"),
         (7, size_of::<ODID_MessagePack_data>(), "MessagePack_data"),
-        (8, size_of::<ODID_MessagePack_encoded>(), "MessagePack_encoded"),
+        (
+            8,
+            size_of::<ODID_MessagePack_encoded>(),
+            "MessagePack_encoded",
+        ),
         (9, offset_of!(ODID_UAS_Data, Location), "UAS.Location"),
         (10, offset_of!(ODID_UAS_Data, Auth), "UAS.Auth"),
         (11, offset_of!(ODID_UAS_Data, SelfID), "UAS.SelfID"),
         (12, offset_of!(ODID_UAS_Data, System), "UAS.System"),
         (13, offset_of!(ODID_UAS_Data, OperatorID), "UAS.OperatorID"),
-        (14, offset_of!(ODID_UAS_Data, BasicIDValid), "UAS.BasicIDValid"),
-        (15, offset_of!(ODID_UAS_Data, OperatorIDValid), "UAS.OperatorIDValid"),
-        (16, offset_of!(ODID_Location_data, TimeStamp), "Location.TimeStamp"),
-        (17, offset_of!(ODID_System_data, Timestamp), "System.Timestamp"),
+        (
+            14,
+            offset_of!(ODID_UAS_Data, BasicIDValid),
+            "UAS.BasicIDValid",
+        ),
+        (
+            15,
+            offset_of!(ODID_UAS_Data, OperatorIDValid),
+            "UAS.OperatorIDValid",
+        ),
+        (
+            16,
+            offset_of!(ODID_Location_data, TimeStamp),
+            "Location.TimeStamp",
+        ),
+        (
+            17,
+            offset_of!(ODID_System_data, Timestamp),
+            "System.Timestamp",
+        ),
         (18, offset_of!(ODID_Auth_data, AuthData), "Auth.AuthData"),
     ];
     for (which, rust, name) in expect {
@@ -230,10 +263,89 @@ pub fn check_layout() {
     }
 }
 
+/// GB 46750-2025 (`libopendroneidcn`): decoded physical values.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DroneRIDData_t {
+    pub sn: [c_char; 21],
+    pub uin: [c_char; 9],
+    pub has_op_category: bool,
+    pub op_category: c_int,
+    pub drone_class: c_int,
+    pub gcs_pos_type: c_int,
+    pub gcs_lon: f64,
+    pub gcs_lat: f64,
+    pub gcs_alt: f32,
+    pub drone_lon: f64,
+    pub drone_lat: f64,
+    pub track_angle: f32,
+    pub ground_speed: f32,
+    pub has_rel_alt: bool,
+    pub rel_alt: f32,
+    pub has_v_speed: bool,
+    pub vertical_speed: f32,
+    pub drone_alt: f32,
+    pub has_pressure_alt: bool,
+    pub pressure_alt: f32,
+    pub op_status: c_int,
+    pub coord_system: c_int,
+    pub horizontal_accuracy: u8,
+    pub vertical_accuracy: u8,
+    pub speed_accuracy: u8,
+    pub timestamp_ms: u64,
+    pub timestamp_accuracy: u8,
+}
+
+pub const RID_OK: c_int = 0;
+pub const RID_OK_EXTENSION: c_int = 1;
+
+unsafe extern "C" {
+    pub fn CN46750_RID_Decode(
+        buf: *const u8,
+        len: usize,
+        data: *mut DroneRIDData_t,
+        version: *mut u8,
+    ) -> c_int;
+    pub fn CN46750_RID_Encode(
+        data: *const DroneRIDData_t,
+        buf: *mut u8,
+        size: usize,
+        out_len: *mut usize,
+    ) -> c_int;
+    pub fn CN46750_FindPacket(
+        data: *const u8,
+        len: usize,
+        offset: *mut usize,
+        rid_len: *mut usize,
+    ) -> bool;
+    fn odid_ref_cn_sizeof(which: c_int) -> usize;
+}
+
+/// Panics if the GB 46750 mirror disagrees with the C compiler.
+pub fn check_cn_layout() {
+    use core::mem::{offset_of, size_of};
+    let expect = [
+        (0, size_of::<DroneRIDData_t>()),
+        (1, offset_of!(DroneRIDData_t, gcs_lon)),
+        (2, offset_of!(DroneRIDData_t, has_rel_alt)),
+        (3, offset_of!(DroneRIDData_t, timestamp_ms)),
+        (4, offset_of!(DroneRIDData_t, timestamp_accuracy)),
+    ];
+    for (which, rust) in expect {
+        // SAFETY: pure function returning a constant.
+        assert_eq!(
+            rust,
+            unsafe { odid_ref_cn_sizeof(which) },
+            "DroneRIDData_t layout item {which}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn layout_matches_c() {
         super::check_layout();
+        super::check_cn_layout();
     }
 }

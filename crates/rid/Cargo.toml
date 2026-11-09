@@ -16,3 +16,5 @@ serde = { workspace = true, optional = true }
 [dev-dependencies]
 odid-ref = { path = "../odid-ref" }
 serde_json = "1"
+# Tests always see the optional features.
+rid = { path = ".", features = ["encode", "serde"] }
