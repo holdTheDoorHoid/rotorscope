@@ -1,7 +1,27 @@
 [package]
 name = "screen"
+description = "On-device screen UI: view-model, button state machine and embedded-graphics renderer"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# `from_tracker`: fill a UiState straight from a tracker::Tracker (the hub
+# enables this; the renderer itself does not need the tracker).
+tracker = ["dep:tracker", "dep:rid"]
+
 [dependencies]
+embedded-graphics = "0.8"
+heapless.workspace = true
+libm = "0.2"
+tracker = { workspace = true, optional = true }
+rid = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Snapshot tests write PNGs of every screen.
+png = "0.17"
+# Tests always see the optional `tracker` feature (the rid crate does the same).
+screen = { path = ".", features = ["tracker"] }
+# The adapter test builds tracks the way the tracker's own tests do.
+rid = { workspace = true, features = ["encode"] }
+tracker.workspace = true
