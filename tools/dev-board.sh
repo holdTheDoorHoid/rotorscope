@@ -14,7 +14,7 @@ declare -A BOARDS=(
 if [[ ${1:-} == --log ]]; then elf=""; shift; else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]}; shift; fi
 secs=${1:-15}; board=${2:-s3}
 port=${BOARDS[$board]:?unknown board $board (known: ${!BOARDS[*]})}
-lock=/tmp/drone-detector-board-$board.lock
+lock=/tmp/rotorscope-board-$board.lock
 chip=$( [[ $board == c5* ]] && echo esp32c5 || echo esp32s3 )
 
 exec 9>"$lock"

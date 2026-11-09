@@ -1,6 +1,6 @@
-# Drone Detector — Requirements and Plan
+# Rotorscope — Requirements and Plan
 
-Working name: **drone-detector** (rename any time). Drafted 2026-11-09.
+Name: **Rotorscope** (chosen 2026-11-09). Drafted 2026-11-09.
 Research behind every claim here is in [RESEARCH.md](RESEARCH.md).
 
 ## In one paragraph

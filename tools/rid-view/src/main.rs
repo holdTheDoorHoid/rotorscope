@@ -23,7 +23,7 @@ use tracker::{Context, Observation, TrackId, TrackState, Tracker, cot, csv, json
 use view::View;
 
 const USAGE: &str = "\
-rid-view: live table of Remote ID drones from drone-detector nodes
+rid-view: live table of Remote ID drones from Rotorscope nodes
 
 USAGE:
     rid-view [OPTIONS] [INPUT...]

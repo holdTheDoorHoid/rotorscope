@@ -8,7 +8,7 @@ members = ["crates/rid", "crates/link", "crates/tracker", "crates/odid-ref", "to
 edition = "2024"
 version = "0.1.0"
 license = "TBD"   # owner still choosing (see PLAN.md, open question 2)
-repository = "https://github.com/holdTheDoorHoid/drone-detector"
+repository = "https://github.com/holdTheDoorHoid/rotorscope"
 
 [workspace.dependencies]
 rid = { path = "crates/rid" }

@@ -3,7 +3,7 @@ edition      = "2024"
 name         = "rid-beacon"
 rust-version = "1.95"
 version      = "0.1.0"
-description  = "Bench Remote ID test transmitter (obviously fake identity, minimum power) for testing the drone-detector receivers"
+description  = "Bench Remote ID test transmitter (obviously fake identity, minimum power) for testing the Rotorscope receivers"
 
 # Own workspace: firmware builds for its own target and toolchain, and must not
 # be swept into the host workspace at the repository root.
