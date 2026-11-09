@@ -282,10 +282,24 @@ ESP32-C5s (Node C, plus a 5 GHz test source or the later FPV node), and dual-ban
 5. **Regulation of the test transmitter.** Keep it low-power, use an obviously fake ID, and use
    it indoors on the bench.
 
+## Test signal sources (decided 2026-11-09: the owner has no drone or module)
+
+- **Our own `firmware/rid-beacon`** replaces ArduRemoteID.
+  - It is Rust and sends every transport, including 5 GHz on a C5.
+  - Research found **no commercial module confirmed to transmit on 5 GHz**, so the C5 build is
+    the only 5 GHz source short of a DJI drone.
+- **One certified module for ground truth (optional, about $60–90):**
+  - Dronetag BS, for BT4 plus BT5 Long Range.
+  - BlueMark db120, if still stocked, for Bluetooth plus 2.4 GHz Wi-Fi.
+  - Most need a GPS fix before they transmit, so test near a window or outdoors.
+- **Free independent receiver:** an Android phone with the "Drone Scanner" app. On iPhone it
+  only sees Bluetooth.
+- **Free real-world check:** take a unit to a local RC flying field or a popular park. Newer
+  DJI models broadcast Wi-Fi beacon Remote ID, and DRONK saw an Avata on 5 GHz channel 149.
+
 ## Open questions for you
 
-1. Do you have a drone with Remote ID, or a standalone broadcast module, to test against? If
-   not, the ArduRemoteID test transmitter carries Phases 1–2.
+1. ~~Drone or module on hand?~~ None. See "Test signal sources" above.
 2. **License:** Apache-2.0/MIT, which lets anyone reuse it including companies, or GPL-3.0,
    which requires anyone who ships changes to share them and matches the FPV and ADSBee code?
    Selling kits is fine either way.
