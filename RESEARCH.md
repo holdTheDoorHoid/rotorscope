@@ -132,3 +132,76 @@ nothing locks it against other agents.
 - **BlueMark DroneScout:** the ds230 sensor was about €950 ex VAT in 2022. Bridge units are
   about $79–139. A 2026 CVE covers missing TLS validation on firmware update.
 - **WarDragon:** commercial kit hardware with the open-source DragonSync software.
+
+## Expansion research (2026-11-09, second round)
+
+### Hub chip
+- **ESP32-S3 N16R8.**
+  - esp-hal 1.2 `psram` is unstable; manual config is more reliable than auto-detect.
+  - Register both an internal and a PSRAM heap region, since Wi-Fi DMA may need internal RAM *(unverified for esp-radio)*.
+  - Octal PSRAM takes GPIO35–37.
+- **ESP32-P4.**
+  - Arrived in esp-hal 1.2.0-rc.0. Only GPIO/UART/I2C/SPI are stable; PSRAM is a stub.
+  - No Wi-Fi in esp-radio, and no Rust host for esp-hosted over SDIO.
+  - The H.264/JPEG encoders are C components (`esp_h264`).
+  - esp-hal needs chip revision v3.0+.
+  - Boards cost $14–90.
+  - Not worth it for the hub.
+- **Pico 2 W.**
+  - `cyw43` 0.7 AP mode works, but it allows about 4 clients *(unverified)*.
+  - PIO gives about 10 extra serial inputs.
+  - Needs a second flash flow (UF2).
+- **ESP32-S31.**
+  - RISC-V, 320 MHz, hardware JPEG, stable Rust.
+  - Mass production since 2026-07-30; no boards found yet.
+
+### FPV: C5VRX internals and a Rust port
+- **RF bring-up** uses the ESP-IDF Wi-Fi stack, then closed-library PHY calls (`phy_force_rx_gain`, `phy_set_freq`, `lmac_stop_hw_txq`…).
+- **The sample path:**
+  - The MODEM_DIAG debug bus is routed through the GPIO matrix onto 8 pins, as 4-bit I + 4-bit Q.
+  - PARL_IO RX reads them at 40 MS/s into a 32 KiB DMA ring.
+  - PARL_IO TX sends the ring through the **BitScrambler**, whose lookup-table state machine does the FM demodulation.
+  - The result drives a 6-bit resistor DAC. No CPU touches the samples.
+- **It has no Wi-Fi streaming of any kind**; its web controls work over Web Serial.
+- **Rust fit:**
+  - Our pinned `esp-wifi-sys-esp32c5` 0.3.0 libphy.a has the exact SHA C5VRX requires, and every symbol it uses.
+  - **Blockers for a video port:**
+    - no esp-hal BitScrambler driver (issue 5170);
+    - no circular PARL_IO DMA;
+    - no MODEM_DIAG signals in the GPIO table;
+    - the demodulator table is GPL.
+  - Video parity would take 35–60 engineer-days. Detection only would take 6–10.
+- **Rebroadcast options:**
+  - Time-slicing on the C5 gives at best a still every 1–2 s.
+  - Tapping C5VRX's digital "Clock Pin D10" output (20 MS/s, 6-bit) with an S3's LCD_CAM, then software JPEG, is the realistic route.
+  - The S3 ADC (about 83 kSPS) is far too slow for composite video.
+- **Legal:** receiving unencrypted analog video is generally lawful in the US (18 U.S.C. §2511(2)(g)(i)). Recording or publishing pilots' feeds raises privacy concerns.
+
+### Control links and LoRa
+- **ExpressLRS on 900 MHz** (as of 4.1.0):
+  - LoRa at 500 kHz, SF5–SF9 by packet rate, plus GFSK 1000 Hz on LR1121.
+  - 40 hop channels from 903.5 to 926.9 MHz.
+- **ExpressLRS on 2.4 GHz:**
+  - LoRa at 812 kHz, SF5–SF8, plus FLRC on SX1280 only.
+  - 80 channels.
+- **The sync channel is fixed at the middle hop index** (about 915.5 and 2440.4 MHz).
+  - Sync packets carry the rate, the telemetry ratio and UID4/UID5.
+  - LoRa sync word 0x12. IQ inversion depends on a UID bit, so try both.
+  - Presence detection without the binding phrase is realistic; no published detector does it yet.
+- **SX1262 vs SX127x:** they reportedly interoperate at 500 kHz SF6–9 with implicit headers *(unverified on hardware)*.
+- **Other links:**
+  - mLRS is the same approach as ELRS.
+  - Crossfire, Tracer and Ghost show as energy only.
+  - SiK/RFD900 GFSK hopping is visible as a pattern.
+  - DJI OcuSync/O4 can't be decoded by any of these chips.
+- **Prior art:**
+  - KonradIT/ELRS-Telemetry-Sniffer-Ground-Station (needs the binding phrase; GPL).
+  - SkySweep32 (CC1101 + SX1281 + RX5808 energy; GPL; unvalidated).
+  - NCC Group's 2022 ELRS advisory.
+- **drone-mesh-mapper backhaul format:** Meshtastic serial TEXTMSG at 115200 baud:
+  - `Drone: <mac> RSSI:<n> https://maps.google.com/?q=<lat>,<lon>`, then a matching `Pilot:` line.
+  - At most one message per 5 s.
+- **Airtime** for a 45-byte message: LongFast 600 ms, MediumFast 170 ms, ShortFast 50 ms.
+  - US 15.247 compliance is clearest at 500 kHz bandwidth with under 0.4 s dwell. MeshCore issue #945 raises the concern.
+- **Rust drivers:** `lora-phy` 3.x covers sx126x, sx127x and lr1110 (the LR11xx family); it has no SX1280 driver. There are no usable Rust Meshtastic or MeshCore stacks.
+- **DOJ/FAA/FCC/DHS advisory (Aug 2020):** monitoring drone control links may implicate the Wiretap Act and the Pen Register statute. Keep identifier extraction opt-in, and keep content decoding out of scope.

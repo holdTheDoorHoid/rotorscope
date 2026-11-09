@@ -229,18 +229,68 @@ ahead.
   nearby, such as medevac helicopters and crop dusters.
 
 ### Phase 7: Analog FPV detection (Node D)
-Two ways to do it, to be decided when we get here:
+Decided 2026-11-09 (see RESEARCH.md "Expansion research"):
 
-| Option | Pros | Cons |
-|---|---|---|
-| **ESP32-C5 raw-radio trick** (C5VRX / ESP-SDR) | Very cheap. Covers all 48 FPV channels. Could even show the video on the phone. | Experimental, undocumented, written in C, GPL-3.0. While in this mode the chip does nothing else. |
-| **RX5808 receiver module** (~$6) | Proven, simple, signal-strength readout, easy in Rust. | One more part. Detection only, no video. |
+1. **Start with an RX5808 module (about $6) on the hub.**
+   - It takes 1–2 days in Rust and sweeps all 48 channels in about 1.5 s.
+   - Weakness: 5 GHz Wi-Fi can look like a video transmitter.
+2. **Optional upgrade: an ESP32-C5 doing detection only, in Rust.**
+   - About 6–10 days.
+   - It confirms real video by the 15.6/15.7 kHz line rate, so Wi-Fi is not mistaken for video.
+   - The proprietary radio library our crates already ship is the exact version C5VRX was built against.
+   - It needs no BitScrambler. esp-hal has no driver for that yet, which is what blocks a Rust video port.
+3. **Live video to phones is deferred.**
+   - A Rust port of C5VRX's video path is 35–60 engineer-days.
+   - Its demodulator table is GPL-licensed work.
+   - The C5 can't time-share its radio between receiving video and running Wi-Fi.
+   - Realistic route if wanted later: run stock C5VRX as a separate GPL binary on its own C5. Capture its digital video pins with an S3 (LCD_CAM), compress to JPEG in software, and serve to phones. That gives roughly 10–30 fps at 160×120–320×240 (unverified).
+   - An ESP32-P4 only makes sense here, and only as a separate video module written in ESP-IDF C.
+
+### Phase 8: LoRa mesh backhaul (several units sharing detections)
+- Use a **stock Meshtastic or MeshCore board** (SX1262; Heltec V3/V4, XIAO + Wio-SX1262), wired to the hub's serial port as a modem.
+- No mesh code of our own: both are C++, and no Rust stack is usable yet.
+- Send two message types:
+  - plain-text lines compatible with drone-mesh-mapper, so that ecosystem can read us;
+  - a compact binary message for other Rotorscope hubs.
+- Airtime is scarce. Send only on a new or significantly changed track, plus a heartbeat every 30–60 s, on a private channel using a 500 kHz preset. Those presets are the ones that clearly meet FCC 15.247.
+- **Never share one LoRa radio between backhaul and detection.** A mesh node must keep listening to relay packets, and it is deaf to drone links whenever it transmits.
+
+### Phase 9: Control-link detection node (LR1121)
+- One **LR1121** radio covers both bands drone control links use: 900 MHz and 2.4 GHz.
+  - Cheapest board: RadioMaster XR1, an ESP32-C3 + LR1121 at about $12–17. Whether it can be reflashed freely is unverified.
+  - Alternative: LilyGo T3-S3 LR1121, about $24–31.
+- Rust driver: `lora-phy`'s LR11xx driver.
+- Detects ExpressLRS (the most common FPV control link) on both bands **without knowing the pilot's binding phrase**:
+  - It parks on ELRS's fixed sync channel and tries each rate setting.
+  - It also builds energy maps of both bands.
+- Also catches mLRS, and the hopping energy pattern of SiK/RFD900 autopilot telemetry.
+- It cannot decode Crossfire, Tracer or Ghost; those show up as energy only. It misses ELRS's high-rate racing mode (FLRC), which needs an SX1280.
+- **Legal line.** A 2020 DOJ/FAA/FCC/DHS advisory warns that monitoring drone control links can fall under wiretap and pen-register law.
+  - Presence and energy detection are the default.
+  - Reading a link's identifier (ELRS UID bytes) is **opt-in**.
+  - Decoding link *content* is out of scope.
+- The hub flags any detection made while its own LoRa backhaul was transmitting.
 
 ### Later ideas
-- DJI legacy beacons (D10) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at
-  any time.
-- 2.4 GHz control-link energy (D14).
-- Several units sharing tracks with each other.
+- DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
+  - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
+- **nRF24L01+** ($1–8) for the 55 toy-drone protocols it carries (SymaX, Bayang, MJX…), if Wi-Fi matching proves insufficient.
+- **SX1280**, only if ELRS racing (FLRC) mode matters.
+- RTL-SDR as an optional laptop add-on for a waterfall next to `rid-view`.
+- **Skip:** CC1101, CC2500, A7105 and CYRF6936. They duplicate the LR1121 or cover declining protocols.
+- Time sync across nodes using the GPS PPS pulse.
+
+### Hub chip (decided 2026-11-09)
+- **ESP32-S3 N16R8** (8 MB PSRAM): same toolchain and code as today.
+  - PSRAM support in esp-hal is still marked unstable.
+  - Octal PSRAM reserves GPIO35–37, so re-check the hub pin map.
+- **Not the ESP32-P4.**
+  - It has no radio; Wi-Fi comes from a companion C6.
+  - Rust can't drive that Wi-Fi.
+  - Its PSRAM support in esp-hal is a stub.
+  - Its video encoders are C-only.
+- **Not the Pico 2 W.** It needs a second toolchain and flasher for kit buyers, and has 2.4 GHz only. Its PIO serial ports are its one real advantage.
+- **Watch the ESP32-S31**: Espressif's RISC-V successor to the S3, with hardware JPEG and stable Rust. It entered mass production in July 2026, but no boards were found yet.
 
 ---
 
