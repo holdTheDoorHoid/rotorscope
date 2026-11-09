@@ -1,0 +1,4 @@
+# Node A (ESP32-S3) is Xtensa: needs Espressif's rustc fork, installed by `espup`.
+# Source ~/export-esp.sh first so the Xtensa linker is on PATH.
+[toolchain]
+channel = "esp"

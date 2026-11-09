@@ -1,0 +1,5 @@
+# Node C (ESP32-C5) is RISC-V and builds on stock stable Rust.
+[toolchain]
+channel    = "stable"
+components = ["rust-src"]
+targets    = ["riscv32imac-unknown-none-elf"]

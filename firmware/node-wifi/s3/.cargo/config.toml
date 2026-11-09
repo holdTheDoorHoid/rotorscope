@@ -1,0 +1,14 @@
+# Node A: ESP32-S3, 2.4 GHz. Build from this directory; cargo finds ../Cargo.toml.
+#   cargo fw        -> ../target/xtensa-esp32s3-none-elf/release/node-wifi
+[alias]
+fw = "build --release --features esp32s3"
+
+[build]
+target    = "xtensa-esp32s3-none-elf"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor --chip esp32s3"
+
+[unstable]
+build-std = ["alloc", "core"]

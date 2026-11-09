@@ -1,0 +1,259 @@
+//! Both outputs: JSON lines on USB (for a laptop / DragonSync) and
+//! postcard+COBS `link::Frame`s on the hub UART.
+//!
+//! The USB stream is machine-read, so only whole JSON objects go on it, one
+//! per line, each with a `"t"` type tag. The only exception is a panic
+//! backtrace, which a reader should treat as a crash marker.
+
+use core::fmt::{self, Write as _};
+use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use esp_hal::Async;
+use esp_hal::uart::UartTx;
+use heapless::Vec;
+use rid::{MAX_PACK, RawMessage, Transport};
+use serde::ser::{SerializeSeq, Serializer};
+use serde::Serialize;
+
+use crate::chip::{self, Hop};
+
+pub type Messages = Vec<RawMessage, MAX_PACK>;
+
+/// Large enough for a full Message Pack decoded to JSON (9 Location-sized
+/// messages are ~4 KB). Lives in the drain task's state, not on a stack.
+pub const JSON_BYTES: usize = 6 * 1024;
+
+/// Hub frames waiting for the UART. Kept short: if the hub link stalls we would
+/// rather lose stats than block the drain task.
+static HUB_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8, { link::MAX_FRAME }>, 8> = Channel::new();
+/// Hub frames that could not be queued or encoded.
+pub static HUB_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// Write a serialized object as one line. Serialization failures are reported
+/// as their own line rather than silently skipped.
+fn emit<T: Serialize>(value: &T, buf: &mut [u8], what: &'static str) {
+    match serde_json_core::to_slice(value, buf) {
+        // serde-json-core only writes UTF-8.
+        Ok(n) => esp_println::println!("{}", core::str::from_utf8(&buf[..n]).unwrap_or("")),
+        Err(_) => esp_println::println!(r#"{{"t":"err","what":"json","of":"{what}"}}"#),
+    }
+}
+
+// ------------------------------------------------------------------- hello --
+
+#[derive(Serialize)]
+struct HelloLine {
+    t: &'static str,
+    fw: &'static str,
+    ver: &'static str,
+    chip: &'static str,
+    role: link::NodeRole,
+    proto: u8,
+    fcs: usize,
+    plan: &'static [Hop],
+}
+
+pub fn hello_json() {
+    let line = HelloLine {
+        t: "hello",
+        fw: env!("CARGO_PKG_NAME"),
+        ver: env!("CARGO_PKG_VERSION"),
+        chip: chip::CHIP,
+        role: chip::ROLE,
+        proto: link::PROTOCOL_VERSION,
+        fcs: chip::FCS_LEN,
+        plan: chip::PLAN,
+    };
+    emit(&line, &mut [0u8; 512], "hello");
+}
+
+pub fn hello_hub() {
+    let mut firmware = heapless::String::<16>::new();
+    // "node-wifi 0.1.0" fits in 16; truncation would only shorten the label.
+    let _ = write!(firmware, "node-wifi {}", env!("CARGO_PKG_VERSION"));
+    to_hub(&link::Frame::Hello { role: chip::ROLE, protocol: link::PROTOCOL_VERSION, firmware });
+}
+
+// ------------------------------------------------------------------- stats --
+
+#[derive(Serialize)]
+pub struct StatsLine {
+    pub t: &'static str,
+    pub up_us: u64,
+    /// Channel the hopper is on right now.
+    pub ch: u8,
+    /// Management frames seen, total and in the last second.
+    pub seen: u32,
+    pub fps: u32,
+    /// Frames that carried Remote ID, total.
+    pub rid: u32,
+    /// Frames lost to a full queue, total.
+    pub drop: u32,
+    /// Most queue slots in use during the last second (of `rx::SLOTS`).
+    pub qmax: u32,
+    /// Non-management callbacks (filter leaks).
+    pub other: u32,
+    /// Frames longer than a slot (kept truncated).
+    pub trunc: u32,
+    /// Failed channel changes, total.
+    pub ch_err: u32,
+    /// Hub frames lost (queue full / encode error), total.
+    pub hub_drop: u32,
+    /// Beacon element walks: [end at sig_len-4, end at sig_len, neither or both].
+    /// The first should dominate; if the second does, `chip::FCS_LEN` is wrong.
+    pub iefit: [u32; 3],
+    /// `[channel, frames]` per distinct channel in the plan, total.
+    pub per_ch: Vec<(u8, u32), 16>,
+}
+
+pub fn stats_json(line: &StatsLine) {
+    emit(line, &mut [0u8; 512], "stats");
+}
+
+pub fn stats_hub(line: &StatsLine) {
+    to_hub(&link::Frame::Stats {
+        uptime_us: line.up_us,
+        frames_seen: line.seen,
+        rid_found: line.rid,
+        dropped: line.drop,
+    });
+}
+
+// --------------------------------------------------------------- detection --
+
+/// One Remote ID frame, as found by `rid::wifi::extract`.
+pub struct Hit<'a> {
+    pub transport: Transport,
+    pub channel: u8,
+    pub rssi: i8,
+    pub mac: [u8; 6],
+    pub counter: u8,
+    pub up_us: u64,
+    pub messages: &'a Messages,
+    /// Set when the payload could not be split into messages.
+    pub error: Option<rid::Error>,
+}
+
+#[derive(Serialize)]
+struct RidLine<'a> {
+    t: &'static str,
+    tr: Transport,
+    ch: u8,
+    rssi: i8,
+    mac: Mac,
+    ctr: u8,
+    up_us: u64,
+    msgs: Decoded<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    err: Option<rid::Error>,
+}
+
+pub fn detection_json(hit: &Hit<'_>, buf: &mut [u8]) {
+    let line = RidLine {
+        t: "rid",
+        tr: hit.transport,
+        ch: hit.channel,
+        rssi: hit.rssi,
+        mac: Mac(hit.mac),
+        ctr: hit.counter,
+        up_us: hit.up_us,
+        msgs: Decoded(hit.messages),
+        err: hit.error,
+    };
+    emit(&line, buf, "rid");
+}
+
+pub fn detection_hub(hit: &Hit<'_>) {
+    if hit.messages.is_empty() {
+        return;
+    }
+    to_hub(&link::Frame::Detection(link::Detection {
+        transport: hit.transport,
+        channel: hit.channel,
+        rssi: hit.rssi,
+        mac: hit.mac,
+        counter: hit.counter,
+        uptime_us: hit.up_us,
+        messages: hit.messages.clone(),
+    }));
+}
+
+/// `aa:bb:cc:dd:ee:ff`
+struct Mac([u8; 6]);
+
+impl fmt::Display for Mac {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let m = self.0;
+        write!(f, "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", m[0], m[1], m[2], m[3], m[4], m[5])
+    }
+}
+
+impl Serialize for Mac {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+/// Lowercase hex of a raw message, for ones the decoder rejects.
+struct Hex<'a>(&'a [u8]);
+
+impl Serialize for Hex<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        struct D<'a>(&'a [u8]);
+        impl fmt::Display for D<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+            }
+        }
+        s.collect_str(&D(self.0))
+    }
+}
+
+/// The message list, each decoded with `rid` where possible, else its hex.
+struct Decoded<'a>(&'a Messages);
+
+impl Serialize for Decoded<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for raw in self.0 {
+            match rid::message::decode(raw) {
+                Ok(msg) => seq.serialize_element(&msg)?,
+                Err(_) => seq.serialize_element(&Hex(raw))?,
+            }
+        }
+        seq.end()
+    }
+}
+
+// --------------------------------------------------------------------- hub --
+
+fn to_hub(frame: &link::Frame) {
+    let mut buf = [0u8; link::MAX_FRAME];
+    let queued = link::encode(frame, &mut buf)
+        .ok()
+        .and_then(|enc| Vec::from_slice(enc).ok())
+        .is_some_and(|v| HUB_QUEUE.try_send(v).is_ok());
+    if !queued {
+        HUB_DROPPED.fetch_add(1, Relaxed);
+    }
+}
+
+/// Owns the hub UART and writes queued frames out.
+#[embassy_executor::task]
+pub async fn hub_writer(mut uart: UartTx<'static, Async>) {
+    loop {
+        let frame = HUB_QUEUE.receive().await;
+        let mut rest = &frame[..];
+        while !rest.is_empty() {
+            match uart.write_async(rest).await {
+                Ok(n) => rest = &rest[n..],
+                Err(_) => {
+                    HUB_DROPPED.fetch_add(1, Relaxed);
+                    break;
+                }
+            }
+        }
+    }
+}

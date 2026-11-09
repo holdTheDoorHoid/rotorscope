@@ -1,0 +1,81 @@
+# Wi-Fi Remote ID listener. One source tree, two chips:
+#   s3/  -> Node A, ESP32-S3, 2.4 GHz   (Xtensa, `esp` toolchain)
+#   c5/  -> Node C, ESP32-C5, 5 GHz     (RISC-V, stable toolchain)
+# Each chip directory holds only the toolchain pin and cargo config; build from
+# inside it (see README.md). Exactly one chip feature must be enabled.
+[package]
+name         = "node-wifi"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.88"
+license      = "TBD"
+publish      = false
+
+[[bin]]
+name = "node-wifi"
+path = "src/main.rs"
+test = false
+bench = false
+
+# Firmware is its own workspace (different targets/toolchains from crates/*).
+[workspace]
+
+[features]
+esp32s3 = [
+  "esp-hal/esp32s3",
+  "esp-rtos/esp32s3",
+  "esp-bootloader-esp-idf/esp32s3",
+  "esp-alloc/esp32s3",
+  "esp-backtrace/esp32s3",
+  "esp-println/esp32s3",
+  "esp-radio/esp32s3",
+  "dep:esp-wifi-sys-esp32s3",
+]
+esp32c5 = [
+  "esp-hal/esp32c5",
+  "esp-rtos/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-alloc/esp32c5",
+  "esp-backtrace/esp32c5",
+  "esp-println/esp32c5",
+  "esp-radio/esp32c5",
+  "dep:esp-wifi-sys-esp32c5",
+]
+
+[dependencies]
+rid  = { path = "../../crates/rid", features = ["serde"] }
+link = { path = "../../crates/link" }
+
+esp-hal                = { version = "~1.2.2", features = ["unstable"] }
+esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
+esp-bootloader-esp-idf = { version = "0.6.0" }
+esp-alloc              = { version = "0.11.0" }
+esp-backtrace          = { version = "0.20.0", features = ["panic-handler", "println"] }
+# USB-Serial-JTAG only: "auto" could fall back to UART0, whose pins we give to the hub link.
+esp-println = { version = "0.18.0", default-features = false, features = ["jtag-serial", "critical-section", "log-04"] }
+# beta.2 was yanked (it only fixed ESP32-S31 builds); beta.1 is the newest usable release.
+esp-radio = { version = "=1.0.0-beta.1", features = ["esp-alloc", "unstable", "wifi", "sniffer", "log-04"] }
+# esp-radio keeps its blob bindings private; we need two calls it does not wrap
+# (promiscuous filter, country code). Same version esp-radio links, so no duplicate.
+esp-wifi-sys-esp32s3 = { version = "0.3.0", optional = true }
+esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
+
+embassy-executor = { version = "0.10.0" }
+embassy-time     = { version = "0.5.0" }
+embassy-sync     = { version = "0.7" }
+critical-section = "1.2.0"
+log              = "0.4.27"
+
+serde           = { version = "1", default-features = false, features = ["derive"] }
+serde-json-core = { version = "0.6", default-features = false }
+heapless        = { version = "0.8", features = ["serde"] }
+
+[profile.dev]
+# The default debug profile is too slow and too big for these chips.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"
