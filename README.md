@@ -50,5 +50,8 @@ impersonate an aircraft.
 
 ## License
 
-Not yet chosen (see PLAN.md, open question 2). `third_party/opendroneid-core-c` is
-Apache-2.0 and is used only by host-side tests.
+GPL-3.0-or-later (see `LICENSE`). Anyone may use, modify and sell Rotorscope, including as
+kits, but whoever ships a changed version must publish their changes under the same license.
+
+`third_party/opendroneid-core-c` keeps its own Apache-2.0 license and is used only by host-side
+tests.

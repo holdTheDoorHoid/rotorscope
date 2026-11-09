@@ -25,6 +25,10 @@ nothing locks it against other agents.
 | [siercks/pocket-rid](https://github.com/siercks/pocket-rid) | S3 | Beacon only | **Rust**, Apache-2.0. Uses esp-hal 1.1 + esp-radio sniffer. Its `no_std` decoder was fuzzed 10⁶ times against core-c with zero mismatches. |
 | [ArduPilot/ArduRemoteID](https://github.com/ArduPilot/ArduRemoteID) | S3/C3 | **Transmitter**: beacon, NAN, BLE4, BLE5 LR | GPL-2.0. Our bench test source. |
 
+**Reuse under our GPL-3.0-or-later license (decided 2026-11-09):** GPL-3.0 projects above
+(orecchino-esp32, C5VRX, ESP-SDR, ADSBee) can be ported or copied with their notices kept.
+ArduRemoteID (GPL-2.0) and andylee77/RID_Scanner (no license) still may not be copied.
+
 **Gaps nobody fills yet:**
 - A coordinated multi-chip set covering NAN, beacon, BLE Long Range and 5 GHz together.
 - A complete Rust receiver.

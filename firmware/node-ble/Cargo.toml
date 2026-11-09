@@ -3,6 +3,7 @@ edition      = "2024"
 name         = "node-ble"
 rust-version = "1.95"
 version      = "0.1.0"
+license      = "GPL-3.0-or-later"
 description  = "Node B: Bluetooth Remote ID listener (BLE4 legacy + BLE5 extended / Long Range)"
 
 # Own workspace: firmware builds for its own target and toolchain, and must not

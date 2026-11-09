@@ -241,7 +241,7 @@ Decided 2026-11-09 (see RESEARCH.md "Expansion research"):
    - It needs no BitScrambler. esp-hal has no driver for that yet, which is what blocks a Rust video port.
 3. **Live video to phones is deferred.**
    - A Rust port of C5VRX's video path is 35–60 engineer-days.
-   - Its demodulator table is GPL-licensed work.
+   - Its demodulator table is GPL-3.0 work, which our GPL-3.0 license lets us reuse.
    - The C5 can't time-share its radio between receiving video and running Wi-Fi.
    - Realistic route if wanted later: run stock C5VRX as a separate GPL binary on its own C5. Capture its digital video pins with an S3 (LCD_CAM), compress to JPEG in software, and serve to phones. That gives roughly 10–30 fps at 160×120–320×240 (unverified).
    - An ESP32-P4 only makes sense here, and only as a separate video module written in ESP-IDF C.
@@ -326,9 +326,10 @@ ESP32-C5s (Node C, plus a 5 GHz test source or the later FPV node), and dual-ban
 2. **Bluetooth Long Range from Rust** (Phase 2). Neither chip has been demonstrated doing it yet.
 3. **Kit firmware updates across 4–5 chips** (Phase 5). The update path has to be designed in,
    not bolted on.
-4. **Licensing mix.** The FPV code we would borrow is GPL-3.0, and so is the ADSBee firmware.
-   Separate firmware on separate chips can carry separate licenses, but pick the project
-   license knowingly (open question 2).
+4. **Licensing (decided 2026-11-09: GPL-3.0-or-later).** This matches the FPV code (C5VRX)
+   and the ADSBee firmware, so we may port or reuse their code directly, keeping their
+   copyright notices. Third-party code must be GPL-3.0-compatible: Apache-2.0, MIT and BSD are
+   fine, GPL-2.0-only is not.
 5. **Regulation of the test transmitter.** Keep it low-power, use an obviously fake ID, and use
    it indoors on the bench.
 
@@ -350,8 +351,6 @@ ESP32-C5s (Node C, plus a 5 GHz test source or the later FPV node), and dual-ban
 ## Open questions for you
 
 1. ~~Drone or module on hand?~~ None. See "Test signal sources" above.
-2. **License:** Apache-2.0/MIT, which lets anyone reuse it including companies, or GPL-3.0,
-   which requires anyone who ships changes to share them and matches the FPV and ADSBee code?
-   Selling kits is fine either way.
-3. Is the attached ESP32-S3 the only ESP32 on hand, or are there others (C5s, a spare S3)?
-4. A project name.
+2. ~~License?~~ GPL-3.0-or-later (2026-11-09). See risk 4.
+3. ~~Other ESP32s on hand?~~ More S3s and C5s arrive the weekend of 2026-11-14.
+4. ~~A project name?~~ Rotorscope.
