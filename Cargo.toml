@@ -2,7 +2,11 @@
 # (different targets and toolchains), and depends on these by path.
 [workspace]
 resolver = "2"
-members = ["crates/rid", "crates/link", "crates/tracker", "crates/odid-ref", "tools/rid-view"]
+members = [
+    "crates/rid", "crates/link", "crates/tracker", "crates/odid-ref",
+    "crates/gnss", "crates/screen", "crates/webui",
+    "tools/rid-view",
+]
 
 [workspace.package]
 edition = "2024"
