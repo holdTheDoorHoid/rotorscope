@@ -20,9 +20,9 @@ use crate::adv::{COUNTERS, bump};
 pub static USB: Pipe<CriticalSectionRawMutex, 8192> = Pipe::new();
 pub static UART: Pipe<CriticalSectionRawMutex, 2048> = Pipe::new();
 
-/// Largest JSON line: 9 decoded messages of the widest type (Location) plus
-/// the envelope. Longer lines are dropped (counted as USB drops).
-pub const MAX_LINE: usize = 4096;
+/// Largest JSON line: 9 decoded messages of the widest type (Location, ~4.2 KB)
+/// plus their raw hex and the envelope. Longer lines are dropped (counted as USB drops).
+pub const MAX_LINE: usize = 6 * 1024;
 
 /// Write all of `bytes` to `pipe`, or nothing if it does not fit.
 ///
@@ -101,6 +101,16 @@ struct BadMessage<'a> {
     raw: Hex<'a>,
 }
 
+/// The raw messages as hex, so a reader can re-decode exactly what was heard
+/// rather than trusting a round trip through the JSON form.
+struct RawList<'a>(&'a [RawMessage]);
+
+impl Serialize for RawList<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.0.iter().map(|m| Hex(m)))
+    }
+}
+
 /// Decodes while serializing, so no decoded copy of the pack is held.
 struct Msgs<'a>(&'a [RawMessage]);
 
@@ -130,6 +140,7 @@ pub struct RidLine<'a> {
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     trunc: bool,
     msgs: Msgs<'a>,
+    raw: RawList<'a>,
 }
 
 impl<'a> RidLine<'a> {
@@ -144,6 +155,7 @@ impl<'a> RidLine<'a> {
             up_us: d.uptime_us,
             trunc: truncated,
             msgs: Msgs(&d.messages),
+            raw: RawList(&d.messages),
         }
     }
 }

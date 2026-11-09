@@ -22,7 +22,7 @@ use crate::chip::{self, Hop};
 pub type Messages = Vec<RawMessage, MAX_PACK>;
 
 /// Large enough for a full Message Pack decoded to JSON (9 Location-sized
-/// messages are ~4 KB). Lives in the drain task's state, not on a stack.
+/// messages are ~4.2 KB) plus their raw hex (~0.5 KB). Lives in the drain task's state, not on a stack.
 pub const JSON_BYTES: usize = 6 * 1024;
 
 /// Hub frames waiting for the UART. Kept short: if the hub link stalls we would
@@ -148,6 +148,7 @@ struct RidLine<'a> {
     ctr: u8,
     up_us: u64,
     msgs: Decoded<'a>,
+    raw: RawList<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     err: Option<rid::Error>,
 }
@@ -162,6 +163,7 @@ pub fn detection_json(hit: &Hit<'_>, buf: &mut [u8]) {
         ctr: hit.counter,
         up_us: hit.up_us,
         msgs: Decoded(hit.messages),
+        raw: RawList(hit.messages),
         err: hit.error,
     };
     emit(&line, buf, "rid");
@@ -210,6 +212,16 @@ impl Serialize for Hex<'_> {
             }
         }
         s.collect_str(&D(self.0))
+    }
+}
+
+/// The raw messages as hex, so a reader can re-decode exactly what was heard
+/// rather than trusting a round trip through the JSON form.
+struct RawList<'a>(&'a [RawMessage]);
+
+impl Serialize for RawList<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.0.iter().map(|m| Hex(m)))
     }
 }
 
