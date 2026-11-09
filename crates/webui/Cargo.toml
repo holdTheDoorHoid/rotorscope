@@ -1,7 +1,17 @@
 [package]
 name = "webui"
+description = "The phone web page (web/index.html), gzipped at build time for the hub's flash"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [dependencies]
+
+[dev-dependencies]
+# Tests inflate the page to check it round-trips.
+flate2 = "1"
+
+[build-dependencies]
+# Host-only: gzip the page once at build time. Nothing of it reaches the hub.
+flate2 = "1"

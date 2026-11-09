@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#000000">
+<title>Rotorscope</title>
+<!--
+  Rotorscope phone page. Served by the hub (crates/webui) and by
+  `rid-view --http`. One file, no external requests: the hub's hotspot has
+  no internet. API: crates/tracker/README.md, "Phone page API".
+
+  Design rules: readable at a glance in sunlight, one-handed (controls at the
+  bottom), colour never the only signal (every state also has a shape, a
+  symbol or a word), dark by default.
+
+  Everything a drone broadcasts (IDs, Self-ID text) is untrusted input from
+  the air: it always goes through esc() before reaching the page.
+-->
+<style>
+:root{
+  --bg:#000;--fg:#fff;--mut:#c4c4c4;--card:#161616;--card2:#262626;--line:#4a4a4a;
+  --drone:#ffc400;--op:#5ccfff;--bad:#ff9a8f;--hi-bg:#ffc400;--hi-fg:#000;
+  --nav:68px;
+}
+[data-theme=light]{
+  --bg:#fff;--fg:#000;--mut:#363636;--card:#f0f0f0;--card2:#dedede;--line:#6e6e6e;
+  --drone:#924a00;--op:#004fae;--bad:#a8001c;--hi-bg:#ffc400;--hi-fg:#000;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:17px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding-bottom:calc(var(--nav) + env(safe-area-inset-bottom))}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:3px solid var(--op);outline-offset:2px}
+.wrap{max-width:760px;margin:0 auto;padding:0 12px}
+.mut{color:var(--mut)}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+h2{font-size:19px;margin:22px 0 8px}
+h3{font-size:16px;margin:16px 0 6px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)}
+[hidden]{display:none!important}
+
+/* ---- status strip ---- */
+#strip{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:2px solid var(--line);
+  padding:6px 8px calc(6px) 8px;display:flex;flex-wrap:wrap;gap:5px 6px;align-items:center;
+  font-size:14px;font-weight:700;cursor:pointer}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border:2px solid var(--line);
+  border-radius:6px;white-space:nowrap;background:var(--card)}
+.chip.bad{border-style:dashed;color:var(--bad)}
+.chip.bad .x{text-decoration:line-through}
+.chip.good{border-color:var(--fg)}
+#clock{margin-left:auto}
+
+/* ---- banners ---- */
+.ban{display:flex;gap:10px;align-items:center;padding:10px 12px;margin:8px 0;border-radius:8px;
+  font-weight:700;border:3px solid var(--fg)}
+.ban .grow{flex:1;min-width:0}
+.ban small{display:block;font-weight:400}
+#lost{background:repeating-linear-gradient(135deg,var(--card) 0 10px,var(--card2) 10px 20px);color:var(--fg)}
+#alert{background:var(--hi-bg);color:var(--hi-fg);border-color:#000}
+#nopos{background:var(--card);border-style:dashed}
+.ban button{flex:none;min-height:44px;min-width:44px;padding:0 12px;border-radius:8px;
+  border:2px solid currentColor;background:transparent;font-weight:700}
+body.lost main{opacity:.5}
+
+/* ---- radar ---- */
+#radar{display:block;width:100%;max-width:min(560px,calc(100vh - 230px));min-width:260px;margin:4px auto 0;touch-action:manipulation}
+#radar text{font-family:system-ui,sans-serif;paint-order:stroke;stroke:var(--bg);stroke-width:3px;stroke-linejoin:round}
+.ring{fill:none;stroke:var(--line);stroke-width:.6}
+.ring.major{stroke-width:1.1}
+.axis{stroke:var(--line);stroke-width:.5}
+.rl{fill:var(--mut);font-size:7px}
+.card{fill:var(--fg);font-size:9px;font-weight:700;text-anchor:middle}
+.dr{fill:var(--drone);stroke:var(--bg);stroke-width:1}
+.dr.stale{fill:none;stroke:var(--mut);stroke-width:1.4;stroke-dasharray:2 1.5}
+.op{fill:var(--bg);stroke:var(--op);stroke-width:2}
+.op.stale{stroke:var(--mut);stroke-dasharray:2 1.5}
+.lk{stroke:var(--op);stroke-width:.9;stroke-dasharray:3 2;fill:none}
+.lbl{fill:var(--fg);font-size:8px;font-weight:700}
+.sel{fill:none;stroke:var(--fg);stroke-width:1.5}
+.pulse{fill:none;stroke:var(--drone);stroke-width:2;animation:pulse 1.4s ease-out infinite}
+@keyframes pulse{from{r:6;opacity:1}to{r:22;opacity:0}}
+@media (prefers-reduced-motion:reduce){.pulse{animation:none;r:12}}
+.rbar{display:flex;gap:8px;align-items:center;justify-content:center;margin:8px 0;flex-wrap:wrap}
+.rbar{flex-wrap:nowrap;gap:6px}
+.rbar .range{flex:1;max-width:12em;text-align:center;font-weight:700;font-size:15px}
+.rbar .btn{padding:0 12px;min-width:48px}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;justify-content:center;font-size:14px;margin:6px 0}
+.legend svg{width:16px;height:16px;vertical-align:-3px}
+.note{text-align:center;margin:6px 0}
+
+/* ---- buttons ---- */
+.btn{min-height:48px;padding:0 16px;border-radius:10px;border:2px solid var(--fg);
+  background:var(--card);font-weight:700}
+a.btn{color:var(--fg);display:inline-flex;align-items:center;text-decoration:none}
+.btn.pri{background:var(--fg);color:var(--bg)}
+.seg{display:flex;gap:0;flex-wrap:wrap}
+.seg .btn{border-radius:0;flex:1}
+.seg .btn:first-child{border-radius:10px 0 0 10px}
+.seg .btn:last-child{border-radius:0 10px 10px 0}
+.btn[aria-pressed=true]{background:var(--fg);color:var(--bg)}
+.btn[aria-pressed=true]::before{content:"\2713\00a0"}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+/* ---- list ---- */
+.sum{margin:10px 0 6px;font-weight:700}
+.trk{display:block;width:100%;text-align:left;background:var(--card);border:2px solid var(--line);
+  border-radius:10px;padding:10px 12px;margin:8px 0}
+.trk.new{border-color:var(--drone);border-width:3px}
+.trk.stale{opacity:.6;border-style:dashed}
+.trk .r1{display:flex;gap:8px;align-items:baseline;min-width:0}
+.trk .id{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.tag{flex:none;font-size:13px;font-weight:800;padding:1px 6px;border-radius:5px;border:2px solid currentColor}
+.tag.new{background:var(--hi-bg);color:var(--hi-fg);border-color:var(--hi-bg)}
+.num{flex:none;font-weight:800;color:var(--drone)}
+.trk .r2{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center;margin-top:4px}
+.big{font-size:26px;font-weight:800}
+.arr{width:22px;height:22px;vertical-align:-4px;fill:var(--fg)}
+.big .arr{width:26px;height:26px}
+.trk .r3{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:6px;font-size:14px;color:var(--mut)}
+.rad{border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--fg)}
+.empty{padding:24px 8px;text-align:center}
+
+/* ---- detail sheet ---- */
+#sheet{position:fixed;inset:0;z-index:20;background:var(--bg);overflow:auto;
+  padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+#sheet .top{position:sticky;top:0;background:var(--bg);border-bottom:2px solid var(--line);
+  display:flex;align-items:center;gap:8px;padding:6px 8px;z-index:1}
+#sheet .top h2{margin:0;font-size:18px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#sheet .bot{position:fixed;left:0;right:0;bottom:0;padding:8px 12px calc(8px + env(safe-area-inset-bottom));
+  background:var(--bg);border-top:2px solid var(--line)}
+#sheet .bot .btn{width:100%}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0}
+dt{color:var(--mut)}
+dd{margin:0;font-weight:600;overflow-wrap:anywhere}
+.quote{background:var(--card);border-left:4px solid var(--fg);padding:8px 10px;overflow-wrap:anywhere;white-space:pre-wrap}
+.row{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:600}
+.scroll{overflow-x:auto}
+
+/* ---- settings ---- */
+label.f{display:block;font-weight:700;margin:10px 0 4px}
+input[type=text]{width:100%;min-height:48px;padding:8px 10px;border-radius:8px;border:2px solid var(--fg);background:var(--card)}
+.msg{margin:8px 0;font-weight:700}
+.msg.err{color:var(--bad)}
+.msg.err::before{content:"\26a0\00a0"}
+
+/* ---- bottom tabs (thumb reach) ---- */
+#tabs{position:fixed;left:0;right:0;bottom:0;z-index:10;display:flex;background:var(--bg);
+  border-top:2px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+#tabs button{flex:1;height:var(--nav);border:0;background:transparent;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2px;font-size:14px;font-weight:700;color:var(--mut);border-top:4px solid transparent}
+#tabs button svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2}
+#tabs button[aria-selected=true]{color:var(--fg);border-top-color:var(--fg);background:var(--card)}
+</style>
+</head>
+<body>
+
+<header id="strip" title="Hub status (tap for details)" role="button" tabindex="0" aria-label="Hub status. Tap for details."></header>
+
+<div class="wrap" id="banners">
+  <div id="lost" class="ban" role="alert" hidden></div>
+  <div id="alert" class="ban" role="alert" hidden></div>
+  <div id="nopos" class="ban" hidden>
+    <span aria-hidden="true">&#8982;</span>
+    <span class="grow">Your position is unknown<small>No distances or directions until the hub has GPS or you enter a position.</small></span>
+    <button type="button" data-go="set">Set</button>
+  </div>
+</div>
+
+<main class="wrap">
+  <section id="v-radar" aria-label="Radar">
+    <div class="note mut" style="font-size:14px">North is up &middot; directions are from true north, not where your phone points</div>
+    <div id="radar-box"></div>
+    <div class="rbar" id="rbar">
+      <button type="button" class="btn" id="zout" aria-label="Zoom out (show farther)">&minus;</button>
+      <span class="range" id="range"></span>
+      <button type="button" class="btn" id="zin" aria-label="Zoom in (show closer)">+</button>
+      <button type="button" class="btn" id="zauto" aria-pressed="true">Auto</button>
+    </div>
+    <div class="legend" id="legend">
+      <span><svg viewBox="-8 -8 16 16"><path class="dr" d="M0,-7 L5.5,6 L0,3 L-5.5,6Z"/></svg> drone, pointing where it&#8217;s going</span>
+      <span><svg viewBox="-8 -8 16 16"><circle class="dr" r="5"/></svg> drone, not moving</span>
+      <span><svg viewBox="-8 -8 16 16"><rect class="op" x="-4.5" y="-4.5" width="9" height="9"/></svg> its operator (dashed link)</span>
+      <span><svg viewBox="-8 -8 16 16"><circle class="dr stale" r="5"/></svg> not heard for 60&nbsp;s</span>
+    </div>
+    <div id="radar-note" class="note"></div>
+  </section>
+
+  <section id="v-list" aria-label="Drone list" hidden></section>
+
+  <section id="v-set" aria-label="Settings" hidden>
+    <h2>Your position</h2>
+    <div id="pos-now"></div>
+    <p class="mut">Your phone can&#8217;t share its location with this page: browsers only allow that on secure (HTTPS) sites, and the hub can&#8217;t offer HTTPS without internet. So the hub uses its own GPS, or a position you type here. A typed position is used whenever the hub&#8217;s GPS has no fix.</p>
+    <label class="f" for="pos-in">Latitude, longitude</label>
+    <input type="text" id="pos-in" placeholder="39.95260, -75.16520" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="mut" style="font-size:14px">Decimal degrees; south and west are negative. Pasting from a maps app works.</div>
+    <label class="f" for="alt-in">Altitude in <span class="u-alt">metres</span> (optional)</label>
+    <input type="text" id="alt-in" placeholder="leave empty if unknown" autocomplete="off">
+    <div class="row">
+      <button type="button" class="btn pri" id="pos-save">Use this position</button>
+      <button type="button" class="btn" id="pos-clear">Forget typed position</button>
+    </div>
+    <div id="pos-msg" class="msg" role="status"></div>
+
+    <h2>New-drone alerts</h2>
+    <p class="mut">A banner always appears. Sound and vibration are extra.</p>
+    <div class="row">
+      <button type="button" class="btn" id="snd" aria-pressed="false">Sound</button>
+      <button type="button" class="btn" id="vib" aria-pressed="false">Vibrate</button>
+      <button type="button" class="btn" id="test">Test alert</button>
+    </div>
+    <div id="alert-msg" class="mut" style="font-size:14px"></div>
+
+    <h2>Display</h2>
+    <div class="seg" role="group" aria-label="Theme">
+      <button type="button" class="btn" data-th="dark">Dark</button>
+      <button type="button" class="btn" data-th="light">Light</button>
+    </div>
+    <div class="mut" style="font-size:14px;margin-top:4px">Light is easier to read in bright sun.</div>
+    <div class="seg" role="group" aria-label="Units" style="margin-top:12px">
+      <button type="button" class="btn" data-units="metric">Metric (m, km/h)</button>
+      <button type="button" class="btn" data-units="imperial">Imperial (ft, mph)</button>
+    </div>
+
+    <h2 id="hub-h">Hub status</h2>
+    <div id="hub"></div>
+
+    <h2>About</h2>
+    <p class="mut">Rotorscope only listens: it never transmits to drones. It shows drones that broadcast Remote ID, which is public by design. There is no map view here, because the hub&#8217;s Wi-Fi has no internet; each drone&#8217;s details have an &#8220;Open in maps app&#8221; button, which works with offline maps.</p>
+  </section>
+</main>
+
+<div id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-h" hidden>
+  <div class="top">
+    <button type="button" class="btn" data-close aria-label="Back">&#8249; Back</button>
+    <h2 id="sheet-h"></h2>
+  </div>
+  <div class="wrap" id="sheet-body"></div>
+  <div class="bot"><button type="button" class="btn" data-close>Close</button></div>
+</div>
+
+<nav id="tabs" role="tablist">
+  <button type="button" role="tab" data-tab="radar" aria-selected="true">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 3v9l6 6"/></svg>Radar</button>
+  <button type="button" role="tab" data-tab="list" aria-selected="false">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span id="tab-list">List</span></button>
+  <button type="button" role="tab" data-tab="set" aria-selected="false">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>Settings</button>
+</nav>
+
+<script>
+'use strict';
+
+/* ======================================================= settings ===== */
+
+// Per-phone preferences. localStorage can throw (private mode) or be empty;
+// the page works the same without it.
+const DEFAULTS = {theme: 'dark', units: 'metric', sound: false, vibrate: false, zoom: -1};
+const S = Object.assign({}, DEFAULTS, (() => {
+  try { return JSON.parse(localStorage.getItem('rotorscope') || '{}'); } catch (e) { return {}; }
+})());
+function save() {
+  try { localStorage.setItem('rotorscope', JSON.stringify(S)); } catch (e) { /* not fatal */ }
+}
+
+/* ====================================================== app state ===== */
+
+const POLL_MS = 1000;          // how often to ask the hub
+const LOST_AFTER_MS = 3500;    // no good answer for this long = "connection lost"
+const NEW_FOR_MS = 15000;      // how long a new drone stays highlighted
+const GRACE_MS = 1000;         // as the tracker's announce_grace_ms
+
+let st = null;                 // last good /api/state
+let lastOk = 0;                // Date.now() of that answer
+let everOk = false;
+let tab = 'radar';
+let sel = null;                // track id shown in the detail sheet
+const known = new Set();       // track ids already alerted (or present at load)
+let primed = false;            // first answer seen: don't alert on what was already there
+const newAt = new Map();       // track id -> Date.now() it was announced
+let alerts = [];               // [{id, at}] in the banner, newest first
+
+/* ===================================================== formatting ===== */
+
+const $ = id => document.getElementById(id);
+// Replace an element's content only when it changed: the page redraws every
+// second, and this keeps text selection and taps steady between changes.
+function setHTML(id, html) {
+  const el = $(id);
+  if (el._html !== html) { el.innerHTML = html; el._html = html; }
+}
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const imp = () => S.units === 'imperial';
+const FT = 3.28084, MI = 1609.344;
+
+function fmtDist(m) {
+  if (m == null) return '?';
+  if (imp()) {
+    const ft = m * FT;
+    if (ft < 1000) return Math.round(ft) + ' ft';
+    const mi = m / MI;
+    return (mi < 10 ? mi.toFixed(2) : mi.toFixed(1)) + ' mi';
+  }
+  if (m < 1000) return Math.round(m) + ' m';
+  return (m < 10000 ? (m / 1000).toFixed(2) : (m / 1000).toFixed(1)) + ' km';
+}
+const fmtAlt = m => m == null ? '?' : imp() ? Math.round(m * FT) + ' ft' : Math.round(m) + ' m';
+const fmtSpd = v => v == null ? '?' : imp() ? Math.round(v * 2.23694) + ' mph' : Math.round(v * 3.6) + ' km/h';
+const fmtVs = v => v == null ? '?' : imp() ? (v * FT * 60).toFixed(0) + ' ft/min' : v.toFixed(1) + ' m/s';
+function fmtAge(ms) {
+  if (ms == null) return '?';
+  if (ms < 1500) return 'now';
+  if (ms < 60000) return Math.round(ms / 1000) + ' s ago';
+  if (ms < 3600000) return Math.floor(ms / 60000) + ' min ago';
+  return Math.floor(ms / 3600000) + ' h ago';
+}
+const POINTS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+const compass = d => POINTS[Math.round(((d % 360) + 360) % 360 / 22.5) % 16];
+// An arrow pointing along bearing `d` (north-up), plus words for screen readers.
+const arrow = d => `<svg class="arr" viewBox="0 0 20 20" style="transform:rotate(${d}deg)" aria-hidden="true">` +
+  `<path d="M10 1 17 18 10 13 3 18Z"/></svg>`;
+const bearing = d => d == null ? '?' : `${arrow(d)} ${compass(d)} ${Math.round(d)}&deg;`;
+const coord = (lat, lon) => `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+const coordHTML = (lat, lon) => `<span class="mono" style="white-space:nowrap">${coord(lat, lon)}</span>`;
+
+const ID_RANK = ['SerialNumber', 'CaaRegistration', 'UtmAssigned', 'SpecificSession'];
+const ID_NAME = {SerialNumber: 'Serial number', CaaRegistration: 'Registration', UtmAssigned: 'UTM ID',
+  SpecificSession: 'Session ID', None: 'Unspecified'};
+function idOf(t) {
+  const ids = (t.ids || []).slice().sort((a, b) => rank(a.type) - rank(b.type));
+  if (ids.length) return ids[0].id;
+  // Not identified yet: the transmitter address.
+  const l = (t.links || []).slice().sort((a, b) => a.age_ms - b.age_ms)[0];
+  return l ? 'MAC ' + l.mac : 'unknown';
+}
+function rank(type) { const i = ID_RANK.indexOf(type); return i < 0 ? 9 : i; }
+
+const UA = {HelicopterOrMultirotor: 'Multirotor', Aeroplane: 'Fixed-wing', HybridLift: 'VTOL',
+  Gyroplane: 'Gyroplane', Glider: 'Glider', Ornithopter: 'Ornithopter', FreeBalloon: 'Balloon',
+  CaptiveBalloon: 'Tethered balloon', Airship: 'Airship', FreeFallParachute: 'Parachute',
+  Rocket: 'Rocket', TetheredPoweredAircraft: 'Tethered aircraft', GroundObstacle: 'Ground obstacle',
+  Kite: 'Kite', Other: 'Other', None: 'Type not given'};
+const uaName = u => u == null ? 'Type not given' : (UA[u] || String(u));
+
+function radioName(l) {
+  switch (l.tr) {
+    case 'WifiBeacon': return l.ch > 14 ? 'Wi-Fi 5 GHz' : 'Wi-Fi 2.4';
+    case 'WifiNan': return l.ch > 14 ? 'Wi-Fi NAN 5' : 'Wi-Fi NAN';
+    case 'BleLegacy': return 'Bluetooth 4';
+    case 'BleExtended': return 'Bluetooth 5';
+    case 'BleLongRange': return 'BT Long Range';
+    default: return String(l.tr);
+  }
+}
+const ROLE = {Wifi24: ['2.4', 'Wi-Fi 2.4 GHz'], Wifi5: ['5G', 'Wi-Fi 5 GHz'], Ble: ['BT', 'Bluetooth'], Fpv: ['FPV', 'FPV video']};
+const role = r => ROLE[r] || [String(r), String(r)];
+
+// Hub time -> local clock text. Uses the hub's GPS time when it has one.
+function clockText() {
+  const d = st && st.utc_ms != null ? new Date(st.utc_ms + (Date.now() - lastOk)) : new Date();
+  return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
+}
+
+/* ========================================================== tracks ===== */
+
+const tracks = () => (st && st.tracks) || [];
+// Ages in the snapshot were true when it arrived; add the time since then,
+// so a lost connection never shows "heard now" for old data.
+const since = () => everOk ? Math.max(0, Date.now() - lastOk) : 0;
+const ago = ms => fmtAge(ms == null ? null : ms + since());
+const findTrack = id => tracks().find(t => t.id === id);
+const isStale = t => t.state === 'stale';
+const dist = t => t.own ? t.own.dist_m : null;
+
+// Active first; then nearest; then (no position) most recently heard.
+function sorted() {
+  return tracks().slice().sort((a, b) =>
+    (isStale(a) - isStale(b)) ||
+    ((dist(a) == null) - (dist(b) == null)) ||
+    ((dist(a) ?? 0) - (dist(b) ?? 0)) ||
+    (a.age_ms - b.age_ms));
+}
+const isNew = t => newAt.has(t.id) && Date.now() - newAt.get(t.id) < NEW_FOR_MS;
+
+/* ========================================================= polling ===== */
+
+async function poll() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 3000);
+  try {
+    const r = await fetch('/api/state', {cache: 'no-store', signal: ctl.signal});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const next = await r.json();
+    // The hub restarted (its clock went backwards): track ids start over.
+    if (st && next.now_ms < st.now_ms) { known.clear(); primed = false; }
+    st = next;
+    lastOk = Date.now();
+    everOk = true;
+    checkNew();
+  } catch (e) {
+    // Shown as "connection lost" once it has lasted LOST_AFTER_MS.
+  } finally {
+    clearTimeout(timer);
+    render();
+    // Ease off while the phone isn't showing the page.
+    setTimeout(poll, document.hidden ? 5000 : POLL_MS);
+  }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) render(); });
+
+/* ========================================================== alerts ===== */
+
+function checkNew() {
+  const now = st.now_ms;
+  for (const t of tracks()) {
+    if (known.has(t.id) || isStale(t)) continue;
+    if (!primed) { known.add(t.id); continue; }
+    // A track with no ID yet may be about to merge into a known drone, so
+    // wait a moment before alerting on it (as the hub's buzzer does).
+    if (!(t.ids && t.ids.length) && now - t.first_ms < GRACE_MS) continue;
+    known.add(t.id);
+    newAt.set(t.id, Date.now());
+    alerts.unshift({id: t.id, at: Date.now()});
+    ring();
+  }
+  primed = true;
+  for (const id of known) if (!findTrack(id)) { known.delete(id); newAt.delete(id); }
+}
+
+// Sound needs an AudioContext started from a tap; vibration needs the page
+// to have been tapped at least once. Both are set up on the first tap.
+let audio = null;
+function wakeAudio() {
+  if (!S.sound) return;
+  if (!audio) {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return;
+    audio = new C();
+  }
+  if (audio.state === 'suspended') audio.resume();
+}
+document.addEventListener('pointerdown', wakeAudio, {passive: true});
+const canVibrate = 'vibrate' in navigator;
+const tapped = () => !navigator.userActivation || navigator.userActivation.hasBeenActive;
+
+function ring() {
+  if (S.sound && audio && audio.state === 'running') {
+    const t0 = audio.currentTime;
+    [[880, 0], [1320, 0.18], [880, 0.36], [1320, 0.54]].forEach(([f, dt]) => {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.type = 'square';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.15, t0 + dt);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + dt + 0.16);
+      o.connect(g).connect(audio.destination);
+      o.start(t0 + dt);
+      o.stop(t0 + dt + 0.17);
+    });
+  }
+  if (S.vibrate && canVibrate) { try { navigator.vibrate([250, 120, 250]); } catch (e) { /* ignore */ } }
+}
+
+/* ========================================================= drawing ===== */
+
+function render() {
+  const lost = !everOk || Date.now() - lastOk > LOST_AFTER_MS;
+  document.body.classList.toggle('lost', lost && everOk);
+  renderStrip(lost);
+  renderBanners(lost);
+  const n = tracks().filter(t => !isStale(t)).length;
+  $('tab-list').textContent = n ? `List (${n})` : 'List';
+  if (tab === 'radar') renderRadar();
+  if (tab === 'list') renderList();
+  if (tab === 'set') renderSettings();
+  if (sel != null) renderDetail();
+}
+
+function renderStrip(lost) {
+  const p = [];
+  p.push(lost
+    ? `<span class="chip bad"><span aria-hidden="true">&#10005;</span> <span>${everOk ? 'LOST' : 'CONNECTING'}</span></span>`
+    : `<span class="chip good"><span aria-hidden="true">&#9679;</span> LIVE</span>`);
+  // While lost, the hub's state is unknown: show no stale ticks.
+  if (st && !lost) {
+    const g = st.gps || {};
+    if (st.own && st.own.source === 'gps') {
+      p.push(`<span class="chip good">GPS &#10003; ${esc(g.state || '')}${g.sats != null ? ' &middot; ' + g.sats + ' sat' : ''}</span>`);
+    } else if (st.own) {
+      p.push(`<span class="chip">&#9998; TYPED POS</span>`);
+    } else {
+      p.push(`<span class="chip bad"><span aria-hidden="true">&#9888;</span> NO POSITION</span>`);
+    }
+    for (const n of st.nodes || []) {
+      const [short, long] = role(n.role);
+      p.push(n.alive
+        ? `<span class="chip" title="${esc(long)} receiver OK">${esc(short)} &#10003;</span>`
+        : `<span class="chip bad" title="${esc(long)} receiver silent"><span class="x">${esc(short)}</span> &#10005;</span>`);
+    }
+    p.push(st.rec ? `<span class="chip good">&#9679; REC</span>` : `<span class="chip mut">REC off</span>`);
+  }
+  p.push(`<span id="clock">${clockText()}</span>`);
+  setHTML('strip', p.join(''));
+}
+
+function renderBanners(lost) {
+  const lb = $('lost');
+  lb.hidden = !lost;
+  if (lost) {
+    const ago = everOk ? Math.round((Date.now() - lastOk) / 1000) : null;
+    setHTML('lost', `<span aria-hidden="true">&#9888;</span><span class="grow">` +
+      (everOk ? `Connection to the hub lost &middot; last update ${ago} s ago`
+              : `Connecting to the hub&hellip;`) +
+      `<small>Retrying every second. Check that this phone is still on the Rotorscope Wi-Fi.</small></span>`);
+  }
+  // Drop alerts for drones that have gone, and old ones.
+  alerts = alerts.filter(a => findTrack(a.id) && Date.now() - a.at < 60000);
+  const ab = $('alert');
+  ab.hidden = !alerts.length;
+  if (alerts.length) {
+    const t = findTrack(alerts[0].id);
+    const more = alerts.length > 1 ? ` (+${alerts.length - 1} more)` : '';
+    const where = t.own && t.own.dist_m != null ? ` &middot; ${fmtDist(t.own.dist_m)} ${compass(t.own.brg)}` : '';
+    const hint = (S.sound || S.vibrate) && !tapped() ? '<small>Tap the screen once to allow sound and vibration.</small>' : '';
+    setHTML('alert', `<span aria-hidden="true" style="font-size:22px">&#9650;</span>` +
+      `<span class="grow">NEW DRONE${more}<small class="mono">#${t.id} ${esc(idOf(t))}${where}</small>${hint}</span>` +
+      `<button type="button" data-open="${t.id}">View</button>` +
+      `<button type="button" data-dismiss aria-label="Dismiss alert">&#10005;</button>`);
+  }
+  $('nopos').hidden = !(st && !st.own && !lost && tab !== 'set');
+}
+
+/* ----- radar ----- */
+
+// Ring ranges in metres. Imperial ones are round numbers of feet and miles.
+const RANGES_M = [100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+const RANGES_I = [500 / FT, 1000 / FT, 0.5 * MI, MI, 2 * MI, 5 * MI, 10 * MI, 20 * MI, 50 * MI];
+const ranges = () => imp() ? RANGES_I : RANGES_M;
+// Ring labels are round numbers: "1 mi", not "1.00 mi".
+const ringLabel = m => fmtDist(m).replace(/\.0+ /, ' ').replace(/(\.\d*?)0+ /, '$1 ');
+
+function autoRange() {
+  let far = 0;
+  for (const t of tracks()) {
+    if (isStale(t) || !t.own) continue;
+    far = Math.max(far, t.own.dist_m || 0, t.own.op_dist_m || 0);
+  }
+  const r = ranges();
+  return r.find(x => x >= far * 1.1) || r[r.length - 1];
+}
+const radarRange = () => S.zoom >= 0 ? ranges()[Math.min(S.zoom, ranges().length - 1)] : autoRange();
+
+// Bearing/distance -> radar coordinates (radius 100 = range).
+function xy(brg, d, R) {
+  const r = Math.min(d / R, 1) * 100, a = brg * Math.PI / 180;
+  return [+(r * Math.sin(a)).toFixed(1), +(-r * Math.cos(a)).toFixed(1)];
+}
+
+function renderRadar() {
+  const R = radarRange();
+  const o = [];
+  o.push(`<svg id="radar" viewBox="-112 -112 224 224" role="img" aria-label="Radar, north up, range ${esc(fmtDist(R))}">`);
+  for (const k of [1, 2, 3, 4]) o.push(`<circle class="ring${k % 2 ? '' : ' major'}" r="${k * 25}"/>`);
+  o.push(`<path class="axis" d="M0-100V100M-100 0H100"/>`);
+  o.push(`<text class="card" y="-103" style="font-size:11px">&#9650;N</text><text class="card" x="106" y="3">E</text>` +
+    `<text class="card" y="110">S</text><text class="card" x="-106" y="3">W</text>`);
+  if (!st || !st.own) {
+    o.push(`<text class="card" y="-6" style="font-size:9px">Your position is unknown,</text>` +
+      `<text class="card" y="7" style="font-size:9px">so the radar can&#8217;t be drawn.</text>`);
+  } else {
+    o.push(`<text class="rl" x="2" y="-46">${esc(ringLabel(R / 2))}</text><text class="rl" x="2" y="-96">${esc(ringLabel(R))}</text>`);
+    // Stale first so active drones draw on top; the selected one last.
+    const list = tracks().filter(t => t.own).sort((a, b) => (isStale(b) - isStale(a)) || ((a.id === sel) - (b.id === sel)));
+    for (const t of list) o.push(radarTrack(t, R));
+  }
+  // You, at the centre.
+  if (st && st.own) o.push(`<path d="M-5 0H5M0-5V5" stroke="var(--fg)" stroke-width="2"/><circle r="2.2" fill="var(--fg)"/>`);
+  o.push(`</svg>`);
+  setHTML('radar-box', o.join(''));
+
+  $('rbar').hidden = $('legend').hidden = !(st && st.own);
+  $('range').textContent = 'Edge ' + ringLabel(R);
+  $('zauto').setAttribute('aria-pressed', S.zoom < 0);
+
+  const notes = [];
+  if (st && !st.own) {
+    notes.push(`${tracks().length} drone(s) heard: see the List.`);
+  } else if (st) {
+    const noPos = tracks().filter(t => !isStale(t) && t.own && t.own.dist_m == null).length;
+    const far = tracks().filter(t => !isStale(t) && t.own && t.own.dist_m > R).length;
+    if (!tracks().length) notes.push('No drones heard yet.');
+    if (noPos) notes.push(`${noPos} drone(s) not sending a position yet: see List.`);
+    if (far) notes.push(`${far} drone(s) beyond the edge, drawn on the rim.`);
+  }
+  setHTML('radar-note', notes.join('<br>'));
+}
+
+function radarTrack(t, R) {
+  const s = [], stale = isStale(t) ? ' stale' : '';
+  const g = t.own;
+  let dx = null;
+  if (g.dist_m != null) dx = xy(g.brg, g.dist_m, R);
+  if (g.op_dist_m != null) {
+    const [ox, oy] = xy(g.op_brg, g.op_dist_m, R);
+    if (dx) s.push(`<line class="lk" x1="${ox}" y1="${oy}" x2="${dx[0]}" y2="${dx[1]}"/>`);
+    s.push(`<rect class="op${stale}" x="${ox - 4.5}" y="${oy - 4.5}" width="9" height="9"/>`);
+    s.push(`<circle cx="${ox}" cy="${oy}" r="12" fill="transparent" data-open="${t.id}"/>`);
+  }
+  if (dx) {
+    const [x, y] = dx, l = t.loc || {};
+    if (isNew(t) && !stale) s.push(`<circle class="pulse" cx="${x}" cy="${y}" r="6"/>`);
+    if (t.id === sel) s.push(`<circle class="sel" cx="${x}" cy="${y}" r="10"/>`);
+    s.push(l.dir != null && (l.speed || 0) > 0.5
+      ? `<path class="dr${stale}" d="M0,-7 L5.5,6 L0,3 L-5.5,6Z" transform="translate(${x} ${y}) rotate(${l.dir})"/>`
+      : `<circle class="dr${stale}" cx="${x}" cy="${y}" r="5"/>`);
+    s.push(`<text class="lbl" x="${x + 8}" y="${y - 5}">#${t.id}</text>`);
+    s.push(`<circle cx="${x}" cy="${y}" r="13" fill="transparent" data-open="${t.id}"/>`);
+  }
+  return s.join('');
+}
+
+/* ----- list ----- */
+
+function renderList() {
+  const all = sorted();
+  const active = all.filter(t => !isStale(t)).length;
+  const o = [`<div class="sum">${active} active drone${active === 1 ? '' : 's'}` +
+    (all.length > active ? ` &middot; ${all.length - active} not heard recently` : '') +
+    (st && !st.own ? ` &middot; <span class="mut">sorted by last heard (no position)</span>` : '') + `</div>`];
+  if (!all.length) {
+    const ears = st ? (st.nodes || []).filter(n => n.alive).map(n => role(n.role)[1]).join(', ') : '';
+    o.push(`<div class="empty mut">No drones heard yet.${ears ? '<br>Listening on: ' + esc(ears) + '.' : ''}</div>`);
+  }
+  for (const t of all) {
+    const g = t.own, l = t.loc || {};
+    const stale = isStale(t);
+    const tags = (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '');
+    const where = !g ? '<span class="mut">distance unknown (no position for you)</span>'
+      : g.dist_m == null ? '<span class="mut">drone not sending a position yet</span>'
+      : `<span class="big">${fmtDist(g.dist_m)}</span><span class="big">${bearing(g.brg)}</span>`;
+    const h = l.height != null ? l.height : l.alt_geo;
+    o.push(`<button type="button" class="trk${stale ? ' stale' : ''}${isNew(t) && !stale ? ' new' : ''}" data-open="${t.id}">` +
+      `<div class="r1"><span class="num">#${t.id}</span><span class="id mono">${esc(idOf(t))}</span>${tags}</div>` +
+      `<div class="r2">${where}</div>` +
+      `<div class="r2"><span>Height ${fmtAlt(h)}</span><span>Speed ${fmtSpd(l.speed)}</span>` +
+      `<span class="mut">${esc(uaName(t.ua))}</span></div>` +
+      `<div class="r3">${(t.links || []).map(x => `<span class="rad">${esc(radioName(x))}</span>`).join('')}` +
+      `<span>heard ${ago(t.age_ms)}</span>${t.rssi != null ? `<span>${t.rssi} dBm</span>` : ''}</div>` +
+      `</button>`);
+  }
+  setHTML('v-list', o.join(''));
+}
+
+/* ----- detail ----- */
+
+function mapsLink(lat, lon, label) {
+  const q = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const href = ios ? `https://maps.apple.com/?ll=${q}&q=${encodeURIComponent(label)}` : `geo:${q}?q=${q}(${encodeURIComponent(label)})`;
+  return `<a class="btn" href="${esc(href)}">Open in maps app</a>`;
+}
+const copyBtn = (text, what) => `<button type="button" class="btn" data-copy="${esc(text)}">Copy ${what}</button>`;
+const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+
+function renderDetail() {
+  const t = findTrack(sel);
+  if (!t) {
+    $('sheet-h').textContent = `Drone #${sel}`;
+    setHTML('sheet-body', `<p class="empty">This drone is no longer tracked (not heard for 10 minutes).</p>`);
+    return;
+  }
+  const g = t.own, l = t.loc, op = t.op;
+  $('sheet-h').textContent = `#${t.id} ${idOf(t)}`;
+  const o = [];
+  o.push(`<p><span class="tag">${isStale(t) ? 'STALE &middot; not heard for 60 s+' : 'ACTIVE'}</span> ` +
+    `${esc(uaName(t.ua))} &middot; heard ${ago(t.age_ms)}</p>`);
+
+  o.push(`<h3>From you</h3>`);
+  if (!g) o.push(`<p class="mut">Unknown: the hub has no position for you. <button type="button" class="btn" data-go="set">Set position</button></p>`);
+  else {
+    o.push(`<dl>` +
+      row('Drone', g.dist_m == null ? 'no position yet' : `<span class="big">${fmtDist(g.dist_m)} ${bearing(g.brg)}</span>`) +
+      row('Operator', g.op_dist_m == null ? 'no position' : `${fmtDist(g.op_dist_m)} ${bearing(g.op_brg)}`) +
+      row('Above you', g.above_m == null ? '?' : fmtAlt(g.above_m)) + `</dl>`);
+  }
+
+  o.push(`<h3>Drone</h3>`);
+  if (l) {
+    const pos = l.lat != null ? coord(l.lat, l.lon) : null;
+    o.push(`<dl>` +
+      row('Position', pos ? `<span class="mono">${pos}</span>` : 'not sent') +
+      row('Height', l.height == null ? '?' : `${fmtAlt(l.height)} ${l.height_ref === 'AboveGround' ? 'above ground' : 'above takeoff'}`) +
+      row('Altitude', `${fmtAlt(l.alt_geo)} GPS &middot; ${fmtAlt(l.alt_baro)} baro`) +
+      row('Speed', `${fmtSpd(l.speed)} &middot; climb ${fmtVs(l.vspeed)}`) +
+      row('Heading', l.dir == null ? '?' : bearing(l.dir)) +
+      row('Status', esc(l.status)) +
+      row('Accuracy', `&plusmn;${l.hacc_m == null ? '?' : fmtAlt(l.hacc_m)} across, &plusmn;${l.vacc_m == null ? '?' : fmtAlt(l.vacc_m)} up`) +
+      row('Updated', ago(l.age_ms)) + `</dl>`);
+    if (pos) o.push(`<div class="row">${copyBtn(pos, 'coordinates')}${mapsLink(l.lat, l.lon, 'Drone ' + idOf(t))}</div>`);
+  } else o.push(`<p class="mut">No location message received yet.</p>`);
+
+  o.push(`<h3>Operator</h3>`);
+  if (op || t.op_id) {
+    const pos = op && op.lat != null ? coord(op.lat, op.lon) : null;
+    o.push(`<dl>` +
+      row('Position', pos ? `<span class="mono">${pos}</span>` : 'not sent') +
+      (op ? row('Kind', esc({Takeoff: 'Takeoff point', LiveGnss: 'Live (operator GPS)', Fixed: 'Fixed location'}[op.src] || op.src)) +
+            row('Altitude', fmtAlt(op.alt)) + row('Updated', ago(op.age_ms)) : '') +
+      row('Operator ID', t.op_id == null ? 'not sent' : `<span class="mono">${esc(t.op_id)}</span>`) + `</dl>`);
+    if (pos) o.push(`<div class="row">${copyBtn(pos, 'coordinates')}${mapsLink(op.lat, op.lon, 'Operator of ' + idOf(t))}</div>`);
+  } else o.push(`<p class="mut">No operator information received yet.</p>`);
+
+  o.push(`<h3>Self-ID text (written by the operator)</h3>`);
+  o.push(t.self_id == null ? `<p class="mut">none</p>` : `<div class="quote">${esc(t.self_id)}</div>`);
+
+  o.push(`<h3>Identity</h3><dl>`);
+  for (const i of t.ids || []) {
+    const type = typeof i.type === 'string' ? (ID_NAME[i.type] || i.type) : 'Reserved';
+    o.push(row(esc(type), `<span class="mono">${esc(i.id)}</span>`));
+  }
+  if (!(t.ids || []).length) o.push(row('ID', 'not received yet'));
+  o.push(row('Tracking', `first heard ${fmtAge(st.now_ms - t.first_ms)}`) + `</dl>`);
+
+  o.push(`<h3>Radios that heard it</h3><div class="scroll"><table><tr><th>Radio</th><th>Signal</th><th>Frames</th><th>Last</th><th>Ch</th><th>Address</th></tr>`);
+  for (const x of t.links || []) {
+    o.push(`<tr><td>${esc(radioName(x))}</td><td>${x.rssi} dBm</td><td>${x.n}</td><td>${ago(x.age_ms)}</td>` +
+      `<td>${x.ch}</td><td class="mono">${esc(x.mac)}</td></tr>`);
+  }
+  o.push(`</table></div>`);
+  setHTML('sheet-body', o.join(''));
+}
+
+function openDetail(id) {
+  if (sel == null) history.pushState({detail: id}, '');
+  sel = id;
+  alerts = alerts.filter(a => a.id !== id);
+  $('sheet').hidden = false;
+  render();
+  $('sheet').scrollTop = 0;
+  document.querySelector('#sheet [data-close]').focus();
+}
+function closeDetail(fromHistory) {
+  if (sel == null) return;
+  sel = null;
+  $('sheet').hidden = true;
+  if (!fromHistory) history.back();
+  render();
+}
+window.addEventListener('popstate', () => closeDetail(true));
+
+// Clipboard: navigator.clipboard needs HTTPS, which the hub lacks, so fall
+// back to the older copy command, and finally to a box to copy by hand.
+function copyText(text, btn) {
+  const done = ok => {
+    const was = btn.textContent;
+    btn.textContent = ok ? 'Copied ✓' : was;
+    if (ok) setTimeout(() => { btn.textContent = was; }, 1500);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => done(true), () => legacyCopy(text, done));
+  } else legacyCopy(text, done);
+}
+function legacyCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { /* unsupported */ }
+  ta.remove();
+  if (!ok) window.prompt('Copy these coordinates:', text);
+  done(ok);
+}
+
+/* ----- settings ----- */
+
+function renderSettings() {
+  if (!st) setHTML('pos-now', '<p class="mut">Waiting for the hub&hellip;</p>');
+  else {
+    const g = st.gps || {}, own = st.own, m = st.manual;
+    const gps = {absent: 'no GPS receiver found', searching: 'searching for satellites', '2d': '2D fix', '3d': '3D fix'}[g.state] || 'unknown';
+    const lines = [];
+    lines.push(own
+      ? `<strong>In use: ${own.source === 'gps' ? 'hub GPS' : 'typed position'}</strong> &middot; ${coordHTML(own.lat, own.lon)}`
+      : `<strong>&#9888; No position in use.</strong> Distances and directions are off.`);
+    lines.push(`Hub GPS: ${esc(gps)}${g.sats != null ? ` (${g.sats} satellites)` : ''}`);
+    if (!(own && own.source === 'manual')) lines.push(m ? `Typed position on file: ${coordHTML(m.lat, m.lon)}${m.alt != null ? ', ' + fmtAlt(m.alt) : ''}` +
+      (own && own.source === 'gps' ? ' (not used while GPS has a fix)' : '') : 'No typed position on file.');
+    setHTML('pos-now', lines.map(x => `<div>${x}</div>`).join(''));
+  }
+  $('pos-clear').disabled = !(st && st.manual);
+  for (const b of document.querySelectorAll('[data-th]')) b.setAttribute('aria-pressed', b.dataset.th === S.theme);
+  for (const b of document.querySelectorAll('[data-units]')) b.setAttribute('aria-pressed', b.dataset.units === S.units);
+  for (const e of document.querySelectorAll('.u-alt')) e.textContent = imp() ? 'feet' : 'metres';
+  $('snd').setAttribute('aria-pressed', S.sound);
+  $('snd').textContent = S.sound ? 'Sound on' : 'Sound off';
+  $('vib').setAttribute('aria-pressed', S.vibrate);
+  $('vib').textContent = S.vibrate ? 'Vibrate on' : 'Vibrate off';
+  $('vib').disabled = !canVibrate;
+  $('alert-msg').textContent = !canVibrate ? 'This browser can’t vibrate (iPhones don’t allow it). Use sound instead.'
+    : (S.sound || S.vibrate) && !tapped() ? 'Tap the screen once so the browser allows sound and vibration.' : '';
+  renderHub();
+}
+
+function renderHub() {
+  if (!st) { setHTML('hub', ''); return; }
+  const o = [`<table><tr><th>Receiver</th><th>State</th><th>Traffic</th></tr>`];
+  for (const n of st.nodes || []) {
+    o.push(`<tr><td>${esc(role(n.role)[1])}</td>` +
+      `<td>${n.alive ? '&#10003; OK' : '<strong>&#10005; silent</strong>'}<br><span class="mut">${n.age_ms == null ? 'never heard' : 'heard ' + ago(n.age_ms)}</span></td>` +
+      `<td>${n.rid_per_s} Remote ID/s<br><span class="mut">${n.seen_per_s ?? '?'} frames/s &middot; ${n.drops ?? '?'} dropped</span></td></tr>`);
+  }
+  if (!(st.nodes || []).length) o.push(`<tr><td colspan="3">No receivers attached.</td></tr>`);
+  o.push(`</table><dl style="margin-top:8px">` +
+    row('SD-card log', st.rec ? '&#9679; recording' : 'off') +
+    row('Hub clock', st.utc_ms != null ? 'GPS time' : 'no GPS time yet (shown: phone time)') +
+    row('Hub up for', fmtAge(st.now_ms).replace(' ago', '')) + `</dl>`);
+  setHTML('hub', o.join(''));
+}
+
+// Accept "39.95, -75.16", "39.95 -75.16", or text containing them (a pasted
+// maps link). The first two numbers are latitude and longitude.
+function parsePos(text) {
+  const nums = (text.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+  if (nums.length < 2) return null;
+  const [lat, lon] = nums;
+  if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return null;
+  return {lat, lon};
+}
+
+async function postPos(body, okText) {
+  const msg = $('pos-msg');
+  msg.className = 'msg';
+  msg.textContent = 'Sending…';
+  try {
+    const r = await fetch('/api/own-pos', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    if (!r.ok) {
+      let why = 'HTTP ' + r.status;
+      try { why = (await r.json()).error || why; } catch (e) { /* plain text */ }
+      throw new Error(why);
+    }
+    msg.textContent = okText;
+  } catch (e) {
+    msg.className = 'msg err';
+    msg.textContent = 'Not saved: ' + e.message;
+  }
+}
+
+/* ========================================================== events ===== */
+
+function setTab(name) {
+  tab = name;
+  for (const b of document.querySelectorAll('#tabs button')) b.setAttribute('aria-selected', b.dataset.tab === name);
+  for (const v of ['radar', 'list', 'set']) $('v-' + v).hidden = v !== name;
+  window.scrollTo(0, 0);
+  render();
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = S.theme;
+  document.querySelector('meta[name=theme-color]').content = S.theme === 'light' ? '#ffffff' : '#000000';
+}
+
+// One delegated click handler: buttons are re-drawn every second, so they
+// carry what they do in data- attributes.
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-open],[data-go],[data-close],[data-dismiss],[data-copy],[data-tab],[data-th],[data-units]');
+  if (!el) return;
+  const d = el.dataset;
+  if (d.open != null) openDetail(+d.open);
+  else if (d.go) { if (sel != null) closeDetail(); setTab(d.go); }
+  else if (d.close != null) closeDetail();
+  else if (d.dismiss != null) { alerts = []; render(); }
+  else if (d.copy != null) copyText(d.copy, el);
+  else if (d.tab) setTab(d.tab);
+  else if (d.th) { S.theme = d.th; save(); applyTheme(); render(); }
+  else if (d.units) { S.units = d.units; save(); render(); }
+});
+function goStatus() { setTab('set'); $('hub-h').scrollIntoView(); }
+$('strip').addEventListener('click', goStatus);
+$('strip').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goStatus(); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && sel != null) closeDetail(); });
+
+$('zin').onclick = () => { const r = ranges(); const i = S.zoom >= 0 ? S.zoom : r.indexOf(autoRange()); S.zoom = Math.max(0, i - 1); save(); render(); };
+$('zout').onclick = () => { const r = ranges(); const i = S.zoom >= 0 ? S.zoom : r.indexOf(autoRange()); S.zoom = Math.min(r.length - 1, i + 1); save(); render(); };
+$('zauto').onclick = () => { S.zoom = -1; save(); render(); };
+
+$('snd').onclick = () => { S.sound = !S.sound; save(); wakeAudio(); if (S.sound) setTimeout(ring, 50); render(); };
+$('vib').onclick = () => { S.vibrate = !S.vibrate; save(); if (S.vibrate) ring(); render(); };
+$('test').onclick = () => {
+  wakeAudio();
+  setTimeout(ring, 50);
+  if (!S.sound && !S.vibrate) $('alert-msg').textContent = 'Sound and vibration are both off; turn one on above.';
+};
+
+$('pos-save').onclick = () => {
+  const p = parsePos($('pos-in').value);
+  const msg = $('pos-msg');
+  if (!p) {
+    msg.className = 'msg err';
+    msg.textContent = 'Type latitude then longitude, e.g. 39.95260, -75.16520';
+    return;
+  }
+  const at = $('alt-in').value.trim();
+  let alt = null;
+  if (at) {
+    alt = parseFloat(at.replace(',', '.'));
+    if (!isFinite(alt)) { msg.className = 'msg err'; msg.textContent = 'Altitude must be a number, or empty.'; return; }
+    if (imp()) alt /= FT;
+  }
+  postPos({lat: p.lat, lon: p.lon, alt}, `Saved ✓ ${coord(p.lat, p.lon)}. Used whenever the hub's GPS has no fix.`);
+};
+$('pos-clear').onclick = () => postPos({clear: true}, 'Typed position forgotten.');
+
+applyTheme();
+render();
+poll();
+// Keep the clock and "x s ago" ticking even when polls stall.
+setInterval(() => { if (Date.now() - lastOk > POLL_MS * 1.5) render(); }, 1000);
+</script>
+</body>
+</html>

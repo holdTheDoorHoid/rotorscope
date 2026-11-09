@@ -5,6 +5,7 @@
 //! laptop shows is what the hub would show. See `--help`.
 
 mod demo;
+mod http;
 mod input;
 mod parse;
 mod view;
@@ -12,13 +13,19 @@ mod view;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{IsTerminal, Write};
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{TcpListener, ToSocketAddrs, UdpSocket};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use input::{Clock, Event};
+use link::NodeRole;
 use parse::Line;
+use rid::Transport;
+use tracker::json::{
+    GpsState, GpsStatus, HubStatus, ManualPos, NodeStatus, OwnPosRequest, OwnSource,
+};
 use tracker::{Context, Observation, TrackId, TrackState, Tracker, cot, csv, json};
 use view::View;
 
@@ -49,6 +56,9 @@ OPTIONS:
     --json                   Print the hub's JSON track lines instead of the
                              table (once a second, or at the end with --once).
     --realtime               Play recorded files back at their captured speed.
+    --http ADDR              Serve the hub's phone page and API on ADDR, e.g.
+                             127.0.0.1:8080 (port 0 picks a free one). The
+                             page can set --own-pos (POST /api/own-pos).
     -h, --help               This text.
 ";
 
@@ -62,6 +72,7 @@ struct Options {
     demo_secs: u64,
     json: bool,
     realtime: bool,
+    http: Option<String>,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -75,6 +86,7 @@ fn parse_args() -> Result<Options, String> {
         demo_secs: 10,
         json: false,
         realtime: false,
+        http: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -109,12 +121,16 @@ fn parse_args() -> Result<Options, String> {
             }
             "--json" => o.json = true,
             "--realtime" => o.realtime = true,
+            "--http" => o.http = Some(value("--http")?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.inputs.push(a),
         }
     }
     if o.inputs.is_empty() && !o.demo {
         o.inputs.push("-".into());
+    }
+    if o.http.is_some() && o.once {
+        return Err("--http serves a live page; it cannot be used with --once".into());
     }
     if o.inputs.len() > 200 {
         return Err("too many inputs".into());
@@ -151,6 +167,82 @@ fn summarize(v: &serde_json::Value, skip: &[&str]) -> String {
         .take(8)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// ------------------------------------------------- node health (--http) --
+
+/// A node's role from its hello line: the Wi-Fi node sends `"role":"Wifi24"`,
+/// the BLE node `"node":"ble"`.
+fn role_from_hello(v: &serde_json::Value) -> Option<NodeRole> {
+    let s = v.get("role").or_else(|| v.get("node"))?.as_str()?;
+    match s.to_ascii_lowercase().as_str() {
+        "wifi24" => Some(NodeRole::Wifi24),
+        "wifi5" => Some(NodeRole::Wifi5),
+        "ble" => Some(NodeRole::Ble),
+        "fpv" => Some(NodeRole::Fpv),
+        _ => None,
+    }
+}
+
+/// Without a hello line, guess the role from what the input hears.
+fn role_from_rid(t: Transport, channel: u8) -> NodeRole {
+    match t {
+        Transport::WifiBeacon | Transport::WifiNan if channel > 14 => NodeRole::Wifi5,
+        Transport::WifiBeacon | Transport::WifiNan => NodeRole::Wifi24,
+        _ => NodeRole::Ble,
+    }
+}
+
+/// Frames seen per second and total drops from a stats line. The Wi-Fi node
+/// sends `fps` and `drop`; the BLE node `adv` per `win_ms` and `tot_drops`.
+fn stats_rates(v: &serde_json::Value) -> (Option<u32>, Option<u32>) {
+    let u = |k: &str| v.get(k).and_then(|x| x.as_u64());
+    let seen = u("fps").or_else(|| {
+        let adv = u("adv")?;
+        let win = u("win_ms").filter(|w| *w > 0).unwrap_or(1000);
+        Some(adv * 1000 / win)
+    });
+    let drops = u("drop").or_else(|| u("tot_drops"));
+    let clamp = |x: u64| x.min(u64::from(u32::MAX)) as u32;
+    (seen.map(clamp), drops.map(clamp))
+}
+
+/// A node counts as alive if heard within this long.
+const NODE_ALIVE_MS: u64 = 5_000;
+/// Window for the Remote ID rate.
+const RATE_WINDOW_MS: u64 = 5_000;
+
+fn note_rid(info: &mut view::NodeInfo, at_ms: u64) {
+    info.last_ms = Some(at_ms);
+    info.rid_times.push_back(at_ms);
+    while info.rid_times.len() > 10_000 {
+        info.rid_times.pop_front();
+    }
+}
+
+fn node_statuses(view: &mut View, now: u64) -> Vec<NodeStatus> {
+    view.nodes
+        .values_mut()
+        .filter_map(|n| {
+            while n
+                .rid_times
+                .front()
+                .is_some_and(|t| now.saturating_sub(*t) > RATE_WINDOW_MS)
+            {
+                n.rid_times.pop_front();
+            }
+            let age = n.last_ms.map(|l| now.saturating_sub(l));
+            Some(NodeStatus {
+                role: n.role?,
+                alive: n.ended.is_none() && age.is_some_and(|a| a <= NODE_ALIVE_MS),
+                age_ms: age,
+                seen_per_s: n.seen_per_s,
+                rid_per_s: ((n.rid_times.len() as u64 * 1000 + RATE_WINDOW_MS / 2) / RATE_WINDOW_MS)
+                    as u32,
+                drops: n.drops,
+            })
+        })
+        .collect()
 }
 
 struct Cot {
@@ -255,8 +347,13 @@ fn run(o: Options) -> Result<(), String> {
         let base = o.inputs.len() as u8;
         let center = o.own.map_or((39.952_583, -75.165_222), |(a, b, _)| (a, b));
         demo::spawn(center, !o.once, o.demo_secs, start, base, tx.clone());
-        for (n, what) in [(base, "demo Wi-Fi"), (base + 1, "demo BLE")] {
-            view.nodes.entry(n).or_default().source = what.into();
+        for (n, what, role) in [
+            (base, "demo Wi-Fi", NodeRole::Wifi24),
+            (base + 1, "demo BLE", NodeRole::Ble),
+        ] {
+            let info = view.nodes.entry(n).or_default();
+            info.source = what.into();
+            info.role = Some(role);
         }
         live_sources += 1;
     }
@@ -281,6 +378,26 @@ fn run(o: Options) -> Result<(), String> {
         outputs.log = Some(f);
     }
 
+    // Own position: from --own-pos, changed by the page (--http). There is
+    // no GPS on a laptop, so it is always a "manual" position.
+    let mut manual: Option<ManualPos> = o.own.map(|(lat, lon, alt)| ManualPos { lat, lon, alt });
+    let (pos_tx, pos_rx) = mpsc::channel::<OwnPosRequest>();
+    let http = match &o.http {
+        Some(addr) => {
+            let listener = TcpListener::bind(addr).map_err(|e| format!("--http {addr}: {e}"))?;
+            let at = listener.local_addr().map_err(|e| e.to_string())?;
+            eprintln!("rid-view: phone page at http://{at}/");
+            let shared = Arc::new(http::Shared {
+                state: Mutex::new(Vec::new()),
+                own_pos: Mutex::new(pos_tx),
+            });
+            http::spawn(listener, Arc::clone(&shared));
+            Some(shared)
+        }
+        None => None,
+    };
+    let mut last_publish: Option<u64> = None;
+
     let mut tr: Tracker = Tracker::default();
     // Tracker time: the newest event stamp; while live it also advances with
     // the wall clock so tracks age and go stale when nothing arrives.
@@ -302,9 +419,14 @@ fn run(o: Options) -> Result<(), String> {
                 Event::Line { node, line, at_ms } => {
                     now = now.max(at_ms);
                     let info = view.nodes.entry(node).or_default();
+                    info.last_ms = Some(at_ms);
                     match line {
                         Line::Rid(r) => {
                             info.rid_lines += 1;
+                            note_rid(info, at_ms);
+                            if info.role.is_none() {
+                                info.role = Some(role_from_rid(r.transport, r.channel));
+                            }
                             let obs = Observation {
                                 node,
                                 transport: r.transport,
@@ -316,9 +438,13 @@ fn run(o: Options) -> Result<(), String> {
                             };
                             tr.ingest_messages(&obs, &r.msgs, r.errors);
                         }
-                        Line::Hello(v) => info.hello = Some(summarize(&v, &["t"])),
+                        Line::Hello(v) => {
+                            info.role = role_from_hello(&v).or(info.role);
+                            info.hello = Some(summarize(&v, &["t"]));
+                        }
                         Line::Stats(v) => {
-                            info.stats = Some(summarize(&v, &["t", "up_us", "win_ms"]))
+                            (info.seen_per_s, info.drops) = stats_rates(&v);
+                            info.stats = Some(summarize(&v, &["t", "up_us", "win_ms"]));
                         }
                         Line::Other => {}
                         Line::Bad => info.bad_lines += 1,
@@ -326,7 +452,9 @@ fn run(o: Options) -> Result<(), String> {
                 }
                 Event::Detection { node, det, at_ms } => {
                     now = now.max(at_ms);
-                    view.nodes.entry(node).or_default().rid_lines += 1;
+                    let info = view.nodes.entry(node).or_default();
+                    info.rid_lines += 1;
+                    note_rid(info, at_ms);
                     tr.ingest(node, &det, now);
                 }
                 Event::End { node, why } => {
@@ -340,8 +468,24 @@ fn run(o: Options) -> Result<(), String> {
         if !o.once {
             now = now.max(clock.ms());
         }
-        if let Some((lat, lon, alt)) = o.own {
-            tr.set_own_position(lat, lon, alt, now);
+        let mut pos_changed = false;
+        while let Ok(req) = pos_rx.try_recv() {
+            manual = match req {
+                OwnPosRequest::Set(p) => Some(p),
+                OwnPosRequest::Clear => None,
+            };
+            pos_changed = true;
+            let what = manual.map_or("cleared".to_string(), |p| {
+                format!("{:.5},{:.5}", p.lat, p.lon)
+            });
+            view.note(
+                &hhmmss(utc_now()),
+                format!("own position from page: {what}"),
+            );
+        }
+        match manual {
+            Some(p) => tr.set_own_position(p.lat, p.lon, p.alt, now),
+            None => tr.clear_own_position(),
         }
         while let Some(id) = tr.take_new_drone(now) {
             view.announced.insert(id, now);
@@ -361,6 +505,32 @@ fn run(o: Options) -> Result<(), String> {
             tr.expire(now);
             let ctx = tr.context(now, Some(utc_now()));
             outputs.tick(&tr, &ctx, &mut view, o.json && !o.once);
+        }
+        // The page polls about once a second; a fresh snapshot 4x a second
+        // keeps it current without rendering per request.
+        if let Some(h) = &http
+            && (pos_changed || last_publish.is_none_or(|l| now >= l + 250))
+        {
+            last_publish = Some(now);
+            let ctx = tr.context(now, Some(utc_now()));
+            let nodes = node_statuses(&mut view, now);
+            let hub = HubStatus {
+                own_source: OwnSource::Manual,
+                manual,
+                gps: GpsStatus {
+                    state: GpsState::Absent,
+                    sats: None,
+                },
+                recording: o.log.is_some(),
+                nodes: &nodes,
+            };
+            let mut buf = vec![0u8; json::state_max_len(tr.len(), nodes.len())];
+            if let Ok(n) = json::state(tr.tracks(), &ctx, &hub, &mut buf) {
+                buf.truncate(n);
+                if let Ok(mut s) = h.state.lock() {
+                    *s = buf;
+                }
+            }
         }
         // Redraw in place 4x a second on a terminal; when piped, a fresh
         // table once a second is plenty.

@@ -234,3 +234,172 @@ fn cot_over_udp() {
     .into();
     assert_eq!(seen, want);
 }
+
+// ------------------------------------------------------------- --http --
+
+/// Kills the server when the test ends, pass or fail.
+struct Server(std::process::Child, String);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Start `rid-view --demo --http 127.0.0.1:0` and read back the port it got.
+fn serve(extra: &[&str]) -> Server {
+    use std::io::BufRead;
+    let mut child = Command::new(BIN)
+        .args(["--demo", "--http", "127.0.0.1:0"])
+        .args(extra)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let addr = line
+        .split("http://")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no address in {line:?}"))
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    Server(child, addr)
+}
+
+/// A minimal HTTP/1.1 client: returns (status, headers, body).
+fn http(addr: &str, req: &str) -> (u16, String, Vec<u8>) {
+    use std::io::Read;
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    s.write_all(req.as_bytes()).unwrap();
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).unwrap();
+    let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(out[..split].to_vec()).unwrap();
+    let status = head[9..12].parse().unwrap();
+    (status, head, out[split + 4..].to_vec())
+}
+
+fn get(addr: &str, path: &str) -> (u16, String, Vec<u8>) {
+    http(addr, &format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"))
+}
+
+fn post(addr: &str, path: &str, body: &str) -> (u16, String, Vec<u8>) {
+    http(
+        addr,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// Poll /api/state until `ok` holds (the demo and the main loop run live).
+fn state_until(addr: &str, ok: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..60 {
+        let (status, head, body) = get(addr, "/api/state");
+        assert_eq!(status, 200);
+        assert_eq!(header(&head, "content-type"), Some("application/json"));
+        if !body.is_empty() {
+            last = serde_json::from_slice(&body).unwrap();
+            if ok(&last) {
+                return last;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("state never matched: {last}");
+}
+
+#[test]
+fn http_serves_page_and_state() {
+    let srv = serve(&["--own-pos", CITY_HALL]);
+    let addr = &srv.1;
+
+    // The page: gzip from the webui crate, revalidated by ETag.
+    let (status, head, body) = get(addr, "/");
+    assert_eq!(status, 200, "{head}");
+    assert_eq!(header(&head, "content-encoding"), Some("gzip"));
+    assert_eq!(header(&head, "content-type"), Some(webui::CONTENT_TYPE));
+    assert_eq!(body, webui::INDEX_HTML_GZ);
+    let etag = header(&head, "etag").unwrap().to_string();
+    let (status, _, body) = http(
+        addr,
+        &format!("GET / HTTP/1.1\r\nHost: x\r\nIf-None-Match: {etag}\r\n\r\n"),
+    );
+    assert_eq!(status, 304);
+    assert!(body.is_empty());
+    assert_eq!(get(addr, "/nope").0, 404);
+    assert_eq!(post(addr, "/api/state", "{}").0, 405);
+
+    // The state: both demo drones, both demo nodes, our position.
+    let v = state_until(addr, |v| {
+        v["tracks"].as_array().is_some_and(|t| t.len() == 2)
+    });
+    assert_eq!(v["t"], "state");
+    assert_eq!(v["v"], 1);
+    assert_eq!(v["own"]["source"], "manual");
+    assert_eq!(v["own"]["lat"], 39.952583);
+    assert_eq!(v["gps"]["state"], "absent");
+    assert_eq!(v["rec"], false);
+    let roles: Vec<_> = v["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["role"].clone())
+        .collect();
+    assert_eq!(roles, [json!("Wifi24"), json!("Ble")]);
+    assert!(
+        v["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["t"] == "track" && t["own"]["dist_m"].is_number())
+    );
+
+    // The page moves our position, then clears it.
+    let (status, _, body) = post(addr, "/api/own-pos", r#"{"lat":40.0,"lon":-75.5,"alt":12}"#);
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let v = state_until(addr, |v| v["own"]["lat"] == 40.0);
+    assert_eq!(v["manual"], json!({"lat":40.0,"lon":-75.5,"alt":12.0}));
+    assert_eq!(v["own"]["alt"], 12.0);
+
+    let (status, _, body) = post(addr, "/api/own-pos", r#"{"lat":123,"lon":0}"#);
+    assert_eq!(status, 400);
+    let err: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(err["error"].as_str().unwrap().contains("lat"));
+
+    assert_eq!(post(addr, "/api/own-pos", r#"{"clear":true}"#).0, 200);
+    let v = state_until(addr, |v| v["own"].is_null());
+    assert!(v["manual"].is_null());
+    // P4: no position, so no geometry.
+    assert!(
+        v["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["own"].is_null())
+    );
+}
+
+#[test]
+fn http_with_once_is_refused() {
+    let out = Command::new(BIN)
+        .args(["--demo", "--once", "--http", "127.0.0.1:0"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

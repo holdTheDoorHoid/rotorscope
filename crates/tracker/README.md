@@ -73,6 +73,78 @@ Example:
 
 A typical line is about 900 bytes. The worst case is 1404 bytes, with all five transports, two IDs and escaped text. Size buffers with `json::MAX_LINE` (1536). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512).
 
+## Phone page API (`json::state`, `json::parse_own_pos`)
+
+The hub's hotspot serves the page in `web/index.html` (bundled by
+`crates/webui`) and three endpoints. `rid-view --http ADDR` serves the same
+on a laptop.
+
+| Request | Answer |
+|---|---|
+| `GET /` | The page: `webui::INDEX_HTML_GZ` with `Content-Encoding: gzip`, `Content-Type: webui::CONTENT_TYPE`, `ETag: webui::ETAG` (answer `304` when `webui::etag_matches(If-None-Match)`), `Cache-Control: no-cache` |
+| `GET /api/state` | `200`, `application/json`, `Cache-Control: no-store`, body from `json::state` |
+| `POST /api/own-pos` | Body `{"lat":..,"lon":..,"alt":..}` (`alt` optional or `null`, metres above the WGS-84 ellipsoid) or `{"clear":true}`. Check it with `json::parse_own_pos`: `200 {"ok":true}`, or `400 {"error":"<OwnPosError::message()>"}` |
+
+The page polls `/api/state` about once a second, and says "connection lost"
+once no answer has arrived for 3.5 s.
+
+### Hub side
+
+```rust
+let nodes: [json::NodeStatus; 3] = /* one per attached node */;
+let hub = json::HubStatus {
+    own_source: json::OwnSource::Gps,   // what ctx.own came from
+    manual: saved_manual,               // Option<json::ManualPos>, whether or not in use
+    gps: json::GpsStatus { state: json::GpsState::Fix3d, sats: Some(9) },
+    recording: sd_log_open,
+    nodes: &nodes,
+};
+let ctx = tracker.context(now_ms, utc_ms);
+let n = json::state(tracker.tracks(), &ctx, &hub, &mut buf)?; // buf: json::state_max_len(tracker.len(), nodes.len())
+```
+
+`pub fn state(tracks: &[Track], ctx: &Context, hub: &HubStatus, buf: &mut [u8]) -> Result<usize, FormatError>`
+writes one object and `\n`. A buffer of `state_max_len(tracks, nodes)` always
+fits (64 tracks and 4 nodes: about 99 KB, so PSRAM); a typical object is about
+1 KB per track. Too small a buffer is `BufferTooSmall`, never a truncated object.
+
+**Which position is used.** The page assumes this policy, and the hub
+implements it: a GPS fix wins; a typed (manual) position is used only while
+the GPS has no fix. The tracker forgets a fix after `own_fix_max_age_ms`, so
+the hub re-applies the manual position every tick with
+`set_own_position(lat, lon, alt, now_ms)` and reports `OwnSource::Manual`.
+Keep the manual position across reboots if you can; the page shows it as
+`manual` either way.
+
+### State object schema (`"v":1`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | `"state"` | Object type tag |
+| `v` | int | Schema version (`json::STATE_VERSION`), bumped on incompatible change |
+| `now_ms` | int | Hub uptime. The page treats a decrease as a hub restart |
+| `utc_ms` | int \| null | Unix ms from GPS time, `null` without it |
+| `own` | object \| null | The position in use: `lat`, `lon`, `alt` (m HAE \| null), `source` (`"gps"` \| `"manual"`), `age_ms`. **`null` means own position unknown** (P4): then every track's `own` is null too |
+| `manual` | object \| null | The typed position on file, `{lat, lon, alt}`, even when GPS is in use |
+| `gps` | object | The GPS receiver: `state` (`"absent"` \| `"searching"` \| `"2d"` \| `"3d"`) and `sats` (int \| null) |
+| `rec` | bool | The SD-card log is being written |
+| `nodes` | array | One per radio node: `role` (`"Wifi24"` \| `"Wifi5"` \| `"Ble"` \| `"Fpv"`), `alive` (heard recently), `age_ms` (since its last frame; null if never), `seen_per_s` (all frames it saw per second; null before its first Stats), `rid_per_s` (Remote ID detections the hub got per second), `drops` (total frames it dropped; null before its first Stats) |
+| `tracks` | array | Every track, each exactly the `json::track_line` object above (in table order; the page sorts) |
+
+Example (tracks shortened):
+
+```json
+{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"own":{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100},"manual":null,"gps":{"state":"3d","sats":9},"rec":true,"nodes":[{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0},{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}],"tracks":[{"t":"track","id":1,...}]}
+```
+
+**New-drone alerts on the page** follow the hub's buzzer rule without extra
+fields: a track id the page has not seen before alerts once it has an ID, or
+1 s after `first_ms`. Tracks present when the page loads do not alert.
+
+**Security.** Self-ID, operator ID and UAS ID text come from the air and can
+contain anything; the page HTML-escapes every one. Anyone on the hotspot can
+`POST /api/own-pos`, which only moves the distances shown.
+
 ## Cursor-on-Target
 
 The events follow DragonSync's conventions (Apache-2.0, WarDragon's TAK
@@ -110,5 +182,6 @@ An empty field means unknown. `transports` is `|`-separated. A field is quoted
 - the once-only alert
 - geometry, checked against GeographicLib and Vincenty's published example
 - golden output for all three formatters
+- the `/api/state` object (golden, no fix, many tracks, every too-small buffer) and `own-pos` parsing
 
 `cargo build -p tracker --target riscv32imac-unknown-none-elf` checks the `no_std` build.

@@ -765,3 +765,222 @@ fn json_worst_case_fits() {
     assert!(cot::drone_event(&tr.tracks()[0], &ctx, &mut big).unwrap() <= cot::MAX_EVENT);
     assert!(csv::row(&tr.tracks()[0], &ctx, &mut big).unwrap() <= csv::MAX_ROW);
 }
+
+// ------------------------------------------------------------ /api/state --
+
+fn nodes() -> [json::NodeStatus; 2] {
+    [
+        json::NodeStatus {
+            role: link::NodeRole::Wifi24,
+            alive: true,
+            age_ms: Some(300),
+            seen_per_s: Some(412),
+            rid_per_s: 1,
+            drops: Some(0),
+        },
+        json::NodeStatus {
+            role: link::NodeRole::Ble,
+            alive: false,
+            age_ms: None,
+            seen_per_s: None,
+            rid_per_s: 0,
+            drops: None,
+        },
+    ]
+}
+
+#[test]
+fn state_golden() {
+    let (tr, ctx) = golden();
+    let nodes = nodes();
+    let hub = json::HubStatus {
+        own_source: json::OwnSource::Gps,
+        manual: None,
+        gps: json::GpsStatus {
+            state: json::GpsState::Fix3d,
+            sats: Some(9),
+        },
+        recording: true,
+        nodes: &nodes,
+    };
+    let mut buf = [0u8; 4096];
+    let n = json::state(tr.tracks(), &ctx, &hub, &mut buf).unwrap();
+    let got = s(&buf, n);
+    let mut line = [0u8; 1024];
+    let ln = json::track_line(&tr.tracks()[0], &ctx, &mut line).unwrap();
+    let track = s(&line, ln - 1); // without its newline
+    let want = std::format!(
+        concat!(
+            r#"{{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"#,
+            r#""own":{{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100}},"#,
+            r#""manual":null,"gps":{{"state":"3d","sats":9}},"rec":true,"#,
+            r#""nodes":[{{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0}},"#,
+            r#"{{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}}],"#,
+            r#""tracks":[{}]}}"#,
+            "\n"
+        ),
+        track
+    );
+    assert_eq!(got, want);
+    let v: serde_json::Value = serde_json::from_str(&got).unwrap();
+    assert_eq!(v["tracks"][0]["own"]["dist_m"], 1363.9);
+    assert_eq!(v["nodes"][1]["role"], "Ble");
+}
+
+#[test]
+fn state_without_fix_or_tracks() {
+    let tr: Tracker = Tracker::default();
+    let ctx = tr.context(1_000, None);
+    let hub = json::HubStatus {
+        own_source: json::OwnSource::Gps,
+        manual: Some(json::ManualPos {
+            lat: 1.5,
+            lon: -2.25,
+            alt: None,
+        }),
+        gps: json::GpsStatus {
+            state: json::GpsState::Searching,
+            sats: None,
+        },
+        recording: false,
+        nodes: &[],
+    };
+    let mut buf = [0u8; 512];
+    let n = json::state(tr.tracks(), &ctx, &hub, &mut buf).unwrap();
+    assert_eq!(
+        s(&buf, n),
+        concat!(
+            r#"{"t":"state","v":1,"now_ms":1000,"utc_ms":null,"own":null,"#,
+            r#""manual":{"lat":1.5,"lon":-2.25,"alt":null},"gps":{"state":"searching","sats":null},"#,
+            r#""rec":false,"nodes":[],"tracks":[]}"#,
+            "\n"
+        )
+    );
+}
+
+#[test]
+fn state_several_tracks_and_small_buffers() {
+    let mut tr: Tracker = Tracker::default();
+    for (i, id) in ["SN-A", "SN-B", "SN-C"].into_iter().enumerate() {
+        let mac = [0x60, 0, 0, 0, 0, i as u8];
+        tr.ingest(
+            0,
+            &det(
+                Transport::WifiBeacon,
+                mac,
+                -60,
+                &[serial(id), location(1.0, 2.0, 3.0)],
+            ),
+            100,
+        );
+    }
+    tr.set_own_position(1.0, 2.001, None, 100);
+    let ctx = tr.context(200, None);
+    let nodes = nodes();
+    let hub = json::HubStatus {
+        own_source: json::OwnSource::Manual,
+        manual: Some(json::ManualPos {
+            lat: 1.0,
+            lon: 2.001,
+            alt: None,
+        }),
+        gps: json::GpsStatus {
+            state: json::GpsState::Absent,
+            sats: None,
+        },
+        recording: false,
+        nodes: &nodes,
+    };
+    let mut buf = std::vec![0u8; json::state_max_len(3, 2)];
+    let n = json::state(tr.tracks(), &ctx, &hub, &mut buf).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+    assert_eq!(v["tracks"].as_array().unwrap().len(), 3);
+    assert_eq!(v["tracks"][2]["ids"][0]["id"], "SN-C");
+    assert_eq!(v["own"]["source"], "manual");
+    assert_eq!(v["own"]["alt"], serde_json::Value::Null);
+    assert_eq!(v["gps"]["state"], "absent");
+    // Every shorter buffer is an error, never a truncated object.
+    for len in 0..n {
+        assert_eq!(
+            json::state(tr.tracks(), &ctx, &hub, &mut buf[..len]),
+            Err(FormatError::BufferTooSmall),
+            "len {len}"
+        );
+    }
+}
+
+/// The documented bound holds for the worst-case head and nodes.
+#[test]
+fn state_head_and_nodes_fit_their_bounds() {
+    let mut tr: Tracker = Tracker::default();
+    tr.set_own_position(
+        -89.123_456_789_012_3,
+        -179.123_456_789_012_3,
+        Some(-12_345.678_901_234),
+        0,
+    );
+    let ctx = tr.context(9_000, Some(u64::MAX));
+    let mut ctx = ctx;
+    ctx.now_ms = u64::MAX;
+    if let Some(o) = &mut ctx.own {
+        o.fix_ms = 0;
+    }
+    let node = json::NodeStatus {
+        role: link::NodeRole::Wifi24,
+        alive: false,
+        age_ms: Some(u64::MAX),
+        seen_per_s: Some(u32::MAX),
+        rid_per_s: u32::MAX,
+        drops: Some(u32::MAX),
+    };
+    let hub = |nodes| json::HubStatus {
+        own_source: json::OwnSource::Manual,
+        manual: Some(json::ManualPos {
+            lat: -89.123_456_789_012_3,
+            lon: -179.123_456_789_012_3,
+            alt: Some(-12_345.678_901_234),
+        }),
+        gps: json::GpsStatus {
+            state: json::GpsState::Searching,
+            sats: Some(255),
+        },
+        recording: false,
+        nodes,
+    };
+    let mut buf = [0u8; 2048];
+    let head = json::state(&[], &ctx, &hub(&[]), &mut buf).unwrap();
+    std::println!("worst-case state head: {head} bytes");
+    assert!(head <= json::STATE_HEAD_MAX, "{head}");
+    let with = json::state(&[], &ctx, &hub(&[node; 4]), &mut buf).unwrap();
+    assert!(with - head <= 4 * json::STATE_NODE_MAX, "{}", with - head);
+}
+
+#[test]
+fn own_pos_requests() {
+    use json::{OwnPosError as E, OwnPosRequest as R, parse_own_pos as p};
+    assert_eq!(
+        p(br#"{"lat":39.9526,"lon":-75.1652,"alt":12.5}"#),
+        Ok(R::Set(json::ManualPos {
+            lat: 39.9526,
+            lon: -75.1652,
+            alt: Some(12.5)
+        }))
+    );
+    assert_eq!(
+        p(br#" {"lon":-75,"lat":40,"alt":null,"note":"x"} "#),
+        Ok(R::Set(json::ManualPos {
+            lat: 40.0,
+            lon: -75.0,
+            alt: None
+        }))
+    );
+    assert_eq!(p(br#"{"clear":true}"#), Ok(R::Clear));
+    assert_eq!(p(br#"{"clear":false}"#), Err(E::Missing));
+    assert_eq!(p(br#"{"lat":40}"#), Err(E::Missing));
+    assert_eq!(p(br#"{"lat":91,"lon":0}"#), Err(E::OutOfRange));
+    assert_eq!(p(br#"{"lat":0,"lon":-180.5}"#), Err(E::OutOfRange));
+    assert_eq!(p(br#"{"lat":0,"lon":0,"alt":1e9}"#), Err(E::OutOfRange));
+    assert_eq!(p(b"lat=1&lon=2"), Err(E::Malformed));
+    assert_eq!(p(br#"{"lat":"40","lon":0}"#), Err(E::Malformed));
+    assert_eq!(p(b""), Err(E::Malformed));
+}

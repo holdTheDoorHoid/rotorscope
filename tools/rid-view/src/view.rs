@@ -29,6 +29,15 @@ pub struct NodeInfo {
     pub ended: Option<String>,
     pub rid_lines: u64,
     pub bad_lines: u64,
+    /// For the phone page's node health (--http).
+    pub role: Option<link::NodeRole>,
+    /// Viewer time (ms) of the last line or detection from this input.
+    pub last_ms: Option<u64>,
+    /// Viewer times of recent Remote ID detections, for a per-second rate.
+    pub rid_times: VecDeque<u64>,
+    /// From the node's stats lines, when it sends them.
+    pub seen_per_s: Option<u32>,
+    pub drops: Option<u32>,
 }
 
 pub struct View {
