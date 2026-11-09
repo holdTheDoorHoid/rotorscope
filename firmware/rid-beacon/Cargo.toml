@@ -1,0 +1,88 @@
+[package]
+edition      = "2024"
+name         = "rid-beacon"
+rust-version = "1.95"
+version      = "0.1.0"
+description  = "Bench Remote ID test transmitter (obviously fake identity, minimum power) for testing the drone-detector receivers"
+
+# Own workspace: firmware builds for its own target and toolchain, and must not
+# be swept into the host workspace at the repository root.
+[workspace]
+
+[[bin]]
+name = "rid-beacon"
+path = "./src/bin/main.rs"
+test = false
+bench = false
+
+[lib]
+test = false
+bench = false
+
+[features]
+default = ["esp32s3"]
+# Exactly one chip feature. The S3 needs the `esp` toolchain (Xtensa); the C5
+# builds on stable for riscv32imac-unknown-none-elf. See README.md.
+esp32s3 = [
+  "esp-hal/esp32s3",
+  "esp-rtos/esp32s3",
+  "esp-bootloader-esp-idf/esp32s3",
+  "esp-alloc/esp32s3",
+  "esp-backtrace/esp32s3",
+  "esp-println/esp32s3",
+  "esp-radio/esp32s3",
+]
+esp32c5 = [
+  "esp-hal/esp32c5",
+  "esp-rtos/esp32c5",
+  "esp-bootloader-esp-idf/esp32c5",
+  "esp-alloc/esp32c5",
+  "esp-backtrace/esp32c5",
+  "esp-println/esp32c5",
+  "esp-radio/esp32c5",
+]
+
+[dependencies]
+# All Remote ID encoding goes through the shared crate (see src/rid_tx.rs), so
+# the transmitter and the receivers agree on every byte.
+rid = { path = "../../crates/rid", features = ["encode"] }
+
+esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "log-04"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["log-04"] }
+esp-alloc = { version = "0.11.0" }
+esp-backtrace = { version = "0.20.0", features = ["panic-handler", "println"] }
+# `jtag-serial` pins console output to the USB-Serial-JTAG port on both chips:
+# that is the USB connector the laptop reads JSON lines from (and the one we
+# read single-letter commands from).
+esp-println = { version = "0.18.0", default-features = false, features = ["log-04", "jtag-serial", "critical-section"] }
+# beta.2 is yanked on crates.io, so beta.1 is the newest usable release.
+# `sniffer` is what exposes raw 802.11 TX (`Sniffer::send_raw_frame`); `coex`
+# lets Wi-Fi and BLE share the one radio.
+esp-radio = { version = "=1.0.0-beta.1", features = ["ble", "coex", "sniffer", "wifi", "esp-alloc", "log-04", "unstable"] }
+log = "0.4.27"
+
+bt-hci = "0.10"
+# For the bt-hci 0.10 workaround in src/hci_fix.rs.
+embedded-io = "0.7"
+embedded-io-async = "0.7"
+# Broadcaster only: no GATT, no central, no scanning.
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "extended-advertising", "default-packet-pool"] }
+embassy-executor = { version = "0.10.0", features = ["log"] }
+embassy-time = { version = "0.5.1", features = ["log"] }
+embassy-futures = "0.1"
+
+critical-section = "1.2.0"
+static_cell = "2.1.1"
+# sin/cos for the simulated circle (core has no float math).
+libm = "0.2"
+
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = 'fat'
+opt-level     = 's'

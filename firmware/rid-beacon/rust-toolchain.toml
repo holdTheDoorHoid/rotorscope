@@ -1,0 +1,4 @@
+# The S3 (Xtensa) needs Espressif's fork. The C5 is built with `cargo +stable`,
+# which overrides this file (see README.md).
+[toolchain]
+channel = "esp"
