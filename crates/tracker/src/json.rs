@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use crate::text::{FormatError, Mac};
-use crate::{Context, TRANSPORTS, Track, TrackId, TrackState};
+use crate::{Band, Context, Track, TrackId, TrackState};
 use rid::Transport;
 use rid::message::{FixedStr, HeightType, IdType, OperatorLocationType, Status, UaType};
 
@@ -68,6 +68,10 @@ struct LinkEntry<'a> {
     n: u32,
     rssi: i8,
     ch: u8,
+    /// `"2.4"` or `"5"`. Added with the band split; a Wi-Fi transport heard
+    /// on both bands has one entry per band. Readers that predate it still
+    /// work: they see two entries with the same `tr`.
+    band: Band,
     mac: Mac<'a>,
     ctr: u8,
     age_ms: u64,
@@ -79,18 +83,16 @@ struct Links<'a>(&'a Track, u64);
 impl Serialize for Links<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let now = self.1;
-        s.collect_seq(TRANSPORTS.iter().filter_map(|t| {
-            let l = self.0.link(*t);
-            l.heard().then(|| LinkEntry {
-                tr: *t,
-                n: l.count,
-                rssi: l.rssi,
-                ch: l.channel,
-                mac: Mac(&l.mac),
-                ctr: l.counter,
-                age_ms: now.saturating_sub(l.last_seen_ms),
-                node: l.node,
-            })
+        s.collect_seq(self.0.slots().map(|(slot, l)| LinkEntry {
+            tr: slot.transport,
+            n: l.count,
+            rssi: l.rssi,
+            ch: l.channel,
+            band: slot.band,
+            mac: Mac(&l.mac),
+            ctr: l.counter,
+            age_ms: now.saturating_sub(l.last_seen_ms),
+            node: l.node,
         }))
     }
 }
@@ -130,9 +132,11 @@ struct Own {
     above_m: Option<f64>,
 }
 
-/// A buffer this size always holds one line (worst case: all five
-/// transports, two IDs, every field at its longest; see the test).
-pub const MAX_LINE: usize = 1536;
+/// A buffer this size always holds one line (worst case: all seven slots,
+/// i.e. every transport plus 5 GHz beacon and NAN, two IDs, every field at
+/// its longest: 1729 bytes, see the test). Kept tight because the hub holds
+/// several of these in static task state without PSRAM.
+pub const MAX_LINE: usize = 1792;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.
 pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {

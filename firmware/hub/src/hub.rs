@@ -70,6 +70,16 @@ impl NodeStatus {
         self.last_heard_ms.is_some_and(|t| now.saturating_sub(t) <= ALIVE_MS)
     }
 
+    /// Remote ID frames the node has found since it booted (its Stats total).
+    pub fn rid_total(&self) -> u32 {
+        self.last_stats.map_or(0, |s| s.rid)
+    }
+
+    /// The node's own uptime, from its last Stats frame.
+    pub fn uptime_s(&self) -> u32 {
+        self.last_stats.map_or(0, |s| (s.uptime_us / 1_000_000) as u32)
+    }
+
     fn on_stats(&mut self, uptime_us: u64, seen: u32, rid: u32, dropped: u32) {
         let cur = StatsTotals { uptime_us, seen, rid };
         if let Some(prev) = self.last_stats {
@@ -146,9 +156,12 @@ impl Hub {
             self.tracker.borrow_mut().ingest(node, &det, now);
             self.announce_new(now);
         }
+        // The screen shows tracks and node health: rebuild its view soon.
+        crate::screen::mark_dirty();
     }
 
-    /// Hand each new drone to the alert seam once (O6). Also called at 1 Hz,
+    /// Hand each new drone to the screen's alert (banner + buzzer) and the
+    /// USB stream, once per drone (O6). Also called at 1 Hz,
     /// because a MAC-only track becomes due only after its grace period.
     pub fn announce_new(&self, now: u64) {
         loop {

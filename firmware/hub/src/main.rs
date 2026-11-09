@@ -7,10 +7,15 @@
 //!   executor -> `FRAMES` queue -> `ingest` -> `hub::Hub` (the track table).
 //! - `hotspot`, `http`, `cot`, `station`: the network side, on embassy-net.
 //! - `tick`: 1 Hz housekeeping and the USB stream; `usb`: output pipe + commands.
-//! - `gnss`, `screen`, `sd`, `panel`: integration seams, no-ops for now.
+//! - `gnss`: the MAX-M10S over I2C (or UART), plus PPS timestamps.
+//! - `periph` (S3 second core): `screen` (banded panel rendering, buttons),
+//!   `sd` (CSV log), `panel` (buzzer, battery), sharing one SPI bus (`bus`).
 //! - `demo` (feature): two synthetic drones in place of nodes.
 //!
-//! All tracker access is on the thread-mode executor, so it needs no lock.
+//! All tracker access is on the thread-mode executor of core 0, so it needs
+//! no lock; the second core only sees copies (`screen::UI_STATE`, SD rows).
+//! Every peripheral that is not fitted (GPS, panel, SD card, buttons, buzzer,
+//! battery) degrades to "absent" without blocking anything else.
 #![no_std]
 #![no_main]
 #![deny(
@@ -20,6 +25,7 @@
 )]
 
 mod api;
+mod bus;
 mod clock;
 mod cot;
 #[cfg(feature = "demo")]
@@ -30,7 +36,9 @@ mod http;
 mod hub;
 mod links;
 mod panel;
+mod periph;
 mod pins;
+mod pwm;
 mod screen;
 mod sd;
 #[cfg(hub_station)]
@@ -66,6 +74,9 @@ use esp_wifi_sys_esp32s3::include as sys;
 
 #[cfg(all(feature = "esp32s3", feature = "esp32c5"))]
 compile_error!("enable exactly one of the `esp32s3` / `esp32c5` features");
+// The C5 has two UARTs and both carry nodes.
+#[cfg(all(feature = "esp32c5", feature = "gps-uart"))]
+compile_error!("`gps-uart` is S3-only: the C5's two UARTs both carry nodes; use the I2C GPS");
 
 const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" };
 
@@ -105,6 +116,10 @@ struct BootLine {
     station: bool,
     open_hotspot: bool,
     links: usize,
+    /// How the GPS is wired: `"i2c"` or `"uart"` (feature `gps-uart`).
+    gps: &'static str,
+    /// Screen controller the build drives.
+    panel: &'static str,
     max_tracks: usize,
     /// Static RAM the track table costs, bytes.
     track_bytes: usize,
@@ -131,6 +146,7 @@ async fn main(spawner: Spawner) -> ! {
     let pins = pins::take!(peripherals);
     let hub: &'static Hub = HUB.init(Hub::new());
     hotspot::init_identity();
+    screen::init_state();
 
     usb::line(&BootLine {
         t: "boot",
@@ -141,7 +157,9 @@ async fn main(spawner: Spawner) -> ! {
         demo: cfg!(feature = "demo"),
         station: cfg!(hub_station),
         open_hotspot: hotspot::OPEN,
-        links: pins::NODE_LINKS,
+        links: pins::NODE_LINKS - usize::from(cfg!(feature = "gps-uart")),
+        gps: if cfg!(feature = "gps-uart") { "uart" } else { "i2c" },
+        panel: if cfg!(feature = "ili9341") { "ili9341" } else { "st7789" },
         max_tracks: hub::MAX_TRACKS,
         track_bytes: core::mem::size_of::<tracker::Tracker<{ hub::MAX_TRACKS }>>(),
         heap_free: esp_alloc::HEAP.free(),
@@ -160,17 +178,55 @@ async fn main(spawner: Spawner) -> ! {
     let [rx0, rx1] = node_rx;
     uart_spawner.spawn(links::reader(0, AnyUart::from(peripherals.UART0), rx0).expect("spawn reader 0"));
     uart_spawner.spawn(links::reader(1, AnyUart::from(peripherals.UART1), rx1).expect("spawn reader 1"));
-    #[cfg(feature = "esp32s3")]
+    // With `gps-uart` the GPS takes the S3's third UART, so node link 2 goes.
+    #[cfg(all(feature = "esp32s3", not(feature = "gps-uart")))]
     uart_spawner.spawn(links::reader(2, AnyUart::from(peripherals.UART2), rx2).expect("spawn reader 2"));
+    #[cfg(all(feature = "esp32s3", feature = "gps-uart"))]
+    let _ = rx2;
     spawner.spawn(links::ingest(hub).expect("spawn ingest"));
 
-    // ---- Seams (no-ops until integrated) ----
-    gnss::start(gnss::GnssPins { sda: gps_sda, scl: gps_scl, pps });
-    // The SPI bus pins go to whichever of screen/SD integrates first.
-    let _spi_bus = (spi_sck, spi_mosi, spi_miso);
-    screen::start(screen::ScreenPins { cs: screen_cs, dc: screen_dc, backlight: screen_backlight });
-    sd::start(sd_cs);
-    panel::start(panel::PanelPins { buttons, buzzer, battery });
+    // ---- GPS (P1, P3) ----
+    let (sda, scl) = (gps_sda, gps_scl);
+    uart_spawner.spawn(gnss::pps_task(pps).expect("spawn pps"));
+    #[cfg(not(feature = "gps-uart"))]
+    match esp_hal::i2c::master::I2c::new(peripherals.I2C0, gnss::I2cLink::config()) {
+        Ok(i2c) => spawner.spawn(gnss::i2c_task(gnss::I2cLink(i2c.with_sda(sda).with_scl(scl).into_async())).expect("spawn gnss")),
+        Err(_) => usb::msg("err", "gps i2c config"),
+    }
+    // UART: hub RX on the SDA pin, hub TX on the SCL pin (see pins.rs).
+    #[cfg(feature = "gps-uart")]
+    {
+        match esp_hal::uart::Uart::new(peripherals.UART2, gnss::UartLink::config(115_200)) {
+            Ok(u) => spawner.spawn(
+                gnss::uart_task(gnss::UartLink { uart: u.with_rx(sda).with_tx(scl).into_async(), baud_idx: 0 })
+                    .expect("spawn gnss"),
+            ),
+            Err(_) => usb::msg("err", "gps uart config"),
+        }
+    }
+
+    // ---- Screen, SD, buttons, buzzer, battery (second core on the S3) ----
+    let parts = periph::Parts {
+        spi: peripherals.SPI2,
+        #[cfg(feature = "esp32s3")]
+        ledc: peripherals.LEDC,
+        adc: peripherals.ADC1,
+        sck: spi_sck,
+        mosi: spi_mosi,
+        miso: spi_miso,
+        screen_cs,
+        screen_dc,
+        backlight: screen_backlight,
+        sd_cs,
+        buttons,
+        buzzer,
+        battery,
+    };
+    #[cfg(feature = "esp32s3")]
+    periph::start_core1(peripherals.CPU_CTRL, peripherals.FROM_CPU_INTR1, parts);
+    #[cfg(feature = "esp32c5")]
+    periph::spawn(spawner, parts);
+    spawner.spawn(screen::feeder(hub).expect("spawn screen feeder"));
 
     // ---- Wi-Fi: hotspot, and station when built ----
     let ap_iface = Interface::access_point();

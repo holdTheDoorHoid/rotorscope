@@ -58,7 +58,7 @@ the nodes' `{"t":"rid",...}` lines use.
 | `first_ms`, `last_ms` | int | Hub uptime when the track was first and last heard |
 | `age_ms` | int | Time since last heard |
 | `rssi` | int \| null | RSSI of the most recently heard frame, in dBm |
-| `links` | array | One entry per transport ever heard: `{tr, n, rssi, ch, mac, ctr, age_ms, node}`. `tr` is the `Transport` (`"WifiBeacon"`, `"WifiNan"`, `"BleLegacy"`, `"BleExtended"`, `"BleLongRange"`), `n` the frame count, `ch` the channel, `mac` the last address, `ctr` the last F3411 counter, `node` the last node that heard it |
+| `links` | array | One entry per **slot** ever heard (a transport, and for Wi-Fi also the band; see "Bands" below): `{tr, n, rssi, ch, band, mac, ctr, age_ms, node}`. `tr` is the `Transport` (`"WifiBeacon"`, `"WifiNan"`, `"BleLegacy"`, `"BleExtended"`, `"BleLongRange"`), `n` the frame count, `ch` the channel, `band` `"2.4"` or `"5"` (GHz), `mac` the last address, `ctr` the last F3411 counter, `node` the last node that heard it. A Wi-Fi transport heard on both bands has two entries with the same `tr` |
 | `loc` | object \| null | Last Location: `lat`, `lon` (deg), `alt_geo` (m, WGS-84 HAE), `alt_baro` (m), `height` (m) with `height_ref` (`"AboveTakeoff"` \| `"AboveGround"`), `speed` (m/s), `vspeed` (m/s, up positive), `dir` (deg true), `status` (`"Airborne"` etc.), `hacc_m`/`vacc_m` (declared accuracy, m), `age_ms` |
 | `op` | object \| null | Operator position from System: `lat`, `lon`, `alt` (m HAE), `src` (`"Takeoff"` \| `"LiveGnss"` \| `"Fixed"`), `age_ms` |
 | `self_id` | string \| null | Self-ID description |
@@ -68,10 +68,34 @@ the nodes' `{"t":"rid",...}` lines use.
 Example:
 
 ```json
-{"t":"track","id":1,"state":"active","ids":[{"type":"SerialNumber","id":"1581F5FKD229400D"}],"ua":"HelicopterOrMultirotor","first_ms":4000,"last_ms":4500,"age_ms":500,"rssi":-83,"links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"loc":{"lat":39.948889,"lon":-75.15,"alt_geo":140.0,"alt_baro":130.0,"height":50.0,"height_ref":"AboveTakeoff","speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0}}
+{"t":"track","id":1,"state":"active","ids":[{"type":"SerialNumber","id":"1581F5FKD229400D"}],"ua":"HelicopterOrMultirotor","first_ms":4000,"last_ms":4500,"age_ms":500,"rssi":-83,"links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"band":"2.4","mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"band":"2.4","mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"loc":{"lat":39.948889,"lon":-75.15,"alt_geo":140.0,"alt_baro":130.0,"height":50.0,"height_ref":"AboveTakeoff","speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0}}
 ```
 
-A typical line is about 900 bytes. The worst case is 1404 bytes, with all five transports, two IDs and escaped text. Size buffers with `json::MAX_LINE` (1536). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512).
+A typical line is about 900 bytes. The worst case is 1729 bytes, with all seven slots, two IDs and escaped text. Size buffers with `json::MAX_LINE` (1792). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512).
+
+## Bands (added 2026-11-09)
+
+A track keeps one set of link statistics per **slot**, not per transport. The
+slots are `tracker::SLOTS`: Wi-Fi beacon and NAN on 2.4 GHz, the same two on
+5 GHz, and the three Bluetooth transports (always 2.4 GHz). The band comes from
+the channel the node reported: 1-14 is 2.4 GHz, anything above 14 is 5 GHz,
+and 0 ("unknown") counts as 2.4 GHz.
+
+Before this, one Wi-Fi slot per transport meant a drone heard by both the
+2.4 GHz node and the 5 GHz node had its frames overwrite each other's RSSI and
+channel, and only one band ever showed.
+
+Schema impact, all backward-compatible (`"v"` stays 1):
+
+| Output | Change |
+|---|---|
+| JSON `links[]` | New `band` field on every entry (`"2.4"` or `"5"`). A Wi-Fi transport heard on both bands now has **two** entries with the same `tr`; a reader that ignores `band` still gets valid entries |
+| CSV `transports` | One name per slot; the 5 GHz slots are `WifiBeacon5G` and `WifiNan5G`. The header is unchanged |
+| CoT remarks | `Transport: WifiBeacon+WifiBeacon5G`, same names as CSV |
+| Rust API | `Track::links` is `[LinkStats; 7]` indexed by `Slot::index`. New: `Slot`, `Band`, `SLOTS`, `Track::slot`, `Track::slots`, `Track::latest_slot`. `Track::link(transport)` now returns a `LinkStats` **by value**, combining both bands (counts added, other fields from the newest band). `Track::transports()` and `latest_link()` keep their meaning |
+
+MAC matching ignores the band: a Wi-Fi MAC is one namespace whichever band it
+was heard on.
 
 ## Phone page API (`json::state`, `json::parse_own_pos`)
 
@@ -177,6 +201,7 @@ An empty field means unknown. `transports` is `|`-separated. A field is quoted
 `cargo test -p tracker` covers:
 
 - merging across transports and the MAC→ID merge
+- the Wi-Fi band split: both bands kept, MACs matched across bands, JSON/CSV/CoT labels
 - BLE MAC rotation and conflicting IDs
 - expiry and eviction at capacity
 - the once-only alert

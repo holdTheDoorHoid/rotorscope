@@ -7,7 +7,7 @@
 use core::fmt::Write;
 
 use crate::json::round_bearing;
-use crate::text::{Buf, CsvField, FormatError, IdText, IsoTime, render, transport_name};
+use crate::text::{Buf, CsvField, FormatError, IdText, IsoTime, render};
 use crate::{Context, Track};
 
 /// A buffer this size always holds one row (see the worst-case test).
@@ -74,12 +74,13 @@ pub fn row(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, Format
             write!(w, "{ua:?}")?;
         }
         w.write_char(',')?;
-        // `|` keeps the transport list in one field without quoting.
-        for (i, t) in track.transports().enumerate() {
+        // `|` keeps the transport list in one field without quoting. One
+        // name per slot, so 5 GHz shows as `WifiBeacon5G` / `WifiNan5G`.
+        for (i, (s, _)) in track.slots().enumerate() {
             if i > 0 {
                 w.write_char('|')?;
             }
-            w.write_str(transport_name(t))?;
+            w.write_str(s.name())?;
         }
         write!(
             w,

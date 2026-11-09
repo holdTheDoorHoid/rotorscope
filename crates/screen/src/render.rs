@@ -69,15 +69,26 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
 
     // GPS: plain when fixed, an inverse warning box when not.
     let mut x = 3;
-    if s.gps.has_position() {
-        x = text(d, "GPS", x, y, F_BAR, p.fg)?;
-        let _ = write!(b, "{}", s.gps.sats);
-        x = text(d, &b, x + 4, y, F_BAR, p.fg)?;
-        if s.gps.fix == Fix::Fix2D {
-            x = text(d, "2D", x + 3, y + 2, F_SMALL, p.dim)?;
+    match s.gps.fix {
+        Fix::Fix2D | Fix::Fix3D => {
+            x = text(d, "GPS", x, y, F_BAR, p.fg)?;
+            let _ = write!(b, "{}", s.gps.sats);
+            x = text(d, &b, x + 4, y, F_BAR, p.fg)?;
+            if s.gps.fix == Fix::Fix2D {
+                x = text(d, "2D", x + 3, y + 2, F_SMALL, p.dim)?;
+            }
         }
-    } else {
-        x = text_boxed(d, "NO FIX", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        // A typed position: distances work, but it is not a live fix.
+        Fix::Manual => {
+            x = text(d, "POS", x, y, F_BAR, p.fg)?;
+            x = text(d, "MAN", x + 4, y + 2, F_SMALL, p.dim)?;
+        }
+        Fix::None => {
+            x = text_boxed(d, "NO FIX", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        }
+        Fix::Absent => {
+            x = text_boxed(d, "NO GPS", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        }
     }
 
     // Nodes: a filled dot when alive, a hollow crossed one when not, each
@@ -145,6 +156,10 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         SdLog::Recording => {
             let l = text_right(d, "REC", rx, y, F_BAR, p.fg)?;
             circle(d, Point::new(l - 7, BAR_H / 2), 4, p.rec, true, 1)?;
+        }
+        // Quiet, not boxed: running without a card is allowed.
+        SdLog::NoCard => {
+            text_right(d, "no SD", rx, y + 2, F_SMALL, p.dim)?;
         }
         SdLog::Error => {
             let w = width("SD!", F_BAR) + 4;
@@ -976,6 +991,8 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
                 Fix::None => write!(b, "no fix, {} satellites", s.gps.sats),
                 Fix::Fix2D => write!(b, "2D fix, {} satellites", s.gps.sats),
                 Fix::Fix3D => write!(b, "3D fix, {} satellites", s.gps.sats),
+                Fix::Manual => write!(b, "no fix; typed position in use"),
+                Fix::Absent => write!(b, "no receiver found"),
             };
             b
         }),
@@ -990,6 +1007,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             let _ = b.push_str(match s.sd {
                 SdLog::Off => "off",
                 SdLog::Recording => "recording",
+                SdLog::NoCard => "no card",
                 SdLog::Error => "ERROR - not recording",
             });
             b

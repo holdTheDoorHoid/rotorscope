@@ -70,8 +70,9 @@ pub async fn emit_patiently(bytes: &[u8], patience: Duration) -> bool {
 
 /// Serialize `value` as one JSON line.
 pub fn line<T: Serialize>(value: &T) {
-    // The hub status line with three links is ~900 bytes.
-    let mut buf = [0u8; 1536];
+    // The hub status line with three links, GPS, SD, screen and battery is
+    // ~1.4 KB.
+    let mut buf = [0u8; 2048];
     match serde_json_core::to_slice(value, &mut buf) {
         Ok(n) if n < buf.len() => {
             buf[n] = b'\n';

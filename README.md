@@ -10,7 +10,8 @@ and [RESEARCH.md](RESEARCH.md) for the survey behind them.
 |---|---|---|
 | Remote ID decoder and encoder | `crates/rid` | Done. Matches the official opendroneid-core-c field for field across hundreds of thousands of random cases, and survives millions of garbage frames. Also decodes DJI legacy Wi-Fi DroneID and GB 46750 (China). |
 | Node-to-hub wire format | `crates/link` | Done (postcard + COBS over UART). |
-| Hub track logic | `crates/tracker` | Done on the host: merges by UAS ID across radios, Vincenty range/bearing, JSON / TAK CoT / CSV output. Not yet running on a hub board. |
+| Hub track logic | `crates/tracker` | Done: merges by UAS ID across radios (2.4 and 5 GHz Wi-Fi kept apart), Vincenty range/bearing, JSON / TAK CoT / CSV output. Runs on the hub. |
+| Hub firmware | `firmware/hub` | S3 runs on the bench: node links, hotspot + phone page, CoT, USB, plus GPS (I2C, PPS), banded 320x240 screen, buttons, buzzer, SD CSV log and battery on the second core. With nothing attached each reports absent and the rest runs; untested against a real GPS, panel or card. |
 | Wi-Fi listener (2.4 GHz S3, 5 GHz C5) | `firmware/node-wifi` | S3 verified on hardware: sniffs and hops channels for 60 s with no drops. C5 builds only. |
 | Bluetooth listener (legacy + Long Range) | `firmware/node-ble` | S3 verified: decoded a BT4 Remote ID broadcast from a laptop. C5 builds only. Long Range not yet heard on air. |
 | Test transmitter | `firmware/rid-beacon` | S3 verified: the laptop received the Wi-Fi beacon and BT4 adverts. NAN, BT5 extended and Long Range transmit with no errors but haven't been heard by a receiver yet. C5 (5 GHz) builds only. |

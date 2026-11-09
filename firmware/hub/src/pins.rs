@@ -27,10 +27,14 @@ pub struct Pins {
     /// Reserved: hub -> node TX (unused today).
     #[allow(dead_code)]
     pub node_tx: [AnyPin<'static>; NODE_LINKS],
-    /// GPS (u-blox MAX-M10S) on I2C.
+    /// GPS (u-blox MAX-M10S) on I2C0 at 0x42. With the `gps-uart` feature
+    /// the same two pins carry UART2 instead: `gps_sda` is the hub's RX (to
+    /// the module's TXD) and `gps_scl` the hub's TX (to its RXD).
     pub gps_sda: AnyPin<'static>,
     pub gps_scl: AnyPin<'static>,
-    /// GPS time pulse, into every chip (P3).
+    /// GPS TIMEPULSE (PPS), rising edge on the UTC second. Input with a
+    /// pull-down, so an unconnected pin stays quiet. Later also wired to every
+    /// node chip (P3).
     pub pps: AnyPin<'static>,
     /// One SPI bus shared by the screen and the SD card, separate chip selects.
     pub spi_sck: AnyPin<'static>,
@@ -40,8 +44,10 @@ pub struct Pins {
     pub screen_dc: AnyPin<'static>,
     pub screen_backlight: AnyPin<'static>,
     pub sd_cs: AnyPin<'static>,
-    /// Buttons, active low with internal pull-ups.
+    /// Buttons in the order Up, Down, Select (hold Select = Back). Active
+    /// low: each switches the pin to ground; internal pull-ups.
     pub buttons: [AnyPin<'static>; 3],
+    /// Passive piezo buzzer, driven with a 2.7 kHz LEDC tone (S3).
     pub buzzer: AnyPin<'static>,
     /// Battery divider into ADC1. Kept as its concrete type: the ADC driver
     /// needs to know the channel at compile time.

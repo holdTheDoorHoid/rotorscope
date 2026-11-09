@@ -53,7 +53,8 @@ pub const TRANSPORTS: [Transport; 5] = [
     Transport::BleLongRange,
 ];
 
-/// Index of `t` in [`TRANSPORTS`] and [`Track::links`].
+/// Index of `t` in [`TRANSPORTS`]. (Not an index into [`Track::links`], which
+/// is per [`Slot`]: use [`Slot::index`] for that.)
 pub fn transport_index(t: Transport) -> usize {
     match t {
         Transport::WifiBeacon => 0,
@@ -61,6 +62,122 @@ pub fn transport_index(t: Transport) -> usize {
         Transport::BleLegacy => 2,
         Transport::BleExtended => 3,
         Transport::BleLongRange => 4,
+    }
+}
+
+/// Which radio band a frame was heard on.
+///
+/// Only Wi-Fi has a choice: Remote ID is sent on 2.4 GHz and, by some drones
+/// (DJI Avata, Mini 4), on 5 GHz. The 2.4 GHz node (S3) and the 5 GHz node
+/// (C5) hear different frames, so a drone heard on both must keep both,
+/// otherwise each band's frames overwrite the other's RSSI, channel and
+/// counter and the screen can only guess "5 GHz" from whichever came last.
+/// Bluetooth is always 2.4 GHz.
+///
+/// Serialized as `"2.4"` and `"5"` (the `band` field of a JSON link entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+pub enum Band {
+    #[serde(rename = "2.4")]
+    Ghz24,
+    #[serde(rename = "5")]
+    Ghz5,
+}
+
+impl Band {
+    /// The band of an 802.11 channel number: 1-14 are 2.4 GHz, 32-177 are
+    /// 5 GHz (no node listens on 6 GHz). Channel 0 means "unknown" in a
+    /// detection and counts as 2.4 GHz, which is what every node meant by it
+    /// before the 5 GHz node existed.
+    pub const fn of_wifi_channel(channel: u8) -> Band {
+        if channel > 14 {
+            Band::Ghz5
+        } else {
+            Band::Ghz24
+        }
+    }
+}
+
+/// One way a drone can be heard: a transport, and for Wi-Fi also the band.
+/// A track keeps one [`LinkStats`] per slot ([`Track::links`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Slot {
+    pub transport: Transport,
+    pub band: Band,
+}
+
+/// Every slot, in the order [`Track::links`] is indexed and JSON lists them.
+/// The first two and last three are the five slots the tracker had before
+/// the band split, in their old relative order.
+pub const SLOTS: [Slot; 7] = [
+    Slot {
+        transport: Transport::WifiBeacon,
+        band: Band::Ghz24,
+    },
+    Slot {
+        transport: Transport::WifiNan,
+        band: Band::Ghz24,
+    },
+    Slot {
+        transport: Transport::WifiBeacon,
+        band: Band::Ghz5,
+    },
+    Slot {
+        transport: Transport::WifiNan,
+        band: Band::Ghz5,
+    },
+    Slot {
+        transport: Transport::BleLegacy,
+        band: Band::Ghz24,
+    },
+    Slot {
+        transport: Transport::BleExtended,
+        band: Band::Ghz24,
+    },
+    Slot {
+        transport: Transport::BleLongRange,
+        band: Band::Ghz24,
+    },
+];
+
+impl Slot {
+    /// The slot a frame on `transport` and `channel` belongs to. For
+    /// Bluetooth the channel is an advertising channel (37-39 or a data
+    /// channel), never a 5 GHz one, so it is ignored.
+    pub const fn of(transport: Transport, channel: u8) -> Slot {
+        let band = match transport {
+            Transport::WifiBeacon | Transport::WifiNan => Band::of_wifi_channel(channel),
+            _ => Band::Ghz24,
+        };
+        Slot { transport, band }
+    }
+
+    /// Index of this slot in [`SLOTS`] and [`Track::links`].
+    pub const fn index(self) -> usize {
+        match (self.transport, self.band) {
+            (Transport::WifiBeacon, Band::Ghz24) => 0,
+            (Transport::WifiNan, Band::Ghz24) => 1,
+            (Transport::WifiBeacon, Band::Ghz5) => 2,
+            (Transport::WifiNan, Band::Ghz5) => 3,
+            // Bluetooth has no 5 GHz slot; a hand-built Slot saying so is
+            // folded onto the only one there is.
+            (Transport::BleLegacy, _) => 4,
+            (Transport::BleExtended, _) => 5,
+            (Transport::BleLongRange, _) => 6,
+        }
+    }
+
+    /// Name for CSV and CoT remarks: the transport name, with `5G` appended
+    /// for the 5 GHz Wi-Fi slots (`WifiBeacon5G`, `WifiNan5G`).
+    pub const fn name(self) -> &'static str {
+        match (self.transport, self.band) {
+            (Transport::WifiBeacon, Band::Ghz24) => "WifiBeacon",
+            (Transport::WifiNan, Band::Ghz24) => "WifiNan",
+            (Transport::WifiBeacon, Band::Ghz5) => "WifiBeacon5G",
+            (Transport::WifiNan, Band::Ghz5) => "WifiNan5G",
+            (Transport::BleLegacy, _) => "BleLegacy",
+            (Transport::BleExtended, _) => "BleExtended",
+            (Transport::BleLongRange, _) => "BleLongRange",
+        }
     }
 }
 
@@ -163,16 +280,16 @@ impl UasId {
     }
 }
 
-/// Reception statistics for one transport.
+/// Reception statistics for one [`Slot`] (transport and band).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LinkStats {
-    /// Frames/adverts heard. Zero means this transport was never heard.
+    /// Frames/adverts heard. Zero means this slot was never heard.
     pub count: u32,
     pub last_seen_ms: u64,
     pub rssi: i8,
     pub counter: u8,
     pub channel: u8,
-    /// Most recent transmitter address on this transport.
+    /// Most recent transmitter address in this slot.
     pub mac: [u8; 6],
     /// Node that heard the most recent one.
     pub node: u8,
@@ -196,8 +313,8 @@ pub struct Track {
     pub system: Option<Stamped<System>>,
     pub self_id: Option<Stamped<SelfId>>,
     pub operator_id: Option<Stamped<OperatorId>>,
-    /// Per transport, indexed by [`transport_index`].
-    pub links: [LinkStats; 5],
+    /// Per [`Slot`] (transport and band), indexed by [`Slot::index`].
+    pub links: [LinkStats; SLOTS.len()],
     /// Bit `n` set when node `n` (0-7) has heard this drone.
     pub nodes: u8,
     pub first_seen_ms: u64,
@@ -217,7 +334,7 @@ impl Track {
             system: None,
             self_id: None,
             operator_id: None,
-            links: [LinkStats::default(); 5],
+            links: [LinkStats::default(); SLOTS.len()],
             nodes: 0,
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
@@ -240,22 +357,51 @@ impl Track {
         self.uas_ids.iter().min_by_key(|u| rank(u.id_type))
     }
 
-    pub fn link(&self, t: Transport) -> &LinkStats {
-        &self.links[transport_index(t)]
+    /// Stats for one slot (transport and band).
+    pub fn slot(&self, s: Slot) -> &LinkStats {
+        &self.links[s.index()]
     }
 
-    /// Transports this drone has ever been heard on.
-    pub fn transports(&self) -> impl Iterator<Item = Transport> + '_ {
-        TRANSPORTS.into_iter().filter(|t| self.link(*t).heard())
-    }
-
-    /// The most recently heard transport's stats (for "the" RSSI and MAC).
-    pub fn latest_link(&self) -> Option<(Transport, &LinkStats)> {
-        TRANSPORTS
+    /// Slots this drone has been heard in, in [`SLOTS`] order.
+    pub fn slots(&self) -> impl Iterator<Item = (Slot, &LinkStats)> + '_ {
+        SLOTS
             .iter()
-            .map(|t| (*t, self.link(*t)))
+            .map(|s| (*s, self.slot(*s)))
             .filter(|(_, l)| l.heard())
-            .max_by_key(|(_, l)| l.last_seen_ms)
+    }
+
+    /// Stats for a transport on any band: the frame counts added up, every
+    /// other field from the band heard most recently. For Bluetooth this is
+    /// simply its one slot.
+    pub fn link(&self, t: Transport) -> LinkStats {
+        let mut out = LinkStats::default();
+        let mut count = 0u32;
+        for (_, l) in self.slots().filter(|(s, _)| s.transport == t) {
+            count = count.saturating_add(l.count);
+            if out.count == 0 || l.last_seen_ms >= out.last_seen_ms {
+                out = *l;
+            }
+        }
+        out.count = count;
+        out
+    }
+
+    /// Transports this drone has ever been heard on (on any band), in
+    /// [`TRANSPORTS`] order.
+    pub fn transports(&self) -> impl Iterator<Item = Transport> + '_ {
+        TRANSPORTS
+            .into_iter()
+            .filter(|t| self.slots().any(|(s, _)| s.transport == *t))
+    }
+
+    /// The most recently heard slot's stats (for "the" RSSI and MAC).
+    pub fn latest_slot(&self) -> Option<(Slot, &LinkStats)> {
+        self.slots().max_by_key(|(_, l)| l.last_seen_ms)
+    }
+
+    /// As [`Track::latest_slot`], naming only the transport.
+    pub fn latest_link(&self) -> Option<(Transport, &LinkStats)> {
+        self.latest_slot().map(|(s, l)| (s.transport, l))
     }
 
     /// True once the "new drone" event has been handed out for this track.
@@ -276,11 +422,11 @@ impl Track {
         self.uas_ids.contains(id)
     }
 
-    /// The most recent MAC this track used on `t`'s medium, if it matches.
+    /// The most recent MAC this track used on `t`'s medium (either band),
+    /// if it matches.
     fn heard_mac(&self, t: Transport, mac: &[u8; 6]) -> bool {
-        TRANSPORTS
-            .iter()
-            .any(|o| same_medium(*o, t) && self.link(*o).heard() && self.link(*o).mac == *mac)
+        self.slots()
+            .any(|(s, l)| same_medium(s.transport, t) && l.mac == *mac)
     }
 
     fn add_id(&mut self, id: UasId) {
@@ -297,7 +443,7 @@ impl Track {
     }
 
     fn observe(&mut self, obs: &Observation) {
-        let l = &mut self.links[transport_index(obs.transport)];
+        let l = &mut self.links[Slot::of(obs.transport, obs.channel).index()];
         l.count = l.count.saturating_add(1);
         l.last_seen_ms = obs.rx_ms;
         l.rssi = obs.rssi;

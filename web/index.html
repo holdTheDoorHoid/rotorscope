@@ -350,10 +350,12 @@ const UA = {HelicopterOrMultirotor: 'Multirotor', Aeroplane: 'Fixed-wing', Hybri
   Kite: 'Kite', Other: 'Other', None: 'Type not given'};
 const uaName = u => u == null ? 'Type not given' : (UA[u] || String(u));
 
+// `band` came with the tracker's band split; older hubs only had the channel.
+const is5 = l => l.band ? l.band === '5' : l.ch > 14;
 function radioName(l) {
   switch (l.tr) {
-    case 'WifiBeacon': return l.ch > 14 ? 'Wi-Fi 5 GHz' : 'Wi-Fi 2.4';
-    case 'WifiNan': return l.ch > 14 ? 'Wi-Fi NAN 5' : 'Wi-Fi NAN';
+    case 'WifiBeacon': return is5(l) ? 'Wi-Fi 5 GHz' : 'Wi-Fi 2.4';
+    case 'WifiNan': return is5(l) ? 'Wi-Fi NAN 5' : 'Wi-Fi NAN';
     case 'BleLegacy': return 'Bluetooth 4';
     case 'BleExtended': return 'Bluetooth 5';
     case 'BleLongRange': return 'BT Long Range';

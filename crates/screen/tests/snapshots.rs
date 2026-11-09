@@ -424,3 +424,80 @@ fn status_warnings() {
     }
     shot("status_warnings", &Ui::default(), &st);
 }
+
+// ---------------------------------------------------------------------------
+// Banded rendering (the hub has no PSRAM for a full framebuffer)
+// ---------------------------------------------------------------------------
+
+/// Drawing band by band gives exactly the pixels of a full-frame render, for
+/// every page and overlay, at the hub's band height and at awkward ones (a
+/// band height that does not divide 240, and a single row).
+#[test]
+fn banded_render_matches_full_frame() {
+    let mut cases: Vec<(&str, Ui, UiState)> = Vec::new();
+    cases.push(("radar_empty", Ui::default(), base(true)));
+    cases.push(("radar_five", Ui::default(), five_drones(true)));
+    cases.push(("no_fix", Ui::default(), five_drones(false)));
+    let st = five_drones(true);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down]);
+    cases.push(("list", ui, st));
+    let st = five_drones(true);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Select, Button::Select]);
+    cases.push(("detail", ui, st));
+    let st = five_drones(true);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    cases.push(("health", ui, st));
+    let st = one_drone(true);
+    let mut ui = Ui::default();
+    ui.new_drone(st.drones[0].key, NOW);
+    cases.push(("alert", ui, st));
+    // The new status-bar states.
+    let mut st = five_drones(true);
+    st.gps.fix = Fix::Manual;
+    st.sd = SdLog::NoCard;
+    cases.push(("manual_nocard", Ui::default(), st));
+    let mut st = base(false);
+    st.gps.fix = Fix::Absent;
+    cases.push(("absent", Ui::default(), st));
+
+    for (name, ui, st) in &cases {
+        let mut full = Fb::new();
+        render(ui, st, &mut full).unwrap();
+        for rows in [BAND_ROWS, 7, 1] {
+            let mut buf = vec![Rgb565::new(1, 2, 3); WIDTH as usize * rows];
+            let mut band = Band::new(&mut buf);
+            let mut out = Fb::new();
+            let mut flushed_rows = 0;
+            render_banded(ui, st, &mut band, |top, n, px| {
+                assert_eq!(top, flushed_rows, "{name}: bands out of order");
+                assert_eq!(px.len(), (n * WIDTH) as usize);
+                out.px[(top * WIDTH) as usize..((top + n) * WIDTH) as usize].copy_from_slice(px);
+                flushed_rows += n;
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+            assert_eq!(flushed_rows, HEIGHT, "{name}: rows {rows}");
+            assert!(
+                out.px == full.px,
+                "{name}: banded ({rows} rows) differs from full frame"
+            );
+        }
+    }
+}
+
+/// The status bar's GPS-absent, manual-position and no-card states.
+#[test]
+fn status_absent_manual_nocard() {
+    let mut st = base(false);
+    st.gps.fix = Fix::Absent;
+    st.sd = SdLog::NoCard;
+    st.power = Power::Usb { battery_pct: None };
+    shot("status_gps_absent", &Ui::default(), &st);
+    let mut st = one_drone(true);
+    st.gps.fix = Fix::Manual;
+    st.sd = SdLog::NoCard;
+    shot("status_manual_pos", &Ui::default(), &st);
+}

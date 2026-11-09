@@ -11,6 +11,8 @@
 //! - [`render`]: draws one 320x240 frame to any embedded-graphics
 //!   `DrawTarget<Color = Rgb565>`, such as a `mipidsi` display or a
 //!   framebuffer.
+//! - [`band`]: the same frame drawn 24 rows at a time into a 15 KB buffer,
+//!   for hubs without PSRAM ([`render_banded`]).
 //!
 //! ```ignore
 //! let mut ui = Ui::default();
@@ -31,6 +33,7 @@
 //! ```
 #![no_std]
 
+pub mod band;
 mod draw;
 pub mod model;
 mod render;
@@ -40,6 +43,7 @@ pub mod ui;
 #[cfg(feature = "tracker")]
 pub mod from_tracker;
 
+pub use band::{BAND_ROWS, Band, render_banded};
 pub use model::*;
 pub use render::{BAR_H, HEIGHT, WIDTH, render};
 pub use theme::Palette;

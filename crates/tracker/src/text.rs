@@ -190,17 +190,6 @@ impl serde::Serialize for Mac<'_> {
     }
 }
 
-/// Short transport names for CSV and CoT remarks.
-pub(crate) fn transport_name(t: rid::Transport) -> &'static str {
-    match t {
-        rid::Transport::WifiBeacon => "WifiBeacon",
-        rid::Transport::WifiNan => "WifiNan",
-        rid::Transport::BleLegacy => "BleLegacy",
-        rid::Transport::BleExtended => "BleExtended",
-        rid::Transport::BleLongRange => "BleLongRange",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

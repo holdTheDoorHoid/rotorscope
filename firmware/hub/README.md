@@ -3,12 +3,18 @@
 Bare-metal Rust (esp-hal 1.2, esp-radio 1.0.0-beta.1, embassy, embassy-net) on an ESP32-S3.
 It works **without PSRAM** (the board on the bench has none, and 4 MB flash).
 
-The hub does five things:
+The hub does these things:
 - It reads up to three radio nodes over UART.
 - It merges their Remote ID detections into tracks (`crates/tracker`).
 - It runs a Wi-Fi hotspot with a phone page, and sends TAK CoT multicast.
 - It streams JSON lines on USB.
 - It can also join an existing network as a fixed sensor.
+- It reads a u-blox MAX-M10S GPS (own position, UTC, PPS), drives a 320x240 screen with three
+  buttons and a buzzer, logs CSV to an SD card, and measures the battery.
+
+Every one of the last group is optional hardware. With none of it wired (the bench board today) the
+hub reports GPS `absent`, SD `no_card`, power `usb`, draws to a panel that is not there, and
+everything else works exactly as before.
 
 ## Build
 
@@ -36,10 +42,9 @@ Flash and watch through the shared lock. Never call espflash directly:
 tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 60
 ```
 
-Builds always recompile the hub crate itself (about 15-25 s). This is because
-`build.rs` watches for `wifi.local.toml`, and cargo treats a watched file that
-does not exist as changed. The cost buys one thing: creating or deleting that
-file always takes effect on the next build.
+Other features: `ili9341` (an ILI9341 panel instead of the default ST7789) and `gps-uart` (GPS on
+UART2 instead of I2C; costs node link 2). A rebuild with nothing changed takes well under a second:
+`build.rs` no longer watches a file that does not exist (see "Station mode").
 
 ## Pins (placeholders until the PCB exists)
 
@@ -49,14 +54,14 @@ All pins are defined in `src/pins.rs`. Change them there and nowhere else.
 |---|---|---|
 | Node 0 RX / TX | 4 / 5 | UART0, Wi-Fi 2.4 GHz node (A). TX is reserved; nodes only talk to the hub today |
 | Node 1 RX / TX | 6 / 7 | UART1, Bluetooth node (B) |
-| Node 2 RX / TX | 15 / 16 | UART2, Wi-Fi 5 GHz node (C) |
-| GPS I2C SDA / SCL | 8 / 9 | MAX-M10S |
-| GPS PPS | 2 | |
+| Node 2 RX / TX | 15 / 16 | UART2, Wi-Fi 5 GHz node (C). Not used in a `gps-uart` build |
+| GPS I2C SDA / SCL | 8 / 9 | MAX-M10S at 0x42. In a `gps-uart` build: 8 = hub RX, 9 = hub TX |
+| GPS PPS | 2 | TIMEPULSE input, pulled down |
 | SPI SCK / MOSI / MISO | 12 / 11 / 13 | Shared by the screen and the SD card |
-| Screen CS / DC / backlight | 10 / 17 / 18 | |
+| Screen CS / DC / backlight | 10 / 17 / 18 | Backlight is LEDC PWM |
 | SD CS | 14 | |
-| Buttons | 38, 39, 40 | Active low, internal pull-ups |
-| Buzzer | 21 | |
+| Buttons Up / Down / Select | 38 / 39 / 40 | Active low, internal pull-ups |
+| Buzzer | 21 | LEDC tone, 2.7 kHz |
 | Battery sense | 1 | ADC1. ADC2 can't be used while Wi-Fi runs |
 
 Wiring a node: node TX goes to hub RX, plus a shared ground. Node A (`node-wifi`) transmits on GPIO43,
@@ -68,10 +73,62 @@ The pin rules, so the choices also suit a PSRAM hub module (N16R8-class):
 - Avoid 19 and 20 (USB).
 - Avoid 43 and 44: the ROM bootloader prints there at reset, and that output would go to a node.
 
-The C5 has only two HP UARTs, so a C5 hub has links 0 and 1 only. Its buttons sit on strapping pins
+The C5 has only two HP UARTs, so a C5 hub has links 0 and 1 only (and no `gps-uart`). esp-hal 1.2
+has no LEDC driver for the C5, so there the backlight is only on or off and the buzzer must be an
+active one; and with one core, the screen and SD share it with everything else. Its buttons sit on strapping pins
 (see `pins.rs`).
 
 The console is USB-Serial-JTAG (the USB-C port), so all three UARTs are free for nodes.
+
+## Wiring the optional parts
+
+Everything below is 3.3 V logic; share ground with the hub. Pin numbers are the S3 placeholders above.
+
+| Part | Its pin | Hub pin | Notes |
+|---|---|---|---|
+| **GPS** (u-blox MAX-M10S breakout) | SDA | GPIO8 | I2C at 100 kHz. Pull-ups to 3V3 (most breakouts have them; the hub's internal ones are weak) |
+| | SCL | GPIO9 | |
+| | TIMEPULSE (PPS) | GPIO2 | Optional but wanted: sub-millisecond UTC |
+| | D_SEL | GND | Selects I2C on the MAX-M10S (open = UART). Check the breakout's silkscreen |
+| | VCC / GND | 3V3 / GND | A backup battery (V_BCKP) keeps the configuration and speeds up the next fix |
+| **GPS on UART** (`gps-uart`) | TXD / RXD | GPIO8 / GPIO9 | Hub RX / hub TX. Takes node link 2 |
+| **Screen** (ST7789 2.0" or ILI9341 2.8", 320x240 SPI) | SCK / SDA (MOSI) | GPIO12 / GPIO11 | 40 MHz |
+| | CS / DC | GPIO10 / GPIO17 | |
+| | RST | 3V3 (or RC to 3V3) | Not driven: the hub sends a software reset |
+| | BL / LED | GPIO18 | PWM. Through a transistor if the module draws more than ~20 mA |
+| | VCC / GND | 3V3 / GND | |
+| **SD card** (SPI microSD socket) | SCK / MOSI / MISO | GPIO12 / GPIO11 / GPIO13 | Shares the screen's bus. 400 kHz to start, then 20 MHz |
+| | CS | GPIO14 | |
+| | VCC / GND | 3V3 / GND | FAT16/FAT32, MBR partition 1 |
+| **Buttons** | one side | GPIO38 / 39 / 40 | Up, Down, Select (hold Select = Back). Other side to GND |
+| **Buzzer** | + | GPIO21 | A *passive* piezo (driven with a tone). Through a transistor for a louder magnetic one |
+| **Battery** | divider mid-point | GPIO1 | Divider from the cell (+) to GND; ratio is `panel::BATTERY_DIVIDER` (placeholder 2.0, two equal resistors, 100k+100k) |
+
+Two things the PCB should add: a **card-detect** switch on the SD socket (the hub has to probe the
+bus today), and a **VBUS sense** pin (today "on USB" is only inferred from the battery voltage).
+
+## What each status means
+
+All of these are in the `{"t":"hub"}` USB line; `gps` and `rec` are also in `/api/state`, and the
+screen's status bar and Health page show them.
+
+| Status | Values | Meaning |
+|---|---|---|
+| `gps.state` | `absent` | Nothing answered at I2C 0x42. `gps.why` says how: `nack` (no device) or `bus` (bus error or timeout: wiring, missing pull-ups). Checked again every 3 s, so a GPS plugged in later is found. Screen: inverse **NO GPS** |
+| | `searching` | Receiver present, no fix yet (or the fix is not trustworthy). Screen: **NO FIX** |
+| | `2d` / `3d` | Fix, with `sats` used. Only a fix that `gnss::Fix::is_usable()` accepts becomes the own position |
+| `gps.cfg` | `none` / `running` / `ok` / `nak` / `no_ack` | The boot configuration (NAV-PVT on, NMEA off, PPS on). `nak`/`no_ack` name the step in a `warn` line; NMEA still works without it |
+| `gps.pps_n`, `pps_age_ms` | | PPS edges seen, and the age of the last. No edges = no GNSS time lock (the receiver only pulses when locked) |
+| `own.source` | `gps` / `manual` | GPS wins; a manual position is used only while there is no usable fix younger than 10 s. Screen: `GPS 9`, or `POS MAN` for a typed position |
+| `utc_src` | `gps_pps` / `gps` / `build` / null | UTC anchored to a PPS edge (sub-ms), to NAV-PVT arrival (up to a few hundred ms late), the demo build's clock, or none (CoT skipped) |
+| `sd.state` | `starting` | Not looked yet (first second after boot) |
+| | `no_card` | Nothing answered in the slot. Probed every 3 s. Screen: small "no SD"; `rec` false |
+| | `recording` | File open, rows going in. `rec` true; screen **REC** |
+| | `error` | A card answered but could not be used (not FAT, unreadable) or a write failed. Retried every 15 s; details in a `warn` line. Screen: inverse **SD!** |
+| `sd.file` | `MMDDhhmm.CSV` / `LOGnnnnn.CSV` | This boot's file: named from GPS UTC when known at the time, else the next sequence number |
+| `sd.rows`, `dropped` | | Rows queued for the card, and rows dropped because the card fell behind |
+| `batt` | `src`: `usb` / `battery`, `pct`, `mv` | **Uncalibrated placeholder.** Below 2.5 V or above 4.3 V at the cell the hub assumes it is on USB with no cell |
+| `screen` | `frames`, `render_us`, `flush_us`, `feed_us`, `core1_stack_free` | Frames drawn; the last frame's drawing time (all bands) and SPI time; time to build the view on core 0; untouched bytes of the second core's stack |
 
 ## Hotspot
 
@@ -125,7 +182,10 @@ is gitignored, so it never gets committed. Without it, no station code is built.
    psk  = "your-wifi-password"   # "" for an open network
    ```
 
-2. Build as usual (`cd firmware/hub/s3 && cargo fw`). Cargo prints
+2. Tell cargo the file is new, then build as usual: `touch firmware/hub/build.rs` (or build once
+   with `HUB_WIFI_RESCAN=1 cargo fw`). Cargo cannot see a file appear by itself without
+   recompiling the hub on every build; edits and deletion of an existing file are noticed
+   automatically. Cargo prints
    `warning: station mode ON (wifi.local.toml found; ssid and psk compiled in)`. The SSID and password
    are never printed.
 3. Flash the hub. The boot line shows `"station":true`. Then `{"t":"sta","state":"up","ch":N}`
@@ -174,9 +234,9 @@ The hub checks that the streamed bytes equal `json::state` byte for byte:
 
 The result appears as `{"t":"state_check","identical":true,…}`.
 
-**Own position.** A recent GPS fix wins. Otherwise the manual position (from the phone or USB `p`)
-is used, and it is re-applied every second so the tracker's 10 s fix timeout doesn't drop it. It is
-not kept across reboots yet.
+**Own position.** A recent usable GPS fix wins (height above the WGS-84 ellipsoid, as Remote ID
+uses). Otherwise the manual position (from the phone or USB `p`) is used, and it is re-applied every
+second so the tracker's 10 s fix timeout doesn't drop it. It is not kept across reboots yet.
 
 **Browsers only give a page the phone's location over HTTPS.** Over plain HTTP the page cannot read
 `navigator.geolocation`, so you have to type the position in on the page.
@@ -187,9 +247,9 @@ Once a second, every track with a position becomes a drone event, and every trac
 position becomes an operator event (`tracker::cot`). They go to **239.2.3.1:6969**, ATAK's default
 SA multicast, on the hotspot (and on the station network, if built).
 
-CoT needs UTC. Until the GPS is integrated there is none, so events are skipped and counted in
-`cot_no_utc`. Demo builds use the build machine's clock plus uptime instead, labelled
-`"utc_src":"build"`.
+CoT needs UTC. It comes from the GPS (`"utc_src":"gps_pps"` or `"gps"`), so every build sends CoT
+once the receiver has time. Without a GPS, events are skipped and counted in `cot_no_utc`. Demo
+builds fall back to the build machine's clock plus uptime, labelled `"utc_src":"build"`.
 
 To toggle CoT, press `m` on USB or `POST /api/cot`. It is on by default.
 
@@ -203,7 +263,8 @@ start with `{` (bootloader text, panics).
 | `boot` | Once: firmware, features, pins, `track_bytes` (static RAM of the track table) |
 | `hotspot` | At boot, and on `h`: SSID, channel, security, password |
 | `track` | Every second, one per track (`tracker::json::track_line`) |
-| `hub` | Every second: tracks, own position, per-link counters, heap, CoT/HTTP counts, timings (below) |
+| `hub` | Every second: tracks, own position, per-link counters, heap, CoT/HTTP counts, timings (below), and `gps`, `sd`, `screen`, `batt`, `buzz` ("What each status means") |
+| `gps`, `sd` | GPS found or lost, configured; SD card found, recording, lost |
 | `new` | A drone seen for the first time (the buzzer's twin) |
 | `state_check` | Streamed `/api/state` vs `json::state` |
 | `sta` | Station up, down or failed |
@@ -249,22 +310,38 @@ Commands are one character, with no Enter:
   plus CoT.
 - **Watchdog.** The 1 Hz tick feeds the RTC watchdog with a 10 s timeout. A panic prints a backtrace
   on USB and reboots after 0.5 s.
-- **RAM (S3, no PSRAM)**, measured with the demo and HTTP clients:
-  - heap is about 139 KB, with at least about 90.8 KB free;
-  - static `.bss` is 225 KB. This includes the 64-track table (29.8 KB), 8 HTTP tasks (about 7 KB
-    each) and the 64 KB heap block;
-  - about 53 KB is left for the stack.
+- **Two cores.** The screen, SD card, buttons, buzzer and battery run on the S3's second core with
+  their own executor (`periph.rs`). Their drivers are blocking (an SD card can be busy for hundreds
+  of ms; a frame takes ~120 ms), and on core 0 that would come out of USB, HTTP and CoT. They see
+  core 0 only through critical-section statics: the screen view-model (`screen::UI_STATE`, an
+  async mutex), the SD row pipe, and atomics. The C5 has one core, so there the same tasks share
+  it and a slow card or frame delays everything.
+- **Screen without a framebuffer.** 320x240 RGB565 is 150 KB. The frame is drawn in 10 bands of
+  320x24 (15 KB, `screen::band`), each sent as soon as it is drawn, so the panel only ever gets
+  finished pixels (no flicker). Measured on the S3 with the demo radar page: **~75 ms to draw all
+  bands (up to ~100 ms), ~44 ms to send them at 40 MHz** (with no panel attached the SPI still
+  clocks), about one frame a second. Core 0 builds the view-model in ~4-9 ms of wall time, yielding
+  between tracks. While core 1 draws, the shared flash cache slows core 0 a little: the CoT pass
+  goes from ~24.5 to ~27 ms in those seconds.
+- **RAM (S3, no PSRAM)**, measured with the demo (2026-11-09):
+  - heap at boot 132 KB free, at least **55.6 KB** free while running (was 90 KB before the screen
+    and SD): the band buffer (15 KB), core 1's stack (12 KB, ~3.6 KB used) and the screen
+    view-model (7 KB) live on the heap;
+  - static `.bss` + `.data` is 267 KB, leaving **~31 KB** for core 0's stack (was ~48 KB).
 
-## Seams for later (no-ops today)
+## Untested without hardware
 
-| Module | Integration needs |
-|---|---|
-| `gnss.rs` | A task on I2C0 (`gps_sda`/`gps_scl`, MAX-M10S at 0x42) using `crates/gnss`, which calls `publish()` with fix and time, and `publish_status()`. Plus a PPS edge interrupt for sub-ms UTC. Height must be ellipsoidal (`height`, not `hMSL`) |
-| `screen.rs` | The shared SPI bus with `screen_cs`/`dc`/`backlight`, rendering `UiState` (already built every second) in its own task via a `Signal`. A 320x240 RGB565 framebuffer (150 KB) doesn't fit without PSRAM: draw in bands or straight to the panel |
-| `sd.rs` | The shared SPI bus with `sd_cs` and `embedded-sdmmc`, writing `csv::HEADER` and then `csv::row` for every track heard since the last tick, through a pipe so the card never stalls the tick. `recording()` feeds `"rec"` |
-| `panel.rs` | Debounced buttons, a buzzer on LEDC (`new_drone` is already called once per drone; rate-limit it), and the battery on ADC1 |
+Built and run on the bare S3 with nothing attached: every peripheral reports absent and nothing
+stalls. These paths have **not** run against real parts yet:
+- GPS: the I2C read loop with data, the configuration ACKs, fix and UTC publishing, PPS anchoring,
+  and the whole `gps-uart` transport (builds only).
+- Screen: whether the panel lights, its orientation and colour inversion (placeholders), and the
+  real SPI timing on a panel.
+- SD: card init, FAT open, file naming, row writes, flush, hot removal and re-insertion.
+- Buttons, buzzer and battery: never pressed, heard or measured.
 
-Not yet done:
+Not done:
 - SNTP time in station mode;
-- keeping the manual position across reboots;
-- a hub-to-node command channel on the reserved TX pins.
+- keeping the manual position and screen settings across reboots;
+- a hub-to-node command channel on the reserved TX pins;
+- PPS to the node chips for cross-node time sync (P3): the hub timestamps PPS for its own UTC only.

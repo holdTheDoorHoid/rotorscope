@@ -203,10 +203,18 @@ impl DroneView {
 /// GPS fix quality, as the status bar shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Fix {
+    /// Receiver answering, no fix yet.
     #[default]
     None,
     Fix2D,
     Fix3D,
+    /// No GPS fix, but a position typed in on the phone page (or over USB)
+    /// is in use, so distances and bearings are real. Shown as "MAN" so
+    /// nobody mistakes it for a live fix: it does not move with the unit.
+    Manual,
+    /// No GPS receiver answering at all (not fitted, unplugged, or wired
+    /// wrong). Distinct from [`Fix::None`] so the health page can say which.
+    Absent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -219,7 +227,7 @@ pub struct Gps {
 impl Gps {
     /// True when the unit knows where it is, so distances can be shown.
     pub fn has_position(&self) -> bool {
-        self.fix != Fix::None
+        matches!(self.fix, Fix::Fix2D | Fix::Fix3D | Fix::Manual)
     }
 }
 
@@ -296,7 +304,10 @@ pub enum SdLog {
     #[default]
     Off,
     Recording,
-    /// Logging was asked for but is failing (no card, full, write error).
+    /// No card in the slot (or none answering). Not an alarm: a unit
+    /// without a card is a normal configuration. The hub keeps checking.
+    NoCard,
+    /// Logging was asked for but is failing (card full, write error).
     Error,
 }
 

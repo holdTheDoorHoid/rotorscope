@@ -56,10 +56,20 @@ fn station_mode() {
     println!("cargo::rustc-check-cfg=cfg(hub_station)");
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let path = Path::new(&dir).join("wifi.local.toml");
-    // Cargo reruns this script when the file appears, changes or disappears.
-    // (Watching a missing file makes cargo rerun the script on every build;
-    // that only costs this script's run, the output does not change.)
-    println!("cargo:rerun-if-changed={}", path.display());
+    // When to rerun this script. Watching a file that does not exist makes
+    // cargo treat it as changed on every build, which recompiled the whole
+    // hub crate each time (15-25 s). So the file is watched only when it is
+    // there (an edit or a delete is then noticed), plus this script itself
+    // and HUB_WIFI_RESCAN. Creating the file is the one change cargo cannot
+    // see on its own: after creating it, `touch firmware/hub/build.rs` or
+    // build once with `HUB_WIFI_RESCAN=1` (README "Station mode").
+    // (Watching the directory instead would not help: firmware/hub holds
+    // target/, which changes on every build.)
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=HUB_WIFI_RESCAN");
+    if path.exists() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 
     let Ok(text) = std::fs::read_to_string(&path) else {
         return; // No file: station mode is compiled out.
@@ -88,6 +98,10 @@ fn build_time() {
     if std::env::var_os("CARGO_FEATURE_DEMO").is_none() {
         return;
     }
+    // This script no longer reruns on every build (see station_mode), so
+    // refresh the stamp whenever the sources change: the hub recompiles then
+    // anyway. A rebuild with no change keeps the old stamp.
+    println!("cargo:rerun-if-changed=src");
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())

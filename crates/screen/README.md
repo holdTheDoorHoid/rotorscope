@@ -37,7 +37,10 @@ apply_backlight(ui.settings().brightness);   // 1..=5
 | `Button` | `Up`, `Down`, `Select` (short press), `Back` (long press of Select). |
 | `ButtonDecoder` | Raw debounced levels → `Button`. Select fires on release; Back fires once Select has been held for 700 ms. Up/Down auto-repeat after 500 ms, every 200 ms. |
 | `render(&Ui, &UiState, &mut D)` | Clears and draws one whole frame. It takes the `Ui` as well as the `UiState`, because the page and cursor belong to the screen, not the hub. |
-| `from_tracker::fill_from_tracker` | Feature `tracker`. Fills `drones`, `total_drones`, `now_ms` and `utc_ms`. If the tracker considers the own fix too old, it sets `gps.fix` to `None`, so the layout and the numbers agree. When there are more than 32 tracks, it picks active before stale, then nearest, then newest. |
+| `band::Band`, `render_banded(&Ui, &UiState, &mut Band, flush)` | Draw the frame 24 rows at a time into a 15 KB buffer (`BAND_ROWS`) and hand each band to `flush(top, rows, pixels)`. For hubs without PSRAM; the test `banded_render_matches_full_frame` checks it gives exactly the full-frame pixels on every page. |
+| `Fix` | `None` (searching), `Fix2D`, `Fix3D`, `Manual` (a typed position is in use, "POS MAN"), `Absent` (no GPS receiver, "NO GPS"). |
+| `SdLog` | `Off`, `Recording`, `NoCard` (quiet "no SD"), `Error` ("SD!"). |
+| `from_tracker::fill_from_tracker` | Feature `tracker`. Fills `drones`, `total_drones`, `now_ms` and `utc_ms`. If the tracker considers the own position too old, it sets a 2D/3D/manual `gps.fix` to `None`, so the layout and the numbers agree. When there are more than 32 tracks, it picks active before stale, then nearest, then newest. |
 
 The renderer does not depend on the tracker. Only the optional adapter does.
 
@@ -81,6 +84,8 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 | `health` | Per node: frames/s, RID frames found, drops, uptime. A dead node shows NOT RESPONDING. Below that: GPS, tracks, SD log and power. |
 | `settings` | The settings page, mid-edit. |
 | `status_warnings` | Status bar under stress: a 2D fix, every node dead, an SD error, 9% battery and no UTC. |
+| `status_gps_absent` | No GPS receiver ("NO GPS"), no SD card ("no SD"), on USB: the bench hub today. |
+| `status_manual_pos` | A typed position in use ("POS MAN"): distances work without a GPS fix. |
 | `page_toast` | The page name after flipping. |
 
 **Status bar (every screen):**
@@ -133,7 +138,10 @@ The renderer does not depend on the tracker. Only the optional adapter does.
   with "+N more new", not a continuous tone. Muting the buzzer keeps the banner.
 - **Full-frame redraw.** `render` clears and redraws everything. Draw into a framebuffer and
   flush it, so the panel never shows a half-drawn frame. 320×240×2 is 150 KB, which fits in
-  the S3's PSRAM, or use embedded-graphics' `Framebuffer`.
+  the S3's PSRAM. Without PSRAM use `render_banded`: the same frame in 10 bands of 15 KB, each
+  sent finished, so nothing flickers either. It costs one `render` pass per band; `Band`
+  rejects fills and glyphs outside the band before generating their pixels. On the S3 hub
+  the radar page takes ~75 ms for all 10 bands.
 
 ## Tensions (for the owner)
 
@@ -166,8 +174,8 @@ The renderer does not depend on the tracker. Only the optional adapter does.
    40% larger for little extra cost, and is the better choice for handheld use.
 6. **Height reference.** The drone reports height "above takeoff" (sometimes "above ground").
    That is not the same as height above you, which is shown separately when the unit has a 3D fix.
-7. **5 GHz Wi-Fi is inferred.** The tracker keeps one slot per transport. A drone heard on
-   5 GHz shows "5" only if its last Wi-Fi frame was on a 5 GHz channel.
+7. ~~5 GHz Wi-Fi is inferred.~~ Fixed 2026-11-09: the tracker keeps 2.4 and 5 GHz Wi-Fi in
+   separate slots, so a drone heard on both bands shows both "W" and "5", each with its own signal.
 8. **UTC, not local time.** Logs and TAK are in UTC, and the unit has no time zone setting.
    The clock is labelled "UTC" so nobody mistakes it for local time.
 
@@ -194,6 +202,7 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 - **The button decoder:** short and long press, and repeat.
 - **Sort order, and formatting** of distances, bearings, IDs and ages.
 - **The tracker adapter**, against a real `tracker::Tracker`.
+- **Banded rendering** equals full-frame rendering, pixel for pixel, at 24, 7 and 1 rows per band.
 - **Every snapshot.** Each one also asserts that no pixel was drawn off the panel.
 
 `cargo build -p screen --target riscv32imac-unknown-none-elf` checks the `no_std` build.

@@ -1,8 +1,11 @@
-//! The 1 Hz heartbeat: housekeeping, the seams, and the USB stream (O4).
+//! The 1 Hz heartbeat: housekeeping, the SD log rows, and the USB stream (O4).
 //!
-//! Each second: refresh own position, expire tracks, hand out new-drone
-//! alerts, render the screen, log to SD, then send one `{"t":"track",...}`
-//! line per track and one `{"t":"hub",...}` status line on USB.
+//! Each second: refresh own position (GPS, else the manual position,
+//! re-applied so the tracker's 10 s fix timeout never drops it), expire
+//! tracks, hand out new-drone alerts, queue one CSV row per active drone for
+//! the SD card, then send one `{"t":"track",...}` line per track and one
+//! `{"t":"hub",...}` status line on USB. The screen redraws on its own
+//! (`screen::feeder`), not from here.
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -15,7 +18,7 @@ use tracker::json::{self, MAX_LINE};
 use crate::api::OwnJson;
 use crate::hub::{Hub, MAX_TRACKS, now_ms};
 use crate::pins::NODE_LINKS;
-use crate::{clock, cot, hotspot, http, links, panel, screen, sd, usb};
+use crate::{clock, cot, gnss, hotspot, http, links, panel, screen, sd, usb};
 
 /// Worst lateness of the thread-mode executor, microseconds (reset each second).
 static LAG_MAX_US: AtomicU32 = AtomicU32::new(0);
@@ -76,6 +79,11 @@ struct HubLine {
     /// Worst thread-mode executor lateness in the last second, microseconds.
     lag_max_us: u32,
     ssid: &'static str,
+    gps: gnss::GpsLine,
+    sd: sd::SdLine,
+    screen: screen::ScreenLine,
+    batt: panel::BattLine,
+    buzz: u32,
 }
 
 /// Watchdog timeout. The tick feeds it; if the thread-mode executor hangs
@@ -90,7 +98,6 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
     let mut ticker = Ticker::every(Duration::from_secs(1));
     let mut line = [0u8; MAX_LINE];
     let mut heap_min_free = usize::MAX;
-    let mut last_tick = 0u64;
     loop {
         ticker.next().await;
         rtc.rwdt.feed();
@@ -105,9 +112,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
         hub.announce_new(now);
         let ctx = hub.context(now);
 
-        screen::render(&ui_state(hub, now));
-        sd::log_tick(&hub.tracker.borrow(), &ctx, last_tick);
-        last_tick = now;
+        sd::log_tick(hub, &ctx).await;
 
         // Track lines. Formatted one at a time with the tracker borrowed only
         // while formatting; a laptop that stops reading costs at most 50 ms
@@ -174,38 +179,13 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             cot_us: cot::TICK_MAX_US.swap(0, Relaxed),
             lag_max_us: LAG_MAX_US.swap(0, Relaxed),
             ssid: hotspot::identity().ssid.as_str(),
+            gps: gnss::GpsLine::now(now),
+            sd: sd::SdLine::now(),
+            screen: screen::ScreenLine::now(),
+            batt: panel::BattLine::now(),
+            buzz: panel::BUZZES.load(Relaxed),
         };
         drop(nodes);
         usb::line(&status);
-    }
-}
-
-/// What the screen would show now.
-fn ui_state(hub: &Hub, now: u64) -> screen::UiState {
-    let tracker = hub.tracker.borrow();
-    let id = hotspot::identity();
-    let nearest = tracker.nearest(now).and_then(|(t, g)| {
-        let rb = g.drone?;
-        let mut name = heapless::String::new();
-        if let Some(uas) = t.primary_id() {
-            let _ = name.push_str(uas.id.as_str().unwrap_or("?"));
-        }
-        Some(screen::Nearest { id: name, dist_m: rb.distance_m as f32, brg_deg: rb.bearing_deg as f32 })
-    });
-    screen::UiState {
-        now_ms: now,
-        active_drones: tracker.active_count(now) as u16,
-        total_tracks: tracker.len() as u16,
-        nearest,
-        new_drone_alert: false,
-        own_source: hub.own_pos(now).map(|p| match p.source {
-            crate::hub::OwnSource::Gps => "gps",
-            crate::hub::OwnSource::Manual => "manual",
-        }),
-        nodes_alive: hub.nodes.borrow().iter().map(|n| n.alive(now)).collect(),
-        ssid: id.ssid.clone(),
-        password: id.password.clone(),
-        battery_mv: panel::battery_mv(),
-        recording: sd::recording(),
     }
 }

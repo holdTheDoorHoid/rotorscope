@@ -573,8 +573,8 @@ fn json_golden() {
     let want = concat!(
         r#"{"t":"track","id":1,"state":"active","ids":[{"type":"SerialNumber","id":"1581F5FKD229400D"}],"#,
         r#""ua":"HelicopterOrMultirotor","first_ms":4000,"last_ms":4500,"age_ms":500,"rssi":-83,"#,
-        r#""links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},"#,
-        r#"{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"#,
+        r#""links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"band":"2.4","mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},"#,
+        r#"{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"band":"2.4","mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"#,
         r#""loc":{"lat":39.948889,"lon":-75.15,"alt_geo":140.0,"alt_baro":130.0,"height":50.0,"height_ref":"AboveTakeoff","#,
         r#""speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"#,
         r#""op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"#,
@@ -742,13 +742,20 @@ fn json_worst_case_fits() {
         self_id("\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"),
         operator_id("\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\""),
     ];
-    for (i, t) in TRANSPORTS.into_iter().enumerate() {
-        let mut d = det(t, [0xff, 0xff, 0xff, 0xff, 0xff, i as u8], -128, &pack);
-        d.channel = 165;
+    // Every slot: each Wi-Fi transport on a 2.4 GHz and a 5 GHz channel.
+    for (i, slot) in SLOTS.into_iter().enumerate() {
+        let mut d = det(
+            slot.transport,
+            [0xff, 0xff, 0xff, 0xff, 0xff, i as u8],
+            -128,
+            &pack,
+        );
+        d.channel = if slot.band == Band::Ghz5 { 165 } else { 14 };
         d.counter = 255;
         tr.ingest(255, &d, u64::MAX / 4 + i as u64);
     }
     assert_eq!(tr.len(), 1);
+    assert_eq!(tr.tracks()[0].slots().count(), SLOTS.len());
     tr.set_own_position(
         89.999_999_9,
         179.999_999_9,
@@ -983,4 +990,149 @@ fn own_pos_requests() {
     assert_eq!(p(b"lat=1&lon=2"), Err(E::Malformed));
     assert_eq!(p(br#"{"lat":"40","lon":0}"#), Err(E::Malformed));
     assert_eq!(p(b""), Err(E::Malformed));
+}
+
+// ------------------------------------------------------------ band split --
+
+/// A Wi-Fi detection on a given channel (the shared `det` uses channel 6).
+fn wifi_on(transport: Transport, channel: u8, rssi: i8, msgs: &[RawMessage]) -> link::Detection {
+    let mut d = det(transport, WIFI_MAC, rssi, msgs);
+    d.channel = channel;
+    d
+}
+
+#[test]
+fn band_of_channel() {
+    assert_eq!(Band::of_wifi_channel(0), Band::Ghz24);
+    assert_eq!(Band::of_wifi_channel(1), Band::Ghz24);
+    assert_eq!(Band::of_wifi_channel(14), Band::Ghz24);
+    assert_eq!(Band::of_wifi_channel(36), Band::Ghz5);
+    assert_eq!(Band::of_wifi_channel(149), Band::Ghz5);
+    assert_eq!(Band::of_wifi_channel(165), Band::Ghz5);
+    // Bluetooth advertising channels are never 5 GHz.
+    assert_eq!(Slot::of(Transport::BleLongRange, 37).band, Band::Ghz24);
+    assert_eq!(Slot::of(Transport::BleLegacy, 39).band, Band::Ghz24);
+    assert_eq!(Slot::of(Transport::WifiNan, 149).name(), "WifiNan5G");
+    // SLOTS and Slot::index agree.
+    for (i, s) in SLOTS.into_iter().enumerate() {
+        assert_eq!(s.index(), i, "{s:?}");
+        assert_eq!(
+            Slot::of(s.transport, if s.band == Band::Ghz5 { 149 } else { 6 }),
+            s
+        );
+    }
+}
+
+/// The same drone heard on 2.4 GHz (S3 node) and 5 GHz (C5 node) keeps
+/// both: neither band's RSSI and channel overwrite the other's.
+#[test]
+fn wifi_on_both_bands_keeps_both_slots() {
+    let mut tr: Tracker = Tracker::default();
+    let pack = [serial("SN-DUAL"), location(39.95, -75.16, 100.0)];
+    tr.ingest(0, &wifi_on(Transport::WifiBeacon, 6, -60, &pack), 1_000);
+    tr.ingest(2, &wifi_on(Transport::WifiBeacon, 149, -75, &pack), 1_200);
+    tr.ingest(0, &wifi_on(Transport::WifiBeacon, 6, -61, &pack), 2_000);
+    assert_eq!(tr.len(), 1);
+    let t = &tr.tracks()[0];
+
+    let b24 = t.slot(Slot::of(Transport::WifiBeacon, 6));
+    let b5 = t.slot(Slot::of(Transport::WifiBeacon, 149));
+    assert_eq!((b24.count, b24.rssi, b24.channel, b24.node), (2, -61, 6, 0));
+    assert_eq!((b5.count, b5.rssi, b5.channel, b5.node), (1, -75, 149, 2));
+    // One transport, two slots.
+    let heard: std::vec::Vec<_> = t.transports().collect();
+    assert_eq!(heard, [Transport::WifiBeacon]);
+    assert_eq!(t.slots().count(), 2);
+    // The band-agnostic view adds the counts and takes the newest band.
+    let any = t.link(Transport::WifiBeacon);
+    assert_eq!((any.count, any.rssi, any.channel), (3, -61, 6));
+    assert_eq!(t.latest_slot().unwrap().0.band, Band::Ghz24);
+    assert_eq!(t.nodes, 0b101);
+
+    // JSON: one entry per band, each labelled.
+    let ctx = tr.context(2_000, None);
+    let mut buf = [0u8; json::MAX_LINE];
+    let n = json::track_line(t, &ctx, &mut buf).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+    let links = v["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2);
+    assert_eq!(
+        (
+            links[0]["tr"].as_str(),
+            links[0]["band"].as_str(),
+            links[0]["ch"].as_u64()
+        ),
+        (Some("WifiBeacon"), Some("2.4"), Some(6))
+    );
+    assert_eq!(
+        (
+            links[1]["tr"].as_str(),
+            links[1]["band"].as_str(),
+            links[1]["ch"].as_u64()
+        ),
+        (Some("WifiBeacon"), Some("5"), Some(149))
+    );
+    assert_eq!(links[1]["n"], 1);
+
+    // CSV and CoT name the 5 GHz slot.
+    let n = csv::row(t, &ctx, &mut buf).unwrap();
+    assert!(
+        s(&buf, n).contains(",WifiBeacon|WifiBeacon5G,"),
+        "{}",
+        s(&buf, n)
+    );
+    let ctx = tr.context(2_000, Some(1_794_232_987_250));
+    let n = cot::drone_event(t, &ctx, &mut buf).unwrap();
+    assert!(
+        s(&buf, n).contains("Transport: WifiBeacon+WifiBeacon5G"),
+        "{}",
+        s(&buf, n)
+    );
+}
+
+/// A MAC first heard on 5 GHz is matched by the same MAC on 2.4 GHz: Wi-Fi
+/// is one address namespace whatever the band.
+#[test]
+fn mac_matches_across_bands() {
+    let mut tr: Tracker = Tracker::default();
+    tr.ingest(
+        2,
+        &wifi_on(Transport::WifiNan, 149, -70, &[location(1.0, 2.0, 3.0)]),
+        100,
+    );
+    tr.ingest(
+        0,
+        &wifi_on(Transport::WifiBeacon, 6, -50, &[serial("SN-X")]),
+        200,
+    );
+    assert_eq!(tr.len(), 1);
+    let t = &tr.tracks()[0];
+    assert_eq!(the_id(t), "SN-X");
+    assert!(t.slot(Slot::of(Transport::WifiNan, 149)).heard());
+    assert!(!t.slot(Slot::of(Transport::WifiNan, 6)).heard());
+}
+
+/// Merging two tracks keeps each band's slot separately.
+#[test]
+fn merge_keeps_bands_apart() {
+    let mut tr: Tracker = Tracker::default();
+    // A 5 GHz MAC-only track, then the same MAC with its ID on 5 GHz, while
+    // a 2.4 GHz track already holds the ID: the two fold together.
+    tr.ingest(
+        0,
+        &wifi_on(Transport::WifiBeacon, 1, -40, &[serial("SN-M")]),
+        100,
+    );
+    let mut d = wifi_on(Transport::WifiBeacon, 36, -80, &[location(1.0, 2.0, 3.0)]);
+    d.mac = [0x02, 0, 0, 0, 0, 9];
+    tr.ingest(2, &d, 150);
+    assert_eq!(tr.len(), 2);
+    let mut d = wifi_on(Transport::WifiBeacon, 36, -79, &[serial("SN-M")]);
+    d.mac = [0x02, 0, 0, 0, 0, 9];
+    tr.ingest(2, &d, 2_000);
+    assert_eq!(tr.len(), 1);
+    let t = &tr.tracks()[0];
+    assert_eq!(t.slot(Slot::of(Transport::WifiBeacon, 1)).rssi, -40);
+    let s5 = t.slot(Slot::of(Transport::WifiBeacon, 36));
+    assert_eq!((s5.count, s5.rssi), (2, -79));
 }

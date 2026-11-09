@@ -48,6 +48,12 @@ demo = ["rid/encode"]
 # Build the hotspot without a password. For bench tests only: anyone nearby
 # could then join and read the track list.
 open-hotspot = []
+# Screen controller. The default is an ST7789 (2.0" 320x240 class); this
+# feature selects an ILI9341 (2.8" class) instead. The panel is not chosen yet.
+ili9341 = []
+# Read the GPS over a UART instead of I2C. Costs node link 2 (the S3 has only
+# three UARTs): the GPS takes UART2 on the GPS pins (see pins.rs).
+gps-uart = []
 
 [dependencies]
 rid     = { path = "../../crates/rid", features = ["serde"] }
@@ -55,6 +61,10 @@ link    = { path = "../../crates/link" }
 tracker = { path = "../../crates/tracker" }
 # The phone page, gzipped at build time (web/index.html).
 webui   = { path = "../../crates/webui" }
+# MAX-M10S parser and configuration frames (no I/O of its own).
+gnss    = { path = "../../crates/gnss" }
+# On-device screen: view-model, button state machine, banded renderer.
+screen  = { path = "../../crates/screen", features = ["tracker"] }
 
 esp-hal                = { version = "~1.2.2", features = ["unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
@@ -88,6 +98,18 @@ edge-captive     = { version = "0.8", default-features = false, features = ["io"
 edge-nal         = "0.7"
 edge-nal-embassy = { version = "0.9", default-features = false, features = ["proto-ipv4", "medium-ethernet", "udp", "tcp"] }
 
+# Screen and SD card share one SPI bus (separate chip selects). All three
+# are MIT/Apache. mipidsi drives ST7789/ILI9341 over embedded-hal 1.0;
+# embedded-sdmmc is a FAT driver for SD cards in SPI mode; embedded-hal-bus
+# shares the bus between the two devices.
+embedded-hal        = "1.0"
+embedded-hal-bus    = "0.3"
+embedded-graphics   = "0.8"
+mipidsi             = { version = "0.10", default-features = false }
+embedded-sdmmc      = { version = "0.10", default-features = false }
+
+# esp-hal's one-shot ADC read is an `nb` call.
+nb               = "1"
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
 heapless         = { version = "0.8", features = ["serde"] }

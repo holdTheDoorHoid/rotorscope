@@ -21,7 +21,7 @@
 
 use core::fmt::Write;
 
-use crate::text::{Buf, FormatError, IdText, IsoTime, Mac, Xml, render, transport_name};
+use crate::text::{Buf, FormatError, IdText, IsoTime, Mac, Xml, render};
 use crate::{Context, Track};
 use rid::message::UaType;
 
@@ -191,11 +191,12 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
         write!(w, "; Description: {}", Xml(&text))?;
     }
     w.write_str("; Transport: ")?;
-    for (i, t) in track.transports().enumerate() {
+    // One name per slot, so a 5 GHz frame reads `WifiBeacon5G`.
+    for (i, (s, _)) in track.slots().enumerate() {
         if i > 0 {
             w.write_char('+')?;
         }
-        w.write_str(transport_name(t))?;
+        w.write_str(s.name())?;
     }
     if let Some(g) = ctx.geometry(track).drone {
         write!(

@@ -7,40 +7,48 @@ use core::fmt::Write;
 use heapless::{String, Vec};
 use rid::Transport;
 use rid::message::{FixedStr, HeightType, IdType, UaType};
-use tracker::{Context, TRANSPORTS, Track, TrackState, Tracker, geo};
+use tracker::{Band, Context, Track, TrackState, Tracker, geo};
 
 use crate::model::*;
 
 /// Replace `state.drones` with the tracker's tracks, choosing the
 /// [`MAX_DRONES`] most relevant when there are more (active before stale,
 /// then nearest, then newest). Also sets `now_ms`, `utc_ms` and
-/// `total_drones`, and downgrades `gps.fix` to `None` when the tracker
-/// considers the own fix too old, so the layout and the numbers agree.
+/// `total_drones`, and downgrades a 2D/3D/manual `gps.fix` to `None` when
+/// the tracker considers the own position too old, so the layout and the
+/// numbers agree. (`Fix::Absent` is left alone: it says more.)
 pub fn fill_from_tracker<const N: usize>(tracker: &Tracker<N>, ctx: &Context, state: &mut UiState) {
     state.now_ms = ctx.now_ms;
     state.utc_ms = ctx.utc_ms;
-    if ctx.own.is_none() {
+    if ctx.own.is_none() && state.gps.has_position() {
         state.gps.fix = Fix::None;
     }
     let tracks = tracker.tracks();
     state.total_drones = tracks.len().min(usize::from(u16::MAX)) as u16;
 
-    let mut idx: Vec<usize, N> = (0..tracks.len()).collect();
-    idx.sort_unstable_by_key(|&i| {
-        let t = &tracks[i];
-        let dist = ctx
-            .geometry(t)
-            .drone
-            .map_or(u64::MAX, |g| g.distance_m.max(0.0) as u64);
-        (
-            ctx.state(t) == TrackState::Stale,
-            dist,
-            u64::MAX - t.last_seen_ms,
-        )
-    });
+    // Sort keys computed once per track: the distance is a Vincenty solve in
+    // f64, which is soft-float on the hub's Xtensa core. A sort that called
+    // it from its comparator would do ~n log n of them per frame.
+    let mut keyed: Vec<((bool, u64, u64), usize), N> = tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let dist = ctx
+                .geometry(t)
+                .drone
+                .map_or(u64::MAX, |g| g.distance_m.max(0.0) as u64);
+            let key = (
+                ctx.state(t) == TrackState::Stale,
+                dist,
+                u64::MAX - t.last_seen_ms,
+            );
+            (key, i)
+        })
+        .collect();
+    keyed.sort_unstable_by_key(|(k, _)| *k);
 
     state.drones.clear();
-    for &i in idx.iter().take(MAX_DRONES) {
+    for &(_, i) in keyed.iter().take(MAX_DRONES) {
         let _ = state.drones.push(view(&tracks[i], ctx));
     }
 }
@@ -119,20 +127,17 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
         put_text(&mut v.operator_id, &o.value.operator_id);
     }
 
-    // Radios: 5 GHz is not a separate transport in the tracker; a Wi-Fi
-    // link last heard on a 5 GHz channel counts as "5".
+    // Radios: one letter per tracker slot. The tracker keeps 5 GHz beacon
+    // and NAN in their own slots, so a drone heard on both bands shows both
+    // "W" and "5", each with its own signal.
     let mut latest = [0u64; 5];
-    for tr in TRANSPORTS {
-        let l = t.link(tr);
-        if !l.heard() {
-            continue;
-        }
-        let r = match tr {
-            Transport::WifiBeacon | Transport::WifiNan if l.channel >= 32 => Radio::Wifi5,
-            Transport::WifiBeacon => Radio::WifiBeacon,
-            Transport::WifiNan => Radio::WifiNan,
-            Transport::BleLegacy | Transport::BleExtended => Radio::Ble,
-            Transport::BleLongRange => Radio::BleLongRange,
+    for (slot, l) in t.slots() {
+        let r = match (slot.transport, slot.band) {
+            (Transport::WifiBeacon | Transport::WifiNan, Band::Ghz5) => Radio::Wifi5,
+            (Transport::WifiBeacon, _) => Radio::WifiBeacon,
+            (Transport::WifiNan, _) => Radio::WifiNan,
+            (Transport::BleLegacy | Transport::BleExtended, _) => Radio::Ble,
+            (Transport::BleLongRange, _) => Radio::BleLongRange,
         };
         v.radios.insert(r);
         let i = r.index();
