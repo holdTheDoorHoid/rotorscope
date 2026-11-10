@@ -4,14 +4,17 @@
 //! help                      list commands
 //! stats                     one stats line now
 //! phy                       PHY version, ABI check, register read-back
-//! freq <MHz>                retune (whole MHz; 2200-2650, 5150-5900)
+//! freq <MHz>                retune (whole MHz; 2200-2700, 5150-5950)
+//! offset <kHz>              fine LO offset, -2500..2500 (default 0)
 //! gain <index>              forced RX gain index
 //! win clip|fold5|fold       Path B 4-bit window (default clip)
 //! lpf <0-63>|off            analog low-pass capacitor code (default 12)
 //! edge rise|fall            PARL_IO sampling edge
+//! pins xiao|alt             debug-bus loopback pads (route.rs)
 //! swap on|off               Path A: take I from the low field
 //! trig <dB> [min_us max_us] trigger ratio over floor, burst length gate
-//! mode detect|idle          run the trigger/decoder loop, or just hold
+//! mode detect|hold|idle     run the trigger/decoder loop; hold = also stop
+//!                           and keep the next accepted burst for `dump`
 //! snap                      Path A: one 16,380-word 10-bit snapshot at 20 MS/s
 //! grab                      Path B: freeze the whole 40 MS/s ring now
 //! level                     snap + gain/window advice, then resume
@@ -25,12 +28,37 @@
 use crate::dump::Enc;
 use crate::iq::Window;
 
+/// What the capture loop does with the ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Trigger, freeze, measure, decode, report, resume.
+    Detect,
+    /// As `Detect`, but keep the ring frozen after the next accepted burst
+    /// so it can be dumped raw; `resume` (or `mode detect`) continues.
+    Hold,
+    /// Ring stopped, nothing triggers (snapshots and dumps still work).
+    Idle,
+}
+
+impl Mode {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Mode::Detect => "detect",
+            Mode::Hold => "hold",
+            Mode::Idle => "idle",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Help,
     Stats,
     Phy,
     Freq(u16),
+    OffsetKhz(i32),
+    /// true = the alternative pad set.
+    Pins(bool),
     Gain(u8),
     Win(Window),
     /// `None` = leave the PHY's own calibration.
@@ -39,8 +67,7 @@ pub enum Command {
     Edge(bool),
     Swap(bool),
     Trig { ratio_db: u8, min_us: Option<u32>, max_us: Option<u32> },
-    /// true = detect, false = idle.
-    Mode(bool),
+    Mode(Mode),
     Snap,
     Grab,
     Level,
@@ -91,6 +118,18 @@ pub fn parse(line: &str) -> Result<Option<Command>, &'static str> {
             }
             Command::Freq(f)
         }
+        "offset" => {
+            let k: i32 = num(a, "offset <kHz -2500..2500>")?;
+            if !(-2500..=2500).contains(&k) {
+                return Err("offset <kHz -2500..2500>");
+            }
+            Command::OffsetKhz(k)
+        }
+        "pins" => match a {
+            Some("xiao") => Command::Pins(false),
+            Some("alt") => Command::Pins(true),
+            _ => return Err("pins xiao|alt"),
+        },
         "gain" => Command::Gain(num(a, "gain <index 0-95>").and_then(|g: u8| {
             if g <= 95 { Ok(g) } else { Err("gain <index 0-95>") }
         })?),
@@ -126,9 +165,10 @@ pub fn parse(line: &str) -> Result<Option<Command>, &'static str> {
             Command::Trig { ratio_db, min_us, max_us }
         }
         "mode" => match a {
-            Some("detect") => Command::Mode(true),
-            Some("idle") => Command::Mode(false),
-            _ => return Err("mode detect|idle"),
+            Some("detect") => Command::Mode(Mode::Detect),
+            Some("hold") => Command::Mode(Mode::Hold),
+            Some("idle") => Command::Mode(Mode::Idle),
+            _ => return Err("mode detect|hold|idle"),
         },
         "snap" => Command::Snap,
         "grab" => Command::Grab,
@@ -232,6 +272,9 @@ mod tests {
         assert!(parse("freq 900").is_err());
         assert!(parse("freq 5756.5").is_err());
         assert_eq!(parse("gain 60"), Ok(Some(Command::Gain(60))));
+        assert_eq!(parse("offset -500"), Ok(Some(Command::OffsetKhz(-500))));
+        assert!(parse("offset 3000").is_err());
+        assert_eq!(parse("pins alt"), Ok(Some(Command::Pins(true))));
         assert!(parse("gain 200").is_err());
         assert_eq!(parse("win fold"), Ok(Some(Command::Win(Window::FOLD))));
         assert_eq!(parse("lpf off"), Ok(Some(Command::Lpf(None))));
@@ -253,7 +296,8 @@ mod tests {
         assert!(parse("resend 9 4").is_err());
         assert_eq!(parse("reveal on"), Ok(Some(Command::Reveal(true))));
         assert_eq!(parse("edge fall"), Ok(Some(Command::Edge(true))));
-        assert_eq!(parse("mode idle"), Ok(Some(Command::Mode(false))));
+        assert_eq!(parse("mode idle"), Ok(Some(Command::Mode(Mode::Idle))));
+        assert_eq!(parse("mode hold"), Ok(Some(Command::Mode(Mode::Hold))));
         assert!(parse("transmit").is_err());
     }
 
