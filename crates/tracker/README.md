@@ -27,6 +27,12 @@ for l in tracker.open_links() {
     json::link_line(l, &ctx, &mut buf)?;    // {"t":"link",...}
     csv::link_row(l, &ctx, &mut buf)?;      // same CSV columns, track "L<n>"
 }
+tracker.ingest_aircraft(&report, now_ms);                     // adsb::Aircraft (ADSBee CSBee line)
+for a in tracker.aircraft() {
+    json::aircraft_line(a, tracker.tracks(), &ctx, &mut buf)?; // {"t":"aircraft",...}
+    cot::aircraft_event(a, tracker.tracks(), &ctx, &mut buf)?; // ICAO-<hex>; Duplicate if it is a RID drone
+    csv::aircraft_row(a, &ctx, &mut buf)?;  // same CSV columns, track "ICAO-<hex>"
+}
 ```
 
 `now_ms` is hub uptime in milliseconds throughout. UTC is only needed for CoT
@@ -156,6 +162,77 @@ system (`WfbNg`, `WfbNg5G` for 5 GHz, `|`-separated if heard on both bands),
 (`link_id`, `vehicle_id`, `comm_id`) only with `show_link_ids`; every
 position column is empty.
 
+## ADS-B aircraft (added 2026-11-09, PLAN.md Phase 6)
+
+Crewed aircraft from an ADSBee 1090 (its CSBee text, parsed by `crates/adsb`)
+live in a third table, module `aircraft`, sized by the tracker's second const
+generic: `Tracker<N, A>`, default `A = aircraft::MAX_AIRCRAFT` (32, about 120
+bytes each). A hub built without an ADSBee uses `A = 0` and pays nothing.
+
+- **Never a drone, never an alert.** `ingest_aircraft` never touches the drone
+  table or `take_new_drone`. The only extra notion is "low aircraft nearby"
+  (`AircraftGeometry::low_nearby`: airborne, within 5 km and at most 610 m /
+  2000 ft above the unit), shown quietly as text.
+- **Key:** the 24-bit ICAO address plus the receiver (1090 MHz or UAT 978).
+- **Freshness:** the ADSBee lists every aircraft in its table once a second,
+  even ones it stopped hearing. A report counts as hearing the aircraft only
+  when its frame counts or "updated" flags say so, and the position is only
+  re-stamped when the ADSBee says it was updated, so `pos_age_ms` is real. A
+  report of an aircraft not currently heard never creates an entry.
+- **Expiry:** stale after 15 s, removed after 60 s (`AIRCRAFT_STALE_MS`,
+  `AIRCRAFT_REMOVE_MS`): aircraft move fast.
+- **Full table:** the least useful entry makes room (stale, then no
+  position, then farthest); a newcomer that would itself be the least useful
+  is dropped.
+- **Range and bearing:** the same Vincenty code as drones. `above_m` is the
+  aircraft's geometric altitude (or, without one, pressure altitude, which is
+  close to height above sea level) minus the own fix's height.
+- **Same drone twice:** an aircraft whose emitter category is UAV, within 300 m
+  of an active Remote ID track, is taken to be that drone
+  (`aircraft::same_drone`): its JSON `drone` field names the track and its CoT
+  event is not sent (`FormatError::Duplicate`).
+
+### Aircraft line schema (`json::aircraft_line`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | `"aircraft"` | |
+| `icao` | string | Six upper-case hex digits |
+| `src` | `"1090"` \| `"978"` | Receiver (978 = UAT, ADSBee 1090U) |
+| `aq` | int | UAT address qualifier (2, 3 = relayed by TIS-B); 0 for 1090 |
+| `state` | `"active"` \| `"stale"` | By the aircraft thresholds above |
+| `call` | string \| null | Callsign (flight ID) |
+| `squawk` | string \| null | Four octal digits, e.g. `"1200"` |
+| `emerg` | string \| null | `"hijack"`, `"radio failure"` or `"emergency"` for squawk 7500/7600/7700 |
+| `cat`, `kind`, `label` | int, string, string | Emitter category number, its name (`"Rotorcraft"`, `"Light"`, ...), and an English label (`"Helicopter"`) |
+| `mil` | bool | A military extended squitter was heard (1090 only) |
+| `air` | bool | Airborne |
+| `lat`, `lon`, `pos_age_ms` | number \| null | Last position and how old it is |
+| `alt_baro_ft`, `alt_geo_ft` | int \| null | Pressure altitude and geometric (WGS-84) altitude, feet |
+| `spd_kt`, `trk`, `vr_fpm` | number \| null | Speed (kt), direction (deg), vertical rate (ft/min, up positive) |
+| `rssi` | int | dBm of the last message |
+| `first_ms`, `last_ms`, `age_ms` | int | As for tracks (`last_ms` = last report in which it was heard) |
+| `drone` | int \| null | The drone track id this ADS-B "UAV" probably is |
+| `own` | object \| null | `dist_m`, `brg`, `above_m`, `low` (bool); null without an own position |
+
+### CSV
+
+Aircraft rows share the columns too: `track` is `ICAO-<hex>`, `uas_id` the
+callsign with `id_type` `Callsign`, `ua_type` the category name,
+`transports` `Adsb1090` or `Uat978`, `drone_lat`/`drone_lon` the position,
+`drone_alt_m` the geometric altitude, `speed_mps`, `rssi_dbm`, `dist_m`,
+`brg_deg`, and the last column `baro_alt_m` the pressure altitude.
+
+### Cursor-on-Target
+
+uid `ICAO-<hex>` (the ADS-B-to-TAK convention), contact callsign the flight ID
+(or the uid), `how="m-g"`, `stale` = position time + 30 s. Type by emitter
+category: rotorcraft `a-n-A-C-H`, lighter-than-air `a-n-A-C-L`, fixed wing and
+unknown `a-n-A-C-F` (neutral civil air: a detector has no basis for another
+affiliation), UAV `a-u-A-M-F-Q` (as Remote ID drones), ground vehicles
+`a-n-G-E-V`, obstacles `b-m-p-s-m`. `hae` is the geometric altitude, or the
+pressure altitude with `altsrc="baro"`.
+
 ## Phone page API (`json::state`, `json::parse_own_pos`)
 
 The hub's hotspot serves the page in `web/index.html` (bundled by
@@ -181,19 +258,21 @@ let hub = json::HubStatus {
     gps: json::GpsStatus { state: json::GpsState::Fix3d, sats: Some(9) },
     recording: sd_log_open,
     nodes: &nodes,
+    adsb: None,                         // Some(json::AdsbStatus) with an ADSBee
 };
 let ctx = tracker.context(now_ms, utc_ms);
-let n = json::state(tracker.tracks(), tracker.open_links(), &ctx, &hub, &mut buf)?;
-// buf: json::state_max_len(tracker.len(), tracker.open_links().len(), nodes.len())
+let n = json::state(tracker.tracks(), tracker.open_links(), tracker.aircraft(), &ctx, &hub, &mut buf)?;
+// buf: json::state_max_len(tracker.len(), tracker.open_links().len(), tracker.aircraft().len(), nodes.len())
 ```
 
-`pub fn state(tracks: &[Track], links: &[LinkTrack], ctx: &Context, hub: &HubStatus, buf: &mut [u8]) -> Result<usize, FormatError>`
-writes one object and `\n`. A buffer of `state_max_len(tracks, links, nodes)`
-always fits (64 tracks, 8 links and 4 nodes: about 124 KB, so PSRAM); a
-typical object is about 1 KB per track. Too small a buffer is
+`pub fn state(tracks: &[Track], links: &[LinkTrack], aircraft: &[AircraftTrack], ctx: &Context, hub: &HubStatus, buf: &mut [u8]) -> Result<usize, FormatError>`
+writes one object and `\n`. A buffer of `state_max_len(tracks, links, aircraft, nodes)`
+always fits (64 tracks, 8 links, 32 aircraft and 4 nodes: about 147 KB, so
+PSRAM); a typical object is about 1 KB per track. Too small a buffer is
 `BufferTooSmall`, never a truncated object. The open links come before the
-tracks, separated by exactly `json::STATE_LINKS_TO_TRACKS`, and the object
-ends with `json::STATE_END`, so a server can stream it piece by piece.
+tracks, separated by exactly `json::STATE_LINKS_TO_TRACKS`; the aircraft come
+after them, separated by `json::STATE_TRACKS_TO_AIRCRAFT`; the object ends
+with `json::STATE_END`, so a server can stream it piece by piece.
 
 **Which position is used.** The page assumes this policy, and the hub
 implements it: a GPS fix wins; a typed (manual) position is used only while
@@ -216,13 +295,15 @@ Keep the manual position across reboots if you can; the page shows it as
 | `gps` | object | The GPS receiver: `state` (`"absent"` \| `"searching"` \| `"2d"` \| `"3d"`) and `sats` (int \| null) |
 | `rec` | bool | The SD-card log is being written |
 | `nodes` | array | One per radio node: `role` (`"Wifi24"` \| `"Wifi5"` \| `"Ble"` \| `"Fpv"`), `alive` (heard recently), `age_ms` (since its last frame; null if never), `seen_per_s` (all frames it saw per second; null before its first Stats), `rid_per_s` (Remote ID detections the hub got per second), `drops` (total frames it dropped; null before its first Stats) |
+| `adsb` | object \| null | The ADS-B receiver (`json::AdsbStatus`): `alive`, `age_ms`, `frames_per_s`, `aircraft` (in the ADSBee's own table), `errors` (lines refused). `null` when the hub has none built in. Added 2026-11-09 |
 | `open_links` | array | Every open FPV link, each exactly the `json::link_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 (a new field) |
 | `tracks` | array | Every track, each exactly the `json::track_line` object above (in table order; the page sorts) |
+| `aircraft` | array | Every ADS-B aircraft, each exactly the `json::aircraft_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 |
 
 Example (tracks shortened):
 
 ```json
-{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"own":{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100},"manual":null,"gps":{"state":"3d","sats":9},"rec":true,"nodes":[{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0},{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}],"open_links":[],"tracks":[{"t":"track","id":1,...}]}
+{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"own":{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100},"manual":null,"gps":{"state":"3d","sats":9},"rec":true,"nodes":[{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0},{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}],"adsb":null,"open_links":[],"tracks":[{"t":"track","id":1,...}],"aircraft":[]}
 ```
 
 **New-drone alerts on the page** follow the hub's buzzer rule without extra
@@ -254,8 +335,11 @@ Before a Basic ID arrives, `<UAS ID>` is `mac-<hex>`.
 ## CSV (`csv::HEADER`, `csv::row`)
 
 ```
-utc,hub_ms,track,own_lat,own_lon,own_alt_m,uas_id,id_type,ua_type,transports,drone_lat,drone_lon,drone_alt_m,height_m,speed_mps,op_lat,op_lon,rssi_dbm,dist_m,brg_deg,op_dist_m,op_brg_deg
+utc,hub_ms,track,own_lat,own_lon,own_alt_m,uas_id,id_type,ua_type,transports,drone_lat,drone_lon,drone_alt_m,height_m,speed_mps,op_lat,op_lon,rssi_dbm,dist_m,brg_deg,op_dist_m,op_brg_deg,baro_alt_m
 ```
+
+`baro_alt_m` (pressure altitude) was added 2026-11-09 with ADS-B; for drones
+it is the Remote ID pressure altitude. Read columns by name.
 
 An empty field means unknown. `transports` is `|`-separated. A field is quoted
 (RFC 4180) only when it needs to be.

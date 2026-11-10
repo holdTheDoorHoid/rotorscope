@@ -52,6 +52,11 @@ pub struct Pins {
     /// Battery divider into ADC1. Kept as its concrete type: the ADC driver
     /// needs to know the channel at compile time.
     pub battery: BatteryPin,
+    /// Feature `adsbee` (S3 only): hub RX from the ADSBee 1090's COMMS_UART
+    /// TX pin (its header pin labelled TX; RP2040 GPIO4, 3.3 V), on UART2.
+    /// Only one wire plus ground: the ADSBee takes no commands on that port.
+    #[cfg(feature = "adsbee")]
+    pub adsbee_rx: AnyPin<'static>,
 }
 
 // ---------------------------------------------------------------- ESP32-S3 --
@@ -62,10 +67,25 @@ mod imp {
     pub type BatteryPin = esp_hal::peripherals::GPIO1<'static>;
 
     /// (name, GPIO) for the boot banner and the README. Keep in step with `take!`.
+    #[cfg(not(feature = "adsbee"))]
     pub const TABLE: &[(&str, u8)] = &[
         ("node0_rx", 4), ("node0_tx", 5),     // UART0: Wi-Fi 2.4 GHz node (A)
         ("node1_rx", 6), ("node1_tx", 7),     // UART1: Bluetooth node (B)
         ("node2_rx", 15), ("node2_tx", 16),   // UART2: Wi-Fi 5 GHz node (C)
+        ("gps_sda", 8), ("gps_scl", 9), ("pps", 2),
+        ("spi_sck", 12), ("spi_mosi", 11), ("spi_miso", 13),
+        ("screen_cs", 10), ("screen_dc", 17), ("screen_bl", 18), ("sd_cs", 14),
+        ("btn0", 38), ("btn1", 39), ("btn2", 40),
+        ("buzzer", 21), ("battery_adc", 1),
+    ];
+    /// As above with the ADSBee on UART2 instead of node C (feature
+    /// `adsbee`). GPIO41 is free on N16R8 modules (octal PSRAM is 33-37)
+    /// and on the DevKitC header; its JTAG role is unused (JTAG is over USB).
+    #[cfg(feature = "adsbee")]
+    pub const TABLE: &[(&str, u8)] = &[
+        ("node0_rx", 4), ("node0_tx", 5),     // UART0: Wi-Fi 2.4 GHz node (A)
+        ("node1_rx", 6), ("node1_tx", 7),     // UART1: Bluetooth node (B)
+        ("adsbee_rx", 41),                    // UART2: ADSBee 1090 TX (node C unused)
         ("gps_sda", 8), ("gps_scl", 9), ("pps", 2),
         ("spi_sck", 12), ("spi_mosi", 11), ("spi_miso", 13),
         ("screen_cs", 10), ("screen_dc", 17), ("screen_bl", 18), ("sd_cs", 14),
@@ -91,6 +111,8 @@ mod imp {
                 buttons: [$p.GPIO38.degrade(), $p.GPIO39.degrade(), $p.GPIO40.degrade()],
                 buzzer: $p.GPIO21.degrade(),
                 battery: $p.GPIO1,
+                #[cfg(feature = "adsbee")]
+                adsbee_rx: $p.GPIO41.degrade(),
             }
         };
     }

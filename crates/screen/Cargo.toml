@@ -22,6 +22,7 @@ rid = { workspace = true, optional = true }
 png = "0.17"
 # Tests always see the optional `tracker` feature (the rid crate does the same).
 screen = { path = ".", features = ["tracker"] }
-# The adapter test builds tracks the way the tracker's own tests do.
+# The adapter tests build tracks (and ADS-B reports) the way the tracker's own tests do.
+adsb.workspace = true
 rid = { workspace = true, features = ["encode"] }
 tracker.workspace = true

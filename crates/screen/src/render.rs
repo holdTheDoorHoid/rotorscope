@@ -92,8 +92,10 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     }
 
     // Nodes: a filled dot when alive, a hollow crossed one when not, each
-    // with its label so the meaning never rests on colour.
+    // with its label so the meaning never rests on colour. Four or more
+    // (an ADS-B receiver too) are packed closer so the right side fits.
     x += 8;
+    let (to_label, gap) = if s.nodes.len() > 3 { (10, 2) } else { (11, 6) };
     for n in &s.nodes {
         let c = Point::new(x + 4, BAR_H / 2);
         if n.alive {
@@ -103,8 +105,8 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
             line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.accent, 1)?;
         }
         let col = if n.alive { p.fg } else { p.accent };
-        x = text(d, n.kind.short(), x + 11, y, F_BAR, col)?;
-        x += 6;
+        x = text(d, n.kind.short(), x + to_label, y, F_BAR, col)?;
+        x += gap;
     }
 
     // Right side, from the right edge inwards: time, power, recording.
@@ -1028,6 +1030,36 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         text(d, k, 4, y + 2, F_SMALL, p.dim)?;
         text(d, &v, 70, y, F_BODY, p.fg)?;
         y += 17;
+    }
+    if let Some(a) = &s.aircraft {
+        // A quiet line, never an alert: crewed aircraft are not what the
+        // unit hunts. "LOW" is the only emphasis, in the accent colour.
+        text(d, "AIRCRAFT", 4, y + 2, F_SMALL, p.dim)?;
+        let mut b: String<40> = String::new();
+        if a.total == 0 {
+            let _ = b.push_str("none heard");
+        } else {
+            let _ = write!(b, "{}", a.active);
+        }
+        let mut x = text(d, &b, 70, y, F_BODY, p.fg)?;
+        if a.low_nearby > 0 {
+            b.clear();
+            let _ = write!(b, " {} LOW", a.low_nearby);
+            x = text(d, &b, x, y, F_BODY, p.accent)?;
+        }
+        if let Some(n) = &a.nearest {
+            b.clear();
+            let _ = write!(
+                b,
+                " {} {}",
+                n.name,
+                draw::distance_short(n.distance_m).as_str()
+            );
+            if let Some(ft) = n.alt_ft {
+                let _ = write!(b, " {ft}ft");
+            }
+            text(d, &b, x, y, F_BODY, p.fg)?;
+        }
     }
     text(d, "UP/DN: pages", 4, HEIGHT - 12, F_SMALL, p.dim).map(drop)
 }

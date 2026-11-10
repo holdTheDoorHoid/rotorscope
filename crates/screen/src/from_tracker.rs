@@ -17,7 +17,11 @@ use crate::model::*;
 /// `total_drones`, and downgrades a 2D/3D/manual `gps.fix` to `None` when
 /// the tracker considers the own position too old, so the layout and the
 /// numbers agree. (`Fix::Absent` is left alone: it says more.)
-pub fn fill_from_tracker<const N: usize>(tracker: &Tracker<N>, ctx: &Context, state: &mut UiState) {
+pub fn fill_from_tracker<const N: usize, const A: usize>(
+    tracker: &Tracker<N, A>,
+    ctx: &Context,
+    state: &mut UiState,
+) {
     state.now_ms = ctx.now_ms;
     state.utc_ms = ctx.utc_ms;
     if ctx.own.is_none() && state.gps.has_position() {
@@ -51,6 +55,44 @@ pub fn fill_from_tracker<const N: usize>(tracker: &Tracker<N>, ctx: &Context, st
     for &(_, i) in keyed.iter().take(MAX_DRONES) {
         let _ = state.drones.push(view(&tracks[i], ctx));
     }
+}
+
+/// Summarise the tracker's aircraft for the health page. The hub calls this
+/// only when it has an ADS-B receiver built in (otherwise `state.aircraft`
+/// stays `None` and no line is drawn).
+pub fn aircraft_summary(aircraft: &[tracker::AircraftTrack], ctx: &Context) -> AircraftSummary {
+    let mut out = AircraftSummary {
+        total: aircraft.len().min(usize::from(u16::MAX)) as u16,
+        ..AircraftSummary::default()
+    };
+    for a in aircraft {
+        if ctx.aircraft_state(a) != TrackState::Active {
+            continue;
+        }
+        out.active = out.active.saturating_add(1);
+        let g = ctx.aircraft_geometry(a);
+        out.low_nearby = out.low_nearby.saturating_add(u16::from(g.low_nearby));
+        let Some(r) = g.range else { continue };
+        if out
+            .nearest
+            .as_ref()
+            .is_some_and(|n| n.distance_m <= r.distance_m as f32)
+        {
+            continue;
+        }
+        let mut name: String<8> = String::new();
+        if a.callsign.is_empty() {
+            let _ = name.push_str(tracker::aircraft::icao_hex(a).as_str());
+        } else {
+            let _ = name.push_str(a.callsign.as_str());
+        }
+        out.nearest = Some(NearestAircraft {
+            name,
+            distance_m: r.distance_m as f32,
+            alt_ft: a.baro_alt_ft,
+        });
+    }
+    out
 }
 
 /// One track as the screen sees it.

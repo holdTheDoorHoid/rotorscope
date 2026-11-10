@@ -5,7 +5,7 @@ resolver = "2"
 members = [
     "crates/rid", "crates/link", "crates/tracker", "crates/odid-ref",
     "crates/gnss", "crates/screen", "crates/webui",
-    "crates/droneid", "crates/openlink",
+    "crates/droneid", "crates/openlink", "crates/adsb",
     "tools/rid-view", "tools/droneid-file",
 ]
 
@@ -20,6 +20,7 @@ rid = { path = "crates/rid" }
 link = { path = "crates/link" }
 tracker = { path = "crates/tracker" }
 openlink = { path = "crates/openlink" }
+adsb = { path = "crates/adsb" }
 serde = { version = "1", default-features = false, features = ["derive"] }
 heapless = { version = "0.8", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["heapless"] }

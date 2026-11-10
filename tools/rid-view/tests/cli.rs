@@ -169,7 +169,13 @@ fn demo_once() {
     assert_eq!(l[0]["ids_shown"], false);
     assert!(l[0]["link_id"].is_null());
     assert!(l[0]["streams"][0]["mac"].is_null());
-    assert_eq!(all.len(), 3);
+    // The demo aircraft: their own lines, never tracks.
+    let a: Vec<_> = all.iter().filter(|l| l["t"] == "aircraft").collect();
+    assert_eq!(a.len(), 3, "{all:?}");
+    assert_eq!(a[0]["call"], "DEMOHELI");
+    assert_eq!(a[0]["kind"], "Rotorcraft");
+    assert!(a[2]["lat"].is_null(), "the third has no position");
+    assert_eq!(all.len(), 6);
 
     // Opting in shows the link ID.
     let out = Command::new(BIN)
@@ -246,6 +252,74 @@ fn open_link_lines_from_a_node() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `--adsbee` with a recorded CSBee file: good lines become aircraft, a
+/// corrupted line and console text are counted and ignored, and the CSV log
+/// gets aircraft rows. (The lines are the `adsb` crate's test fixtures.)
+#[test]
+fn adsbee_file_input() {
+    let dir = std::env::temp_dir().join(format!("rid-view-adsb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rec = dir.join("adsbee.txt");
+    let csv = dir.join("log.csv");
+    let _ = std::fs::remove_file(&csv);
+    std::fs::write(
+        &rec,
+        concat!(
+            "INFO: ADSBee 1090 console\r\n",
+            "#A:A1B2C3,200007F,N911PH,7700,7,39.95600,-75.16000,1200,1325,270,95,-500,-512,0,0,2,-62,9,3,4,DA00\r\n",
+            // One digit changed: refused by the CRC.
+            "#A:C0FFEE,3F,UAL123,1200,3,39.87190,-75.24110,1028,1179,85,250,1024,1088,0,0,2,-80,3,0,7,F9\r\n",
+            "#S:2,10,20,18,10,8,5,4,10,123456,654321,9F57\r\n",
+        ),
+    )
+    .unwrap();
+    let out = Command::new(BIN)
+        .args(["--once", "--json", "--own-pos", CITY_HALL, "--log"])
+        .arg(&csv)
+        .arg("--adsbee")
+        .arg(&rec)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let all = tracks(&out.stdout);
+    assert_eq!(all.len(), 1, "{all:?}");
+    let a = &all[0];
+    assert_eq!(a["t"], "aircraft");
+    assert_eq!(a["icao"], "A1B2C3");
+    assert_eq!(a["emerg"], "emergency");
+    assert!(a["own"]["dist_m"].as_f64().unwrap() > 300.0);
+    let log = std::fs::read_to_string(&csv).unwrap();
+    let rows: Vec<&str> = log.lines().skip(1).collect();
+    assert_eq!(rows.len(), 1, "{log}");
+    assert!(rows[0].contains(",ICAO-A1B2C3,"), "{log}");
+    assert!(
+        rows[0].contains(",N911PH,Callsign,Rotorcraft,Adsb1090,"),
+        "{log}"
+    );
+
+    // The table says what was refused.
+    let out = Command::new(BIN)
+        .args(["--once", "--adsbee"])
+        .arg(&rec)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("AIRCRAFT (ADS-B)"), "{text}");
+    assert!(
+        text.contains("N911PH") && text.contains("EMERGENCY"),
+        "{text}"
+    );
+    assert!(
+        text.contains("bad lines: 1") && text.contains("other text: 1"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn bad_arguments() {
     let out = Command::new(BIN)
@@ -303,15 +377,18 @@ fn cot_over_udp() {
             .unwrap()
             .to_string();
         seen.insert(uid);
-        if seen.len() == 4 {
+        if seen.len() == 6 {
             break;
         }
     }
+    // The two demo aircraft with a position; the third has none to plot.
     let want: std::collections::BTreeSet<String> = [
         "drone-DEMO-ALPHA-0001",
         "pilot-DEMO-ALPHA-0001",
         "drone-DEMO-BRAVO-0002",
         "pilot-DEMO-BRAVO-0002",
+        "ICAO-DE0001",
+        "ICAO-DE0002",
     ]
     .map(String::from)
     .into();
@@ -448,6 +525,13 @@ fn http_serves_page_and_state() {
     let v = state_until(addr, |v| {
         v["open_links"].as_array().is_some_and(|l| l.len() == 1)
     });
+    // The demo ADSBee: three aircraft after the tracks, and its health.
+    let v2 = state_until(addr, |v| {
+        v["aircraft"].as_array().is_some_and(|a| a.len() == 3)
+    });
+    assert_eq!(v2["adsb"]["alive"], true);
+    assert_eq!(v2["adsb"]["aircraft"], 3);
+    assert_eq!(v2["aircraft"][0]["own"]["low"], true);
     assert_eq!(v["open_links"][0]["t"], "link");
     assert!(v["open_links"][0]["link_id"].is_null());
     assert!(

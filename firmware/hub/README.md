@@ -45,7 +45,8 @@ tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 60
 ```
 
 Other features: `ili9341` (an ILI9341 panel instead of the default ST7789), `gps-uart` (GPS on
-UART2 instead of I2C; costs node link 2), and `show-link-ids` (below). A rebuild with nothing changed takes well under a second:
+UART2 instead of I2C; costs node link 2), `adsbee` (an ADSBee 1090 on UART2; costs node link 2;
+see "ADS-B" below), and `show-link-ids` (below). A rebuild with nothing changed takes well under a second:
 `build.rs` no longer watches a file that does not exist (see "Station mode").
 
 ## Pins (placeholders until the PCB exists)
@@ -56,7 +57,8 @@ All pins are defined in `src/pins.rs`. Change them there and nowhere else.
 |---|---|---|
 | Node 0 RX / TX | 4 / 5 | UART0, Wi-Fi 2.4 GHz node (A). TX is reserved; nodes only talk to the hub today |
 | Node 1 RX / TX | 6 / 7 | UART1, Bluetooth node (B) |
-| Node 2 RX / TX | 15 / 16 | UART2, Wi-Fi 5 GHz node (C). Not used in a `gps-uart` build |
+| Node 2 RX / TX | 15 / 16 | UART2, Wi-Fi 5 GHz node (C). Not used in a `gps-uart` or `adsbee` build |
+| ADSBee RX | 41 | `adsbee` builds only: UART2, from the ADSBee 1090's COMMS_UART TX. Free on N16R8 modules and the DevKitC header |
 | GPS I2C SDA / SCL | 8 / 9 | MAX-M10S at 0x42. In a `gps-uart` build: 8 = hub RX, 9 = hub TX |
 | GPS PPS | 2 | TIMEPULSE input, pulled down |
 | SPI SCK / MOSI / MISO | 12 / 11 / 13 | Shared by the screen and the SD card |
@@ -94,6 +96,7 @@ Everything below is 3.3 V logic; share ground with the hub. Pin numbers are the 
 | | D_SEL | GND | Selects I2C on the MAX-M10S (open = UART). Check the breakout's silkscreen |
 | | VCC / GND | 3V3 / GND | A backup battery (V_BCKP) keeps the configuration and speeds up the next fix |
 | **GPS on UART** (`gps-uart`) | TXD / RXD | GPIO8 / GPIO9 | Hub RX / hub TX. Takes node link 2 |
+| **ADSBee 1090** (`adsbee`) | TX (COMMS_UART) | GPIO41 | 115200 8N1, 3.3 V. Plus GND. Its RX stays unconnected: it takes no commands on this port. Takes node link 2. Setup: `docs/ADSBEE.md` |
 | **Screen** (ST7789 2.0" or ILI9341 2.8", 320x240 SPI) | SCK / SDA (MOSI) | GPIO12 / GPIO11 | 40 MHz |
 | | CS / DC | GPIO10 / GPIO17 | |
 | | RST | 3V3 (or RC to 3V3) | Not driven: the hub sends a software reset |
@@ -353,6 +356,36 @@ Commands are one character, with no Enter:
     for core 0's stack (31.3 KB before). The C5 hub, whose stack was within 1.2 KB of the linker's
     8 KB floor, gives 4 KB of its extra heap to make room (`EXTRA_HEAP` in `main.rs`).
 
+## ADS-B (feature `adsbee`, PLAN.md Phase 6)
+
+An ADSBee 1090 shows crewed aircraft (medevac helicopters, crop dusters)
+beside the drones. `src/adsbee.rs` reads its CSBee text on UART2 with the
+`adsb` crate; the aircraft go into the tracker's own aircraft table and out
+on every output: the phone page's list ("Aircraft (ADS-B)", plus an ADS-B chip
+in the status strip), USB (`{"t":"aircraft",...}` lines and an `adsb` object
+in the `hub` line), the SD log (`ICAO-<hex>` rows), CoT (`ICAO-<hex>`, civil
+air types) and the screen (an ADS node and an AIRCRAFT line on the health
+page). Aircraft **never** trigger the new-drone alert or the buzzer; one
+within 5 km and 2000 ft is tagged LOW, quietly.
+
+Why CSBee over the UART, not the ADSBee's other outputs: it is the only one
+that is decoded *and* integrity-checked text (a CRC per line), carries
+everything we show (callsign, squawk, category, both altitudes, signal), and
+needs no Mode S decoder of our own. MAVLink and GDL90 are binary and drop the
+signal level and statistics; raw/Beast would need a full Mode S and CPR
+decoder on the hub; the Wi-Fi feeds would mean changing the ADSBee's network
+settings, and the hub's hotspot is not a place to send them anyway.
+
+The ADSBee only accepts AT commands on its USB console, so the hub cannot
+configure it; the owner sets `AT+PROTOCOL_OUT=COMMS_UART,CSBEE` once (see
+`docs/ADSBEE.md`). Memory (S3, measured from the linked image): the aircraft
+table (32 x 120 B), the report queue and the extra tasks cost ~9.9 KB of
+static RAM, leaving **19.2 KB** for core 0's stack in an `adsbee` build
+(29.1 KB before). Builds without `adsbee` size the table to 0: the default S3
+build lost 0.6 KB of stack (28.5 KB) and the C5 0.5 KB (10.9 KB), for the
+always-compiled formatter code and status fields. `adsbee` is refused on the
+C5 (no spare UART).
+
 ## Untested without hardware
 
 Built and run on the bare S3 with nothing attached: every peripheral reports absent and nothing
@@ -363,6 +396,8 @@ stalls. These paths have **not** run against real parts yet:
   real SPI timing on a panel.
 - SD: card init, FAT open, file naming, row writes, flush, hot removal and re-insertion.
 - Buttons, buzzer and battery: never pressed, heard or measured.
+- ADSBee: the UART reader against a real ADSBee (only the parser and the demo's encoded lines
+  have run), its real line rate in a busy sky, and GPIO41 on the actual module.
 
 Not done:
 - SNTP time in station mode;

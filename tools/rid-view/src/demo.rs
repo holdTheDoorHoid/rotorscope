@@ -14,6 +14,14 @@
 //!   would report it: video and MAVLink down, MAVLink up, one sighting per
 //!   stream per second with running packet counts. It has no position and
 //!   must never become a drone track.
+//! - Three crewed aircraft, as an ADSBee would report them once a second:
+//!   CSBee text built with `adsb::encode` and parsed back with the same
+//!   `adsb::LineSplitter` the `--adsbee` input uses. A medevac helicopter
+//!   circling low 1.5 km out (the "low aircraft nearby" case), an airliner
+//!   on a wide circle at 11,000 ft, and a light aircraft heard only by its
+//!   transponder replies (altitude, no position). None of them may become
+//!   a drone or raise an alert. Their callsigns (DEMOHELI, DEMOJET) and
+//!   addresses (DE0001-DE0003) are obviously synthetic.
 
 use std::f64::consts::PI;
 use std::sync::mpsc::Sender;
@@ -271,6 +279,130 @@ fn link_step(t_ms: u64) -> Vec<link::OpenLinkSighting> {
         .collect()
 }
 
+/// A simulated aircraft for the ADS-B part of the demo.
+struct Plane {
+    icao: u32,
+    call: &'static str,
+    category: i8,
+    squawk: u16,
+    /// `None`: no position (Mode S replies only).
+    orbit: Option<Orbit>,
+    alt_ft: i32,
+    rssi: i16,
+}
+
+const PLANES: [Plane; 3] = [
+    Plane {
+        icao: 0xDE0001,
+        call: "DEMOHELI",
+        category: 7,
+        squawk: 0o1200,
+        orbit: Some(Orbit {
+            radius_m: 1500.0,
+            period_s: 160.0,
+            sense: 1.0,
+            alt_m: 0.0,
+        }),
+        alt_ft: 900,
+        rssi: -58,
+    },
+    Plane {
+        icao: 0xDE0002,
+        call: "DEMOJET",
+        category: 3,
+        squawk: 0o4721,
+        orbit: Some(Orbit {
+            radius_m: 12_000.0,
+            period_s: 520.0,
+            sense: -1.0,
+            alt_m: 0.0,
+        }),
+        alt_ft: 11_000,
+        rssi: -81,
+    },
+    Plane {
+        icao: 0xDE0003,
+        call: "",
+        category: 1,
+        squawk: 0o1200,
+        orbit: None,
+        alt_ft: 4_500,
+        rssi: -88,
+    },
+];
+
+/// The CSBee text an ADSBee would send at simulated time `t_ms`: once a
+/// second, one `#A:` line per aircraft and a `#S:` line.
+pub fn adsb_text(center: (f64, f64), t_ms: u64) -> Vec<u8> {
+    use adsb::flag;
+    if !t_ms.is_multiple_of(1000) {
+        return Vec::new();
+    }
+    let t = t_ms as f64 / 1000.0;
+    let mut out = Vec::new();
+    let mut buf = [0u8; adsb::MAX_LINE];
+    for p in &PLANES {
+        let mut flags =
+            1 << flag::AIRBORNE | 1 << flag::BARO_ALT_VALID | 1 << flag::UPDATED_BARO_ALT;
+        let (mut lat, mut lon, mut dir, mut kt) = (0.0, 0.0, 0.0, 0);
+        if let Some(o) = &p.orbit {
+            let (pos, d, mps) = o.at(center, t);
+            (lat, lon, dir) = (pos.lat, pos.lon, d);
+            kt = (f64::from(mps) / 0.514_444).round() as i32;
+            flags |= 1 << flag::POSITION_VALID
+                | 1 << flag::DIRECTION_VALID
+                | 1 << flag::SPEED_VALID
+                | 1 << flag::UPDATED_POSITION
+                | 1 << flag::UPDATED_DIRECTION
+                | 1 << flag::UPDATED_SPEED;
+        }
+        let a = adsb::Aircraft {
+            source: adsb::Source::ModeS,
+            icao: p.icao,
+            flags,
+            callsign: adsb::Callsign::new(p.call).unwrap_or_default(),
+            squawk: Some(p.squawk),
+            category: p.category,
+            lat_deg: lat,
+            lon_deg: lon,
+            baro_alt_ft: p.alt_ft,
+            gnss_alt_ft: 0,
+            direction_deg: dir,
+            speed_kt: kt,
+            baro_vrate_fpm: 0,
+            gnss_vrate_fpm: 0,
+            uat_emergency: 0,
+            nicnac: 0,
+            acdims: 0,
+            version: 2,
+            signal_dbm: p.rssi,
+            signal_quality: 6,
+            frames_per_s: 2,
+            es_frames_per_s: if p.orbit.is_some() { 4 } else { 0 },
+        };
+        if let Some(n) = adsb::encode::aircraft(&a, &mut buf) {
+            out.extend_from_slice(&buf[..n]);
+        }
+    }
+    let s = adsb::Stats {
+        version: adsb::PROTOCOL_VERSION,
+        demods_per_s: 140,
+        raw_squitters_per_s: 12,
+        squitters_per_s: 6,
+        raw_extended_squitters_per_s: 11,
+        extended_squitters_per_s: 8,
+        raw_uat_per_s: 0,
+        uat_per_s: 0,
+        aircraft: PLANES.len() as u16,
+        tscal: 0,
+        uptime_s: (t_ms / 1000) as u32,
+    };
+    if let Some(n) = adsb::encode::stats(&s, &mut buf) {
+        out.extend_from_slice(&buf[..n]);
+    }
+    out
+}
+
 /// Run the demo on a thread. `live`: in real time, forever. Otherwise run
 /// `sim_secs` of simulated time as fast as possible, then end.
 /// The demo's nodes are `node_base` (Wi-Fi), `node_base + 1` (BLE) and
@@ -285,6 +417,7 @@ pub fn spawn(
 ) {
     std::thread::spawn(move || {
         let mut t_ms = 0;
+        let mut adsb_split = adsb::LineSplitter::new();
         loop {
             if !live && t_ms > sim_secs * 1000 {
                 let _ = tx.send(Event::End {
@@ -313,6 +446,13 @@ pub fn spawn(
                 {
                     return;
                 }
+            }
+            let mut gone = false;
+            adsb_split.feed(&adsb_text(center, t_ms), |result| {
+                gone |= tx.send(Event::Adsb { result, at_ms }).is_err();
+            });
+            if gone {
+                return;
             }
             for sighting in link_step(t_ms) {
                 if tx
@@ -380,6 +520,40 @@ mod tests {
         let fpv = &tr.open_links()[0];
         assert_eq!(fpv.streams.len(), 3);
         assert_eq!(fpv.packets(), (71_000 * 970 / 1000) as u32);
+    }
+
+    /// The demo aircraft go through the real CSBee parser and into their
+    /// own table: never a drone, never an alert.
+    #[test]
+    fn demo_aircraft_are_aircraft() {
+        let center = (39.952_583, -75.165_222);
+        let mut tr: tracker::Tracker = tracker::Tracker::default();
+        tr.set_own_position(center.0, center.1, None, 0);
+        let mut split = adsb::LineSplitter::new();
+        let mut errors = 0;
+        let mut t = 0;
+        while t <= 5_000 {
+            split.feed(&adsb_text(center, t), |r| match r {
+                Ok(adsb::Report::Aircraft(a)) => {
+                    tr.ingest_aircraft(&a, t);
+                }
+                Ok(adsb::Report::Stats(_)) => {}
+                Err(_) => errors += 1,
+            });
+            t += STEP_MS;
+        }
+        assert_eq!(errors, 0);
+        assert!(tr.tracks().is_empty());
+        assert_eq!(tr.take_new_drone(t), None);
+        assert_eq!(tr.aircraft().len(), 3);
+        let ctx = tr.context(t, None);
+        let heli = &tr.aircraft()[0];
+        assert_eq!(heli.callsign.as_str(), "DEMOHELI");
+        let g = ctx.aircraft_geometry(heli);
+        assert!((g.range.unwrap().distance_m - 1500.0).abs() < 10.0);
+        assert!(g.low_nearby);
+        assert!(!ctx.aircraft_geometry(&tr.aircraft()[1]).low_nearby);
+        assert!(tr.aircraft()[2].position.is_none());
     }
 
     #[test]

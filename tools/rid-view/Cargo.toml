@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 # Same merge/expiry/format code as the hub.
 tracker.workspace = true
+# The ADSBee's CSBee text (--adsbee); `encode` builds the --demo aircraft.
+adsb = { workspace = true, features = ["encode"] }
 link.workspace = true
 # Open FPV link types (the node's "open" lines).
 openlink = { workspace = true, features = ["serde"] }

@@ -26,12 +26,19 @@
 //! [`Tracker::open_links`], module [`openlinks`]. Their identifiers stay out of
 //! every output unless [`Config::show_link_ids`] is set.
 //!
+//! # Aircraft
+//! Crewed aircraft from an ADSBee (ADS-B), a third table with its own
+//! expiry, never alerted on: [`Tracker::ingest_aircraft`],
+//! [`Tracker::aircraft`], module [`aircraft`]. Its capacity is the second
+//! const generic of [`Tracker`] (0 on a hub built without ADS-B).
+//!
 //! # Time
 //! All `*_ms` times are hub monotonic milliseconds (uptime), supplied by the
 //! caller. Wall-clock UTC is only needed by the CoT and CSV formatters and is
 //! passed in separately, because the hub may not have GPS time.
 #![no_std]
 
+pub mod aircraft;
 pub mod cot;
 pub mod csv;
 pub mod geo;
@@ -45,6 +52,7 @@ use rid::message::{
     BasicId, FixedStr, IdType, Location, Message, OperatorId, SelfId, System, UaType,
 };
 
+pub use aircraft::{AircraftGeometry, AircraftKey, AircraftTrack};
 pub use geo::RangeBearing;
 pub use openlinks::{LinkTrack, LinkTrackId};
 pub use text::FormatError;
@@ -615,6 +623,15 @@ impl Context {
         openlinks::link_state(t, self.now_ms, &self.config)
     }
 
+    /// Active or stale, for an aircraft (its own, shorter thresholds).
+    pub fn aircraft_state(&self, a: &AircraftTrack) -> TrackState {
+        aircraft::aircraft_state(a, self.now_ms)
+    }
+
+    pub fn aircraft_geometry(&self, a: &AircraftTrack) -> AircraftGeometry {
+        AircraftGeometry::of(a, self.own.as_ref())
+    }
+
     pub fn geometry(&self, t: &Track) -> Geometry {
         Geometry::of(t, self.own.as_ref())
     }
@@ -644,27 +661,31 @@ impl Ingested {
     }
 }
 
-/// The track table. `N` is the capacity (PLAN.md D7: 32 required, 64 goal).
-pub struct Tracker<const N: usize = 64> {
+/// The track table. `N` is the drone capacity (PLAN.md D7: 32 required, 64
+/// goal); `A` the aircraft capacity (see [`aircraft`]).
+pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAFT }> {
     tracks: Vec<Track, N>,
     /// Open FPV links, a separate table with its own ids.
     links: openlinks::LinkTable,
+    /// ADS-B aircraft, a separate table keyed by ICAO address.
+    aircraft: aircraft::AircraftTable<A>,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
 }
 
-impl<const N: usize> Default for Tracker<N> {
+impl<const N: usize, const A: usize> Default for Tracker<N, A> {
     fn default() -> Self {
         Self::new(Config::default())
     }
 }
 
-impl<const N: usize> Tracker<N> {
+impl<const N: usize, const A: usize> Tracker<N, A> {
     pub const fn new(config: Config) -> Self {
         Self {
             tracks: Vec::new(),
             links: openlinks::LinkTable::new(),
+            aircraft: aircraft::AircraftTable::new(),
             next_id: 1,
             own: None,
             config,
@@ -936,12 +957,37 @@ impl<const N: usize> Tracker<N> {
         self.links.active_count(now_ms, &self.config)
     }
 
+    /// Feed one aircraft report from the ADSBee (see [`aircraft`]). Kept
+    /// apart from drones: it never creates, merges or alerts on a drone
+    /// track. `None` if the aircraft was not added (not currently heard, or
+    /// the table is full of nearer ones).
+    pub fn ingest_aircraft(&mut self, report: &adsb::Aircraft, now_ms: u64) -> Option<AircraftKey> {
+        let own = self.own_position(now_ms);
+        self.aircraft.ingest(report, now_ms, own.as_ref())
+    }
+
+    /// Aircraft, in table order (the order `json::state` lists them).
+    pub fn aircraft(&self) -> &[AircraftTrack] {
+        self.aircraft.all()
+    }
+
+    pub fn get_aircraft(&self, key: AircraftKey) -> Option<&AircraftTrack> {
+        self.aircraft.get(key)
+    }
+
+    /// Aircraft heard within [`aircraft::AIRCRAFT_STALE_MS`].
+    pub fn active_aircraft_count(&self, now_ms: u64) -> usize {
+        self.aircraft.active_count(now_ms)
+    }
+
     /// Drop drone tracks and open links not heard for
-    /// [`Config::remove_after_ms`]. Called by `ingest` too; call it
+    /// [`Config::remove_after_ms`], and aircraft not heard for
+    /// [`aircraft::AIRCRAFT_REMOVE_MS`]. Called by `ingest` too; call it
     /// periodically so an idle table still empties. Returns the number of
     /// *drone* tracks removed.
     pub fn expire(&mut self, now_ms: u64) -> usize {
         self.links.expire(now_ms, &self.config);
+        self.aircraft.expire(now_ms);
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         self.tracks
@@ -965,5 +1011,7 @@ impl<const N: usize> Tracker<N> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_aircraft;
 #[cfg(test)]
 mod tests_openlinks;

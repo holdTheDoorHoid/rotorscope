@@ -311,6 +311,31 @@ pub enum SdLog {
     Error,
 }
 
+/// The nearest aircraft, for the health page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NearestAircraft {
+    /// Callsign, or the ICAO address in hex when it has sent none.
+    pub name: String<8>,
+    pub distance_m: f32,
+    /// Pressure altitude, feet.
+    pub alt_ft: Option<i32>,
+}
+
+/// Crewed aircraft from the ADS-B receiver, summarised. Aircraft are not
+/// drones: they never appear in the drone list, on the radar or in the
+/// new-drone alert, only as this line on the health page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AircraftSummary {
+    /// Aircraft the hub holds.
+    pub total: u16,
+    /// Of those, heard recently.
+    pub active: u16,
+    /// Active, airborne, within 5 km and about 2000 ft of the unit.
+    pub low_nearby: u16,
+    /// The nearest active aircraft with a position (needs an own position).
+    pub nearest: Option<NearestAircraft>,
+}
+
 /// Everything one frame shows. The hub owns one (e.g. in a `static`) and
 /// refills it each frame; nothing in it is retained by the screen.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -328,6 +353,8 @@ pub struct UiState {
     /// Drones the tracker holds, which may exceed `drones.len()`.
     pub total_drones: u16,
     pub hub_uptime_s: u32,
+    /// `None` when the hub has no ADS-B receiver built in (no line shown).
+    pub aircraft: Option<AircraftSummary>,
 }
 
 impl UiState {

@@ -44,6 +44,55 @@ fn location(lat: f64, lon: f64) -> Message {
 }
 
 #[test]
+fn summarises_aircraft() {
+    use screen::from_tracker::aircraft_summary;
+    let mut tr: Tracker = Tracker::default();
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
+    let report = |icao: u32, north_m: f64, baro_ft: i32, call: &str| adsb::Aircraft {
+        source: adsb::Source::ModeS,
+        icao,
+        flags: 0xff | 1 << adsb::flag::UPDATED_POSITION,
+        callsign: adsb::Callsign::new(call).unwrap(),
+        squawk: None,
+        category: 7,
+        lat_deg: CITY_HALL.0 + north_m / 111_000.0,
+        lon_deg: CITY_HALL.1,
+        baro_alt_ft: baro_ft,
+        gnss_alt_ft: baro_ft,
+        direction_deg: 0.0,
+        speed_kt: 90,
+        baro_vrate_fpm: 0,
+        gnss_vrate_fpm: 0,
+        uat_emergency: 0,
+        nicnac: 0,
+        acdims: 0,
+        version: 2,
+        signal_dbm: -70,
+        signal_quality: 5,
+        frames_per_s: 2,
+        es_frames_per_s: 2,
+    };
+    tr.ingest_aircraft(&report(0xA1B2C3, 1_500.0, 1_200, "N911PH"), 0);
+    tr.ingest_aircraft(&report(0xC0FFEE, 9_000.0, 9_000, ""), 0);
+    let ctx = tr.context(1_000, None);
+    let a = aircraft_summary(tr.aircraft(), &ctx);
+    assert_eq!((a.total, a.active, a.low_nearby), (2, 2, 1));
+    let n = a.nearest.unwrap();
+    assert_eq!(n.name.as_str(), "N911PH");
+    assert_eq!(n.alt_ft, Some(1_200));
+    assert!((n.distance_m - 1_500.0).abs() < 20.0);
+    // Aircraft never become drones on the screen.
+    let mut st = UiState::default();
+    fill_from_tracker(&tr, &ctx, &mut st);
+    assert!(st.drones.is_empty());
+    // Stale ones are counted but not active.
+    let ctx = tr.context(1_000 + tracker::aircraft::AIRCRAFT_STALE_MS, None);
+    let a = aircraft_summary(tr.aircraft(), &ctx);
+    assert_eq!((a.total, a.active, a.low_nearby), (2, 0, 0));
+    assert!(a.nearest.is_none());
+}
+
+#[test]
 fn fills_from_a_tracker() {
     let mut t: Tracker<8> = Tracker::default();
     t.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(40.0), 1_000);

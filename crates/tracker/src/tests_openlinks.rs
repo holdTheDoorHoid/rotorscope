@@ -197,9 +197,18 @@ fn identifiers_hidden_by_default() {
         },
         recording: false,
         nodes: &[],
+        adsb: None,
     };
-    let mut big = std::vec![0u8; json::state_max_len(0, 3, 0)];
-    let n = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut big).unwrap();
+    let mut big = std::vec![0u8; json::state_max_len(0, 3, 0, 0)];
+    let n = json::state(
+        tr.tracks(),
+        tr.open_links(),
+        tr.aircraft(),
+        &ctx,
+        &hub,
+        &mut big,
+    )
+    .unwrap();
     all += &s(&big, n);
     for leak in [
         "7505d6",
@@ -321,7 +330,7 @@ fn csv_link_rows() {
     let row = s(&buf, n);
     assert_eq!(
         row,
-        "2026-11-09T14:03:07.250Z,5000,L1,39.9525830,-75.1652220,40.0,,,,WfbNg|WfbNg5G,,,,,,,,-80,,,,\n"
+        "2026-11-09T14:03:07.250Z,5000,L1,39.9525830,-75.1652220,40.0,,,,WfbNg|WfbNg5G,,,,,,,,-80,,,,,\n"
     );
     assert_eq!(row.matches(',').count(), csv::HEADER.matches(',').count());
 
@@ -331,7 +340,7 @@ fn csv_link_rows() {
     let n = csv::link_row(&tr.open_links()[0], &ctx, &mut buf).unwrap();
     assert_eq!(
         s(&buf, n),
-        ",5000,L1,,,,7505d6,link_id,,WfbNg5G,,,,,,,,-60,,,,\n"
+        ",5000,L1,,,,7505d6,link_id,,WfbNg5G,,,,,,,,-60,,,,,\n"
     );
 }
 
@@ -354,9 +363,18 @@ fn state_lists_links_before_tracks() {
         },
         recording: false,
         nodes: &[],
+        adsb: None,
     };
-    let mut buf = std::vec![0u8; json::state_max_len(0, 2, 0)];
-    let n = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf).unwrap();
+    let mut buf = std::vec![0u8; json::state_max_len(0, 2, 0, 0)];
+    let n = json::state(
+        tr.tracks(),
+        tr.open_links(),
+        tr.aircraft(),
+        &ctx,
+        &hub,
+        &mut buf,
+    )
+    .unwrap();
     let text = s(&buf, n);
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["open_links"].as_array().unwrap().len(), 2);
@@ -366,10 +384,17 @@ fn state_lists_links_before_tracks() {
     let mut line = [0u8; 1024];
     let ln = json::link_line(&tr.open_links()[0], &ctx, &mut line).unwrap();
     assert!(text.contains(&s(&line, ln - 1)));
-    assert!(text.ends_with("}],\"tracks\":[]}\n"));
+    assert!(text.ends_with("}],\"tracks\":[],\"aircraft\":[]}\n"));
     for len in 0..n {
         assert_eq!(
-            json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf[..len]),
+            json::state(
+                tr.tracks(),
+                tr.open_links(),
+                tr.aircraft(),
+                &ctx,
+                &hub,
+                &mut buf[..len]
+            ),
             Err(FormatError::BufferTooSmall),
             "len {len}"
         );

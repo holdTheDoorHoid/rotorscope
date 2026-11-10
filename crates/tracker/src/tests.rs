@@ -9,12 +9,12 @@ use rid::RawMessage;
 use rid::encode;
 use rid::message::*;
 
-const WIFI_MAC: [u8; 6] = [0x60, 0x60, 0x1f, 0x00, 0x00, 0x01];
+pub(crate) const WIFI_MAC: [u8; 6] = [0x60, 0x60, 0x1f, 0x00, 0x00, 0x01];
 const BLE_MAC: [u8; 6] = [0xc0, 0x11, 0x22, 0x33, 0x44, 0x55];
 const BLE_MAC2: [u8; 6] = [0xd0, 0x99, 0x88, 0x77, 0x66, 0x55];
 
 // Philadelphia City Hall and Independence Hall.
-const CITY_HALL: (f64, f64) = (39.952_583, -75.165_222);
+pub(crate) const CITY_HALL: (f64, f64) = (39.952_583, -75.165_222);
 const INDEPENDENCE: (f64, f64) = (39.948_889, -75.150_000);
 
 fn enc(m: Message) -> RawMessage {
@@ -29,7 +29,7 @@ fn basic(id_type: IdType, id: &[u8]) -> RawMessage {
     }))
 }
 
-fn serial(id: &str) -> RawMessage {
+pub(crate) fn serial(id: &str) -> RawMessage {
     basic(IdType::SerialNumber, id.as_bytes())
 }
 
@@ -53,7 +53,7 @@ fn location_msg(lat: f64, lon: f64, alt: f32) -> Location {
     }
 }
 
-fn location(lat: f64, lon: f64, alt: f32) -> RawMessage {
+pub(crate) fn location(lat: f64, lon: f64, alt: f32) -> RawMessage {
     enc(Message::Location(location_msg(lat, lon, alt)))
 }
 
@@ -87,7 +87,12 @@ fn operator_id(text: &str) -> RawMessage {
     }))
 }
 
-fn det(transport: Transport, mac: [u8; 6], rssi: i8, msgs: &[RawMessage]) -> link::Detection {
+pub(crate) fn det(
+    transport: Transport,
+    mac: [u8; 6],
+    rssi: i8,
+    msgs: &[RawMessage],
+) -> link::Detection {
     link::Detection {
         transport,
         channel: if matches!(transport, Transport::WifiBeacon | Transport::WifiNan) {
@@ -677,13 +682,13 @@ fn csv_golden() {
     let mut buf = [0u8; 512];
     let n = csv::header(&mut buf).unwrap();
     assert_eq!(s(&buf, n), csv::HEADER);
-    assert_eq!(csv::HEADER.matches(',').count(), 21);
+    assert_eq!(csv::HEADER.matches(',').count(), 22);
     let n = csv::row(&tr.tracks()[0], &ctx, &mut buf).unwrap();
     let want = "2026-11-09T14:03:07.250Z,5000,1,39.9525830,-75.1652220,40.0,1581F5FKD229400D,SerialNumber,\
 HelicopterOrMultirotor,WifiBeacon|BleLongRange,39.9488890,-75.1500000,140.0,50.0,5.25,39.9525830,\
--75.1652220,-83,1363.9,107.5,0.0,0.0\n";
+-75.1652220,-83,1363.9,107.5,0.0,0.0,130.0\n";
     assert_eq!(s(&buf, n), want);
-    assert_eq!(want.matches(',').count(), 21);
+    assert_eq!(want.matches(',').count(), 22);
 
     // Unknowns are empty fields; awkward IDs are quoted.
     let mut bare: Tracker = Tracker::default();
@@ -695,7 +700,7 @@ HelicopterOrMultirotor,WifiBeacon|BleLongRange,39.9488890,-75.1500000,140.0,50.0
     let n = csv::row(&bare.tracks()[0], &bare.context(0, None), &mut buf).unwrap();
     assert_eq!(
         s(&buf, n),
-        ",0,1,,,,\"A,\"\"B\"\"\",SerialNumber,HelicopterOrMultirotor,BleLegacy,,,,,,,,-50,,,,\n"
+        ",0,1,,,,\"A,\"\"B\"\"\",SerialNumber,HelicopterOrMultirotor,BleLegacy,,,,,,,,-50,,,,,\n"
     );
 }
 
@@ -809,9 +814,18 @@ fn state_golden() {
         },
         recording: true,
         nodes: &nodes,
+        adsb: None,
     };
     let mut buf = [0u8; 4096];
-    let n = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf).unwrap();
+    let n = json::state(
+        tr.tracks(),
+        tr.open_links(),
+        tr.aircraft(),
+        &ctx,
+        &hub,
+        &mut buf,
+    )
+    .unwrap();
     let got = s(&buf, n);
     let mut line = [0u8; 1024];
     let ln = json::track_line(&tr.tracks()[0], &ctx, &mut line).unwrap();
@@ -823,7 +837,7 @@ fn state_golden() {
             r#""manual":null,"gps":{{"state":"3d","sats":9}},"rec":true,"#,
             r#""nodes":[{{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0}},"#,
             r#"{{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}}],"#,
-            r#""open_links":[],"tracks":[{}]}}"#,
+            r#""adsb":null,"open_links":[],"tracks":[{}],"aircraft":[]}}"#,
             "\n"
         ),
         track
@@ -851,15 +865,24 @@ fn state_without_fix_or_tracks() {
         },
         recording: false,
         nodes: &[],
+        adsb: None,
     };
     let mut buf = [0u8; 512];
-    let n = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf).unwrap();
+    let n = json::state(
+        tr.tracks(),
+        tr.open_links(),
+        tr.aircraft(),
+        &ctx,
+        &hub,
+        &mut buf,
+    )
+    .unwrap();
     assert_eq!(
         s(&buf, n),
         concat!(
             r#"{"t":"state","v":1,"now_ms":1000,"utc_ms":null,"own":null,"#,
             r#""manual":{"lat":1.5,"lon":-2.25,"alt":null},"gps":{"state":"searching","sats":null},"#,
-            r#""rec":false,"nodes":[],"open_links":[],"tracks":[]}"#,
+            r#""rec":false,"nodes":[],"adsb":null,"open_links":[],"tracks":[],"aircraft":[]}"#,
             "\n"
         )
     );
@@ -897,9 +920,18 @@ fn state_several_tracks_and_small_buffers() {
         },
         recording: false,
         nodes: &nodes,
+        adsb: None,
     };
-    let mut buf = std::vec![0u8; json::state_max_len(3, 0, 2)];
-    let n = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf).unwrap();
+    let mut buf = std::vec![0u8; json::state_max_len(3, 0, 0, 2)];
+    let n = json::state(
+        tr.tracks(),
+        tr.open_links(),
+        tr.aircraft(),
+        &ctx,
+        &hub,
+        &mut buf,
+    )
+    .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
     assert_eq!(v["tracks"].as_array().unwrap().len(), 3);
     assert_eq!(v["tracks"][2]["ids"][0]["id"], "SN-C");
@@ -909,7 +941,14 @@ fn state_several_tracks_and_small_buffers() {
     // Every shorter buffer is an error, never a truncated object.
     for len in 0..n {
         assert_eq!(
-            json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf[..len]),
+            json::state(
+                tr.tracks(),
+                tr.open_links(),
+                tr.aircraft(),
+                &ctx,
+                &hub,
+                &mut buf[..len]
+            ),
             Err(FormatError::BufferTooSmall),
             "len {len}"
         );
@@ -953,12 +992,13 @@ fn state_head_and_nodes_fit_their_bounds() {
         },
         recording: false,
         nodes,
+        adsb: None,
     };
     let mut buf = [0u8; 2048];
-    let head = json::state(&[], &[], &ctx, &hub(&[]), &mut buf).unwrap();
+    let head = json::state(&[], &[], &[], &ctx, &hub(&[]), &mut buf).unwrap();
     std::println!("worst-case state head: {head} bytes");
     assert!(head <= json::STATE_HEAD_MAX, "{head}");
-    let with = json::state(&[], &[], &ctx, &hub(&[node; 4]), &mut buf).unwrap();
+    let with = json::state(&[], &[], &[], &ctx, &hub(&[node; 4]), &mut buf).unwrap();
     assert!(with - head <= 4 * json::STATE_NODE_MAX, "{}", with - head);
 }
 
