@@ -1,0 +1,16 @@
+[package]
+name = "openlink"
+description = "no_std recognition of open-source digital FPV / telemetry links (wfb-ng, OpenHD, RubyFPV, DroneBridge) from raw 802.11 frames"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+openlink = { path = ".", features = ["serde"] }

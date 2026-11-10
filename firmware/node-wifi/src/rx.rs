@@ -1,13 +1,19 @@
 //! The hand-off between the Wi-Fi driver's receive callback and our tasks.
 //!
 //! The callback runs on the driver's own thread, ahead of the radio's next
-//! frame, so it does the least possible: drop non-management frames, copy the
-//! frame into a free slot, and pass the slot's index on. Nothing is decoded
-//! there. Slots are fixed buffers in a static pool; ownership moves by index
+//! frame, so it does the least possible: copy a management frame into a free
+//! slot and pass the slot's index on, without decoding it.
+//!
+//! Data frames (on when `chip::OPEN_LINKS`) take a different, slot-free path:
+//! `openlink::classify` looks at their first bytes right here (almost every
+//! frame is rejected on its frame-control byte, the rest on a handful of
+//! address bytes), and a hit only bumps a counter in [`SIGHTINGS`]. A busy
+//! channel's data traffic therefore never competes with Remote ID for the
+//! 32 slots; the `open_links` task reads the table a few times a second. Slots are fixed buffers in a static pool; ownership moves by index
 //! through two channels (`FREE` -> callback -> `FULL` -> task -> `FREE`), so a
 //! frame is copied exactly once and nothing large lands on the driver's stack.
 
-use core::cell::UnsafeCell;
+use core::cell::{RefCell, UnsafeCell};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -62,10 +68,21 @@ static FULL: Channel<CriticalSectionRawMutex, u8, SLOTS> = Channel::new();
 
 /// Management frames the callback accepted (queued or dropped).
 pub static MGMT_SEEN: AtomicU32 = AtomicU32::new(0);
+/// Data frames the callback looked at.
+pub static DATA_SEEN: AtomicU32 = AtomicU32::new(0);
+/// Data frames recognised as an open FPV / telemetry link.
+pub static OPEN_SEEN: AtomicU32 = AtomicU32::new(0);
+/// Links (streams) the node is counting. 16 covers a few links' worth of
+/// streams (wfb-ng uses up to five per link); beyond that the quietest
+/// stream is replaced and counted in `Sightings::evicted`.
+pub const OPEN_STREAMS: usize = 16;
+/// Per-stream packet counts, written by the callback, read by `open_links`.
+pub static SIGHTINGS: critical_section::Mutex<RefCell<openlink::Sightings<OPEN_STREAMS>>> =
+    critical_section::Mutex::new(RefCell::new(openlink::Sightings::new()));
 /// Management frames lost because every slot was in use.
 pub static DROPPED: AtomicU32 = AtomicU32::new(0);
-/// Callbacks for anything else: non-management frames past the filter, or
-/// frames too short to have a management header.
+/// Callbacks for anything else: control (or other) frames past the filter,
+/// or management frames too short to have a header.
 pub static OTHER: AtomicU32 = AtomicU32::new(0);
 /// Most slots in use at once since the stats task last reset it.
 pub static HIGH_WATER: AtomicU32 = AtomicU32::new(0);
@@ -83,6 +100,10 @@ pub fn init() {
 /// The promiscuous receive callback. Keep it this small.
 pub fn on_frame(pkt: PromiscuousPkt<'_>) {
     let data = pkt.data;
+    if pkt.frame_type == sys::wifi_promiscuous_pkt_type_t_WIFI_PKT_DATA {
+        on_data(&pkt);
+        return;
+    }
     // Frame control byte 0: version (bits 0-1) and type (bits 2-3) both zero
     // means a management frame. Checked here as well as by the filter.
     if pkt.frame_type != sys::wifi_promiscuous_pkt_type_t_WIFI_PKT_MGMT
@@ -115,6 +136,22 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
     slot.up_us = embassy_time::Instant::now().as_micros();
     // Cannot fail: FULL has room for every index.
     let _ = FULL.try_send(idx);
+}
+
+/// A data frame: classify it in place and count a hit. No slot, no queue.
+fn on_data(pkt: &PromiscuousPkt<'_>) {
+    DATA_SEEN.fetch_add(1, Relaxed);
+    // `data` ends with the FCS slot, which `classify` expects. Its first test
+    // is the frame-control byte, so ordinary (QoS) data costs one compare.
+    let Some(link) = openlink::classify(pkt.data) else { return };
+    OPEN_SEEN.fetch_add(1, Relaxed);
+    let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
+    let channel = match pkt.rx_cntl.channel {
+        0 => TUNED_CHANNEL.load(Relaxed),
+        c => c.min(255) as u8,
+    };
+    let now = embassy_time::Instant::now().as_micros();
+    critical_section::with(|cs| SIGHTINGS.borrow_ref_mut(cs).record(&link, channel, rssi, now));
 }
 
 /// A queued frame. Returning it to the pool happens on drop.

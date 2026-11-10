@@ -23,6 +23,11 @@ pub const MAX_TRACKS: usize = 64;
 /// Hello every 5 s).
 pub const ALIVE_MS: u64 = 3_000;
 
+/// Open FPV links' identifiers on the outputs (feature `show-link-ids`).
+/// There is no runtime settings store yet, and this is a decision about what
+/// the unit discloses, so it is fixed when the firmware is built.
+pub const SHOW_LINK_IDS: bool = cfg!(feature = "show-link-ids");
+
 /// Milliseconds since boot: the time base for the tracker and every output.
 pub fn now_ms() -> u64 {
     Instant::now().as_millis()
@@ -50,6 +55,8 @@ pub struct NodeStatus {
     detections_at_last_tick: u32,
     /// The node's own drop total (frames it lost before sending).
     pub node_dropped: u32,
+    /// Open FPV link sightings received from this link, total.
+    pub open_sightings: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -130,7 +137,12 @@ pub struct Hub {
 impl Hub {
     pub fn new() -> Self {
         Self {
-            tracker: RefCell::new(Tracker::new(tracker::Config::default())),
+            tracker: RefCell::new(Tracker::new(tracker::Config {
+                // Project policy: open-link identifiers stay hidden unless
+                // the unit was built with `--features show-link-ids`.
+                show_link_ids: SHOW_LINK_IDS,
+                ..tracker::Config::default()
+            })),
             nodes: RefCell::new(core::array::from_fn(|_| NodeStatus::default())),
             manual_pos: Cell::new(None),
         }
@@ -150,11 +162,19 @@ impl Hub {
                     st.on_stats(*uptime_us, *frames_seen, *rid_found, *dropped);
                 }
                 Frame::Detection(_) => st.detections = st.detections.wrapping_add(1),
+                Frame::OpenLink(_) => st.open_sightings = st.open_sightings.wrapping_add(1),
             }
         }
-        if let Frame::Detection(det) = frame {
-            self.tracker.borrow_mut().ingest(node, &det, now);
-            self.announce_new(now);
+        match frame {
+            Frame::Detection(det) => {
+                self.tracker.borrow_mut().ingest(node, &det, now);
+                self.announce_new(now);
+            }
+            // Kept apart from drones; no alert (there is no position to act on).
+            Frame::OpenLink(s) => {
+                self.tracker.borrow_mut().ingest_open_link(node, &s, now);
+            }
+            Frame::Hello { .. } | Frame::Stats { .. } => {}
         }
         // The screen shows tracks and node health: rebuild its view soon.
         crate::screen::mark_dirty();

@@ -10,11 +10,14 @@
 //! - DEMO-BRAVO-0002: 250 m circle the other way, 150 s lap, heard over BLE
 //!   Long Range (pack) and, every third second, as BT4 legacy single messages,
 //!   so the cross-transport merge is exercised.
+//! - A wfb-ng FPV link on channel 161 (video down, MAVLink up), sent as the
+//!   5 GHz node would: one `OpenLink` sighting per stream per second with a
+//!   running count. It exercises the open-link table and outputs.
 
 use core::f64::consts::PI;
 
 use embassy_time::{Duration, Ticker};
-use link::{Detection, Frame};
+use link::{Detection, Frame, OpenLinkSighting};
 use rid::message::{
     BasicId, Category, ClassificationType, DescType, FixedStr, HeightType, HorizontalAccuracy, IdType, LatLon,
     Location, Message, OperatorId, OperatorIdType, OperatorLocationType, SelfId, SpeedAccuracy, Status, System,
@@ -155,13 +158,42 @@ fn inject(frame: Frame) {
     let _ = FRAMES.try_send((NODE, frame));
 }
 
+/// The demo FPV link's streams: (radio port, frames per second).
+const FPV: [(u8, u32); 2] = [(0, 900), (144, 20)];
+
+fn fpv_sighting(port: u8, packets: u32) -> Frame {
+    let ch = ((openlink::WFB_DEFAULT_LINK_ID << 8) | u32::from(port)).to_be_bytes();
+    Frame::OpenLink(OpenLinkSighting {
+        link: openlink::OpenLink {
+            system: openlink::System::WfbNg,
+            id: Some(openlink::WFB_DEFAULT_LINK_ID),
+            port,
+            direction: if port < 128 {
+                openlink::Direction::AirToGround
+            } else {
+                openlink::Direction::GroundToAir
+            },
+            tx: [0x57, 0x42, ch[0], ch[1], ch[2], ch[3]],
+        },
+        channel: 161,
+        rssi: if port < 128 { -66 } else { -79 },
+        uptime_us: now_ms() * 1000,
+        packets,
+    })
+}
+
 #[embassy_executor::task]
 pub async fn task(centre: (f64, f64)) {
     let mut ticker = Ticker::every(Duration::from_secs(1));
     let mut counter: u8 = 0;
+    let mut seconds: u32 = 0;
     loop {
         ticker.next().await;
         counter = counter.wrapping_add(1);
+        seconds = seconds.wrapping_add(1);
+        for (port, fps) in FPV {
+            inject(fpv_sighting(port, seconds.saturating_mul(fps)));
+        }
         let t_s = now_ms() as f64 / 1000.0;
         for d in [&ALPHA, &BRAVO] {
             match messages(d, centre, t_s) {

@@ -2,7 +2,8 @@
 //!
 //! Two halves:
 //! - [`log_tick`] runs in the 1 Hz tick (core 0, where the tracker lives) and
-//!   formats `csv::row` for every *active* drone into the [`ROWS`] pipe. It
+//!   formats `csv::row` for every *active* drone (and `csv::link_row` for
+//!   every active open FPV link) into the [`ROWS`] pipe. It
 //!   never touches the card. When the pipe is full it waits at most
 //!   [`ROW_PATIENCE`] per row and then drops the row (counted), so a slow or
 //!   stuck card can never hold up the tick.
@@ -44,7 +45,8 @@ use embedded_sdmmc::{
 use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
 use tracker::csv::{self, MAX_ROW};
-use tracker::{Context, TrackId, TrackState};
+use tracker::openlinks::MAX_LINK_TRACKS;
+use tracker::{Context, LinkTrackId, TrackId, TrackState};
 
 use crate::bus::{Bus, Speed, SpiBus};
 use crate::hub::{Hub, MAX_TRACKS, now_ms};
@@ -150,7 +152,8 @@ impl SdLine {
 
 // ------------------------------------------------------------- core 0 --
 
-/// Queue one CSV row per active drone. Called by the 1 Hz tick.
+/// Queue one CSV row per active drone and per active open link. Called by
+/// the 1 Hz tick.
 pub async fn log_tick(hub: &Hub, ctx: &Context) {
     if !recording() {
         return; // nothing to write to: skip the formatting too
@@ -174,6 +177,25 @@ pub async fn log_tick(hub: &Hub, ctx: &Context) {
             }
         }
         // A row takes ~1-2 ms to format (soft-float); let others in.
+        embassy_futures::yield_now().await;
+    }
+    let links: heapless::Vec<LinkTrackId, MAX_LINK_TRACKS> = {
+        let t = hub.tracker.borrow();
+        t.open_links().iter().filter(|l| ctx.link_state(l) == TrackState::Active).map(|l| l.id).collect()
+    };
+    for id in links {
+        let n = {
+            let tracker = hub.tracker.borrow();
+            let Some(l) = tracker.get_open_link(id) else { continue };
+            csv::link_row(l, ctx, &mut row)
+        };
+        if let Ok(n) = n {
+            if push(&row[..n]).await {
+                ROWS_LOGGED.fetch_add(1, Relaxed);
+            } else {
+                ROWS_DROPPED.fetch_add(1, Relaxed);
+            }
+        }
         embassy_futures::yield_now().await;
     }
 }

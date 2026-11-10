@@ -45,6 +45,8 @@ esp32c5 = [
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }
 link = { path = "../../crates/link" }
+# Open FPV / telemetry link classifier (wfb-ng, OpenHD, RubyFPV, DroneBridge).
+openlink = { path = "../../crates/openlink", features = ["serde"] }
 
 esp-hal                = { version = "~1.2.2", features = ["unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }

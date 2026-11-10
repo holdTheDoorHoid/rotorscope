@@ -2,7 +2,10 @@
 //!
 //! Reads the nodes' USB JSON lines (serial ports, recorded files or stdin)
 //! and runs them through the same `tracker` crate the hub uses, so what the
-//! laptop shows is what the hub would show. See `--help`.
+//! laptop shows is what the hub would show. See `--help`. Open FPV links
+//! the Wi-Fi node recognises (wfb-ng, OpenHD, RubyFPV, DroneBridge) are
+//! listed below the drones, with their identifiers hidden unless
+//! `--show-link-ids` is given (the hub's policy too).
 
 mod demo;
 mod http;
@@ -26,7 +29,9 @@ use rid::Transport;
 use tracker::json::{
     GpsState, GpsStatus, HubStatus, ManualPos, NodeStatus, OwnPosRequest, OwnSource,
 };
-use tracker::{Context, Observation, TrackId, TrackState, Tracker, cot, csv, json};
+use tracker::{
+    Config, Context, LinkTrackId, Observation, TrackId, TrackState, Tracker, cot, csv, json,
+};
 use view::View;
 
 const USAGE: &str = "\
@@ -48,7 +53,12 @@ OPTIONS:
                              operator once a second, e.g. udp://239.2.3.1:6969
                              (ATAK's default multicast). Off by default.
     --demo                   Add two simulated drones circling --own-pos
-                             (or Philadelphia City Hall). No hardware needed.
+                             (or Philadelphia City Hall), and a simulated
+                             wfb-ng FPV link. No hardware needed.
+    --show-link-ids          Show open FPV links' identifiers (wfb-ng link
+                             ID, RubyFPV vehicle ID, DroneBridge comm ID) and
+                             their transmitter addresses. Off by default:
+                             they identify someone's equipment.
     --once                   Read inputs to the end, print the table once and
                              exit (for files; with --demo, simulates
                              --demo-secs seconds instantly).
@@ -73,6 +83,7 @@ struct Options {
     json: bool,
     realtime: bool,
     http: Option<String>,
+    show_link_ids: bool,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -87,6 +98,7 @@ fn parse_args() -> Result<Options, String> {
         json: false,
         realtime: false,
         http: None,
+        show_link_ids: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -122,6 +134,7 @@ fn parse_args() -> Result<Options, String> {
             "--json" => o.json = true,
             "--realtime" => o.realtime = true,
             "--http" => o.http = Some(value("--http")?),
+            "--show-link-ids" => o.show_link_ids = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.inputs.push(a),
         }
@@ -181,6 +194,15 @@ fn role_from_hello(v: &serde_json::Value) -> Option<NodeRole> {
         "ble" => Some(NodeRole::Ble),
         "fpv" => Some(NodeRole::Fpv),
         _ => None,
+    }
+}
+
+/// Without a hello line, guess a Wi-Fi node's role from its channel.
+fn role_from_channel(channel: u8) -> NodeRole {
+    if channel > 14 {
+        NodeRole::Wifi5
+    } else {
+        NodeRole::Wifi24
     }
 }
 
@@ -273,10 +295,12 @@ impl Cot {
 }
 
 /// Everything that happens once a second: own position refresh, expiry,
-/// CSV rows for drones heard since the last row, CoT, JSON lines.
+/// CSV rows for drones and open links heard since the last row, CoT, JSON
+/// lines.
 struct Outputs {
     log: Option<File>,
     logged: HashMap<TrackId, u64>,
+    logged_links: HashMap<LinkTrackId, u64>,
     cot: Option<Cot>,
     cot_error_shown: bool,
 }
@@ -294,8 +318,23 @@ impl Outputs {
                 }
                 self.logged.insert(t.id, t.last_seen_ms);
             }
+            for l in tr.open_links() {
+                if self
+                    .logged_links
+                    .get(&l.id)
+                    .is_some_and(|&t| t >= l.last_seen_ms)
+                {
+                    continue;
+                }
+                if let Ok(n) = csv::link_row(l, ctx, &mut buf) {
+                    let _ = f.write_all(&buf[..n]);
+                }
+                self.logged_links.insert(l.id, l.last_seen_ms);
+            }
             let _ = f.flush();
             self.logged.retain(|id, _| tr.get(*id).is_some());
+            self.logged_links
+                .retain(|id, _| tr.get_open_link(*id).is_some());
         }
         if let Some(c) = &self.cot {
             for t in tr
@@ -318,6 +357,11 @@ impl Outputs {
             let mut out = std::io::stdout().lock();
             for t in tr.tracks() {
                 if let Ok(n) = json::track_line(t, ctx, &mut buf) {
+                    let _ = out.write_all(&buf[..n]);
+                }
+            }
+            for l in tr.open_links() {
+                if let Ok(n) = json::link_line(l, ctx, &mut buf) {
                     let _ = out.write_all(&buf[..n]);
                 }
             }
@@ -350,6 +394,7 @@ fn run(o: Options) -> Result<(), String> {
         for (n, what, role) in [
             (base, "demo Wi-Fi", NodeRole::Wifi24),
             (base + 1, "demo BLE", NodeRole::Ble),
+            (base + 2, "demo Wi-Fi 5 GHz", NodeRole::Wifi5),
         ] {
             let info = view.nodes.entry(n).or_default();
             info.source = what.into();
@@ -362,6 +407,7 @@ fn run(o: Options) -> Result<(), String> {
     let mut outputs = Outputs {
         log: None,
         logged: HashMap::new(),
+        logged_links: HashMap::new(),
         cot: o.cot.as_deref().map(Cot::open).transpose()?,
         cot_error_shown: false,
     };
@@ -398,7 +444,10 @@ fn run(o: Options) -> Result<(), String> {
     };
     let mut last_publish: Option<u64> = None;
 
-    let mut tr: Tracker = Tracker::default();
+    let mut tr: Tracker = Tracker::new(Config {
+        show_link_ids: o.show_link_ids,
+        ..Config::default()
+    });
     // Tracker time: the newest event stamp; while live it also advances with
     // the wall clock so tracks age and go stale when nothing arrives.
     let mut now = 0u64;
@@ -438,6 +487,13 @@ fn run(o: Options) -> Result<(), String> {
                             };
                             tr.ingest_messages(&obs, &r.msgs, r.errors);
                         }
+                        Line::Open(s) => {
+                            info.open_lines += 1;
+                            if info.role.is_none() {
+                                info.role = Some(role_from_channel(s.channel));
+                            }
+                            tr.ingest_open_link(node, &s, now);
+                        }
                         Line::Hello(v) => {
                             info.role = role_from_hello(&v).or(info.role);
                             info.hello = Some(summarize(&v, &["t"]));
@@ -456,6 +512,17 @@ fn run(o: Options) -> Result<(), String> {
                     info.rid_lines += 1;
                     note_rid(info, at_ms);
                     tr.ingest(node, &det, now);
+                }
+                Event::OpenLink {
+                    node,
+                    sighting,
+                    at_ms,
+                } => {
+                    now = now.max(at_ms);
+                    let info = view.nodes.entry(node).or_default();
+                    info.last_ms = Some(at_ms);
+                    info.open_lines += 1;
+                    tr.ingest_open_link(node, &sighting, now);
                 }
                 Event::End { node, why } => {
                     live_sources -= 1;
@@ -524,8 +591,9 @@ fn run(o: Options) -> Result<(), String> {
                 recording: o.log.is_some(),
                 nodes: &nodes,
             };
-            let mut buf = vec![0u8; json::state_max_len(tr.len(), nodes.len())];
-            if let Ok(n) = json::state(tr.tracks(), &ctx, &hub, &mut buf) {
+            let mut buf =
+                vec![0u8; json::state_max_len(tr.len(), tr.open_links().len(), nodes.len())];
+            if let Ok(n) = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf) {
                 buf.truncate(n);
                 if let Ok(mut s) = h.state.lock() {
                     *s = buf;

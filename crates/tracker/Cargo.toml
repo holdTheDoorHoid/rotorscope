@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 rid = { workspace = true, features = ["serde"] }
 link.workspace = true
+openlink = { workspace = true, features = ["serde"] }
 heapless.workspace = true
 serde.workspace = true
 # Pure-Rust maths (sin/cos/atan2/sqrt) for range and bearing without std.

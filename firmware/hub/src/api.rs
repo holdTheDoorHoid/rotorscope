@@ -4,10 +4,13 @@
 //! tracks is up to ~99 KB: it does not fit next to Wi-Fi on an S3 without
 //! PSRAM. So the hub sends the same bytes in pieces:
 //!
-//! 1. the envelope: `json::state` called with **no tracks**, which yields
-//!    `{...,"tracks":[]}\n`; the trailing `]}\n` is cut off;
-//! 2. each track as `json::track_line` without its `\n`, comma-separated;
-//! 3. `]}\n`.
+//! 1. the envelope: `json::state` called with **no links and no tracks**,
+//!    which yields `{...,"open_links":[],"tracks":[]}\n`; the trailing
+//!    `],"tracks":[]}\n` is cut off;
+//! 2. each open link as `json::link_line` without its `\n`, comma-separated;
+//! 3. `],"tracks":[` (`json::STATE_LINKS_TO_TRACKS`);
+//! 4. each track as `json::track_line` without its `\n`, comma-separated;
+//! 5. `]}\n` (`json::STATE_END`).
 //!
 //! That is byte-for-byte what `json::state` produces for the same tracks and
 //! context (it builds the object the same way), and `check_against_reference`
@@ -16,13 +19,16 @@
 //! a piece is formatted, never across a socket write.
 
 use tracker::json::{self, GpsStatus, HubStatus, MAX_LINE, ManualPos, NodeStatus, OwnPosRequest};
-use tracker::{Context, TrackId};
+use tracker::openlinks::MAX_LINK_TRACKS;
+use tracker::{Context, LinkTrackId, TrackId};
 
 use crate::hub::{Hub, MAX_TRACKS, OwnSource};
 use crate::pins::NODE_LINKS;
 use crate::{gnss, sd};
 
-const TAIL: &[u8] = b"]}\n";
+/// What `json::state` puts after the envelope when there are no links or
+/// tracks: `],"tracks":[]}\n`.
+const EMPTY_TAIL: usize = json::STATE_LINKS_TO_TRACKS.len() + json::STATE_END.len();
 
 /// Node entries for the state object: one per link that has said Hello.
 fn node_statuses(hub: &Hub, now: u64) -> heapless::Vec<NodeStatus, NODE_LINKS> {
@@ -61,12 +67,12 @@ fn envelope(hub: &Hub, ctx: &Context, buf: &mut [u8]) -> usize {
         recording: sd::recording(),
         nodes: &nodes,
     };
-    match json::state(&[], ctx, &status, buf) {
-        // `...,"tracks":[]}\n` -> `...,"tracks":[`
-        Ok(n) if n >= TAIL.len() => n - TAIL.len(),
+    match json::state(&[], &[], ctx, &status, buf) {
+        // `...,"open_links":[],"tracks":[]}\n` -> `...,"open_links":[`
+        Ok(n) if n >= EMPTY_TAIL => n - EMPTY_TAIL,
         // Cannot happen with MAX_LINE (head + 3 nodes is < 1 KB); still valid JSON.
         _ => {
-            let fallback = br#"{"t":"state","v":1,"err":"envelope","tracks":["#;
+            let fallback = br#"{"t":"state","v":1,"err":"envelope","open_links":["#;
             buf[..fallback.len()].copy_from_slice(fallback);
             fallback.len()
         }
@@ -80,28 +86,34 @@ fn gnss_status() -> GpsStatus {
 /// Builds the state body piece by piece. Every piece fits in [`MAX_LINE`].
 pub struct StateWriter {
     ctx: Context,
+    links: heapless::Vec<LinkTrackId, MAX_LINK_TRACKS>,
     ids: heapless::Vec<TrackId, MAX_TRACKS>,
     next: usize,
     stage: Stage,
-    wrote_track: bool,
+    /// Whether the current array has an element yet (for the commas).
+    wrote_any: bool,
 }
 
 #[derive(PartialEq)]
 enum Stage {
     Head,
+    Links,
+    Mid,
     Tracks,
     Tail,
     Done,
 }
 
 impl StateWriter {
-    /// Snapshot the track list (in table order, as `json::state` iterates it)
-    /// and the time. A track that disappears before its turn is skipped; one
-    /// that appears later waits for the next poll.
+    /// Snapshot the link and track lists (in table order, as `json::state`
+    /// iterates them) and the time. One that disappears before its turn is
+    /// skipped; one that appears later waits for the next poll.
     pub fn new(hub: &Hub, now: u64) -> Self {
         let ctx = hub.context(now);
-        let ids = hub.tracker.borrow().tracks().iter().map(|t| t.id).collect();
-        Self { ctx, ids, next: 0, stage: Stage::Head, wrote_track: false }
+        let tracker = hub.tracker.borrow();
+        let links = tracker.open_links().iter().map(|l| l.id).collect();
+        let ids = tracker.tracks().iter().map(|t| t.id).collect();
+        Self { ctx, links, ids, next: 0, stage: Stage::Head, wrote_any: false }
     }
 
     /// Write the next piece into `buf`; `None` when the body is complete.
@@ -109,8 +121,24 @@ impl StateWriter {
         loop {
             match self.stage {
                 Stage::Head => {
-                    self.stage = Stage::Tracks;
+                    self.stage = Stage::Links;
                     return Some(envelope(hub, &self.ctx, buf));
+                }
+                Stage::Links => {
+                    let Some(&id) = self.links.get(self.next) else {
+                        self.stage = Stage::Mid;
+                        continue;
+                    };
+                    self.next += 1;
+                    let tracker = hub.tracker.borrow();
+                    let Some(link) = tracker.get_open_link(id) else { continue };
+                    let start = usize::from(self.wrote_any);
+                    let Ok(n) = json::link_line(link, &self.ctx, &mut buf[start..]) else { continue };
+                    return Some(self.element(buf, start, n));
+                }
+                Stage::Mid => {
+                    (self.stage, self.next, self.wrote_any) = (Stage::Tracks, 0, false);
+                    return Some(put(buf, json::STATE_LINKS_TO_TRACKS));
                 }
                 Stage::Tracks => {
                     let Some(&id) = self.ids.get(self.next) else {
@@ -120,24 +148,36 @@ impl StateWriter {
                     self.next += 1;
                     let tracker = hub.tracker.borrow();
                     let Some(track) = tracker.get(id) else { continue };
-                    let start = usize::from(self.wrote_track);
+                    let start = usize::from(self.wrote_any);
                     let Ok(n) = json::track_line(track, &self.ctx, &mut buf[start..]) else { continue };
-                    if self.wrote_track {
-                        buf[0] = b',';
-                    }
-                    self.wrote_track = true;
-                    // Drop the line's '\n' inside the array.
-                    return Some(start + n - 1);
+                    return Some(self.element(buf, start, n));
                 }
                 Stage::Tail => {
                     self.stage = Stage::Done;
-                    buf[..TAIL.len()].copy_from_slice(TAIL);
-                    return Some(TAIL.len());
+                    return Some(put(buf, json::STATE_END));
                 }
                 Stage::Done => return None,
             }
         }
     }
+}
+
+impl StateWriter {
+    /// An array element formatted at `buf[start..]` (`n` bytes, ending in
+    /// '\n'): put the comma in front if it is not the first, drop the '\n'.
+    fn element(&mut self, buf: &mut [u8; MAX_LINE], start: usize, n: usize) -> usize {
+        if self.wrote_any {
+            buf[0] = b',';
+        }
+        self.wrote_any = true;
+        start + n - 1
+    }
+}
+
+/// Copy `s` to the front of `buf`; returns its length.
+fn put(buf: &mut [u8; MAX_LINE], s: &[u8]) -> usize {
+    buf[..s.len()].copy_from_slice(s);
+    s.len()
 }
 
 /// Build the body both ways (streamed pieces, and `json::state` into one heap
@@ -147,12 +187,13 @@ impl StateWriter {
 pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
     const MAX_CHECKED: usize = 4;
     let tracker = hub.tracker.borrow();
-    if tracker.len() > MAX_CHECKED {
+    let links = tracker.open_links();
+    if tracker.len() > MAX_CHECKED || links.len() > MAX_CHECKED {
         return None;
     }
     let ctx = hub.context(now);
     let nodes = node_statuses(hub, now);
-    let mut reference = alloc::vec![0u8; json::state_max_len(tracker.len(), nodes.len())];
+    let mut reference = alloc::vec![0u8; json::state_max_len(tracker.len(), links.len(), nodes.len())];
     let mut env = [0u8; MAX_LINE];
     let env_len = envelope(hub, &ctx, &mut env);
     // Rebuild the reference with the same inputs the envelope used.
@@ -166,11 +207,19 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
         recording: sd::recording(),
         nodes: &nodes,
     };
-    let ref_len = json::state(tracker.tracks(), &ctx, &status, &mut reference).ok()?;
+    let ref_len = json::state(tracker.tracks(), links, &ctx, &status, &mut reference).ok()?;
 
     let mut streamed: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(ref_len);
     streamed.extend_from_slice(&env[..env_len]);
     let mut line = [0u8; MAX_LINE];
+    for (i, l) in links.iter().enumerate() {
+        if i > 0 {
+            streamed.push(b',');
+        }
+        let n = json::link_line(l, &ctx, &mut line).ok()?;
+        streamed.extend_from_slice(&line[..n - 1]);
+    }
+    streamed.extend_from_slice(json::STATE_LINKS_TO_TRACKS);
     for (i, t) in tracker.tracks().iter().enumerate() {
         if i > 0 {
             streamed.push(b',');
@@ -178,7 +227,7 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
         let n = json::track_line(t, &ctx, &mut line).ok()?;
         streamed.extend_from_slice(&line[..n - 1]);
     }
-    streamed.extend_from_slice(TAIL);
+    streamed.extend_from_slice(json::STATE_END);
     Some((streamed[..] == reference[..ref_len], ref_len))
 }
 

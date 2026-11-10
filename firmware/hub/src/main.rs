@@ -89,7 +89,14 @@ const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" }
 const RECLAIMED_HEAP: usize = 73_744;
 #[cfg(feature = "esp32c5")]
 const RECLAIMED_HEAP: usize = 65_536;
+#[cfg(feature = "esp32s3")]
 const EXTRA_HEAP: usize = 64 * 1024;
+/// 4 KB less on the C5: its main stack was already within ~1.2 KB of the
+/// linker's 8 KB floor, and the open-FPV-link table (`tracker::openlinks`)
+/// needed the room. The S3 keeps 64 KB; it showed >= 55 KB of heap unused.
+/// Not measured on a C5 hub (none has run yet).
+#[cfg(feature = "esp32c5")]
+const EXTRA_HEAP: usize = 60 * 1024;
 
 /// Centre of the demo drones' circles, and the reference for the USB `p`
 /// test position: Philadelphia City Hall, as `rid-beacon` uses.
@@ -121,8 +128,12 @@ struct BootLine {
     /// Screen controller the build drives.
     panel: &'static str,
     max_tracks: usize,
-    /// Static RAM the track table costs, bytes.
+    /// Static RAM the track table costs, bytes (open-link table included).
     track_bytes: usize,
+    /// Open FPV links the table holds, and whether their identifiers are
+    /// shown (feature `show-link-ids`; off by default).
+    max_open_links: usize,
+    show_link_ids: bool,
     heap_free: usize,
     pins: &'static [(&'static str, u8)],
 }
@@ -162,6 +173,8 @@ async fn main(spawner: Spawner) -> ! {
         panel: if cfg!(feature = "ili9341") { "ili9341" } else { "st7789" },
         max_tracks: hub::MAX_TRACKS,
         track_bytes: core::mem::size_of::<tracker::Tracker<{ hub::MAX_TRACKS }>>(),
+        max_open_links: tracker::openlinks::MAX_LINK_TRACKS,
+        show_link_ids: hub::SHOW_LINK_IDS,
         heap_free: esp_alloc::HEAP.free(),
         pins: pins::TABLE,
     });

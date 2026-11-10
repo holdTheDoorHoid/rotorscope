@@ -224,6 +224,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "openlink",
  "postcard",
  "rid",
  "serde",
@@ -287,6 +288,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlink"
+version = "0.1.0"
+dependencies = [
+ "openlink",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,6 +355,7 @@ dependencies = [
  "heapless 0.8.0",
  "libc",
  "link",
+ "openlink",
  "rid",
  "serde",
  "serde_json",
@@ -510,6 +521,7 @@ dependencies = [
  "heapless 0.8.0",
  "libm",
  "link",
+ "openlink",
  "rid",
  "serde",
  "serde-json-core",

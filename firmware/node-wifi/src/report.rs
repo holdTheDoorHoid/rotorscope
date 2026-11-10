@@ -87,6 +87,12 @@ pub struct StatsLine {
     /// Management frames seen, total and in the last second.
     pub seen: u32,
     pub fps: u32,
+    /// Data frames looked at, total (0 with `chip::OPEN_LINKS` off).
+    pub data: u32,
+    /// Data frames recognised as an open FPV / telemetry link, total.
+    pub open: u32,
+    /// Open-link streams replaced in the node's table to make room, total.
+    pub open_ev: u32,
     /// Frames that carried Remote ID, total.
     pub rid: u32,
     /// Frames lost to a full queue, total.
@@ -239,6 +245,53 @@ impl Serialize for Decoded<'_> {
         }
         seq.end()
     }
+}
+
+// -------------------------------------------------------------- open links --
+
+/// `{"t":"open",...}`: one stream of an open FPV link, at most once a second.
+/// `id` is the link's cleartext identifier (wfb-ng link ID, RubyFPV vehicle
+/// ID, DroneBridge comm ID) or null. The node is a raw sensor and prints it;
+/// the hub and rid-view hide it unless their operator opts in.
+#[derive(Serialize)]
+struct OpenLine {
+    t: &'static str,
+    sys: openlink::System,
+    id: Option<u32>,
+    port: u8,
+    dir: openlink::Direction,
+    ch: u8,
+    rssi: i8,
+    mac: Mac,
+    up_us: u64,
+    /// Frames counted on this stream since the node started tracking it.
+    n: u32,
+}
+
+pub fn open_json(s: &openlink::Sighting) {
+    let line = OpenLine {
+        t: "open",
+        sys: s.link.system,
+        id: s.link.id,
+        port: s.link.port,
+        dir: s.link.direction,
+        ch: s.channel,
+        rssi: s.rssi,
+        mac: Mac(s.link.tx),
+        up_us: s.last_us,
+        n: s.packets,
+    };
+    emit(&line, &mut [0u8; 256], "open");
+}
+
+pub fn open_hub(s: &openlink::Sighting) {
+    to_hub(&link::Frame::OpenLink(link::OpenLinkSighting {
+        link: s.link,
+        channel: s.channel,
+        rssi: s.rssi,
+        uptime_us: s.last_us,
+        packets: s.packets,
+    }));
 }
 
 // --------------------------------------------------------------------- hub --

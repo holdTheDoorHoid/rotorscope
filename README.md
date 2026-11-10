@@ -15,6 +15,7 @@ and [RESEARCH.md](RESEARCH.md) for the survey behind them.
 | Wi-Fi listener (2.4 GHz S3, 5 GHz C5) | `firmware/node-wifi` | S3 verified on hardware: sniffs and hops channels for 60 s with no drops. C5 builds only. |
 | Bluetooth listener (legacy + Long Range) | `firmware/node-ble` | S3 verified: decoded a BT4 Remote ID broadcast from a laptop. C5 builds only. Long Range not yet heard on air. |
 | Test transmitter | `firmware/rid-beacon` | S3 verified: the laptop received the Wi-Fi beacon and BT4 adverts. NAN, BT5 extended and Long Range transmit with no errors but haven't been heard by a receiver yet. C5 (5 GHz) builds only. |
+| Open FPV link detection | `crates/openlink`, `firmware/node-wifi`, `crates/tracker` | Built and unit-tested (2026-11-09): recognises wfb-ng/OpenIPC, OpenHD, RubyFPV and DroneBridge frames by their headers, lists them apart from drones, identifiers hidden unless opted in. Not yet heard on air. |
 | Laptop viewer | `tools/rid-view` | Done. Reads node USB output, files or stdin; can send TAK CoT; has `--demo`. |
 | DJI OcuSync DroneID decoder | `crates/droneid`, `tools/droneid-file` | Host side done (Phase 10a): `no_std`, fixed point, builds for the C5. Decodes every burst in both public recordings (fetch them with `tools/fetch-droneid-samples.sh`). Recognises O4's encrypted records but never decrypts; that part is untested on real signals. |
 

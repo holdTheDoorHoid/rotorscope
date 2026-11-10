@@ -10,6 +10,10 @@
 //!   merges into ALPHA when the Basic ID advert arrives half a second later.
 //! - BRAVO is a fixed-wing on BLE Long Range whose address rotates every 30 s
 //!   (BLE privacy); the UAS ID keeps it one track.
+//! - A wfb-ng (OpenIPC) FPV link on 5 GHz channel 161, as the 5 GHz node
+//!   would report it: video and MAVLink down, MAVLink up, one sighting per
+//!   stream per second with running packet counts. It has no position and
+//!   must never become a drone track.
 
 use std::f64::consts::PI;
 use std::sync::mpsc::Sender;
@@ -230,9 +234,47 @@ fn step(center: (f64, f64), t_ms: u64) -> Vec<(u8, link::Detection)> {
     out
 }
 
+/// The demo FPV link: (port, frames per second, RSSI).
+const FPV_STREAMS: [(u8, u64, f64); 3] = [(0, 900, -64.0), (16, 50, -64.0), (144, 20, -77.0)];
+/// Its channel: OpenIPC's usual one.
+const FPV_CHANNEL: u8 = 161;
+
+/// The open-link sightings due at simulated time `t_ms`: one per stream each
+/// second, as `node-wifi` rate-limits them.
+fn link_step(t_ms: u64) -> Vec<link::OpenLinkSighting> {
+    if !(t_ms / STEP_MS).is_multiple_of(4) {
+        return Vec::new();
+    }
+    let wobble = 2.0 * (t_ms as f64 / 2300.0).sin();
+    FPV_STREAMS
+        .iter()
+        .map(|&(port, fps, rssi)| {
+            let ch = ((openlink::WFB_DEFAULT_LINK_ID << 8) | u32::from(port)).to_be_bytes();
+            link::OpenLinkSighting {
+                link: openlink::OpenLink {
+                    system: openlink::System::WfbNg,
+                    id: Some(openlink::WFB_DEFAULT_LINK_ID),
+                    port,
+                    direction: if port < 128 {
+                        openlink::Direction::AirToGround
+                    } else {
+                        openlink::Direction::GroundToAir
+                    },
+                    tx: [0x57, 0x42, ch[0], ch[1], ch[2], ch[3]],
+                },
+                channel: FPV_CHANNEL,
+                rssi: (rssi + wobble).round() as i8,
+                uptime_us: t_ms * 1000,
+                packets: ((t_ms + 1000) * fps / 1000) as u32,
+            }
+        })
+        .collect()
+}
+
 /// Run the demo on a thread. `live`: in real time, forever. Otherwise run
 /// `sim_secs` of simulated time as fast as possible, then end.
-/// The demo's nodes are `node_base` (Wi-Fi) and `node_base + 1` (BLE).
+/// The demo's nodes are `node_base` (Wi-Fi), `node_base + 1` (BLE) and
+/// `node_base + 2` (5 GHz Wi-Fi, the FPV link).
 pub fn spawn(
     center: (f64, f64),
     live: bool,
@@ -272,6 +314,18 @@ pub fn spawn(
                     return;
                 }
             }
+            for sighting in link_step(t_ms) {
+                if tx
+                    .send(Event::OpenLink {
+                        node: node_base + 2,
+                        sighting,
+                        at_ms,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             t_ms += STEP_MS;
         }
     });
@@ -292,6 +346,9 @@ mod tests {
         while t <= 70_000 {
             for (node, det) in step(center, t) {
                 tr.ingest(node, &det, t);
+            }
+            for s in link_step(t) {
+                tr.ingest_open_link(2, &s, t);
             }
             while tr.take_new_drone(t).is_some() {
                 alerts += 1;
@@ -318,6 +375,11 @@ mod tests {
             "third MAC epoch at 70 s"
         );
         assert_eq!(bravo.ua_type, Some(UaType::Aeroplane));
+        // The FPV link: one entry, three streams, no drone and no alert.
+        assert_eq!(tr.open_links().len(), 1);
+        let fpv = &tr.open_links()[0];
+        assert_eq!(fpv.streams.len(), 3);
+        assert_eq!(fpv.packets(), (71_000 * 970 / 1000) as u32);
     }
 
     #[test]

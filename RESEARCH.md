@@ -300,3 +300,120 @@ Measured on the two public recordings and on synthetic bursts:
 - **Cost:** host per burst is about 2 ms on the cheap path, about 4 ms worst case
   (19 FFTs, about 600k multiply-accumulates resampling, about 113k operations per turbo
   half-iteration). Scaled C5 estimate 40–150 ms (not measured).
+
+## Autel, Skydio and digital FPV (2026-11-09, fourth round)
+
+Two research agents. FCC test reports were read directly where cited; *unverified* marks the rest.
+
+### Autel SkyLink
+- **TD-LTE based.** The FCC module manual (FCC ID 2AGNTMTBL, module M240958L) says "developed
+  based on the 4G TD LTE technology platform". It names MCU **LC1881** (Leadcore lineage,
+  *unverified*). It advertises "encrypted transmission" and one band at a time with adaptive
+  channel choice. Fast hopping is *unverified*.
+- **FCC reports:**
+
+  | Model (FCC ID) | Bands | Modes and measured bandwidth |
+  |---|---|---|
+  | EVO II (2AGNTMC2409A) | 909–921, 2407.5–2471.5 MHz | OFDM 5/10/20 MHz modes, 6 dB widths 4.54/9.08/18.07 MHz, 1 MHz raster |
+  | EVO Lite/Lite+ (2AGNTMDXM2409A) | 2.4, 5154–5246, 5728–5847 MHz | 1.4/10/20 MHz modes, 1.10/8.98/18.04 MHz; also a real 802.11n/ac radio |
+  | EVO Max (2AGNTMDX240958A) | 904–926, 2.4, 5.2, 5.8 GHz | 1.4/10/20 MHz modes, QPSK/16QAM; also Wi-Fi and a 24 GHz radar |
+
+- **The widths match LTE at 15 kHz spacing** (72/300/600/1200 subcarriers = 1.08/4.5/9/18 MHz).
+  So: 66.67 µs symbols, normal CP ≈ 4.69 µs, FFT 128/1024/2048. *Inferred, not measured from I/Q.*
+- EVO II test mode was on about 4.05 ms per 5.01 ms (TDD-like).
+- RFUAV saw the EVO Nano as a 20 MHz video signal at 5.77 GHz plus a 4 MHz hopping signal with
+  4 ms bursts.
+- **No DroneID-like broadcast** found; no open detector or decoder. Commercial counter-drone
+  vendors claim Autel identification (*unverified*).
+- Remote ID: yes on EVO II V3, Max and Lite/Lite+ (firmware updates), reportedly over Bluetooth
+  only (*unverified*).
+- 900 MHz modes are unreachable on ESP32.
+
+### Skydio
+- **Skydio 2/2+** (2ATQRSDRC2V1): 802.11 at 2.4/5.2/5.8 GHz, 20/40 MHz, plus 5 and 10 MHz modes
+  ("Skydio Link") added by a 2020 FCC change. The controller module (2ATQRSMO5GV1) is 2×2.
+- **X10, SkydioLink Gen 3** (2ATQRSMODBV3): modified 802.11ax with HE20, HE10 (half clock) and
+  HE5 (quarter clock), 2.4 and 5.18–5.845 GHz, AES-256.
+- **X10D / X2D "Connect MH"**: 1625–2500 MHz in several bands, 4 MHz channels on X2D; vendor not
+  named (Doodle Labs is a guess). X2D is not Remote ID compliant.
+- **Remote ID:** sent as a standard Wi-Fi beacon (patent US 2023/0294848: the radio steps off
+  its link channel to beacon). 2/2+/X2E got it in June 2023; on by default on X10. Rotorscope
+  should already see it.
+- HE20 headers are readable by ESP32 promiscuous mode; HE10/HE5 aren't, but in raw I/Q the
+  short-training-field period scales 0.8 → 1.6 → 3.2 µs, a cheap autocorrelation test.
+
+### Digital FPV
+- **Open systems send ordinary 802.11 data frames** (frame control `08 01`, broadcast receiver):
+  - **wfb-ng / OpenIPC:**
+    - Source address `57:42:LL:LL:LL:PP` ("WB" + 3-byte link ID + stream number).
+    - Link ID = SHA-1(link_domain)[0..3]; the default "default" gives `75:05:d6` (checked).
+    - Streams 0–127 are drone→ground (video 0–15, MAVLink 16–31, tunnel 32–47); 128–255 are uplink.
+    - Payload encrypted (ChaCha20-Poly1305).
+    - Default channel 165 (5825 MHz), MCS1 with STBC + LDPC on video; OpenIPC often uses 161.
+  - **OpenHD:**
+    - addr2/addr3 = `[01 air | 02 ground][nonce…][port]`, first and last bytes equal.
+    - Default 5745 MHz, MCS2; default bind phrase "openhd".
+  - **RubyFPV:**
+    - addr2 = addr3 = `13:12:34:56:78:90`; addr1 broadcast with an odd port byte.
+    - Its header carries cleartext vehicle IDs while encryption is off; the README says
+      encryption is "temporarily disabled".
+  - **DroneBridge:** a cleartext 10-byte header after a data or RTS frame.
+- **DJI FPV / Vista channels:** 5660, 5695, 5735, 5770, 5805, 5878, 5914, 5839 MHz (FCC; CE only
+  CH3–5 and 8).
+  - O3: 5.725–5.850 GHz, 10/20/40 MHz.
+  - O4: also 5.17–5.25 GHz, with 60/40 MHz at 5794.5 and 10/20 MHz at 5768.5/5789.5/5814.5.
+  - LTE-derived baseband; video proprietary.
+  - Whether air units send DroneID is unknown: they have no GPS. Point the Phase 10 receiver at
+    one to settle it.
+- **Walksnail Avatar:**
+  - Artosyn AR9201/AR8211 with a Ceva LTE baseband (FPVWiki, secondary).
+  - 8 channels; the plan is inferred to match DJI's.
+  - 20 MHz, or 40 MHz in the 50 Mbps mode.
+  - No public PHY parameters.
+- **HDZero** (open VTX firmware, `hd-zero/hdzero-vtx` `src/common.h`, `dm6300.c`):
+  - R1–R8 at 5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917 MHz (37 MHz spacing).
+  - Also E1 5705, F1 5740, F2 5760, F4 5800, and a low band 5362–5621 MHz.
+  - 27 MHz "wide" by default, 17 MHz narrow mode.
+  - Modulation undocumented. No pairing; continuous outside pit mode.
+  - FCC 2A2O6HDZ3100.
+- **Shared chip families:**
+  - Leadcore-lineage LTE: DJI OcuSync 1/2 (LC1860C), Herelink (Pinecone S1), Autel (LC1881,
+    *unverified*).
+  - Artosyn: Walksnail, and others.
+  - One 15 kHz-spacing cyclic-prefix detector flags the whole LTE-style family.
+- **No open decoder exists** for Walksnail, HDZero, DJI FPV video, Autel or Skydio links.
+  Commercial detectors claim some (*unverified*).
+
+### Coverage gaps
+- C5 raw capture measured to 5800 MHz.
+  - Above that: wfb-ng channel 165, DJI/Walksnail CH6–8, HDZero R6–R8. Normal Wi-Fi mode on
+    channel 165 needs a bench check.
+  - The RX5808 covers the rest as signal strength.
+- 900 MHz (Autel) and 1.6–2.1 GHz (Skydio X10D) need other radios. The owner's Airspy R2 (to
+  1.8 GHz, 10 MS/s) can record Autel's 5/10 MHz modes at 900 MHz for study.
+
+### Datasets
+- **RFUAV:** Hugging Face `kitofrank/RFUAV`, 100 MS/s float32.
+  - Includes Autel EVO Nano, Herelink HX4, DJI FPV Combo, Avata 2 and Parrot.
+  - Code Apache-2.0; data licence unstated, so local validation only.
+- **CageDroneRF:** Autel X-Star and EVO II at 20 MS/s. Access by request form; CC BY-NC-SA.
+- **No Autel/Skydio/digital FPV:** DroneRFa, DroneDetect and DRFF-R2 are DJI- or Parrot-only.
+  Nothing anywhere for Walksnail, HDZero, OpenIPC or Skydio.
+
+### What would unblock the rest
+- **Recordings** (C5 40 MS/s continuous plus 20 MS/s snapshots; one SDR reference capture ≥ 30 MS/s):
+  - HDZero on R4 and F4, both widths, armed and pit mode.
+  - Walksnail CH3/CH4, 20/40 MHz, linked and unlinked.
+  - DJI O3/O4 at 10/20/40 MHz, plus O4 at 5.1 GHz.
+  - OpenIPC/wfb-ng with LDPC/STBC on and off.
+  - Autel and Skydio: powered/unpaired, idle, armed, hovering near and far, controller only.
+- **Hardware, rough used prices:**
+  - HDZero VTX $40–70; it transmits without pairing, so it's the cheapest first test.
+  - Walksnail 1S kit $70–100.
+  - OpenIPC camera + BL-M8812EU2 $70–120, plus an RTL8812AU dongle $30–40.
+  - DJI O3 Air Unit about $150 (needs goggles to link).
+  - Autel EVO Nano $300–450.
+  - Skydio 2+ $600–1000.
+  - X10: borrow from a public-safety user.
+- **FCC test reports** with occupied-bandwidth plots for EVO II V2/V3, Alpha, Nano and HDZero.
+  The HDZero PDF returned 403 to automated fetches.

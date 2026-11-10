@@ -3,12 +3,19 @@
 //!
 //! Empty field = unknown. Times are UTC ISO-8601 when the hub has GPS time,
 //! and always the hub's uptime in ms, so rows stay ordered without a fix.
+//!
+//! Open FPV links ([`link_row`]) share the file and the columns: their
+//! `track` is `L<n>` (a separate id space from drones), `transports` names
+//! the system, and the position columns are empty because a sighting has
+//! none. `uas_id` and `id_type` carry the link's identifier only when
+//! `Config::show_link_ids` is set.
 
 use core::fmt::Write;
 
 use crate::json::round_bearing;
+use crate::openlinks::{LinkTrack, shown_id};
 use crate::text::{Buf, CsvField, FormatError, IdText, IsoTime, render};
-use crate::{Context, Track};
+use crate::{Band, Context, Track};
 
 /// A buffer this size always holds one row (see the worst-case test).
 pub const MAX_ROW: usize = 512;
@@ -106,4 +113,66 @@ pub fn row(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, Format
         )
     })();
     w.finish()
+}
+
+/// Write one row for an open link (columns as [`HEADER`]; see the module
+/// docs for what each means here), `\n`-terminated.
+pub fn link_row(t: &LinkTrack, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let own = ctx.own;
+    let mut w = Buf::new(buf);
+    let _ = (|| -> core::fmt::Result {
+        if let Some(utc) = ctx.utc_ms {
+            write!(w, "{}", IsoTime(utc))?;
+        }
+        write!(
+            w,
+            ",{},L{},{},{},{},",
+            ctx.now_ms,
+            t.id.0,
+            Opt(own.map(|o| o.lat), 7),
+            Opt(own.map(|o| o.lon), 7),
+            Opt(own.and_then(|o| o.alt_m), 1),
+        )?;
+        // Identifier columns: empty unless the operator opted in.
+        if let Some(id) = shown_id(t, ctx) {
+            write!(w, "{id},{}", t.system.id_name().unwrap_or(""))?;
+        } else {
+            w.write_char(',')?;
+        }
+        // ua_type: none for a link. transports: the system, once per band
+        // heard, `5G` appended for 5 GHz (as the Wi-Fi Remote ID slots).
+        w.write_str(",,")?;
+        let name = system_name(t.system);
+        let mut first = true;
+        for band in [Band::Ghz24, Band::Ghz5] {
+            if t.streams.iter().any(|s| s.band() == band) {
+                if !first {
+                    w.write_char('|')?;
+                }
+                first = false;
+                w.write_str(name)?;
+                if band == Band::Ghz5 {
+                    w.write_str("5G")?;
+                }
+            }
+        }
+        // No drone position, speed or operator: seven empty fields.
+        w.write_str(",,,,,,,,")?;
+        if let Some(s) = t.latest() {
+            write!(w, "{}", s.rssi)?;
+        }
+        // No range or bearing either.
+        w.write_str(",,,,\n")
+    })();
+    w.finish()
+}
+
+/// The system's name as in JSON (`WfbNg`, `OpenHd`, `RubyFpv`, `DroneBridge`).
+fn system_name(s: openlink::System) -> &'static str {
+    match s {
+        openlink::System::WfbNg => "WfbNg",
+        openlink::System::OpenHd => "OpenHd",
+        openlink::System::RubyFpv => "RubyFpv",
+        openlink::System::DroneBridge => "DroneBridge",
+    }
 }

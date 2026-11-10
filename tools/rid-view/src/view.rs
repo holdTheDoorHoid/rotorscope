@@ -7,7 +7,8 @@ use std::fmt::Write;
 
 use rid::Transport;
 use rid::message::UaType;
-use tracker::{Context, Track, TrackId, TrackState, Tracker};
+use tracker::openlinks::shown_id;
+use tracker::{Context, LinkTrack, Track, TrackId, TrackState, Tracker};
 
 /// Cursor to top-left; the screen is then overwritten line by line.
 pub const HOME: &str = "\x1b[H";
@@ -28,6 +29,8 @@ pub struct NodeInfo {
     pub stats: Option<String>,
     pub ended: Option<String>,
     pub rid_lines: u64,
+    /// Open FPV link sightings from this input.
+    pub open_lines: u64,
     pub bad_lines: u64,
     /// For the phone page's node health (--http).
     pub role: Option<link::NodeRole>,
@@ -182,6 +185,9 @@ impl View {
                 let _ = write!(line, "  stats: {st}");
             }
             let _ = write!(line, "  rid lines: {}", info.rid_lines);
+            if info.open_lines > 0 {
+                let _ = write!(line, ", open links: {}", info.open_lines);
+            }
             if info.bad_lines > 0 {
                 let _ = write!(line, ", unparsed: {}", info.bad_lines);
             }
@@ -265,6 +271,7 @@ impl View {
                 fit(&self_id, 24),
             );
         }
+        self.render_links(&mut s, tr, ctx, eol);
         if !self.log.is_empty() {
             let _ = writeln!(s, "{eol}");
             for l in &self.log {
@@ -273,6 +280,104 @@ impl View {
         }
         s
     }
+}
+
+impl View {
+    /// The open FPV links, below the drones. Nothing at all when there are none.
+    fn render_links(&self, s: &mut String, tr: &Tracker, ctx: &Context, eol: &str) {
+        if tr.open_links().is_empty() {
+            return;
+        }
+        let ids = if ctx.config.show_link_ids {
+            "identifiers shown"
+        } else {
+            "identifiers hidden; --show-link-ids to show"
+        };
+        let _ = writeln!(s, "{eol}");
+        let _ = writeln!(s, "  OPEN FPV LINKS ({ids}){eol}");
+        let _ = writeln!(
+            s,
+            "  {:<15} {:<10} {:<5} {:<26} {:>4} {:>5} {:>8} {:>6}{eol}",
+            "SYSTEM", "ID", "DIR", "STREAMS", "CH", "RSSI", "PKTS", "AGE",
+        );
+        let mut links: Vec<&LinkTrack> = tr.open_links().iter().collect();
+        links.sort_by_key(|l| {
+            (
+                ctx.link_state(l) == TrackState::Stale,
+                std::cmp::Reverse(l.last_seen_ms),
+            )
+        });
+        for l in links {
+            let (pre, post) = if ctx.link_state(l) == TrackState::Stale {
+                (self.style(DIM), self.style(RESET))
+            } else {
+                ("", "")
+            };
+            let id = match (shown_id(l, ctx), l.system.id_name()) {
+                (Some(id), _) => id.to_string(),
+                (None, None) => "-".into(),
+                (None, Some(_)) if ctx.config.show_link_ids => "-".into(),
+                (None, Some(_)) => "hidden".into(),
+            };
+            let dir = match (
+                l.heard(openlink::Direction::AirToGround),
+                l.heard(openlink::Direction::GroundToAir),
+            ) {
+                (true, true) => "dn+up",
+                (true, false) => "down",
+                (false, true) => "up",
+                (false, false) => "?",
+            };
+            let latest = l.latest();
+            let _ = writeln!(
+                s,
+                "{pre}  {:<15} {:<10} {:<5} {:<26} {:>4} {:>5} {:>8} {:>6}{post}{eol}",
+                l.system.label(),
+                id,
+                dir,
+                fit(&streams(l), 26),
+                latest.map_or("-".into(), |x| x.channel.to_string()),
+                latest.map_or("-".into(), |x| x.rssi.to_string()),
+                l.packets(),
+                age(ctx.now_ms.saturating_sub(l.last_seen_ms)),
+            );
+        }
+    }
+}
+
+/// A link's streams in words: wfb-ng's video / mavlink / tunnel, otherwise
+/// the port numbers, each with an arrow for its direction (down to the
+/// ground, up to the aircraft).
+fn streams(l: &LinkTrack) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut ports: Vec<(u8, openlink::Direction)> =
+        l.streams.iter().map(|x| (x.port, x.direction)).collect();
+    ports.sort();
+    ports.dedup();
+    for (port, dir) in ports {
+        let probe = openlink::OpenLink {
+            system: l.system,
+            id: None,
+            port,
+            direction: dir,
+            tx: [0; 6],
+        };
+        let arrow = match dir {
+            openlink::Direction::AirToGround => "↓",
+            openlink::Direction::GroundToAir => "↑",
+            openlink::Direction::Unknown => "",
+        };
+        let name = match probe.wfb_stream() {
+            Some(openlink::WfbStream::Video) => format!("video{arrow}"),
+            Some(openlink::WfbStream::Mavlink) => format!("mavlink{arrow}"),
+            Some(openlink::WfbStream::Tunnel) => format!("tunnel{arrow}"),
+            None => format!("p{port}{arrow}"),
+        };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out.join(",")
 }
 
 #[cfg(test)]
@@ -289,5 +394,50 @@ mod tests {
         assert_eq!(age(400), "0.4s");
         assert_eq!(age(65_000), "65s");
         assert_eq!(fit("abcdef", 4), "abc…");
+    }
+
+    fn sighting(port: u8, id: Option<u32>) -> link::OpenLinkSighting {
+        link::OpenLinkSighting {
+            link: openlink::OpenLink {
+                system: openlink::System::WfbNg,
+                id,
+                port,
+                direction: if port < 128 {
+                    openlink::Direction::AirToGround
+                } else {
+                    openlink::Direction::GroundToAir
+                },
+                tx: [0x57, 0x42, 0x75, 0x05, 0xd6, port],
+            },
+            channel: 161,
+            rssi: -61,
+            uptime_us: 0,
+            packets: 50,
+        }
+    }
+
+    #[test]
+    fn links_section_hides_ids_unless_asked() {
+        for show in [false, true] {
+            let mut tr: Tracker = Tracker::new(tracker::Config {
+                show_link_ids: show,
+                ..tracker::Config::default()
+            });
+            for port in [0, 16, 144] {
+                tr.ingest_open_link(2, &sighting(port, Some(0x7505d6)), 1_000);
+            }
+            let ctx = tr.context(1_500, None);
+            let text = View::new(false).render(&tr, &ctx, "00:00:00Z");
+            assert!(text.contains("OPEN FPV LINKS"), "{text}");
+            assert!(text.contains("wfb-ng/OpenIPC"));
+            assert!(text.contains("video↓,mavlink↓,mavlink↑"), "{text}");
+            assert!(text.contains("dn+up"));
+            assert_eq!(text.contains("7505d6"), show, "{text}");
+            assert_eq!(text.contains("hidden"), !show);
+        }
+        // No links: no section.
+        let tr: Tracker = Tracker::default();
+        let text = View::new(false).render(&tr, &tr.context(0, None), "00:00:00Z");
+        assert!(!text.contains("OPEN FPV LINKS"));
     }
 }

@@ -7,8 +7,10 @@
 
 use serde::Serialize;
 
+use crate::openlinks::{LinkTrack, LinkTrackId, shown_id};
 use crate::text::{FormatError, Mac};
 use crate::{Band, Context, Track, TrackId, TrackState};
+use openlink::{Direction, System};
 use rid::Transport;
 use rid::message::{FixedStr, HeightType, IdType, OperatorLocationType, Status, UaType};
 
@@ -204,6 +206,119 @@ pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize,
     Ok(n + 1)
 }
 
+// ------------------------------------------------------------- open links --
+
+#[derive(Serialize)]
+struct LinkLine<'a> {
+    t: &'static str,
+    id: LinkTrackId,
+    state: TrackState,
+    sys: System,
+    label: &'static str,
+    /// Whether this unit shows identifiers (`Config::show_link_ids`). When
+    /// false, `link_id` and every `mac` are null whatever the link sent.
+    ids_shown: bool,
+    link_id: Option<heapless::String<10>>,
+    first_ms: u64,
+    last_ms: u64,
+    age_ms: u64,
+    rssi: Option<i8>,
+    ch: Option<u8>,
+    band: Option<Band>,
+    /// Heard in each direction.
+    down: bool,
+    up: bool,
+    pkts: u32,
+    streams: Streams<'a>,
+}
+
+#[derive(Serialize)]
+struct StreamEntry<'a> {
+    port: u8,
+    /// wfb-ng only: `"video"`, `"mavlink"` or `"tunnel"`, from the port.
+    kind: Option<&'static str>,
+    dir: Direction,
+    ch: u8,
+    band: Band,
+    rssi: i8,
+    n: u32,
+    mac: Option<Mac<'a>>,
+    age_ms: u64,
+    node: u8,
+}
+
+struct Streams<'a>(&'a LinkTrack, &'a Context);
+
+impl Serialize for Streams<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let (t, ctx) = (self.0, self.1);
+        let show = ctx.config.show_link_ids;
+        s.collect_seq(t.streams.iter().map(|x| StreamEntry {
+            port: x.port,
+            kind: stream_kind(t.system, x.port),
+            dir: x.direction,
+            ch: x.channel,
+            band: x.band(),
+            rssi: x.rssi,
+            n: x.packets,
+            mac: show.then_some(Mac(&x.mac)),
+            age_ms: ctx.now_ms.saturating_sub(x.last_seen_ms),
+            node: x.node,
+        }))
+    }
+}
+
+/// wfb-ng's stream class (spec 4.1) as a word, `None` for other systems.
+pub(crate) fn stream_kind(system: System, port: u8) -> Option<&'static str> {
+    let l = openlink::OpenLink {
+        system,
+        id: None,
+        port,
+        direction: Direction::Unknown,
+        tx: [0; 6],
+    };
+    l.wfb_stream().map(|k| match k {
+        openlink::WfbStream::Video => "video",
+        openlink::WfbStream::Mavlink => "mavlink",
+        openlink::WfbStream::Tunnel => "tunnel",
+    })
+}
+
+/// A buffer this size always holds one link line (worst case: six streams,
+/// identifiers shown, every number at its widest; see the test). The hub
+/// streams link lines through its `MAX_LINE` buffer, so this must not exceed it.
+pub const MAX_LINK_LINE: usize = 1344;
+const _: () = assert!(MAX_LINK_LINE <= MAX_LINE);
+
+/// Write one open link as a JSON object followed by `\n` (`"t":"link"`;
+/// schema in `crates/tracker/README.md`). Returns bytes written.
+pub fn link_line(t: &LinkTrack, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let latest = t.latest();
+    let line = LinkLine {
+        t: "link",
+        id: t.id,
+        state: ctx.link_state(t),
+        sys: t.system,
+        label: t.system.label(),
+        ids_shown: ctx.config.show_link_ids,
+        link_id: shown_id(t, ctx),
+        first_ms: t.first_seen_ms,
+        last_ms: t.last_seen_ms,
+        age_ms: ctx.now_ms.saturating_sub(t.last_seen_ms),
+        rssi: latest.map(|s| s.rssi),
+        ch: latest.map(|s| s.channel),
+        band: latest.map(|s| s.band()),
+        down: t.heard(Direction::AirToGround),
+        up: t.heard(Direction::GroundToAir),
+        pkts: t.packets(),
+        streams: Streams(t, ctx),
+    };
+    let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
+    let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
+    *nl = b'\n';
+    Ok(n + 1)
+}
+
 // ------------------------------------------------------------------ state --
 //
 // The phone page polls `GET /api/state` about once a second and gets one
@@ -312,30 +427,41 @@ struct StateHead<'a> {
 /// Schema version of the state object (`"v"`). Bump on incompatible change.
 pub const STATE_VERSION: u8 = 1;
 
-/// Bytes the state object needs before the tracks, with no nodes (worst case).
+/// Bytes the state object needs besides its nodes, open links and tracks
+/// (worst case, with the empty arrays' brackets).
 pub const STATE_HEAD_MAX: usize = 448;
 /// Bytes one node entry needs (worst case, with its comma).
 pub const STATE_NODE_MAX: usize = 160;
 
-/// A buffer this size always holds the state object for `tracks` tracks and
-/// `nodes` nodes. E.g. 64 tracks and 4 nodes: about 99 KB (put it in PSRAM).
-/// A typical object is far smaller (~1 KB per track); see `state` for what
-/// happens when it does not fit.
-pub const fn state_max_len(tracks: usize, nodes: usize) -> usize {
-    STATE_HEAD_MAX + nodes * STATE_NODE_MAX + tracks * MAX_LINE
+/// A buffer this size always holds the state object for `tracks` tracks,
+/// `links` open links and `nodes` nodes. E.g. 64 tracks, 8 links and 4
+/// nodes: about 124 KB (put it in PSRAM). A typical object is far smaller
+/// (~1 KB per track, ~0.4 KB per link); see `state` for what happens when it
+/// does not fit.
+pub const fn state_max_len(tracks: usize, links: usize, nodes: usize) -> usize {
+    STATE_HEAD_MAX + nodes * STATE_NODE_MAX + links * MAX_LINK_LINE + tracks * MAX_LINE
 }
+
+/// Between the open links and the tracks of the state object. A server that
+/// streams the object in pieces (the hub) writes exactly these bytes.
+pub const STATE_LINKS_TO_TRACKS: &[u8] = b"],\"tracks\":[";
+/// The end of the state object.
+pub const STATE_END: &[u8] = b"]}\n";
 
 /// Write the `/api/state` body: one JSON object followed by `\n`. Returns
 /// bytes written.
 ///
-/// `tracks` is normally `tracker.tracks()` and `ctx` is
-/// `tracker.context(now_ms, utc_ms)`, so the tracks agree with `own`.
-/// Every track is written exactly as [`track_line`] writes it.
+/// `tracks` is normally `tracker.tracks()`, `links` is
+/// `tracker.open_links()`, and `ctx` is `tracker.context(now_ms, utc_ms)`, so
+/// the tracks agree with `own`. Every track is written exactly as
+/// [`track_line`] writes it, every link as [`link_line`]; the links come
+/// first, as `"open_links":[...]`, then `"tracks":[...]`.
 ///
 /// Returns [`FormatError::BufferTooSmall`] (and nothing usable) if `buf` is
 /// too small; [`state_max_len`] gives a size that always fits.
 pub fn state(
     tracks: &[Track],
+    links: &[LinkTrack],
     ctx: &Context,
     hub: &HubStatus,
     buf: &mut [u8],
@@ -357,9 +483,18 @@ pub fn state(
         rec: hub.recording,
         nodes: hub.nodes,
     };
-    // `{...}` -> `{...,"tracks":[` : drop the closing brace and carry on.
+    // `{...}` -> `{...,"open_links":[` : drop the closing brace and carry on.
     let mut n = serde_json_core::to_slice(&head, buf).map_err(|_| FormatError::BufferTooSmall)? - 1;
-    put(buf, &mut n, b",\"tracks\":[")?;
+    put(buf, &mut n, b",\"open_links\":[")?;
+    for (i, l) in links.iter().enumerate() {
+        if i > 0 {
+            put(buf, &mut n, b",")?;
+        }
+        let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
+        // `link_line` ends with '\n'; drop it inside the array.
+        n += link_line(l, ctx, rest)? - 1;
+    }
+    put(buf, &mut n, STATE_LINKS_TO_TRACKS)?;
     for (i, t) in tracks.iter().enumerate() {
         if i > 0 {
             put(buf, &mut n, b",")?;
@@ -368,7 +503,7 @@ pub fn state(
         // `track_line` ends with '\n'; drop it inside the array.
         n += track_line(t, ctx, rest)? - 1;
     }
-    put(buf, &mut n, b"]}\n")?;
+    put(buf, &mut n, STATE_END)?;
     Ok(n)
 }
 

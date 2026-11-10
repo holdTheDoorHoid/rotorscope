@@ -5,7 +5,7 @@ resolver = "2"
 members = [
     "crates/rid", "crates/link", "crates/tracker", "crates/odid-ref",
     "crates/gnss", "crates/screen", "crates/webui",
-    "crates/droneid",
+    "crates/droneid", "crates/openlink",
     "tools/rid-view", "tools/droneid-file",
 ]
 
@@ -19,6 +19,7 @@ repository = "https://github.com/holdTheDoorHoid/rotorscope"
 rid = { path = "crates/rid" }
 link = { path = "crates/link" }
 tracker = { path = "crates/tracker" }
+openlink = { path = "crates/openlink" }
 serde = { version = "1", default-features = false, features = ["derive"] }
 heapless = { version = "0.8", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["heapless"] }

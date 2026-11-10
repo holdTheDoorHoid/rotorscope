@@ -6,6 +6,8 @@ It works **without PSRAM** (the board on the bench has none, and 4 MB flash).
 The hub does these things:
 - It reads up to three radio nodes over UART.
 - It merges their Remote ID detections into tracks (`crates/tracker`).
+- It lists open digital FPV / telemetry links the Wi-Fi nodes recognise (wfb-ng/OpenIPC, OpenHD,
+  RubyFPV, DroneBridge), separately from drones, with their identifiers hidden by default.
 - It runs a Wi-Fi hotspot with a phone page, and sends TAK CoT multicast.
 - It streams JSON lines on USB.
 - It can also join an existing network as a fixed sensor.
@@ -42,8 +44,8 @@ Flash and watch through the shared lock. Never call espflash directly:
 tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 60
 ```
 
-Other features: `ili9341` (an ILI9341 panel instead of the default ST7789) and `gps-uart` (GPS on
-UART2 instead of I2C; costs node link 2). A rebuild with nothing changed takes well under a second:
+Other features: `ili9341` (an ILI9341 panel instead of the default ST7789), `gps-uart` (GPS on
+UART2 instead of I2C; costs node link 2), and `show-link-ids` (below). A rebuild with nothing changed takes well under a second:
 `build.rs` no longer watches a file that does not exist (see "Station mode").
 
 ## Pins (placeholders until the PCB exists)
@@ -129,6 +131,21 @@ screen's status bar and Health page show them.
 | `sd.rows`, `dropped` | | Rows queued for the card, and rows dropped because the card fell behind |
 | `batt` | `src`: `usb` / `battery`, `pct`, `mv` | **Uncalibrated placeholder.** Below 2.5 V or above 4.3 V at the cell the hub assumes it is on USB with no cell |
 | `screen` | `frames`, `render_us`, `flush_us`, `feed_us`, `core1_stack_free` | Frames drawn; the last frame's drawing time (all bands) and SPI time; time to build the view on core 0; untouched bytes of the second core's stack |
+
+## Open FPV links and `show-link-ids`
+
+Node A/C report open FPV / telemetry links as `link::Frame::OpenLink` sightings (one per stream per
+second at most). The hub keeps them in the tracker's separate link table (8 links, see
+`crates/tracker/README.md`), lists them in `/api/state` (`open_links`) and on the phone page's List,
+sends a `{"t":"link",...}` USB line for each every second, and logs active ones to the SD card as
+`L<n>` rows. They have no position: no CoT, no radar dot, no buzzer.
+
+**Identifiers are hidden unless the firmware is built with `--features show-link-ids`.** That covers
+the wfb-ng link ID, RubyFPV vehicle ID and DroneBridge comm ID, and those links' transmitter
+addresses (wfb-ng's embeds the link ID), on every output. This is a project decision: seeing *that* a
+wfb-ng link is nearby is for anyone holding the unit; *whose* it is takes the builder's opt-in. There
+is no runtime settings store yet, so it is a build-time switch (`hub::SHOW_LINK_IDS`); the boot line
+reports `"show_link_ids"`. Video and MAVLink content is never decoded.
 
 ## Hotspot
 
@@ -263,12 +280,16 @@ start with `{` (bootloader text, panics).
 | `boot` | Once: firmware, features, pins, `track_bytes` (static RAM of the track table) |
 | `hotspot` | At boot, and on `h`: SSID, channel, security, password |
 | `track` | Every second, one per track (`tracker::json::track_line`) |
+| `link` | Every second, one per open FPV link (`tracker::json::link_line`) |
 | `hub` | Every second: tracks, own position, per-link counters, heap, CoT/HTTP counts, timings (below), and `gps`, `sd`, `screen`, `batt`, `buzz` ("What each status means") |
 | `gps`, `sd` | GPS found or lost, configured; SD card found, recording, lost |
 | `new` | A drone seen for the first time (the buzzer's twin) |
 | `state_check` | Streamed `/api/state` vs `json::state` |
 | `sta` | Station up, down or failed |
 | `warn`, `err`, `cmd`, `help`, `demo` | Messages |
+
+The `hub` line also counts open FPV links: `open_links` (in the table) and `open_active` (heard in the
+last minute). The boot line has `max_open_links` and `show_link_ids`.
 
 The `hub` line includes timing and memory fields:
 - `heap_free` and `heap_min_free`;
@@ -328,6 +349,9 @@ Commands are one character, with no Enter:
     and SD): the band buffer (15 KB), core 1's stack (12 KB, ~3.6 KB used) and the screen
     view-model (7 KB) live on the heap;
   - static `.bss` + `.data` is 267 KB, leaving **~31 KB** for core 0's stack (was ~48 KB).
+  - The open-FPV-link table (2026-11-09) costs ~2.2 KB of that: the linker now leaves **29.1 KB**
+    for core 0's stack (31.3 KB before). The C5 hub, whose stack was within 1.2 KB of the linker's
+    8 KB floor, gives 4 KB of its extra heap to make room (`EXTRA_HEAP` in `main.rs`).
 
 ## Untested without hardware
 

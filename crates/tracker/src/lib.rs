@@ -19,6 +19,13 @@
 //! adverts (another MAC, which may rotate) and its NAN frames end up as one
 //! track: the UAS ID is the only thing they share.
 //!
+//! # Open FPV links
+//! Separately from drones, the tracker keeps a small table of open digital
+//! FPV / telemetry links (wfb-ng, OpenHD, RubyFPV, DroneBridge) that the
+//! Wi-Fi nodes recognise with the `openlink` crate: [`Tracker::ingest_open_link`],
+//! [`Tracker::open_links`], module [`openlinks`]. Their identifiers stay out of
+//! every output unless [`Config::show_link_ids`] is set.
+//!
 //! # Time
 //! All `*_ms` times are hub monotonic milliseconds (uptime), supplied by the
 //! caller. Wall-clock UTC is only needed by the CoT and CSV formatters and is
@@ -29,6 +36,7 @@ pub mod cot;
 pub mod csv;
 pub mod geo;
 pub mod json;
+pub mod openlinks;
 mod text;
 
 use heapless::Vec;
@@ -38,6 +46,7 @@ use rid::message::{
 };
 
 pub use geo::RangeBearing;
+pub use openlinks::{LinkTrack, LinkTrackId};
 pub use text::FormatError;
 
 /// Basic IDs kept per track: F3411 allows a UA to send up to two (one per
@@ -204,6 +213,14 @@ pub struct Config {
     pub announce_grace_ms: u64,
     /// Own GPS fix older than this is treated as "position unknown" (P4).
     pub own_fix_max_age_ms: u64,
+    /// Show open-link identifiers (wfb-ng link ID, RubyFPV vehicle ID,
+    /// DroneBridge comm ID) and those links' transmitter addresses in every
+    /// output. **Off by default** (project policy): recognising that a wfb-ng
+    /// or OpenHD link is on the air is fine to show anyone; the identifiers
+    /// single out a person's equipment, so they appear only when whoever runs
+    /// the unit opts in. Drone Remote ID is unaffected (it is broadcast to be
+    /// read).
+    pub show_link_ids: bool,
 }
 
 impl Default for Config {
@@ -213,6 +230,7 @@ impl Default for Config {
             remove_after_ms: 600_000,
             announce_grace_ms: 1_000,
             own_fix_max_age_ms: 10_000,
+            show_link_ids: false,
         }
     }
 }
@@ -592,6 +610,11 @@ impl Context {
         }
     }
 
+    /// Active or stale, for an open link (same thresholds as drones).
+    pub fn link_state(&self, t: &LinkTrack) -> TrackState {
+        openlinks::link_state(t, self.now_ms, &self.config)
+    }
+
     pub fn geometry(&self, t: &Track) -> Geometry {
         Geometry::of(t, self.own.as_ref())
     }
@@ -624,6 +647,8 @@ impl Ingested {
 /// The track table. `N` is the capacity (PLAN.md D7: 32 required, 64 goal).
 pub struct Tracker<const N: usize = 64> {
     tracks: Vec<Track, N>,
+    /// Open FPV links, a separate table with its own ids.
+    links: openlinks::LinkTable,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -639,6 +664,7 @@ impl<const N: usize> Tracker<N> {
     pub const fn new(config: Config) -> Self {
         Self {
             tracks: Vec::new(),
+            links: openlinks::LinkTable::new(),
             next_id: 1,
             own: None,
             config,
@@ -885,9 +911,37 @@ impl<const N: usize> Tracker<N> {
         }
     }
 
-    /// Drop tracks not heard for [`Config::remove_after_ms`]. Called by
-    /// `ingest` too; call it periodically so an idle table still empties.
+    /// Feed one open-link sighting from `node` (see [`openlinks`]). Kept
+    /// apart from drones: it never creates, merges or alerts on a drone track.
+    pub fn ingest_open_link(
+        &mut self,
+        node: u8,
+        sighting: &link::OpenLinkSighting,
+        now_ms: u64,
+    ) -> LinkTrackId {
+        self.links.ingest(node, sighting, now_ms, &self.config)
+    }
+
+    /// Open links, in table order (the order `json::state` lists them).
+    pub fn open_links(&self) -> &[LinkTrack] {
+        self.links.tracks()
+    }
+
+    pub fn get_open_link(&self, id: LinkTrackId) -> Option<&LinkTrack> {
+        self.links.get(id)
+    }
+
+    /// Open links heard within [`Config::stale_after_ms`].
+    pub fn active_link_count(&self, now_ms: u64) -> usize {
+        self.links.active_count(now_ms, &self.config)
+    }
+
+    /// Drop drone tracks and open links not heard for
+    /// [`Config::remove_after_ms`]. Called by `ingest` too; call it
+    /// periodically so an idle table still empties. Returns the number of
+    /// *drone* tracks removed.
     pub fn expire(&mut self, now_ms: u64) -> usize {
+        self.links.expire(now_ms, &self.config);
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         self.tracks
@@ -911,3 +965,5 @@ impl<const N: usize> Tracker<N> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_openlinks;

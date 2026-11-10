@@ -332,6 +332,51 @@ ground.
 real OcuSync drone with props off and motors armed, or a field visit. A used Mini 2 (plaintext
 OcuSync 2) is the cheapest reference.
 
+### Phase 11: Other drone links (Autel, Skydio, digital FPV)
+Decided 2026-11-09 (see RESEARCH.md "Autel, Skydio and digital FPV").
+
+**What each system allows:**
+
+| System | Best we can do | How |
+|---|---|---|
+| wfb-ng / OpenIPC, OpenHD, RubyFPV (open digital FPV) | **Identify system and link** | Their injected Wi-Fi frames carry a fixed cleartext address pattern; Node A/C promiscuous mode |
+| Skydio 2/2+/X10 at 20 MHz | Remote ID + Wi-Fi headers | Standard Remote ID beacon (already decoded); 802.11 headers visible, payload encrypted |
+| Skydio 5/10 MHz and X10 HE10/HE5 modes | Fingerprint | Raw-capture C5: Wi-Fi preamble timing scaled ×2/×4 |
+| DJI FPV, O3, O4 air units | Fingerprint, plus DroneID if they send it | Raw-capture C5: LTE-style symbol timing, width, channel plan |
+| Walksnail Avatar | Fingerprint | Same as DJI (Artosyn LTE-style chip); telling the two apart needs recordings |
+| HDZero | Fingerprint | Fixed 37 MHz channel grid, 27 or 17 MHz wide, continuous |
+| Autel SkyLink 2.4/5.x GHz | Fingerprint | TD-LTE based: 1.1/4.5/9/18 MHz wide on a 1 MHz raster |
+| Autel 900 MHz, Skydio X10D 1.6–2.1 GHz | Not reachable | No ESP32 covers it; LR1121 wideband energy at best |
+| Video or telemetry content of any of them | Out of scope | Encrypted or proprietary, and legally off-limits |
+
+1. **11a. Open digital FPV over Wi-Fi.** **BUILT 2026-11-09**, untested on radios: `crates/openlink`,
+   link protocol v2 `Frame::OpenLink`, Node A/C data-frame path, tracker/phone/CSV/rid-view output.
+   IDs hidden unless the hub is built with `show-link-ids` (rid-view: `--show-link-ids`). A classifier for wfb-ng/OpenIPC,
+   OpenHD, RubyFPV (and DroneBridge if safely matchable), a new link frame, and tracker, phone
+   page and log output.
+   - Recognising the system is on by default.
+   - Link IDs and vehicle IDs are identifiers, shown only when opted in.
+   - Bench checks needed: does ESP32 promiscuous mode deliver LDPC/STBC-coded frames
+     (wfb-ng's default video profile), and does the C5 receive channel 165?
+2. **11b. One fingerprint classifier on the raw-capture C5** (after 10b, sharing its capture
+   layer). It measures, from a capture:
+   - the cyclic-prefix autocorrelation lag (64 samples at 20 MS/s = Wi-Fi; about 1333 =
+     LTE-style DJI/Autel/Walksnail/Herelink; ×2/×4 Wi-Fi = Skydio narrow modes);
+   - occupied width;
+   - duty cycle (Wi-Fi is bursty, video links near-continuous);
+   - whether the centre matches a known channel plan.
+
+   It reports a family ("LTE-style video link", "HDZero", "narrow Wi-Fi"), not a brand, until
+   recordings let us separate brands. The DJI DroneID check (Phase 10) is what confirms "DJI".
+   Build it on the host first against public recordings (RFUAV), then tune on our own.
+3. **11c. Channels above 5800 MHz** (HDZero R6–R8, DJI/Walksnail CH6–8) are outside the C5's
+   measured raw-capture range. The Phase 7 RX5808 covers them as signal strength on known
+   centres.
+
+**Blocked on recordings.** No public dataset has Walksnail, HDZero, OpenIPC or Skydio. See
+RESEARCH.md for the recording list and the hardware that unblocks it (about $250 for HDZero +
+Walksnail + OpenIPC).
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.

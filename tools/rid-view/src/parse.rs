@@ -8,6 +8,11 @@
 //! string or `{"error":..,"raw":"hex"}`. Unknown fields and line types are
 //! ignored so firmware can add to the format freely.
 //!
+//! The Wi-Fi node also reports open FPV / telemetry links it recognises:
+//! `{"t":"open","sys":"WfbNg","id":7669206,"port":0,"dir":"AirToGround",
+//! "ch":161,"rssi":-60,"mac":"57:42:..","up_us":..,"n":1234}` (`id` null when
+//! the system sends none; `n` the node's running frame count for that stream).
+//!
 //! The `rid` types serialize but do not deserialize, so this module rebuilds
 //! `Message`s from JSON itself. Enum names are not duplicated here: each is
 //! matched by serializing every code with `rid` and comparing, so a name the
@@ -25,6 +30,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Line {
     Rid(RidLine),
+    /// An open FPV link sighting, already in the hub's wire form.
+    Open(link::OpenLinkSighting),
     Hello(Value),
     Stats(Value),
     /// Any other `t` (log, err, boot, cmd...): ignored by the table.
@@ -53,6 +60,7 @@ pub fn line(text: &str) -> Line {
     };
     match v.get("t").and_then(Value::as_str) {
         Some("rid") => rid_line(&v).map_or(Line::Bad, Line::Rid),
+        Some("open") => open_line(&v).map_or(Line::Bad, Line::Open),
         Some("hello") => Line::Hello(v),
         Some("stats") => Line::Stats(v),
         _ => Line::Other,
@@ -94,6 +102,41 @@ fn rid_line(v: &Value) -> Option<RidLine> {
         }
     }
     Some(out)
+}
+
+/// A node's `"t":"open"` line. `sys` and `port` are required; the enum
+/// names are `openlink`'s own serde names, so they cannot drift.
+fn open_line(v: &Value) -> Option<link::OpenLinkSighting> {
+    let system = serde_json::from_value(v.get("sys")?.clone()).ok()?;
+    let direction = match v.get("dir") {
+        Some(d) => serde_json::from_value(d.clone()).ok()?,
+        None => openlink::Direction::Unknown,
+    };
+    let clamp = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_u64)
+            .map(|x| x.min(u64::from(u32::MAX)) as u32)
+    };
+    Some(link::OpenLinkSighting {
+        link: openlink::OpenLink {
+            system,
+            id: v
+                .get("id")
+                .and_then(Value::as_u64)
+                .and_then(|x| u32::try_from(x).ok()),
+            port: u8::try_from(v.get("port")?.as_u64()?).ok()?,
+            direction,
+            tx: v
+                .get("mac")
+                .and_then(Value::as_str)
+                .and_then(mac)
+                .unwrap_or([0; 6]),
+        },
+        channel: num(v.get("ch")).unwrap_or(0.0) as u8,
+        rssi: num(v.get("rssi")).unwrap_or(0.0) as i8,
+        uptime_us: v.get("up_us").and_then(Value::as_u64).unwrap_or(0),
+        packets: clamp("n").unwrap_or(0),
+    })
 }
 
 impl RidLine {
@@ -420,6 +463,42 @@ mod tests {
             panic!()
         };
         assert_eq!(b.uas_id.as_bytes(), &[0x01, 0xca, 0xfe, 0x00, 0x42]);
+    }
+
+    #[test]
+    fn open_link_lines() {
+        let v = serde_json::json!({
+            "t":"open","sys":"WfbNg","id":0x7505d6,"port":144,"dir":"GroundToAir",
+            "ch":161,"rssi":-63,"mac":"57:42:75:05:d6:90","up_us":5_000_000u64,"n":77,"new":1,
+        });
+        let Line::Open(o) = line_of(&v) else { panic!() };
+        assert_eq!(
+            o,
+            link::OpenLinkSighting {
+                link: openlink::OpenLink {
+                    system: openlink::System::WfbNg,
+                    id: Some(0x7505d6),
+                    port: 144,
+                    direction: openlink::Direction::GroundToAir,
+                    tx: [0x57, 0x42, 0x75, 0x05, 0xd6, 0x90],
+                },
+                channel: 161,
+                rssi: -63,
+                uptime_us: 5_000_000,
+                packets: 77,
+            }
+        );
+        // No ID, no direction: still a sighting.
+        let Line::Open(o) = line(r#"{"t":"open","sys":"OpenHd","id":null,"port":4}"#) else {
+            panic!()
+        };
+        assert_eq!(
+            (o.link.id, o.link.direction),
+            (None, openlink::Direction::Unknown)
+        );
+        // Unknown system or a missing port is not.
+        assert_eq!(line(r#"{"t":"open","sys":"Nope","port":1}"#), Line::Bad);
+        assert_eq!(line(r#"{"t":"open","sys":"WfbNg"}"#), Line::Bad);
     }
 
     #[test]

@@ -657,7 +657,30 @@ function renderList() {
       `<span>heard ${ago(t.age_ms)}</span>${t.rssi != null ? `<span>${t.rssi} dBm</span>` : ''}</div>` +
       `</button>`);
   }
+  o.push(...linkCards());
   setHTML('v-list', o.join(''));
+}
+
+/* Open FPV links (wfb-ng, OpenHD, RubyFPV, DroneBridge): no position, so
+   only listed. link_id is null unless the hub shows identifiers. */
+function linkCards() {
+  const all = (st && st.open_links) || [];
+  if (!all.length) return [];
+  const o = ['<h2>Open FPV links</h2>'];
+  for (const l of all) {
+    const stale = l.state === 'stale';
+    const dir = l.down && l.up ? 'both ways' : l.down ? 'air to ground' : l.up ? 'ground to air' : '';
+    const kinds = [...new Set((l.streams || []).map(s => s.kind || 'port ' + s.port))].join(', ');
+    o.push(`<div class="trk${stale ? ' stale' : ''}">` +
+      `<div class="r1"><span class="id">${esc(l.label)}</span>${stale ? '<span class="tag">STALE</span>' : ''}</div>` +
+      `<div class="r2"><span>${esc(dir)}</span><span>${esc(kinds)}</span></div>` +
+      `<div class="r3"><span>ch ${l.ch ?? '?'}</span><span>heard ${ago(l.age_ms)}</span>` +
+      (l.rssi != null ? `<span>${l.rssi} dBm</span>` : '') +
+      (l.link_id != null ? `<span class="mono">ID ${esc(l.link_id)}</span>` : '') + `</div></div>`);
+  }
+  o.push('<div class="mut" style="font-size:14px">A digital video or telemetry link is on the air nearby; its position is unknown.' +
+    (all.some(l => !l.ids_shown) ? ' Identifiers are hidden by the hub.' : '') + '</div>');
+  return o;
 }
 
 /* ----- detail ----- */

@@ -2,9 +2,10 @@
 //!
 //! Each second: refresh own position (GPS, else the manual position,
 //! re-applied so the tracker's 10 s fix timeout never drops it), expire
-//! tracks, hand out new-drone alerts, queue one CSV row per active drone for
-//! the SD card, then send one `{"t":"track",...}` line per track and one
-//! `{"t":"hub",...}` status line on USB. The screen redraws on its own
+//! tracks, hand out new-drone alerts, queue one CSV row per active drone and
+//! open FPV link for the SD card, then send one `{"t":"track",...}` line per
+//! track, one `{"t":"link",...}` line per open link and one `{"t":"hub",...}`
+//! status line on USB. The screen redraws on its own
 //! (`screen::feeder`), not from here.
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -12,7 +13,8 @@ use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::rtc_cntl::{Rtc, RwdtStage};
 use serde::Serialize;
-use tracker::TrackId;
+use tracker::openlinks::MAX_LINK_TRACKS;
+use tracker::{LinkTrackId, TrackId};
 use tracker::json::{self, MAX_LINE};
 
 use crate::api::OwnJson;
@@ -60,6 +62,9 @@ struct HubLine {
     utc_src: Option<&'static str>,
     tracks: usize,
     active: usize,
+    /// Open FPV links in the table, and how many were heard recently.
+    open_links: usize,
+    open_active: usize,
     own: Option<OwnJson>,
     links: heapless::Vec<LinkLine, NODE_LINKS>,
     heap_used: usize,
@@ -134,6 +139,22 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             // stretch with the network stack and HTTP waiting.
             embassy_futures::yield_now().await;
         }
+        // Open FPV links, the same way (no floats in these; cheap).
+        let links: heapless::Vec<LinkTrackId, MAX_LINK_TRACKS> =
+            hub.tracker.borrow().open_links().iter().map(|l| l.id).collect();
+        for id in links {
+            let n = {
+                let tracker = hub.tracker.borrow();
+                let Some(l) = tracker.get_open_link(id) else { continue };
+                json::link_line(l, &ctx, &mut line)
+            };
+            if let Ok(n) = n
+                && !usb::emit_patiently(&line[..n], Duration::from_millis(50)).await
+            {
+                break;
+            }
+            embassy_futures::yield_now().await;
+        }
 
         let heap_free = esp_alloc::HEAP.free();
         heap_min_free = heap_min_free.min(heap_free);
@@ -145,6 +166,8 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             utc_src: clock::source(now),
             tracks: hub.tracker.borrow().len(),
             active: hub.tracker.borrow().active_count(now),
+            open_links: hub.tracker.borrow().open_links().len(),
+            open_active: hub.tracker.borrow().active_link_count(now),
             own: hub.own_pos(now).map(|p| OwnJson::of(&p, now)),
             links: (0..NODE_LINKS)
                 .map(|i| {

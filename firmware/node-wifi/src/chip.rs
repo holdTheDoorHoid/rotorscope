@@ -126,6 +126,13 @@ mod imp {
 
 pub use imp::*;
 
+/// Also receive data frames and report open FPV / telemetry links (wfb-ng,
+/// OpenHD, RubyFPV, DroneBridge; `crates/openlink`). Costs one short callback
+/// per data frame on the channel; Remote ID's queue is never used for them.
+/// Turn off if the `drop` counter shows Remote ID losing frames on a busy
+/// channel.
+pub const OPEN_LINKS: bool = true;
+
 /// Hub UART speed. 921600 leaves ample headroom: a full 9-message Detection is
 /// ~250 bytes, under 3 ms on the wire.
 pub const HUB_BAUD: u32 = 921_600;
@@ -155,10 +162,19 @@ pub fn configure_radio(ctl: &mut WifiController<'_>) -> Result<(), &'static str>
     #[cfg(not(feature = "esp32c5"))]
     let _ = ctl;
 
-    // Management frames only: data frames are most of the air time and would
-    // otherwise cost a callback each. The callback re-checks frame control
-    // anyway, because the C5's mask has been reported to leak other types.
-    let filter = sys::wifi_promiscuous_filter_t { filter_mask: sys::WIFI_PROMIS_FILTER_MASK_MGMT };
+    // Management frames for Remote ID, plus data frames when looking for
+    // open FPV links (`OPEN_LINKS`). Data frames are most of the air time and
+    // cost a callback each, so the callback rejects them on their first byte
+    // or two and never queues one (see `rx::on_frame`). Control frames stay
+    // off: an RTS-mode wfb-ng or DroneBridge link is not captured. The
+    // callback re-checks the type anyway, because the C5's mask has been
+    // reported to leak other types.
+    let mask = if OPEN_LINKS {
+        sys::WIFI_PROMIS_FILTER_MASK_MGMT | sys::WIFI_PROMIS_FILTER_MASK_DATA
+    } else {
+        sys::WIFI_PROMIS_FILTER_MASK_MGMT
+    };
+    let filter = sys::wifi_promiscuous_filter_t { filter_mask: mask };
     // SAFETY: plain struct passed by pointer; Wi-Fi is initialised.
     if unsafe { sys::esp_wifi_set_promiscuous_filter(&filter) } != 0 {
         return Err("esp_wifi_set_promiscuous_filter");

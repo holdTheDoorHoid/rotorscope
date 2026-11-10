@@ -25,6 +25,12 @@ pub enum Event {
         det: Box<link::Detection>,
         at_ms: u64,
     },
+    /// From the demo: an open FPV link sighting, as a node sends the hub.
+    OpenLink {
+        node: u8,
+        sighting: link::OpenLinkSighting,
+        at_ms: u64,
+    },
     /// The source ended (EOF or error).
     End {
         node: u8,

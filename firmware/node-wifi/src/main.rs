@@ -4,7 +4,10 @@
 //! Shape: the driver's promiscuous callback copies management frames into a
 //! queue (`rx`); `drain` pulls them out and runs the `rid` crate; `report`
 //! prints JSON lines on USB and sends `link` frames to the hub; `main` ends up
-//! as the channel hopper. Receive-only: nothing here transmits on the air.
+//! as the channel hopper. Data frames are classified in the callback by the
+//! `openlink` crate (open FPV / telemetry links) and only counted there;
+//! `open_links` reports each stream at most once a second. Receive-only:
+//! nothing here transmits on the air.
 #![no_std]
 #![no_main]
 #![deny(
@@ -83,6 +86,9 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(drain().expect("spawn drain"));
     spawner.spawn(stats().expect("spawn stats"));
+    if chip::OPEN_LINKS {
+        spawner.spawn(open_links().expect("spawn open_links"));
+    }
 
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
     hop_forever(&mut wifi).await
@@ -199,6 +205,36 @@ async fn drain() {
     }
 }
 
+/// Shortest gap between two reports of one open-link stream. A video
+/// downlink is hundreds of frames a second; one line a second, carrying the
+/// running count, says everything the hub shows.
+const OPEN_REPORT_GAP_US: u64 = 1_000_000;
+
+/// Report open-link streams that have new frames, each at most once per
+/// `OPEN_REPORT_GAP_US`. Checked four times a second, so a new link is
+/// reported within 250 ms of its first frame.
+#[embassy_executor::task]
+async fn open_links() {
+    let mut ticker = Ticker::every(Duration::from_millis(250));
+    loop {
+        ticker.next().await;
+        let now = Instant::now().as_micros();
+        // Copy out under the lock (the callback writes the table); format
+        // and send after releasing it.
+        let mut due: heapless::Vec<openlink::Sighting, { rx::OPEN_STREAMS }> = heapless::Vec::new();
+        critical_section::with(|cs| {
+            rx::SIGHTINGS.borrow_ref_mut(cs).take_due(now, OPEN_REPORT_GAP_US, |s| {
+                // Cannot overflow: the table holds OPEN_STREAMS entries.
+                let _ = due.push(*s);
+            })
+        });
+        for s in &due {
+            report::open_json(s);
+            report::open_hub(s);
+        }
+    }
+}
+
 /// Stats every second on both outputs; the hub also gets Hello every 5 s so a
 /// hub that restarts learns who is attached.
 #[embassy_executor::task]
@@ -217,6 +253,9 @@ async fn stats() {
             ch: rx::TUNED_CHANNEL.load(Relaxed),
             seen,
             fps: seen.wrapping_sub(last_seen),
+            data: rx::DATA_SEEN.load(Relaxed),
+            open: rx::OPEN_SEEN.load(Relaxed),
+            open_ev: critical_section::with(|cs| rx::SIGHTINGS.borrow_ref(cs).evicted),
             rid: RID_FOUND.load(Relaxed),
             drop: rx::DROPPED.load(Relaxed),
             qmax: rx::HIGH_WATER.swap(0, Relaxed),

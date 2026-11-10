@@ -54,10 +54,18 @@ ili9341 = []
 # Read the GPS over a UART instead of I2C. Costs node link 2 (the S3 has only
 # three UARTs): the GPS takes UART2 on the GPS pins (see pins.rs).
 gps-uart = []
+# Show open FPV links' identifiers (wfb-ng link ID, RubyFPV vehicle ID,
+# DroneBridge comm ID) and those links' transmitter addresses on every output
+# (phone page, USB, SD log). Off by default, by project policy: recognising
+# that an FPV link is on the air is shown to anyone, but the identifiers
+# single out someone's equipment, so whoever builds the unit must opt in.
+show-link-ids = []
 
 [dependencies]
 rid     = { path = "../../crates/rid", features = ["serde"] }
 link    = { path = "../../crates/link" }
+# Open FPV link types (the demo builds sightings with them).
+openlink = { path = "../../crates/openlink", features = ["serde"] }
 tracker = { path = "../../crates/tracker" }
 # The phone page, gzipped at build time (web/index.html).
 webui   = { path = "../../crates/webui" }

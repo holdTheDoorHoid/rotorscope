@@ -22,6 +22,11 @@ for t in tracker.tracks() {
     cot::operator_event(t, &ctx, &mut buf)?;
     csv::row(t, &ctx, &mut buf)?;           // SD log; csv::HEADER first
 }
+tracker.ingest_open_link(node, &sighting, now_ms);           // link::OpenLinkSighting
+for l in tracker.open_links() {
+    json::link_line(l, &ctx, &mut buf)?;    // {"t":"link",...}
+    csv::link_row(l, &ctx, &mut buf)?;      // same CSV columns, track "L<n>"
+}
 ```
 
 `now_ms` is hub uptime in milliseconds throughout. UTC is only needed for CoT
@@ -97,6 +102,60 @@ Schema impact, all backward-compatible (`"v"` stays 1):
 MAC matching ignores the band: a Wi-Fi MAC is one namespace whichever band it
 was heard on.
 
+## Open FPV links (added 2026-11-09)
+
+Wi-Fi nodes also recognise open-source digital FPV / telemetry links that
+inject ordinary 802.11 frames: wfb-ng (and OpenIPC), OpenHD, RubyFPV and
+DroneBridge for Linux (`crates/openlink` has the byte rules and the
+false-positive reasoning). A node sends a `link::OpenLinkSighting` per stream
+at most about once a second; `Tracker::ingest_open_link` keeps them in a
+separate table of `openlinks::MAX_LINK_TRACKS` (8) entries with their own ids
+(`LinkTrackId`). They never create, merge with or alert on a drone track.
+
+- **Key.** System plus the cleartext identifier: wfb-ng's link ID, RubyFPV's
+  vehicle ID, DroneBridge's comm ID. A link's streams (wfb-ng's video down,
+  MAVLink up and down, tunnel) are one entry, each stream kept separately
+  (`MAX_STREAMS` = 6, per port, direction and node). OpenHD sends no ID, so
+  all OpenHD in range is one entry; so is any traffic of a system without an ID.
+- **Expiry.** As drones: stale after `stale_after_ms`, removed after
+  `remove_after_ms`. A full table drops the link heard least recently.
+- **Privacy (project policy).** `Config::show_link_ids` is **false by
+  default**. Then every output (JSON, CSV, the laptop table) leaves out the
+  identifier *and* the transmitter MAC (for wfb-ng the MAC embeds the link
+  ID). The system, ports, directions, channel, RSSI and counts are always
+  shown. `openlinks::shown_id` is the one place the rule is applied. The hub
+  sets it from its `show-link-ids` build feature; `rid-view` from
+  `--show-link-ids`. Video and MAVLink content is never decoded anywhere.
+- **No position, no CoT.** A sighting has no position, so there is nothing
+  for TAK to plot; `cot` ignores open links.
+
+### Link line schema (`json::link_line`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | `"link"` | Line type tag |
+| `id` | int | Link handle (separate numbering from drone tracks) |
+| `state` | `"active"` \| `"stale"` | As tracks |
+| `sys` | string | `"WfbNg"`, `"OpenHd"`, `"RubyFpv"`, `"DroneBridge"` |
+| `label` | string | For people: `"wfb-ng/OpenIPC"`, `"OpenHD"`, `"RubyFPV"`, `"DroneBridge"` |
+| `ids_shown` | bool | The unit's `show_link_ids` setting |
+| `link_id` | string \| null | Only when `ids_shown`: wfb-ng's link ID as six hex digits (`"7505d6"` is the default `link_domain`), else decimal. Null when hidden or not sent |
+| `first_ms`, `last_ms`, `age_ms` | int | As tracks |
+| `rssi`, `ch`, `band` | | Of the stream heard most recently |
+| `down`, `up` | bool | Heard air-to-ground / ground-to-air |
+| `pkts` | int | Sum of the streams' running frame counts |
+| `streams` | array | `{port, kind, dir, ch, band, rssi, n, mac, age_ms, node}`: `kind` is wfb-ng's `"video"` / `"mavlink"` / `"tunnel"` (null otherwise), `dir` `"AirToGround"` / `"GroundToAir"` / `"Unknown"`, `n` the node's running count for that stream, `mac` null unless `ids_shown` |
+
+A worst-case line is about 1.2 KB; `json::MAX_LINK_LINE` (1344) always holds one.
+
+### CSV
+
+Open links share the SD log's columns: `track` is `L<n>`, `transports` is the
+system (`WfbNg`, `WfbNg5G` for 5 GHz, `|`-separated if heard on both bands),
+`rssi_dbm` the latest, `uas_id` / `id_type` the identifier and its name
+(`link_id`, `vehicle_id`, `comm_id`) only with `show_link_ids`; every
+position column is empty.
+
 ## Phone page API (`json::state`, `json::parse_own_pos`)
 
 The hub's hotspot serves the page in `web/index.html` (bundled by
@@ -124,13 +183,17 @@ let hub = json::HubStatus {
     nodes: &nodes,
 };
 let ctx = tracker.context(now_ms, utc_ms);
-let n = json::state(tracker.tracks(), &ctx, &hub, &mut buf)?; // buf: json::state_max_len(tracker.len(), nodes.len())
+let n = json::state(tracker.tracks(), tracker.open_links(), &ctx, &hub, &mut buf)?;
+// buf: json::state_max_len(tracker.len(), tracker.open_links().len(), nodes.len())
 ```
 
-`pub fn state(tracks: &[Track], ctx: &Context, hub: &HubStatus, buf: &mut [u8]) -> Result<usize, FormatError>`
-writes one object and `\n`. A buffer of `state_max_len(tracks, nodes)` always
-fits (64 tracks and 4 nodes: about 99 KB, so PSRAM); a typical object is about
-1 KB per track. Too small a buffer is `BufferTooSmall`, never a truncated object.
+`pub fn state(tracks: &[Track], links: &[LinkTrack], ctx: &Context, hub: &HubStatus, buf: &mut [u8]) -> Result<usize, FormatError>`
+writes one object and `\n`. A buffer of `state_max_len(tracks, links, nodes)`
+always fits (64 tracks, 8 links and 4 nodes: about 124 KB, so PSRAM); a
+typical object is about 1 KB per track. Too small a buffer is
+`BufferTooSmall`, never a truncated object. The open links come before the
+tracks, separated by exactly `json::STATE_LINKS_TO_TRACKS`, and the object
+ends with `json::STATE_END`, so a server can stream it piece by piece.
 
 **Which position is used.** The page assumes this policy, and the hub
 implements it: a GPS fix wins; a typed (manual) position is used only while
@@ -153,12 +216,13 @@ Keep the manual position across reboots if you can; the page shows it as
 | `gps` | object | The GPS receiver: `state` (`"absent"` \| `"searching"` \| `"2d"` \| `"3d"`) and `sats` (int \| null) |
 | `rec` | bool | The SD-card log is being written |
 | `nodes` | array | One per radio node: `role` (`"Wifi24"` \| `"Wifi5"` \| `"Ble"` \| `"Fpv"`), `alive` (heard recently), `age_ms` (since its last frame; null if never), `seen_per_s` (all frames it saw per second; null before its first Stats), `rid_per_s` (Remote ID detections the hub got per second), `drops` (total frames it dropped; null before its first Stats) |
+| `open_links` | array | Every open FPV link, each exactly the `json::link_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 (a new field) |
 | `tracks` | array | Every track, each exactly the `json::track_line` object above (in table order; the page sorts) |
 
 Example (tracks shortened):
 
 ```json
-{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"own":{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100},"manual":null,"gps":{"state":"3d","sats":9},"rec":true,"nodes":[{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0},{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}],"tracks":[{"t":"track","id":1,...}]}
+{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"own":{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100},"manual":null,"gps":{"state":"3d","sats":9},"rec":true,"nodes":[{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0},{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}],"open_links":[],"tracks":[{"t":"track","id":1,...}]}
 ```
 
 **New-drone alerts on the page** follow the hub's buzzer rule without extra
@@ -208,5 +272,7 @@ An empty field means unknown. `transports` is `|`-separated. A field is quoted
 - geometry, checked against GeographicLib and Vincenty's published example
 - golden output for all three formatters
 - the `/api/state` object (golden, no fix, many tracks, every too-small buffer) and `own-pos` parsing
+- open FPV links (`tests_openlinks.rs`): kept apart from drones, merged per link, bounded, expired,
+  golden JSON and CSV, and no identifier in any output unless `show_link_ids`
 
 `cargo build -p tracker --target riscv32imac-unknown-none-elf` checks the `no_std` build.

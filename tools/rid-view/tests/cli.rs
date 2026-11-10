@@ -157,10 +157,93 @@ fn demo_once() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    let t = tracks(&out.stdout);
+    let all = tracks(&out.stdout);
+    let t: Vec<_> = all.iter().filter(|l| l["t"] == "track").collect();
     assert_eq!(t.len(), 2);
     // No --own-pos: geometry is null (P4), not invented.
     assert!(t.iter().all(|t| t["own"].is_null()));
+    // The demo FPV link is listed apart from the drones, its ID hidden.
+    let l: Vec<_> = all.iter().filter(|l| l["t"] == "link").collect();
+    assert_eq!(l.len(), 1, "{all:?}");
+    assert_eq!(l[0]["sys"], "WfbNg");
+    assert_eq!(l[0]["ids_shown"], false);
+    assert!(l[0]["link_id"].is_null());
+    assert!(l[0]["streams"][0]["mac"].is_null());
+    assert_eq!(all.len(), 3);
+
+    // Opting in shows the link ID.
+    let out = Command::new(BIN)
+        .args([
+            "--demo",
+            "--once",
+            "--demo-secs",
+            "3",
+            "--json",
+            "--show-link-ids",
+        ])
+        .output()
+        .unwrap();
+    let all = tracks(&out.stdout);
+    let l = all.iter().find(|l| l["t"] == "link").unwrap();
+    assert_eq!(l["link_id"], "7505d6");
+    assert_eq!(l["streams"][0]["mac"], "57:42:75:05:d6:00");
+}
+
+/// A node's `"t":"open"` lines become one open link, kept apart from drones,
+/// logged to CSV with the identifier left out.
+#[test]
+fn open_link_lines_from_a_node() {
+    let dir = std::env::temp_dir().join(format!("rid-view-open-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("log.csv");
+    let _ = std::fs::remove_file(&csv);
+    let lines = [
+        r#"{"t":"hello","fw":"node-wifi","role":"Wifi5","proto":2}"#,
+        r#"{"t":"open","sys":"WfbNg","id":7669206,"port":0,"dir":"AirToGround","ch":161,"rssi":-60,"mac":"57:42:75:05:d6:00","up_us":1000000,"n":900}"#,
+        r#"{"t":"open","sys":"WfbNg","id":7669206,"port":144,"dir":"GroundToAir","ch":161,"rssi":-75,"mac":"57:42:75:05:d6:90","up_us":1100000,"n":20}"#,
+        r#"{"t":"open","sys":"OpenHd","id":null,"port":4,"dir":"AirToGround","ch":149,"rssi":-70,"mac":"01:aa:bb:cc:dd:04","up_us":1200000,"n":5}"#,
+    ]
+    .join("\n");
+    let mut child = Command::new(BIN)
+        .args(["--once", "--json", "--log"])
+        .arg(&csv)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let all = tracks(&out.stdout);
+    assert!(
+        all.iter().all(|l| l["t"] == "link"),
+        "no drone tracks: {all:?}"
+    );
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0]["pkts"], 920);
+    assert_eq!(
+        (all[0]["down"].clone(), all[0]["up"].clone()),
+        (json!(true), json!(true))
+    );
+    assert_eq!(all[1]["sys"], "OpenHd");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains("7505d6") && !text.contains("57:42"),
+        "{text}"
+    );
+
+    let log = std::fs::read_to_string(&csv).unwrap();
+    let rows: Vec<&str> = log.lines().skip(1).collect();
+    assert_eq!(rows.len(), 2, "{log}");
+    assert!(rows[0].contains(",L1,,,,,,,WfbNg5G,"), "{log}");
+    assert!(!log.contains("7505d6"));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -361,7 +444,12 @@ fn http_serves_page_and_state() {
         .iter()
         .map(|n| n["role"].clone())
         .collect();
-    assert_eq!(roles, [json!("Wifi24"), json!("Ble")]);
+    assert_eq!(roles, [json!("Wifi24"), json!("Ble"), json!("Wifi5")]);
+    let v = state_until(addr, |v| {
+        v["open_links"].as_array().is_some_and(|l| l.len() == 1)
+    });
+    assert_eq!(v["open_links"][0]["t"], "link");
+    assert!(v["open_links"][0]["link_id"].is_null());
     assert!(
         v["tracks"]
             .as_array()

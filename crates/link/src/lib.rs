@@ -3,7 +3,9 @@
 //! Each frame is a [`Frame`] serialized with postcard and COBS-delimited (a
 //! zero byte ends every frame), so a reader that joins mid-stream resyncs at
 //! the next zero. Nodes send *raw* Remote ID messages; the hub decodes them
-//! with the `rid` crate.
+//! with the `rid` crate. Open FPV / telemetry links (wfb-ng, OpenHD, RubyFPV,
+//! DroneBridge) are classified on the node by the `openlink` crate and sent
+//! as [`Frame::OpenLink`] sightings, rate-limited per link.
 #![cfg_attr(not(test), no_std)]
 
 use heapless::Vec;
@@ -11,7 +13,12 @@ use rid::{MAX_PACK, RawMessage, Transport};
 use serde::{Deserialize, Serialize};
 
 /// Bump when a change would make an old hub misread a new node.
-pub const PROTOCOL_VERSION: u8 = 1;
+///
+/// - 1: Hello, Detection, Stats.
+/// - 2: adds [`Frame::OpenLink`]. Appended as the last variant, so v1 frames
+///   encode exactly as before; a v1 hub counts a v2 `OpenLink` as corrupt and
+///   carries on.
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// Largest encoded frame, COBS overhead included. Size buffers with this.
 pub const MAX_FRAME: usize = 320;
@@ -41,6 +48,26 @@ pub struct Detection {
     pub messages: Vec<RawMessage, MAX_PACK>,
 }
 
+/// An open FPV / telemetry link heard by a Wi-Fi node: the latest frame of
+/// one stream of one link (system, ID, port, direction; see
+/// `openlink::Sightings`), sent at most about once a second per stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenLinkSighting {
+    /// System, cleartext identifier (link / vehicle / comm ID, if any),
+    /// port, direction and transmitter address (display order).
+    pub link: openlink::OpenLink,
+    /// Wi-Fi channel number it was heard on, 0 if unknown.
+    pub channel: u8,
+    /// RSSI of the most recent frame, dBm.
+    pub rssi: i8,
+    /// Node uptime when the most recent frame arrived.
+    pub uptime_us: u64,
+    /// Frames the node has counted on this stream since it started tracking
+    /// it. A running total: it restarts if the node reboots or had to drop
+    /// the stream from its table, so take differences with care.
+    pub packets: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Frame {
     /// Sent at boot and every few seconds, so a hub that restarts learns who is attached.
@@ -61,6 +88,8 @@ pub enum Frame {
         /// BLE node splits legacy / extended / Long Range). Empty otherwise.
         by_transport: Vec<(Transport, u32), 5>,
     },
+    /// Protocol 2. Keep it last: postcard tags variants by index.
+    OpenLink(OpenLinkSighting),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -151,7 +180,23 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 5] {
+    fn sighting(fill: u8) -> OpenLinkSighting {
+        OpenLinkSighting {
+            link: openlink::OpenLink {
+                system: openlink::System::DroneBridge,
+                id: if fill == 0 { None } else { Some(u32::MAX) },
+                port: fill,
+                direction: openlink::Direction::Unknown,
+                tx: [fill; 6],
+            },
+            channel: fill,
+            rssi: i8::MIN,
+            uptime_us: if fill == 0 { 0 } else { u64::MAX },
+            packets: if fill == 0 { 0 } else { u32::MAX },
+        }
+    }
+
+    fn samples() -> [Frame; 7] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -176,6 +221,8 @@ mod tests {
                 .into_iter()
                 .collect(),
             },
+            Frame::OpenLink(sighting(0xFF)),
+            Frame::OpenLink(sighting(0x00)),
         ]
     }
 
@@ -203,6 +250,13 @@ mod tests {
             worst = worst.max(encode(&f, &mut big).unwrap().len());
         }
         std::println!("largest encoded frame: {worst} bytes");
+        let mut buf = [0u8; MAX_FRAME];
+        let sighting = encode(&samples()[5], &mut buf).unwrap().len();
+        std::println!("largest open-link sighting: {sighting} bytes");
+        assert!(
+            sighting <= 48,
+            "{sighting}: keep sightings small, they can be frequent"
+        );
         assert!(worst <= MAX_FRAME, "{worst} > {MAX_FRAME}");
         let mut exact = [0u8; MAX_FRAME];
         assert!(encode(&samples()[1], &mut exact).is_ok());
@@ -236,6 +290,37 @@ mod tests {
             dec.feed(core::slice::from_ref(b), |r| n += r.is_ok() as usize);
         }
         assert_eq!(n, samples().len());
+    }
+
+    /// The variants that existed in protocol 1 encode exactly as they did:
+    /// their postcard tags are 0, 1 and 2, and OpenLink got the next one.
+    #[test]
+    fn protocol_1_frames_unchanged() {
+        let mut buf = [0u8; MAX_FRAME];
+        for (f, tag) in samples().iter().zip([0, 1, 1, 1, 2, 3, 3]) {
+            let raw = postcard::to_slice(f, &mut buf).unwrap();
+            assert_eq!(raw[0], tag, "{f:?}");
+        }
+        let real = OpenLinkSighting {
+            link: openlink::OpenLink {
+                system: openlink::System::WfbNg,
+                id: Some(openlink::WFB_DEFAULT_LINK_ID),
+                port: 0,
+                direction: openlink::Direction::AirToGround,
+                tx: [0x57, 0x42, 0x75, 0x05, 0xD6, 0x00],
+            },
+            channel: 161,
+            rssi: -63,
+            uptime_us: 12_345_678,
+            packets: 4321,
+        };
+        let mut dec = Decoder::new();
+        let mut got = None;
+        dec.feed(
+            encode(&Frame::OpenLink(real.clone()), &mut buf).unwrap(),
+            |r| got = Some(r),
+        );
+        assert_eq!(got, Some(Ok(Frame::OpenLink(real))));
     }
 
     #[test]
