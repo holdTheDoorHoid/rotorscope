@@ -301,6 +301,33 @@ impl Receiver {
         })
     }
 
+    /// Build a receiver directly in `slot`, never on the stack.
+    ///
+    /// [`Receiver::new`] returns about 125 KiB by value, which a chip's stack
+    /// cannot hold. This zeroes `slot` (every buffer starts at zero, exactly
+    /// as `new` leaves it) and then writes the two fields that are not all
+    /// zero: the resampler (about 9 KiB, built on the stack once) and the
+    /// configuration. `slot` may be a `static`, a PSRAM region or anything
+    /// else the caller owns.
+    pub fn init_in_place(
+        slot: &mut core::mem::MaybeUninit<Receiver>,
+        fs_in: u32,
+    ) -> Result<&mut Receiver, RateError> {
+        let rs = Resampler::new(fs_in)?;
+        let p = slot.as_mut_ptr();
+        // SAFETY: apart from `rs` and `config`, every field is an integer, an
+        // array of integers or integer complex types, or a `Turbo` made only
+        // of integer arrays, so all-zero bytes are a valid value of each.
+        // `rs` and `config` are written with `write` (no drop of the zeroed
+        // bytes) before the reference is created.
+        unsafe {
+            core::ptr::write_bytes(p, 0, 1);
+            core::ptr::addr_of_mut!((*p).rs).write(rs);
+            core::ptr::addr_of_mut!((*p).config).write(Config::default());
+            Ok(&mut *p)
+        }
+    }
+
     pub fn fs_in(&self) -> u32 {
         self.rs.fs_in
     }
