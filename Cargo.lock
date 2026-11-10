@@ -339,6 +339,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawcap"
+version = "0.1.0"
+dependencies = [
+ "droneid",
+]
+
+[[package]]
 name = "rid"
 version = "0.1.0"
 dependencies = [
