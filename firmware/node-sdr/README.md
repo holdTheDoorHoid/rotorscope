@@ -49,7 +49,8 @@ grab held decode bus err ok help boot_cmd`), plus dump lines (`@H/@D/@E`). Comma
 `stats`, `phy`, `freq <MHz>`, `offset <kHz>`, `gain <idx>`, `lpf <0-63>|off`,
 `win clip|fold5|fold`, `edge rise|fall`, `pins xiao|alt`, `swap on|off`,
 `trig <dB> [min_us max_us]`, `mode detect|hold|idle`, `snap`, `grab`, `level`, `decode`,
-`dump [raw|c16] [b64|hex]`, `resend <first> [last]`, `reveal on|off`, `resume`.
+`dump [raw|c16] [b64|hex]`, `resend <first> [last]`, `reveal on|off`, `resume`, `bootloader`
+(stop the radio and reboot into the ROM download mode; use it before reflashing).
 
 A `burst` line, one per accepted trigger:
 
