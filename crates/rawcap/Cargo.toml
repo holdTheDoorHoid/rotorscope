@@ -1,0 +1,17 @@
+[package]
+name = "rawcap"
+description = "Host-testable logic of the ESP32-C5 raw-radio capture layer: sample unpacking, ring indexing, energy trigger, decimation, dump encoding"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+# Host side only: decoding dumps pulled over USB (`dump::Collector`).
+std = []
+
+[dependencies]
+droneid = { path = "../droneid", default-features = false }
+
+[dev-dependencies]
+droneid = { path = "../droneid", features = ["std"] }

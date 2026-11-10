@@ -55,6 +55,34 @@ impl C16 {
     }
 }
 
+/// Subtract the mean of `x` from every sample (saturating) and return the
+/// mean that was removed.
+///
+/// Raw captures that truncate (the ESP32-C5's bit-sliced debug bus and its
+/// dump engine both floor) carry a half-LSB bias plus the receiver's own DC
+/// (LO leakage). The decoder already removes DC per burst span; doing it
+/// once over the whole capture as well keeps the energy detector's windows
+/// honest and makes dumped captures look clean.
+pub fn remove_dc(x: &mut [C16]) -> C16 {
+    if x.is_empty() {
+        return C16::default();
+    }
+    let (mut sr, mut si) = (0i64, 0i64);
+    for v in x.iter() {
+        sr += v.re as i64;
+        si += v.im as i64;
+    }
+    let n = x.len() as i64;
+    // Round half away from zero.
+    let mr = (sr + sr.signum() * (n / 2)) / n;
+    let mi = (si + si.signum() * (n / 2)) / n;
+    for v in x.iter_mut() {
+        v.re = sat16(v.re as i32 - mr as i32);
+        v.im = sat16(v.im as i32 - mi as i32);
+    }
+    C16 { re: mr as i16, im: mi as i16 }
+}
+
 impl C32 {
     pub const ZERO: C32 = C32 { re: 0, im: 0 };
     /// Wrapping sum.

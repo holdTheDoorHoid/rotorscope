@@ -383,4 +383,60 @@ mod tests {
         assert!(got[0].crc24_ok);
         assert_eq!(got[0].block, p);
     }
+
+    #[test]
+    fn receiver_built_in_place_decodes_like_new() {
+        // The chip builds its receiver in a zeroed PSRAM slot with
+        // `init_in_place`; it must behave exactly like `Receiver::new`.
+        let mut rng = Rng::new(7);
+        let fs = 20_000_000;
+        let p = random_payload(&mut rng);
+        let cap = Capture { snr_db: 20.0, cfo_hz: 500e3, ..Capture::clean(fs) };
+        let (x, _) = capture(&p, Layout::Nine, &cap, &mut rng);
+        // Dirty the slot first: init_in_place must not depend on it being zero.
+        let mut slot: Box<core::mem::MaybeUninit<Receiver>> = Box::new_uninit();
+        unsafe { core::ptr::write_bytes(slot.as_mut_ptr().cast::<u8>(), 0xa5, core::mem::size_of::<Receiver>()) };
+        let rx = Receiver::init_in_place(&mut slot, fs).unwrap();
+        assert_eq!(rx.fs_in(), fs);
+        let mut got = vec![];
+        rx.decode_all(&x, &mut |r| {
+            if let Ok(b) = r {
+                got.push(b);
+            }
+        });
+        let want = decode(&x, fs, crate::rx::Config::default().max_iterations);
+        assert_eq!(got.len(), 1);
+        assert_eq!(want.len(), 1);
+        assert!(got[0].crc24_ok);
+        assert_eq!(got[0].block, want[0].block);
+        assert_eq!(got[0].block, p);
+    }
+
+    #[test]
+    fn dc_bias_removed_then_decodes() {
+        // A truncating 4-bit capture with a large DC step on top: remove_dc
+        // brings the mean back to zero and the burst still decodes.
+        let mut rng = Rng::new(8);
+        let fs = 40_000_000;
+        let p = random_payload(&mut rng);
+        let cap = Capture { snr_db: 25.0, cfo_hz: 500e3, peak: 6.0 * 4096.0, ..Capture::clean(fs) };
+        let (x, _) = capture(&p, Layout::Nine, &cap, &mut rng);
+        let mut q: Vec<_> = x
+            .iter()
+            .map(|c| {
+                // floor() like the hardware, plus one LSB of DC on I.
+                let f = |v: i16, dc: i32| (((v as i32).div_euclid(4096) + dc).clamp(-8, 7) << 12) as i16;
+                crate::math::C16 { re: f(c.re, 1), im: f(c.im, 0) }
+            })
+            .collect();
+        let dc = crate::math::remove_dc(&mut q);
+        // floor() costs -0.5 LSB on both axes; I also carries +1 LSB.
+        assert!((dc.re - 2048).abs() < 600 && (dc.im + 2048).abs() < 600, "removed {dc:?}");
+        let (sr, si) = q.iter().fold((0i64, 0i64), |(a, b), v| (a + v.re as i64, b + v.im as i64));
+        assert!(sr.abs() < q.len() as i64 && si.abs() < q.len() as i64);
+        let got = decode(&q, fs, 8);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].crc24_ok);
+        assert_eq!(got[0].block, p);
+    }
 }

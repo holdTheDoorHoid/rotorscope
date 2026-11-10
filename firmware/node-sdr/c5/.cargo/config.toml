@@ -1,0 +1,19 @@
+# ESP32-C5 only. Build from this directory; cargo finds ../Cargo.toml.
+#   cargo fw        -> ../target/riscv32imac-unknown-none-elf/release/node-sdr
+#   cargo fw-lite   -> same, without the PSRAM decoder (capture + dump only)
+[alias]
+fw      = "build --release"
+fw-lite = "build --release --no-default-features"
+
+[build]
+target = "riscv32imac-unknown-none-elf"
+# Frame pointers make esp-backtrace's panic backtraces usable on RISC-V.
+rustflags = ["-C", "force-frame-pointers"]
+
+[target.riscv32imac-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c5"
+
+[env]
+# The main stack runs the DroneID decoder (~30 KiB deep); make esp-hal's
+# link-time check demand it rather than its default.
+ESP_HAL_CONFIG_ENSURE_MAIN_STACK_MINIMUM = "40000"
