@@ -271,6 +271,62 @@ Decided 2026-11-09 (see RESEARCH.md "Expansion research"):
   - Decoding link *content* is out of scope.
 - The hub flags any detection made while its own LoRa backhaul was transmitting.
 
+### Phase 10: DJI OcuSync detection and DroneID decoding (C5 as a radio sampler)
+Decided 2026-11-09 (see RESEARCH.md "DJI OcuSync and DroneID").
+
+**What we can get, by generation:**
+
+| DJI link | Example drones | Detect | Decode serial, drone and pilot position |
+|---|---|---|---|
+| OcuSync 2 | Mini 2, Mini 4K, Air 2, Mavic 2 | Yes | Yes, plaintext (proven by open tools) |
+| OcuSync 3 / 3+ | Mini 3 / 3 Pro, Air 2S, Avata, Mavic 3 | Yes | Mostly yes (one vendor's tests); Inspire 3 is encrypted |
+| O4 / O4+ | Mini 4 Pro, Air 3, Avata 2, Neo, Flip, Mavic 4 | Yes, plus a per-session ID | **No.** Encrypted; the key is in DJI's hardware and is not public |
+
+**The approach.** Every OcuSync drone sends a short, LTE-style DroneID burst (about 9 MHz wide,
+0.57–0.64 ms long, every ~640 ms) on a handful of fixed frequencies in 2.4 and 5.8 GHz, but
+only while its motors are running. A dedicated C5 reads its own radio's raw samples, as C5VRX
+does, watches one of those frequencies continuously, and recognises the burst by its built-in
+reference pattern (Zadoff-Chu root 600). For plaintext bursts it then demodulates and decodes
+the fields. No external SDR is needed. No ESP32 or Rust implementation exists yet, so this is new
+ground.
+
+1. **10a. Host decoder first, no hardware needed** (about 8–12 days, agent estimate).
+   - New crate `crates/droneid`: resample to 15.36 MS/s, FFT, equalise from the reference
+     symbols, demap, descramble, LTE turbo decode, CRC, parse fields. Fixed-point from the
+     start so it later runs on a chip.
+   - Tested on RUB-SysSec's public Mini 2 and Mavic Air 2 recordings (fetched by a script, not
+     copied into the repo: they are AGPL), and cross-checked against anarkiwi's decoder.
+   - Also recognises O4's encrypted records and reports their session ID.
+2. **10b. C5 raw-capture layer in Rust** (about 8–12 days; the riskiest part).
+   - Shared with Phase 7's C5 FPV detector, so it is built once.
+   - Calls the closed radio library we already ship (every needed function is present), routes
+     the radio's debug sample bus to pins and back into memory through PARL_IO as a
+     continuous 40 MS/s ring, with fixed gain.
+   - esp-hal lacks pieces (no debug-bus signal entries, no circular PARL_IO DMA), so some raw
+     register work.
+3. **10c. Detection on the C5.** Cheap energy trigger on the ring, freeze about 1 ms, confirm
+   with the reference pattern. Reports "DJI OcuSync, frequency, signal strength, plaintext or
+   O4" to the hub as a new link transport.
+4. **10d. Decoding on the C5.** Estimated 50–200 ms per burst, well inside the gap between
+   bursts. Fallback: ship the ~40 KB capture to the S3 hub over SPI (about 8 ms).
+   - Fallback for signal quality: the 10-bit snapshot capture at 20 MS/s, if the 4-bit ring proves
+     too coarse.
+
+**Decisions:**
+- **Its own C5.** Parked on one DroneID frequency it catches a share of bursts (O4 hops over 7
+  frequencies, so roughly one every 4–5 s), enough for presence and tracking. Prefer a C5 with
+  built-in PSRAM (XIAO ESP32-C5).
+- **O4 stays detect-only, permanently.** No key handling of any kind: decrypting would lose the
+  legal "readily accessible" safe harbour and could raise anti-circumvention issues.
+- **Plaintext fields shown by default**, like Remote ID, because DroneID is a broadcast made for
+  third-party receivers (AeroScope), with a setting to turn decoding off. This is our call, not
+  legal advice; revisit before selling kits.
+- **Never transmit DroneID**, not even on the bench.
+
+**Testing without a DJI drone:** the public recordings cover 10a. Bench testing 10b–10d needs a
+real OcuSync drone with props off and motors armed, or a field visit. A used Mini 2 (plaintext
+OcuSync 2) is the cheapest reference.
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.

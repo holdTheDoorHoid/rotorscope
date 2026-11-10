@@ -48,6 +48,13 @@ This project only listens. `rid-beacon` exists purely to test the receivers on t
 uses an obviously fake identity and the lowest transmit power, and must not be used to
 impersonate an aircraft.
 
+## Acknowledgements
+
+The C5 raw-radio work builds on findings from C5VRX by Twotoz and the C5VRX contributors
+(https://github.com/Twotoz/C5VRX, https://twotoz.github.io/C5VRX/), ESPARGOS/esp-sdr,
+cyber-murmel/esp-sdr-zephyr and CapnBry/widscan58. The DJI DroneID work builds on RUB-SysSec's
+DroneSecurity research, proto17/dji_droneid and anarkiwi/samples2djidroneid.
+
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Anyone may use, modify and sell Rotorscope, including as

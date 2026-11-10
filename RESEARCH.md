@@ -197,7 +197,7 @@ ArduRemoteID (GPL-2.0) and andylee77/RID_Scanner (no license) still may not be c
   - mLRS is the same approach as ELRS.
   - Crossfire, Tracer and Ghost show as energy only.
   - SiK/RFD900 GFSK hopping is visible as a pattern.
-  - DJI OcuSync/O4 can't be decoded by any of these chips.
+  - DJI OcuSync/O4 can't be decoded by any of these LoRa-class chips (see "DJI OcuSync and DroneID" for the C5 route).
 - **Prior art:**
   - KonradIT/ELRS-Telemetry-Sniffer-Ground-Station (needs the binding phrase; GPL).
   - SkySweep32 (CC1101 + SX1281 + RX5808 energy; GPL; unvalidated).
@@ -209,3 +209,68 @@ ArduRemoteID (GPL-2.0) and andylee77/RID_Scanner (no license) still may not be c
   - US 15.247 compliance is clearest at 500 kHz bandwidth with under 0.4 s dwell. MeshCore issue #945 raises the concern.
 - **Rust drivers:** `lora-phy` 3.x covers sx126x, sx127x and lr1110 (the LR11xx family); it has no SX1280 driver. There are no usable Rust Meshtastic or MeshCore stacks.
 - **DOJ/FAA/FCC/DHS advisory (Aug 2020):** monitoring drone control links may implicate the Wiretap Act and the Pen Register statute. Keep identifier extraction opt-in, and keep content decoding out of scope.
+
+## DJI OcuSync and DroneID (2026-11-09, third round)
+
+Two research agents; primary sources read where noted, *unverified* marks the rest.
+
+### Open projects
+| Project | License, language | Receiver | Tested | Output |
+|---|---|---|---|---|
+| [RUB-SysSec/DroneSecurity](https://github.com/RUB-SysSec/DroneSecurity) (NDSS 2023) | AGPL-3.0, Python | USRP B205-mini, 50 MS/s | Mini 2, Mavic Air 2, Mavic 2 (OcuSync 2) | Full fields. **Public recordings in `samples/`** (`mini2_sm` 5.8 MB, `mavic_air_2` 1.8 MB) |
+| [proto17/dji_droneid](https://github.com/proto17/dji_droneid) | MIT, MATLAB + C++ | B205-mini, 30.72 MS/s | Mini 2 | Turbo decode; deframer unfinished. Recordings withheld |
+| [anarkiwi/samples2djidroneid](https://github.com/anarkiwi/samples2djidroneid) | Apache-2.0, Python | float32 IQ at 15.36 or 30.72 MS/s | OcuSync 2 only | Full fields. Good test oracle |
+| [alphafox02/antsdr_dji_droneid](https://github.com/alphafox02/antsdr_dji_droneid) → dragonsdr_dji_droneid | Unstated; vendor firmware | AntSDR / DragonSDR (AD9361) | Mini 2, Mini 3 Pro, Air 2S, Mavic 3 plaintext; Mini 5 encrypted | JSON over ZMQ, Kismet source. Paid closed O4 decryption add-on |
+| [luyii-code-1/dji-ocusync-droneid-research](https://github.com/luyii-code-1/dji-ocusync-droneid-research) | GPL-3.0, Python + C | HackRF int8, 15.36 MS/s | O2 chain; Mini 5 Pro (O4), Inspire 3 (encrypted O3) | O4 records recovered, CRC-valid; decrypts only with a supplied key |
+| [EdwardBlair/dji-droneid-spec](https://github.com/EdwardBlair/dji-droneid-spec) | No license; prose spec | — | O4/O4+ | PHY, coding, record formats and crypto |
+
+No Rust and no ESP32 implementation exists. Aaronia sells a commercial OcuSync 1–3+/Lightbridge option (*unverified* marketing).
+
+### The burst
+- LTE-like OFDM: 15.36 MS/s, 1024-point FFT, 15 kHz spacing, 600 QPSK data carriers plus DC, about 9 MHz occupied. Same waveform on 2.4 and 5.8 GHz.
+- 9 symbols (≈643 µs; CP 80/72…/80) or 8 symbols (≈572 µs) on older OcuSync and on O4.
+- Zadoff-Chu reference symbols, roots 600 and 147. Root 600 alone is reportedly enough to detect a burst.
+- Coding: LTE Gold scrambler (c_init 0x12345678), 173-byte input + CRC-24A → K = 1408, LTE turbo (QPP f1 = 43, f2 = 88), rate match to 7200 bits, inner DJI CRC-16. No pilots, so phase is tracked from the ZC symbols (proto17's notes).
+- Payload (O2, NDSS Fig. 13): serial (16 chars), drone lat/lon/altitude/height, velocities, yaw, GPS time, pilot (controller) lat/lon, home lat/lon, product type, UUID.
+- Interval about 640 ms (0.6–3 s seen). Bursts only while the motors run.
+- Frequencies: O2 2399.5, 2414.5, 2429.5, 2444.5, 2459.5 / 5756.5, 5776.5, 5796.5 MHz (proto17). O4 hops per packet over 2429.5, 2444.5, 5756.5, 5776.5, 5796.5, 5816.5, 2414.5 (EdwardBlair). Bursts appear on 2.4 GHz even with video forced to 5 GHz. No 5.1 GHz DroneID channel documented.
+
+### Generations and encryption
+- Wi-Fi drones (Spark, Mavic Air, Mini SE, Tello): the 802.11 vendor element we already decode (`rid::dji`).
+- OcuSync 2: plaintext (NDSS, primary).
+- O3/O3+: plaintext on Mini 3 Pro, Air 2S, Mavic 3 (alphafox02 README only); Inspire 3 encrypted (luyii); O3 Air Unit, Avata, DJI FPV *unverified*.
+- O4/O4+: encrypted. A CRYP record wraps a random AES-128 session key to an AeroScope SM2 public key; INFP records carry the telemetry in AES-128-CTR. Cleartext: record type, a 4-byte key ID that links one session's packets, IV, lengths, CRCs. The private key stays in the AeroScope module's TEE. No public key or method.
+- Model-to-generation mapping comes mostly from retailer listings.
+
+### Detecting the link itself
+- Video downlink OFDM 10/20/40 MHz (O3 Air Unit up to 40 MHz); O4 Air Unit up to 60 MHz and uses 5.170–5.250 GHz. 60 MHz or 5.1 GHz activity points to O4.
+- Uplink control: narrowband hopping, 0.4–5 MHz, 0.5–5 ms bursts (arXiv 2505.18167).
+- Pitfall: an energy detector "confirmed" a link in half the scans where only the controller was on (arXiv 2609.25294). The ZC match is the reliable test.
+- Datasets: DroneRF, DroneDetect, DroneRFa, RFUAV (Apache-2.0).
+- Other links (Autel SkyLink, Skydio, Walksnail, HDZero): no open decoders; energy only.
+
+### Can a C5 do it?
+- **Two capture paths**, both driven through the closed radio library we already ship:
+  - **Debug bus → GPIO → PARL_IO:** continuous 40 MS/s, 4-bit I + 4-bit Q (PARL_IO is only 8 bits wide), no anti-alias filter (set the low-pass ≤ 20 MHz), fixed gain. 56 KiB ring ≈ 1.43 ms. esp-sdr-zephyr ran 40 MB/s for 40 s with no gaps. CPU budget about 6 cycles per byte.
+  - **Dump engine (esp-sdr's method):** 10-bit I/Q + gain index, 16,380-sample snapshots: 822 µs at 20 MS/s, enough for a whole burst; 412 µs at 40 MS/s is not. The CPU loses 128 KiB of SRAM while it runs.
+- Neither runs at 15.36 MS/s; resample 20 or 40 MS/s by 96/125.
+- Tuning: any whole MHz (`phy_set_chanfreq`); shift the half-MHz digitally, which also moves the burst off the DC spike. Retune 0.23–0.7 ms. C5 receives 2200–2650 and 5180–5800 MHz (measured).
+- AGC is built for Wi-Fi and oscillated above 5.3 GHz (esp-sdr issue #5); use manual gain.
+- 4-bit I/Q gives about 20 dB quantisation SNR, enough for turbo-coded QPSK, but only 20–24 dB between noise and clipping, so gain must suit the scene.
+- OFDM has been decoded on these paths (esp-sdr-zephyr, S3, MER 27–31 dB over coax). Nobody has done LTE, Zadoff-Chu or DroneID on an ESP32.
+- 2.4 GHz board spurs at 2400, 2440, 2448, 2480, 2496 MHz.
+- Coexistence: one LO. *Untested idea:* parked on channel 149 (5745 MHz), DroneID at 5741.5 is in-band, so promiscuous Remote ID might still work alongside. Plan a dedicated C5.
+- RAM 384 KB, no FPU (use int16). C5HR8 (XIAO C5) has 8 MB PSRAM in-package; C5HF4 has none.
+- **Compute:** a C5 int16 1024-FFT ≈ 0.8 ms; S3 esp-dsp ≈ 65 µs. Full-rate correlation doesn't fit; energy trigger then frequency-domain ZC check ≈ 5–10 ms per candidate. Full decode ≈ 50–200 ms on a C5, 20–50 ms on an S3 (estimates). A capture is 32–41 KB: ≈ 8 ms over 40 MHz SPI, ≈ 70 ms over 5 Mbaud UART.
+- **Rust gaps:** esp-hal's C5 signal table stops at 105, so the debug-bus outputs (106+) need raw `GPIO_FUNC_OUT_SEL` writes; circular PARL_IO DMA needs raw work; no BitScrambler (not needed here); `librftest.a` (the dump engine) isn't shipped, but its registers are documented by esp-sdr-zephyr. The radio-library ABI must match its version (widscan58's `check_phy_abi.sh` idea). No no_std turbo decoder exists; `pccc` and `comnum` (std) serve as host oracles.
+- **Alternative:** an S3 can capture 2.4 GHz gaplessly at 16 MS/s, 10-bit (esp-sdr `docs/iq-stream.md`). The ESP32-S31 gives 8-bit I/Q at 40 MS/s, but only 2.15–2.85 GHz.
+
+### Sources (C5 side)
+[ESPARGOS/esp-sdr](https://github.com/ESPARGOS/esp-sdr) (GPL-3.0-or-later; it says the capture mechanism itself isn't copyrightable),
+[cyber-murmel/esp-sdr-zephyr](https://github.com/cyber-murmel/esp-sdr-zephyr) `doc/hardware-quirks.md`,
+[Twotoz/C5VRX](https://github.com/Twotoz/C5VRX) (GPL-3.0-only; asks for credit in README when code or findings are reused),
+[CapnBry/widscan58](https://github.com/CapnBry/widscan58), esp-dsp benchmarks, ESP-IDF `soc_caps.h`.
+
+### Legal (not legal advice)
+- 2020 interagency advisory: collecting identifiers/telemetry may implicate the Pen/Trap statute; RF-energy sensing is safest.
+- 18 U.S.C. §2510(16): encrypted transmissions aren't "readily accessible to the general public", so decrypting O4 loses that safe harbour; plaintext O2 is a closer call. Using a key pulled from DJI hardware could raise DMCA §1201 issues.
