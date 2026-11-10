@@ -1,0 +1,13 @@
+[package]
+name = "rawcap-pull"
+description = "Laptop tool: rebuild node-sdr captures from a USB serial log and write files tools/droneid-file reads"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rawcap = { path = "../../crates/rawcap" }
+
+[dev-dependencies]
+droneid = { path = "../../crates/droneid", features = ["std"] }

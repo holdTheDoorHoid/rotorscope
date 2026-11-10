@@ -14,7 +14,7 @@ use rawcap::crc32::Crc32;
 use rawcap::dsp::{HB_REACH, decimate_nibbles};
 use rawcap::dump::{self, CHUNK, Enc, Kind, LINE_MAX, Meta};
 use rawcap::iq::{POWER, Window};
-use rawcap::ring::{NODE_BYTES, RING_BYTES, at, window_ok};
+use rawcap::ring::{NODE_BYTES, RING_BYTES, window_ok};
 use rawcap::trigger::{self, Rise, Trigger, db10_x10, extent};
 use rawcap::word;
 
@@ -128,6 +128,17 @@ pub struct Radio {
 
 fn now_us() -> u64 {
     esp_hal::time::Instant::now().duration_since_epoch().as_micros()
+}
+
+/// Byte `k` of the stream window starting at `start` (k < RING_BYTES),
+/// without a 64-bit modulo per byte (a library call on RV32).
+fn reader(start: u64) -> impl Fn(usize) -> u8 {
+    let bytes = ring::bytes();
+    let off = (start % RING_BYTES as u64) as usize;
+    move |k| {
+        let i = off + k;
+        bytes[if i >= RING_BYTES { i - RING_BYTES } else { i }]
+    }
 }
 
 fn capture() -> &'static mut [C16] {
@@ -269,12 +280,9 @@ impl Radio {
     /// Measure, gate, convert and decode one frozen Path B window. Returns
     /// whether it passed the duration gate.
     fn window(&mut self, start: u64, r: Rise) -> bool {
-        let bytes = ring::bytes();
+        let get = reader(start);
         let cfg = self.s.trig;
-        let seg_power = |k: usize| -> u32 {
-            let a = start + (k * SEG) as u64;
-            (0..SEG as u64).map(|j| POWER[at(bytes, a + j) as usize] as u32).sum()
-        };
+        let seg_power = |k: usize| -> u32 { (k * SEG..(k + 1) * SEG).map(|j| POWER[get(j) as usize] as u32).sum() };
         let segs = WINDOW_BYTES / SEG;
         // Floor per segment, from the trigger's per-probe floor.
         let floor_seg = (r.floor as u64 * SEG as u64 / cfg.probe as u64).max(1);
@@ -302,7 +310,7 @@ impl Radio {
         }
         self.n.accepted += 1;
         let cap = capture();
-        decimate_nibbles(|k| at(bytes, start + k as u64), cap);
+        decimate_nibbles(&get, cap);
         remove_dc(cap);
         self.c16_len = CAPTURE_LEN;
         let mut line = Line::new();
@@ -575,11 +583,11 @@ impl Radio {
         self.held = Held::Ring { start, len: GRAB_BYTES };
         self.c16_len = 0;
         // Quick look: mean power and the nibble histogram corners.
-        let bytes = ring::bytes();
+        let get = reader(start);
         let mut p = 0u64;
         let mut rails = 0u32;
-        for k in 0..GRAB_BYTES as u64 {
-            let b = at(bytes, start + k);
+        for k in 0..GRAB_BYTES {
+            let b = get(k);
             p += POWER[b as usize] as u64;
             let (i, q) = rawcap::iq::unpack(b);
             rails += (i == 7 || i == -8 || q == 7 || q == -8) as u32;
@@ -597,9 +605,8 @@ impl Radio {
             Held::Nothing if self.c16_len > 0 => {}
             Held::Nothing => return err("nothing held: snap, grab or mode hold first"),
             Held::Ring { start, len } => {
-                let bytes = ring::bytes();
                 let n = ((len - 2 * HB_REACH) / 2).min(CAPTURE_LEN);
-                decimate_nibbles(|k| at(bytes, start + k as u64), &mut capture()[..n]);
+                decimate_nibbles(reader(start), &mut capture()[..n]);
                 remove_dc(&mut capture()[..n]);
                 self.c16_len = n;
             }
@@ -630,7 +637,7 @@ impl Radio {
 
     fn source_byte(&self, src: Source, k: usize) -> u8 {
         match src {
-            Source::RingWindow { start } => at(ring::bytes(), start + k as u64),
+            Source::RingWindow { start } => reader(start)(k),
             Source::Words => {
                 // SAFETY: inside the bank (bounds checked by the caller's length).
                 let w = unsafe { ((CAPTURE_ADDR + (k & !3)) as *const u32).read_volatile() };

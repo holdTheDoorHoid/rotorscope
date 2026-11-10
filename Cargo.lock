@@ -346,6 +346,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rawcap-pull"
+version = "0.1.0"
+dependencies = [
+ "droneid",
+ "rawcap",
+]
+
+[[package]]
 name = "rid"
 version = "0.1.0"
 dependencies = [

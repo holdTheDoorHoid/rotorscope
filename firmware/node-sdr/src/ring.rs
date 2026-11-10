@@ -84,25 +84,7 @@ extern "C" fn dma_isr() {
     if st & 0b111_1000 != 0 {
         DMA_ERRORS.fetch_add(1, Relaxed);
     }
-    let walked = critical_section::with(|cs| {
-        let cell = WALKER.borrow(cs);
-        let mut w = cell.get();
-        let n = w.walk(|i| {
-            let d = desc(i);
-            // SAFETY: our descriptor; the DMA writes dw0 back when a node
-            // finishes and we recycle it here.
-            unsafe {
-                let v = core::ptr::addr_of!((*d).dw0).read_volatile();
-                let len = dw0::length(v);
-                if len != 0 {
-                    core::ptr::addr_of_mut!((*d).dw0).write_volatile(dw0::recycle(v));
-                }
-                len
-            }
-        });
-        cell.set(w);
-        n
-    });
+    let walked = walk_nodes();
     if walked != 0 {
         NEW_DATA.signal(());
     }
@@ -142,6 +124,10 @@ pub fn start(falling_edge: bool) {
     // SAFETY (all register writes below): field values within their widths,
     // on peripherals this firmware owns exclusively (PARL_IO, DMA_CH0).
     unsafe {
+        // The PLL_F240M divider output the RX clock is taken from (ESP-IDF
+        // enables it through esp_clk_tree_enable_src; esp-hal only does when
+        // one of its own drivers asks).
+        pcr.pll_div_clk_en().modify(|_, w| w.pll_240m_clk_en().set_bit());
         // PARL_IO bus clock and reset.
         pcr.parl_io_conf().modify(|_, w| w.parl_clk_en().set_bit());
         pcr.parl_io_conf().modify(|_, w| w.parl_rst_en().set_bit());
@@ -226,16 +212,18 @@ pub fn stop() {
         dma.in_int_ch(CH).clr().write(|w| w.bits(u32::MAX));
     }
     // Account for nodes that finished before the stop.
-    dma_isr_walk_only();
+    walk_nodes();
 }
 
-fn dma_isr_walk_only() {
+/// Add every finished node to the producer count and recycle it.
+fn walk_nodes() -> usize {
     critical_section::with(|cs| {
         let cell = WALKER.borrow(cs);
         let mut w = cell.get();
-        w.walk(|i| {
+        let n = w.walk(|i| {
             let d = desc(i);
-            // SAFETY: as in `dma_isr`.
+            // SAFETY: our descriptor; the DMA writes dw0 back when a node
+            // finishes and we recycle it here.
             unsafe {
                 let v = core::ptr::addr_of!((*d).dw0).read_volatile();
                 let len = dw0::length(v);
@@ -246,7 +234,8 @@ fn dma_isr_walk_only() {
             }
         });
         cell.set(w);
-    });
+        n
+    })
 }
 
 /// The descriptor the DMA is working on (index), for diagnostics.

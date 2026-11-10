@@ -6,7 +6,7 @@ members = [
     "crates/rid", "crates/link", "crates/tracker", "crates/odid-ref",
     "crates/gnss", "crates/screen", "crates/webui",
     "crates/droneid", "crates/openlink", "crates/rawcap",
-    "tools/rid-view", "tools/droneid-file",
+    "tools/rid-view", "tools/droneid-file", "tools/rawcap-pull",
 ]
 
 [workspace.package]
