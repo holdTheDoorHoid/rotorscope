@@ -369,3 +369,8 @@ Not done:
 - keeping the manual position and screen settings across reboots;
 - a hub-to-node command channel on the reserved TX pins;
 - PPS to the node chips for cross-node time sync (P3): the hub timestamps PPS for its own UTC only.
+
+
+## Bench tests
+
+Two-board tests that flash and judge this firmware: `tools/bench/run.py --list` (see `docs/BENCH.md`).

@@ -1,0 +1,5 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_HPSYS),boot:0x8 (SPI_FAST_FLASH_BOOT)
+I (31) boot: ESP-IDF v5.5 2nd stage bootloader
+I (120) boot: Disabling RNG early entropy source...

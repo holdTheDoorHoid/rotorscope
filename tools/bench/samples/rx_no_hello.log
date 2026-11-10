@@ -1,0 +1,5 @@
+{"t":"stats","up_us":1000000,"seen":60,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":2000000,"seen":120,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":3000000,"seen":180,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":4000000,"seen":240,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":5000000,"seen":300,"fps":60,"rid":0,"drop":0}

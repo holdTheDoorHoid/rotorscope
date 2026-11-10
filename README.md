@@ -41,8 +41,10 @@ Firmware: each `firmware/*` folder is its own project with a README. The S3 is a
 chip, so it needs Espressif's toolchain (`espup install`, then `. ~/export-esp.sh`). The C5
 builds on stable Rust.
 
-Flash and watch a board with `tools/dev-board.sh <elf> [seconds]`. It holds a lock so that
-parallel agents take turns.
+Flash and watch a board with `tools/dev-board.sh <elf> [seconds] [board]`. It holds a per-board
+lock so that parallel agents take turns. Boards are named in the gitignored `tools/boards.local`
+(`tools/dev-board.sh --register` fills it in). Two-board bench tests, one command each:
+`tools/bench/run.py --list`; see [docs/BENCH.md](docs/BENCH.md).
 
 ## Conduct
 

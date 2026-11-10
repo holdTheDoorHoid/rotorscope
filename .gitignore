@@ -6,3 +6,8 @@ target/
 firmware/hub/wifi.local.toml
 # Downloaded test recordings (third-party licences; never commit).
 testdata/
+
+# Local bench boards (per machine) and bench run logs.
+tools/boards.local
+bench-logs/
+__pycache__/

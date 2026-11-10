@@ -123,3 +123,8 @@ advertise off
 This sends Basic ID, serial number, multirotor, `TESTBLE0000000000000`. Coded-PHY
 and extended-advert reception need the Rust test transmitter (`firmware/rid-beacon`)
 on a second board.
+
+
+## Bench tests
+
+Two-board tests that flash and judge this firmware: `tools/bench/run.py --list` (see `docs/BENCH.md`).

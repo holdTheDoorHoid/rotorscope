@@ -1,0 +1,50 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_HPSYS),boot:0x8 (SPI_FAST_FLASH_BOOT)
+I (31) boot: ESP-IDF v5.5 2nd stage bootloader
+{"t":"hello","fw":"node-wifi","ver":"0.1.0","chip":"esp32s3","proto":2}
+{"t":"stats","up_us":1000000,"seen":60,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-59,"mac":"60:60:1f:aa:bb:cc","ctr":1,"up_us":1004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":2000000,"seen":120,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-60,"mac":"60:60:1f:aa:bb:cc","ctr":2,"up_us":2004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":3000000,"seen":180,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-61,"mac":"60:60:1f:aa:bb:cc","ctr":3,"up_us":3004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":4000000,"seen":240,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-62,"mac":"60:60:1f:aa:bb:cc","ctr":4,"up_us":4004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":5000000,"seen":300,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-58,"mac":"60:60:1f:aa:bb:cc","ctr":5,"up_us":5004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":6000000,"seen":360,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-59,"mac":"60:60:1f:aa:bb:cc","ctr":6,"up_us":6004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":7000000,"seen":420,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-60,"mac":"60:60:1f:aa:bb:cc","ctr":7,"up_us":7004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":8000000,"seen":480,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-61,"mac":"60:60:1f:aa:bb:cc","ctr":8,"up_us":8004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":9000000,"seen":540,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-62,"mac":"60:60:1f:aa:bb:cc","ctr":9,"up_us":9004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":10000000,"seen":600,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-58,"mac":"60:60:1f:aa:bb:cc","ctr":10,"up_us":10004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":11000000,"seen":660,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-59,"mac":"60:60:1f:aa:bb:cc","ctr":11,"up_us":11004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":12000000,"seen":720,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-60,"mac":"60:60:1f:aa:bb:cc","ctr":12,"up_us":12004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":13000000,"seen":780,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-61,"mac":"60:60:1f:aa:bb:cc","ctr":13,"up_us":13004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":14000000,"seen":840,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-62,"mac":"60:60:1f:aa:bb:cc","ctr":14,"up_us":14004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":15000000,"seen":900,"fps":60,"rid":0,"drop":0}
+{"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-58,"mac":"60:60:1f:aa:bb:cc","ctr":15,"up_us":15004321,"msgs":[{"BasicId":{"id_type":"SerialNumber","ua_type":"HelicopterOrMultirotor","uas_id":"1581F5FKD229400D"}},{"Location":{"status":"Airborne","direction":122.0,"speed_horizontal":5.25,"height":50.0}},{"SelfId":{"desc_type":"Text","text":"BENCH TEST-NOT AIRCRAFT"}}]}
+{"t":"stats","up_us":16000000,"seen":960,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":17000000,"seen":1020,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":18000000,"seen":1080,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":19000000,"seen":1140,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":20000000,"seen":1200,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":21000000,"seen":1260,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":22000000,"seen":1320,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":23000000,"seen":1380,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":24000000,"seen":1440,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":25000000,"seen":1500,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":26000000,"seen":1560,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":27000000,"seen":1620,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":28000000,"seen":1680,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":29000000,"seen":1740,"fps":60,"rid":0,"drop":0}
+{"t":"stats","up_us":30000000,"seen":1800,"fps":60,"rid":0,"drop":0}

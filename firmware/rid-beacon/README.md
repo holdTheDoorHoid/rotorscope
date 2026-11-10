@@ -197,3 +197,8 @@ Each command echoes a `{"t":"cmd",…}` line.
 4. **Wi-Fi and BLE share one radio (`coex`).** Wi-Fi uses modem-sleep power save (as ESP-IDF
    requires with Bluetooth on), so the coexistence arbiter has idle windows to give to BLE.
 5. **esp-radio beta.2 is yanked**, so this pins `=1.0.0-beta.1`.
+
+
+## Bench tests
+
+Two-board tests that flash and judge this firmware: `tools/bench/run.py --list` (see `docs/BENCH.md`). Pick a transport on the beacon with the console keys above; the runner types them for you.

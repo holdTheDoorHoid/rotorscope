@@ -131,3 +131,8 @@ Built and unit-tested only. Nothing has been checked against a real transmitter:
   real frame on hardware.
 - ESP32-C5: builds; not yet run on hardware. First boot should show no `set_channel` errors and
   `per_ch` rising on 149.
+
+
+## Bench tests
+
+Two-board tests that flash and judge this firmware: `tools/bench/run.py --list` (see `docs/BENCH.md`).

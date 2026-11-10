@@ -1,34 +1,203 @@
 #!/usr/bin/env bash
-# Flash an ELF to a dev board and capture its serial output, holding a lock so
-# parallel agents take turns. The boards are not in `lab`, so this lock is the
-# only thing stopping two flashes from colliding.
+# Flash an ELF to a dev board and capture its serial output, holding a per-board
+# lock so parallel agents (and the two halves of a bench test) take turns. The
+# boards are not in `lab`, so this lock is the only thing stopping two flashes
+# from colliding.
 #
-#   tools/dev-board.sh <elf> [seconds=15] [board=s3]
-#   tools/dev-board.sh --log [seconds=15] [board=s3]    # reset + read, no flash
+#   tools/dev-board.sh <elf> [seconds=15] [board=s3]   flash, reset, read
+#   tools/dev-board.sh --log [seconds=15] [board=s3]   reset + read, no flash
+#   tools/dev-board.sh --register [--no-probe]          find attached boards, name them,
+#                                                       write tools/boards.local
+#   tools/dev-board.sh --list                           registered boards: attached? busy?
+#   tools/dev-board.sh --resolve <board>                print "<port> <chip>" and exit
+#   tools/dev-board.sh --hold <seconds> [board]         take the lock and sit on it
 #
-# Boards are addressed by their USB by-id path (MAC), never by /dev/ttyACMn.
+# Options (before the positional arguments):
+#   --send KEYS        after the reset, type these characters on the board's console
+#                      (rid-beacon's one-key commands, e.g. "xw"). Default delay 8 s.
+#   --send-after SECS  how long after the reset to start typing (default 8)
+#   --dry-run          print what would happen; touch no hardware, take no lock
+#
+# Boards are addressed by their USB by-id path (it contains the MAC), never by
+# /dev/ttyACMn and never by a serial number. Names (s3, s3b, c5a, c5b, ...) are
+# looked up in tools/boards.local (gitignored; created by --register; override
+# with $ROTORSCOPE_BOARDS). The built-in `s3` below is only a fallback.
+#
+# Locks: one file per board, keyed on the by-id path (so two names for one board
+# share a lock), in $ROTORSCOPE_LOCK_DIR (default ~/.local/state/rotorscope/locks),
+# NOT in /tmp: sandboxed agents can have a private /tmp, which gives each of them
+# its own "shared" lock (see docs/BENCH.md, "How the lock works").
 set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+boards_file=${ROTORSCOPE_BOARDS:-$here/boards.local}
+lock_dir=${ROTORSCOPE_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/rotorscope/locks}
+
 declare -A BOARDS=(
   [s3]=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_E8:F6:0A:81:6D:F0-if00
 )
-if [[ ${1:-} == --log ]]; then elf=""; shift; else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]}; shift; fi
-secs=${1:-15}; board=${2:-s3}
-port=${BOARDS[$board]:?unknown board $board (known: ${!BOARDS[*]})}
-lock=/tmp/rotorscope-board-$board.lock
-chip=$( [[ $board == c5* ]] && echo esp32c5 || echo esp32s3 )
+declare -A CHIPS=()
+if [[ -f $boards_file ]]; then
+  while read -r bname bpath bchip _; do
+    [[ -z ${bname:-} || $bname == \#* ]] && continue
+    BOARDS[$bname]=$bpath
+    [[ -n ${bchip:-} && $bchip != "?" && $bchip != \#* ]] && CHIPS[$bname]=$bchip
+  done <"$boards_file"
+fi
 
-exec 9>"$lock"
+chip_of() {  # chip_of <board>
+  if [[ -n ${CHIPS[$1]:-} ]]; then echo "${CHIPS[$1]}"
+  elif [[ $1 == c5* ]]; then echo esp32c5
+  else echo esp32s3; fi
+}
+lock_name() { local b; b=$(basename "$1"); echo "${b//[^A-Za-z0-9_.:-]/_}.lock"; }
+
+# ---- sub-commands that do not flash -----------------------------------------
+case ${1:-} in
+  --resolve)
+    b=${2:?usage: --resolve <board>}
+    [[ -n ${BOARDS[$b]:-} ]] || { echo "unknown board $b (known: ${!BOARDS[*]})" >&2; exit 1; }
+    echo "${BOARDS[$b]} $(chip_of "$b")"; exit 0 ;;
+  --list)
+    printf '%-6s %-8s %-9s %s\n' NAME CHIP STATE PORT
+    for b in $(printf '%s\n' "${!BOARDS[@]}" | sort); do
+      p=${BOARDS[$b]}; state=attached; [[ -e $p ]] || state=ABSENT
+      if [[ $state == attached ]]; then
+        lf=$lock_dir/$(lock_name "$p")
+        if [[ -e $lf ]] && ! flock -n "$lf" true 2>/dev/null; then state="BUSY"; fi
+      fi
+      printf '%-6s %-8s %-9s %s\n' "$b" "$(chip_of "$b")" "$state" "$p"
+      if [[ $state == BUSY ]]; then printf '         held by: %s\n' "$(head -c 200 "$lock_dir/$(lock_name "$p")" 2>/dev/null | tr '\n' ' ')"; fi
+    done
+    exit 0 ;;
+  --register)
+    shift
+    export BOARDS_FILE=$boards_file LOCK_DIR=$lock_dir PROBE=1
+    [[ ${1:-} == --no-probe ]] && PROBE=0
+    mkdir -p "$lock_dir"
+    exec python3 -I - <<'PY'
+import glob, os, re, subprocess, sys
+bf, lockdir, probe = os.environ["BOARDS_FILE"], os.environ["LOCK_DIR"], os.environ["PROBE"] == "1"
+def lock_name(p):  # keep in step with lock_name() in dev-board.sh
+    return re.sub(r"[^A-Za-z0-9_.:-]", "_", os.path.basename(p)) + ".lock"
+known = {}   # path -> (name, chip)
+lines = []
+if os.path.exists(bf):
+    for ln in open(bf):
+        lines.append(ln.rstrip("\n"))
+        f = ln.split()
+        if len(f) >= 2 and not f[0].startswith("#"):
+            known[f[1]] = (f[0], f[2] if len(f) > 2 and f[2] != "?" else "?")
+ports = sorted(glob.glob("/dev/serial/by-id/usb-Espressif_*"))
+if not ports:
+    print("No Espressif boards attached (nothing under /dev/serial/by-id/usb-Espressif_*).")
+    print("Plug a board in with a data-capable USB cable and run this again.")
+    sys.exit(1)
+taken = {n for n, _ in known.values()}
+def next_name(chip):
+    if chip == "esp32c5":
+        for c in "abcdefgh":
+            if f"c5{c}" not in taken: return f"c5{c}"
+    else:
+        for n in ["s3"] + [f"s3{c}" for c in "bcdefgh"]:
+            if n not in taken: return n
+    return None
+new = []
+print(f"{'NAME':<6} {'CHIP':<9} {'MAC':<18} PORT")
+for p in ports:
+    m = re.search(r"_([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})-if", p)
+    mac = m.group(1) if m else "?"
+    if p in known:
+        name, chip = known[p]
+        print(f"{name:<6} {chip:<9} {mac:<18} {p}   (already registered)")
+        continue
+    chip = "?"
+    if probe:
+        # The chip type is not in the by-id name (S3 and C5 look the same), so ask the
+        # board. board-info resets it; hold its lock so nobody is mid-flash.
+        os.makedirs(lockdir, exist_ok=True)
+        r = subprocess.run(["flock", "-w", "120", os.path.join(lockdir, lock_name(p)),
+                            "espflash", "board-info", "--port", p, "--non-interactive"],
+                           capture_output=True, text=True)
+        m2 = re.search(r"Chip type:\s*(esp32\w*)", r.stdout + r.stderr, re.I)
+        if m2: chip = m2.group(1).lower()
+        else: print(f"  could not read chip type of {mac}: {(r.stdout + r.stderr).strip()[-200:]}")
+    name = next_name(chip) if chip != "?" else None
+    if name is None:
+        print(f"{'?':<6} {chip:<9} {mac:<18} {p}   (NOT registered: chip unknown; edit {bf} by hand)")
+        continue
+    taken.add(name); known[p] = (name, chip); new.append((name, p, chip, mac))
+    print(f"{name:<6} {chip:<9} {mac:<18} {p}   NEW")
+if new:
+    with open(bf, "a") as fh:
+        if not lines: fh.write("# Local bench boards. name  by-id-path  chip   # mac\n# Edit names freely; paths must stay /dev/serial/by-id/... (never ttyACMn).\n")
+        for name, p, chip, mac in new:
+            fh.write(f"{name}  {p}  {chip}   # {mac}\n")
+    print(f"\nWrote {len(new)} new board(s) to {bf}.")
+    print("Put a sticky label with the NAME and MAC on each board now.")
+else:
+    print("\nNothing new to register.")
+absent = [n for pth, (n, _) in known.items() if not os.path.exists(pth)]
+if absent: print("Registered but not attached right now:", ", ".join(sorted(absent)))
+PY
+    ;;
+esac
+
+# ---- option parsing -----------------------------------------------------------
+send=""; send_after=8; dry=0; hold=""
+while [[ ${1:-} == --* && ${1:-} != --log ]]; do
+  case $1 in
+    --send) send=${2:?--send needs KEYS}; shift 2 ;;
+    --send-after) send_after=${2:?}; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    --hold) hold=${2:?--hold needs seconds}; shift 2 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+done
+if [[ -n $hold ]]; then elf=""; secs=$hold; board=${1:-s3}
+elif [[ ${1:-} == --log ]]; then elf=""; shift; secs=${1:-15}; board=${2:-s3}
+else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]  (or --register / --list)}; shift; secs=${1:-15}; board=${2:-s3}; fi
+port=${BOARDS[$board]:-}
+if [[ -z $port ]]; then echo "unknown board $board (known: ${!BOARDS[*]}). Run: tools/dev-board.sh --register" >&2; exit 1; fi
+chip=$(chip_of "$board")
+
+if (( dry )); then
+  echo "[dry-run] board=$board chip=$chip port=$port"
+  echo "[dry-run] lock: $lock_dir/$(lock_name "$port")"
+  [[ -n $elf ]] && echo "[dry-run] espflash flash --chip $chip --port $port --non-interactive $elf"
+  echo "[dry-run] reset (DTR/RTS) then read ${secs}s${send:+; after ${send_after}s type '$send'}"
+  exit 0
+fi
+[[ -e $port ]] || { echo "board $board: $port is not attached" >&2; exit 1; }
+[[ -z $elf || -f $elf ]] || { echo "no such ELF: $elf" >&2; exit 1; }
+
+mkdir -p "$lock_dir"
+lock=$lock_dir/$(lock_name "$port")
+old_lock=/tmp/rotorscope-board-$board.lock   # what older copies of this script used
+
+exec 9>>"$lock"
 if ! flock -w 600 9; then echo "board $board busy for 10 min; giving up" >&2; exit 1; fi
+# Also take the legacy /tmp lock, always second, so an old copy of the script that is
+# still running (or a checkout that has not pulled yet) still excludes us.
+exec 8>>"$old_lock"
+if ! flock -w 600 8; then echo "board $board busy (legacy lock) for 10 min; giving up" >&2; exit 1; fi
+printf 'pid=%s since=%s cmd=%s %s\n' "$$" "$(date +%T)" "$(basename "${elf:-log}")" "$board" >"$lock"
+
+if [[ -n $hold ]]; then echo "holding $board for ${hold}s"; sleep "$hold"; exit 0; fi
 if [[ -n $elf ]]; then
   espflash flash --chip "$chip" --port "$port" --non-interactive "$elf" 2>&1 | tail -3
 fi
-python3 -I - "$port" "$secs" <<'PY'
+python3 -I - "$port" "$secs" "$send" "$send_after" <<'PY'
 import sys, time, serial
-port, secs = sys.argv[1], float(sys.argv[2])
+port, secs, keys, after = sys.argv[1], float(sys.argv[2]), sys.argv[3], float(sys.argv[4])
 s = serial.Serial(port, 115200, timeout=0.2)
 s.dtr = False; s.rts = True; time.sleep(0.1); s.rts = False   # USB-JTAG hard reset
-end = time.time() + secs
+t0 = time.time(); end = t0 + secs
 while time.time() < end:
+    if keys and time.time() - t0 >= after:
+        for ch in keys:              # one character at a time, like a person typing
+            s.write(ch.encode()); s.flush(); time.sleep(0.4)
+        keys = ""
     b = s.read(4096)
     if b: sys.stdout.write(b.decode(errors="replace")); sys.stdout.flush()
 PY
