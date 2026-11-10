@@ -136,6 +136,13 @@ pub fn stop() {
     wr(CTRL, 0);
 }
 
+/// Stop the engine and clear the block-1 owner and MAC_DUMP_ALLOC bits
+/// (before a reset into the ROM loader, as C5VRX does).
+pub fn release() {
+    wr(CTRL, 0);
+    restore_usage(rd(SRAM_USAGE) & !USAGE_OWNER_MASK);
+}
+
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code, reason = "fields are read through Debug in the error line")]
 pub enum SnapError {

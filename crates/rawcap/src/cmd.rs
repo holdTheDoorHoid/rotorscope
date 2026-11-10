@@ -11,7 +11,8 @@
 //! lpf <0-63>|off            analog low-pass capacitor code (default 12)
 //! edge rise|fall            PARL_IO sampling edge
 //! pins xiao|alt             debug-bus loopback pads (route.rs)
-//! swap on|off               Path A: take I from the low field
+//! swap on|off               I/Q orientation: Path A takes I from the low
+//!                           field, Path B routes the low bits to the I nibble
 //! trig <dB> [min_us max_us] trigger ratio over floor, burst length gate
 //! mode detect|hold|idle     run the trigger/decoder loop; hold = also stop
 //!                           and keep the next accepted burst for `dump`
@@ -23,6 +24,7 @@
 //! resend <first> [last]     resend lines of the last dump
 //! reveal on|off             print serial numbers unredacted
 //! resume                    drop the held capture, back to the ring
+//! bootloader                stop the radio, reboot into the ROM download mode
 //! ```
 
 use crate::dump::Enc;
@@ -77,6 +79,7 @@ pub enum Command {
     Resend { first: u32, last: u32 },
     Reveal(bool),
     Resume,
+    Bootloader,
 }
 
 /// Lowest and highest LO the C5 has been measured to receive on
@@ -196,6 +199,7 @@ pub fn parse(line: &str) -> Result<Option<Command>, &'static str> {
         }
         "reveal" => Command::Reveal(on_off(a)?),
         "resume" => Command::Resume,
+        "bootloader" => Command::Bootloader,
         _ => return Err("unknown command (help)"),
     };
     Ok(Some(cmd))

@@ -171,6 +171,12 @@ impl Radio {
         self.rx = Some(rx);
     }
 
+    /// Debug-bus lanes for the current window and orientation.
+    fn lanes(&self) -> [u8; 8] {
+        let l = self.s.window.diag_lanes();
+        if self.s.swap_iq { [l[4], l[5], l[6], l[7], l[0], l[1], l[2], l[3]] } else { l }
+    }
+
     fn tune(&self) -> phy::Tune {
         phy::Tune { mhz: self.s.mhz, gain: self.s.gain, lpf: self.s.lpf }
     }
@@ -189,7 +195,7 @@ impl Radio {
         }
         let rb = phy::apply(self.tune());
         self.print_phy(&rb);
-        route::connect(&self.s.pins, self.s.window.diag_lanes());
+        route::connect(&self.s.pins, self.lanes());
         ring::install();
         self.restart();
     }
@@ -424,7 +430,7 @@ impl Radio {
                 ring::stop();
                 route::release(&self.s.pins);
                 self.s.pins = if alt { route::PINS_ALT } else { route::PINS_XIAO };
-                route::connect(&self.s.pins, self.s.window.diag_lanes());
+                route::connect(&self.s.pins, self.lanes());
                 self.restart();
                 ok("pins", if alt { "alt" } else { "xiao" });
             }
@@ -438,7 +444,7 @@ impl Radio {
             }
             Command::Win(w) => {
                 self.s.window = w;
-                route::set_lanes(&self.s.pins, w.diag_lanes());
+                route::set_lanes(&self.s.pins, self.lanes());
                 self.trig.reset();
                 ok("win", w.name());
             }
@@ -449,6 +455,8 @@ impl Radio {
             }
             Command::Swap(on) => {
                 self.s.swap_iq = on;
+                route::set_lanes(&self.s.pins, self.lanes());
+                self.trig.reset();
                 ok("swap", if on { "on" } else { "off" });
             }
             Command::Trig { ratio_db, min_us, max_us } => {
@@ -483,6 +491,22 @@ impl Radio {
             Command::Reveal(on) => {
                 self.s.reveal = on;
                 ok("reveal", if on { "on" } else { "off" });
+            }
+            Command::Bootloader => {
+                println!(r#"{{"t":"ok","bootloader":"rebooting into download mode"}}"#);
+                // Let the line drain before the reset cuts USB.
+                let t = now_us();
+                while now_us() - t < 50_000 {}
+                ring::stop();
+                engine::release();
+                // SAFETY: stopping the running driver; nothing uses it after.
+                let _ = unsafe { esp_wifi_sys_esp32c5::include::esp_wifi_stop() };
+                // C5VRX `rf_reboot_to_download`: the USB reset does not reset
+                // the modem domain, and the forced clocks plus a running dump
+                // writer can keep the ROM loader from answering; so stop them
+                // and ask the ROM for download mode across a software reset.
+                esp_hal::peripherals::LP_AON::regs().sys_cfg().modify(|_, w| w.force_download_boot().set_bit());
+                esp_hal::system::software_reset();
             }
             Command::Resume => {
                 self.restart();

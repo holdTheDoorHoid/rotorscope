@@ -134,7 +134,7 @@ fn print_spectrum(ci16: &[u8], rate: u32) {
     }
     let mut acc = vec![0f64; N];
     let mut frames = 0;
-    for f in x.chunks_exact(N) {
+    for f in x.as_chunks::<N>().0 {
         // Hann window, then FFT.
         let mut b: Vec<(f64, f64)> = f
             .iter()
