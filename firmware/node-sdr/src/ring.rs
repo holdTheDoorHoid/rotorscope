@@ -170,7 +170,7 @@ pub fn start(falling_edge: bool) {
 
         // GDMA: bus clock (no reset: other channels may be in use by esp-hal
         // drivers in later phases), register clock, memory window.
-        pcr.gdma_conf().modify(|_, w| w.gdma_clk_en().set_bit());
+        pcr.gdma_conf().modify(|_, w| w.gdma_clk_en().set_bit().gdma_rst_en().clear_bit());
         dma.misc_conf().modify(|_, w| w.clk_en().set_bit());
         dma.intr_mem_start_addr().write(|w| w.bits(0x4080_0000));
         dma.intr_mem_end_addr().write(|w| w.bits(0x4400_0000));
