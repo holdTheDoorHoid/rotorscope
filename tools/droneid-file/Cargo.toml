@@ -1,0 +1,11 @@
+[package]
+name = "droneid-file"
+description = "Laptop tool: decode DJI DroneID bursts from a raw IQ recording, one JSON line per burst"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+droneid = { path = "../../crates/droneid", features = ["std"] }
+serde_json = "1"

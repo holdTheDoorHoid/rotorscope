@@ -1,0 +1,20 @@
+[package]
+name = "droneid"
+description = "no_std, fixed-point receiver for DJI's OcuSync DroneID burst (LTE-like OFDM, turbo coded)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = ["std"]
+# Host conveniences only (reading IQ files, chunked decoding of long
+# recordings, float resampling for experiments). The decode path
+# never needs it and never allocates.
+std = []
+
+[dev-dependencies]
+droneid = { path = ".", features = ["std"] }
+
+[[example]]
+name = "quant"
+required-features = ["std"]

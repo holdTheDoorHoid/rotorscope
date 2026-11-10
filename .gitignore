@@ -4,3 +4,5 @@ target/
 *.elf
 # Hub station-mode credentials: created by the owner, never committed.
 firmware/hub/wifi.local.toml
+# Downloaded test recordings (third-party licences; never commit).
+testdata/

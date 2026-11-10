@@ -5,7 +5,8 @@ resolver = "2"
 members = [
     "crates/rid", "crates/link", "crates/tracker", "crates/odid-ref",
     "crates/gnss", "crates/screen", "crates/webui",
-    "tools/rid-view",
+    "crates/droneid",
+    "tools/rid-view", "tools/droneid-file",
 ]
 
 [workspace.package]

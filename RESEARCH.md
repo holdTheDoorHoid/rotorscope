@@ -274,3 +274,29 @@ No Rust and no ESP32 implementation exists. Aaronia sells a commercial OcuSync 1
 ### Legal (not legal advice)
 - 2020 interagency advisory: collecting identifiers/telemetry may implicate the Pen/Trap statute; RF-energy sensing is safest.
 - 18 U.S.C. §2510(16): encrypted transmissions aren't "readily accessible to the general public", so decrypting O4 loses that safe harbour; plaintext O2 is a closer call. Using a key pulled from DJI hardware could raise DMCA §1201 issues.
+
+### Findings from building the decoder (10a, 2026-11-09)
+Measured on the two public recordings and on synthetic bursts:
+- **Results:** both recordings decode, 13 of 13 bursts CRC-valid (NDSS reported 7 of 10 for
+  `mini2_sm`), all on the systematic-bits path with 0 raw bit errors. The turbo path gives
+  identical blocks and gains about 8 dB on synthetic bursts.
+- **Correction: root 600 alone does not fix the frequency offset.** A whole-carrier offset of
+  d looks like a timing shift of about 1.7·d samples. Root 147 resolves it.
+- **Correction: 4-bit capture.** In clipping (top-bits) mode it decodes from 2 dB to beyond
+  54 dB per-carrier SNR, because the turbo path recovers hard-clipped bursts. Only the
+  wrap-around window needs gain held within about 16 dB. Any truncating capture needs DC
+  removal; without it the half-LSB bias costs 4.5 dB.
+- **10-bit at 20 MS/s** (822 µs snapshot) decodes across the whole range on the cheap path.
+- **Sensitivity is limited by detection, not decoding:** at 0 dB, 11 of 13 bursts decode when
+  given the true timing, but the energy trigger finds none.
+- **Layout:** in the 9-symbol layout the first symbol carries no coded data; data is in symbols
+  1, 2, 4, 6, 7, 8. Standard LTE QPSK mapping works once phase comes from the reference
+  symbols.
+- **Records:** OcuSync 2 also sends a plaintext 0x11 record (141 bytes: serial plus unknown
+  fields). The O2 flight record uses the same length-byte + CRC-16 envelope as O4's spec.
+- **Altitude units:** feet vs metres is unresolved. raw ÷ 3.281 reproduces the paper's output.
+- **The recordings** are concatenated detector output (bursts about 90 µs apart, at +2.0,
+  −12.47 and +9.61 MHz), so they say nothing about the real burst interval.
+- **Cost:** host per burst is about 2 ms on the cheap path, about 4 ms worst case
+  (19 FFTs, about 600k multiply-accumulates resampling, about 113k operations per turbo
+  half-iteration). Scaled C5 estimate 40–150 ms (not measured).

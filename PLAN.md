@@ -290,7 +290,12 @@ reference pattern (Zadoff-Chu root 600). For plaintext bursts it then demodulate
 the fields. No external SDR is needed. No ESP32 or Rust implementation exists yet, so this is new
 ground.
 
-1. **10a. Host decoder first, no hardware needed** (about 8–12 days, agent estimate).
+1. **10a. Host decoder first, no hardware needed.** **DONE 2026-11-09:** `crates/droneid` +
+   `tools/droneid-file`. Both public recordings decode, 13 of 13 bursts CRC-valid, on the cheap
+   path. A simulated 4-bit C5 capture still decodes in clipping mode across more than 50 dB.
+   Open: the receiver needs about 125 KiB of RAM plus about 30 KiB of stack, which is tight
+   next to a 56 KiB capture ring on a C5 without PSRAM. Feet vs metres for altitude is
+   unresolved. O4 parsing is untested on real signals.
    - New crate `crates/droneid`: resample to 15.36 MS/s, FFT, equalise from the reference
      symbols, demap, descramble, LTE turbo decode, CRC, parse fields. Fixed-point from the
      start so it later runs on a chip.

@@ -16,6 +16,7 @@ and [RESEARCH.md](RESEARCH.md) for the survey behind them.
 | Bluetooth listener (legacy + Long Range) | `firmware/node-ble` | S3 verified: decoded a BT4 Remote ID broadcast from a laptop. C5 builds only. Long Range not yet heard on air. |
 | Test transmitter | `firmware/rid-beacon` | S3 verified: the laptop received the Wi-Fi beacon and BT4 adverts. NAN, BT5 extended and Long Range transmit with no errors but haven't been heard by a receiver yet. C5 (5 GHz) builds only. |
 | Laptop viewer | `tools/rid-view` | Done. Reads node USB output, files or stdin; can send TAK CoT; has `--demo`. |
+| DJI OcuSync DroneID decoder | `crates/droneid`, `tools/droneid-file` | Host side done (Phase 10a): `no_std`, fixed point, builds for the C5. Decodes every burst in both public recordings (fetch them with `tools/fetch-droneid-samples.sh`). Recognises O4's encrypted records but never decrypts; that part is untested on real signals. |
 
 **Verified end to end:** laptop Bluetooth broadcasting a test Remote ID → S3 running
 `node-ble` → `rid-view` showing the drone.
@@ -53,7 +54,11 @@ impersonate an aircraft.
 The C5 raw-radio work builds on findings from C5VRX by Twotoz and the C5VRX contributors
 (https://github.com/Twotoz/C5VRX, https://twotoz.github.io/C5VRX/), ESPARGOS/esp-sdr,
 cyber-murmel/esp-sdr-zephyr and CapnBry/widscan58. The DJI DroneID work builds on RUB-SysSec's
-DroneSecurity research, proto17/dji_droneid and anarkiwi/samples2djidroneid.
+DroneSecurity research, proto17/dji_droneid and anarkiwi/samples2djidroneid, and on the O4 record
+and PHY description in EdwardBlair/dji-droneid-spec. `crates/droneid` uses these for protocol
+facts only (layouts, constants, the published scrambler example); it contains no code from any
+of them. The two test recordings come from RUB-SysSec/DroneSecurity (AGPL-3.0) and are
+downloaded on demand, never committed.
 
 ## License
 

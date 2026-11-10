@@ -82,6 +82,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "droneid"
+version = "0.1.0"
+dependencies = [
+ "droneid",
+]
+
+[[package]]
+name = "droneid-file"
+version = "0.1.0"
+dependencies = [
+ "droneid",
+ "serde_json",
+]
+
+[[package]]
 name = "embedded-graphics"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
