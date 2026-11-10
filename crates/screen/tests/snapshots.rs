@@ -392,6 +392,42 @@ fn health() {
     shot("health", &ui, &st);
 }
 
+/// A hub with an ADS-B receiver: the ADSBee as a fourth node, and the
+/// AIRCRAFT line (one low, nearest a medevac helicopter).
+fn with_aircraft() -> UiState {
+    let mut st = five_drones(true);
+    st.nodes
+        .push(NodeStatus {
+            kind: NodeKind::Adsb,
+            alive: true,
+            frames_per_s: 118,
+            rid_found: 0,
+            drops: 0,
+            uptime_s: 3_600,
+        })
+        .unwrap();
+    st.aircraft = Some(AircraftSummary {
+        total: 14,
+        active: 12,
+        low_nearby: 1,
+        nearest: Some(NearestAircraft {
+            name: s("N911PH"),
+            distance_m: 1_240.0,
+            alt_ft: Some(1_200),
+        }),
+    });
+    st
+}
+
+#[test]
+fn health_aircraft() {
+    let st = with_aircraft();
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("health_aircraft", &ui, &st);
+}
+
 #[test]
 fn settings() {
     let st = base(true);
@@ -450,6 +486,10 @@ fn banded_render_matches_full_frame() {
     let mut ui = Ui::default();
     press(&mut ui, &st, &[Button::Down, Button::Down]);
     cases.push(("health", ui, st));
+    let st = with_aircraft();
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    cases.push(("health_aircraft", ui, st));
     let st = one_drone(true);
     let mut ui = Ui::default();
     ui.new_drone(st.drones[0].key, NOW);

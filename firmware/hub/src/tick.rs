@@ -14,13 +14,13 @@ use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::rtc_cntl::{Rtc, RwdtStage};
 use serde::Serialize;
 use tracker::openlinks::MAX_LINK_TRACKS;
-use tracker::{LinkTrackId, TrackId};
+use tracker::{AircraftKey, LinkTrackId, TrackId};
 use tracker::json::{self, MAX_LINE};
 
 use crate::api::OwnJson;
-use crate::hub::{Hub, MAX_TRACKS, now_ms};
+use crate::hub::{Hub, MAX_AIRCRAFT, MAX_TRACKS, now_ms};
 use crate::pins::NODE_LINKS;
-use crate::{clock, cot, gnss, hotspot, http, links, panel, screen, sd, usb};
+use crate::{adsbee, clock, cot, gnss, hotspot, http, links, panel, screen, sd, usb};
 
 /// Worst lateness of the thread-mode executor, microseconds (reset each second).
 static LAG_MAX_US: AtomicU32 = AtomicU32::new(0);
@@ -65,6 +65,10 @@ struct HubLine {
     /// Open FPV links in the table, and how many were heard recently.
     open_links: usize,
     open_active: usize,
+    /// ADS-B aircraft in the table, and how many were heard recently
+    /// (always 0 without the `adsbee` feature).
+    aircraft: usize,
+    aircraft_active: usize,
     own: Option<OwnJson>,
     links: heapless::Vec<LinkLine, NODE_LINKS>,
     heap_used: usize,
@@ -85,6 +89,8 @@ struct HubLine {
     lag_max_us: u32,
     ssid: &'static str,
     gps: gnss::GpsLine,
+    /// The ADSBee link; `null` when not built in.
+    adsb: Option<adsbee::AdsbLine>,
     sd: sd::SdLine,
     screen: screen::ScreenLine,
     batt: panel::BattLine,
@@ -155,6 +161,22 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             }
             embassy_futures::yield_now().await;
         }
+        // ADS-B aircraft (feature `adsbee`; the table is empty otherwise).
+        let aircraft: heapless::Vec<AircraftKey, MAX_AIRCRAFT> =
+            hub.tracker.borrow().aircraft().iter().map(|a| a.key).collect();
+        for key in aircraft {
+            let n = {
+                let tracker = hub.tracker.borrow();
+                let Some(a) = tracker.get_aircraft(key) else { continue };
+                json::aircraft_line(a, tracker.tracks(), &ctx, &mut line)
+            };
+            if let Ok(n) = n
+                && !usb::emit_patiently(&line[..n], Duration::from_millis(50)).await
+            {
+                break;
+            }
+            embassy_futures::yield_now().await;
+        }
 
         let heap_free = esp_alloc::HEAP.free();
         heap_min_free = heap_min_free.min(heap_free);
@@ -168,6 +190,8 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             active: hub.tracker.borrow().active_count(now),
             open_links: hub.tracker.borrow().open_links().len(),
             open_active: hub.tracker.borrow().active_link_count(now),
+            aircraft: hub.tracker.borrow().aircraft().len(),
+            aircraft_active: hub.tracker.borrow().active_aircraft_count(now),
             own: hub.own_pos(now).map(|p| OwnJson::of(&p, now)),
             links: (0..NODE_LINKS)
                 .map(|i| {
@@ -203,6 +227,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             lag_max_us: LAG_MAX_US.swap(0, Relaxed),
             ssid: hotspot::identity().ssid.as_str(),
             gps: gnss::GpsLine::now(now),
+            adsb: adsbee::AdsbLine::now(hub, now),
             sd: sd::SdLine::now(),
             screen: screen::ScreenLine::now(),
             batt: panel::BattLine::now(),

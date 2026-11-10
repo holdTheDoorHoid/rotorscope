@@ -44,7 +44,7 @@ esp32c5 = [
 ]
 # Two synthetic, obviously fake drones circling the hub, injected as if a
 # node had heard them. Exercises every output without any radio nodes.
-demo = ["rid/encode"]
+demo = ["rid/encode", "adsb/encode"]
 # Build the hotspot without a password. For bench tests only: anyone nearby
 # could then join and read the track list.
 open-hotspot = []
@@ -60,6 +60,11 @@ gps-uart = []
 # that an FPV link is on the air is shown to anyone, but the identifiers
 # single out someone's equipment, so whoever builds the unit must opt in.
 show-link-ids = []
+# ADS-B: read an ADSBee 1090's CSBee output on UART2 (pin `adsbee_rx`, see
+# pins.rs) and show crewed aircraft beside the drones (src/adsbee.rs). S3
+# only, and it costs node link 2 (the 5 GHz node): the S3 has three UARTs.
+# Excludes `gps-uart`, which wants the same UART.
+adsbee = []
 
 [dependencies]
 rid     = { path = "../../crates/rid", features = ["serde"] }
@@ -67,6 +72,8 @@ link    = { path = "../../crates/link" }
 # Open FPV link types (the demo builds sightings with them).
 openlink = { path = "../../crates/openlink", features = ["serde"] }
 tracker = { path = "../../crates/tracker" }
+# CSBee parser for the ADSBee (feature `adsbee`; the types are used regardless).
+adsb    = { path = "../../crates/adsb" }
 # The phone page, gzipped at build time (web/index.html).
 webui   = { path = "../../crates/webui" }
 # MAX-M10S parser and configuration frames (no I/O of its own).

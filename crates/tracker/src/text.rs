@@ -13,6 +13,9 @@ pub enum FormatError {
     NoPosition,
     /// The output needs UTC and the hub has none yet (no GPS time).
     NoTime,
+    /// Deliberately not written: the object is already sent as something
+    /// else (an ADS-B "UAV" that is a Remote ID drone track, for CoT).
+    Duplicate,
 }
 
 /// `fmt::Write` into a byte slice; remembers overflow instead of panicking.

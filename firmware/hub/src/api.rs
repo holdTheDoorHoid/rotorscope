@@ -4,13 +4,16 @@
 //! tracks is up to ~99 KB: it does not fit next to Wi-Fi on an S3 without
 //! PSRAM. So the hub sends the same bytes in pieces:
 //!
-//! 1. the envelope: `json::state` called with **no links and no tracks**,
-//!    which yields `{...,"open_links":[],"tracks":[]}\n`; the trailing
-//!    `],"tracks":[]}\n` is cut off;
+//! 1. the envelope: `json::state` called with **no links, tracks or
+//!    aircraft**, which yields `{...,"open_links":[],"tracks":[],"aircraft":[]}\n`;
+//!    the trailing `],"tracks":[],"aircraft":[]}\n` is cut off;
 //! 2. each open link as `json::link_line` without its `\n`, comma-separated;
 //! 3. `],"tracks":[` (`json::STATE_LINKS_TO_TRACKS`);
 //! 4. each track as `json::track_line` without its `\n`, comma-separated;
-//! 5. `]}\n` (`json::STATE_END`).
+//! 5. `],"aircraft":[` (`json::STATE_TRACKS_TO_AIRCRAFT`);
+//! 6. each aircraft as `json::aircraft_line` without its `\n` (none unless
+//!    built with `adsbee`);
+//! 7. `]}\n` (`json::STATE_END`).
 //!
 //! That is byte-for-byte what `json::state` produces for the same tracks and
 //! context (it builds the object the same way), and `check_against_reference`
@@ -20,15 +23,16 @@
 
 use tracker::json::{self, GpsStatus, HubStatus, MAX_LINE, ManualPos, NodeStatus, OwnPosRequest};
 use tracker::openlinks::MAX_LINK_TRACKS;
-use tracker::{Context, LinkTrackId, TrackId};
+use tracker::{AircraftKey, Context, LinkTrackId, TrackId};
 
-use crate::hub::{Hub, MAX_TRACKS, OwnSource};
+use crate::hub::{Hub, MAX_AIRCRAFT, MAX_TRACKS, OwnSource};
 use crate::pins::NODE_LINKS;
-use crate::{gnss, sd};
+use crate::{adsbee, gnss, sd};
 
-/// What `json::state` puts after the envelope when there are no links or
-/// tracks: `],"tracks":[]}\n`.
-const EMPTY_TAIL: usize = json::STATE_LINKS_TO_TRACKS.len() + json::STATE_END.len();
+/// What `json::state` puts after the envelope when there are no links,
+/// tracks or aircraft: `],"tracks":[],"aircraft":[]}\n`.
+const EMPTY_TAIL: usize =
+    json::STATE_LINKS_TO_TRACKS.len() + json::STATE_TRACKS_TO_AIRCRAFT.len() + json::STATE_END.len();
 
 /// Node entries for the state object: one per link that has said Hello.
 fn node_statuses(hub: &Hub, now: u64) -> heapless::Vec<NodeStatus, NODE_LINKS> {
@@ -66,9 +70,10 @@ fn envelope(hub: &Hub, ctx: &Context, buf: &mut [u8]) -> usize {
         gps: gnss_status(),
         recording: sd::recording(),
         nodes: &nodes,
+        adsb: adsbee::status(hub, now),
     };
-    match json::state(&[], &[], ctx, &status, buf) {
-        // `...,"open_links":[],"tracks":[]}\n` -> `...,"open_links":[`
+    match json::state(&[], &[], &[], ctx, &status, buf) {
+        // `...,"open_links":[],"tracks":[],"aircraft":[]}\n` -> `...,"open_links":[`
         Ok(n) if n >= EMPTY_TAIL => n - EMPTY_TAIL,
         // Cannot happen with MAX_LINE (head + 3 nodes is < 1 KB); still valid JSON.
         _ => {
@@ -88,6 +93,7 @@ pub struct StateWriter {
     ctx: Context,
     links: heapless::Vec<LinkTrackId, MAX_LINK_TRACKS>,
     ids: heapless::Vec<TrackId, MAX_TRACKS>,
+    aircraft: heapless::Vec<AircraftKey, MAX_AIRCRAFT>,
     next: usize,
     stage: Stage,
     /// Whether the current array has an element yet (for the commas).
@@ -100,6 +106,8 @@ enum Stage {
     Links,
     Mid,
     Tracks,
+    Mid2,
+    Aircraft,
     Tail,
     Done,
 }
@@ -113,7 +121,8 @@ impl StateWriter {
         let tracker = hub.tracker.borrow();
         let links = tracker.open_links().iter().map(|l| l.id).collect();
         let ids = tracker.tracks().iter().map(|t| t.id).collect();
-        Self { ctx, links, ids, next: 0, stage: Stage::Head, wrote_any: false }
+        let aircraft = tracker.aircraft().iter().map(|a| a.key).collect();
+        Self { ctx, links, ids, aircraft, next: 0, stage: Stage::Head, wrote_any: false }
     }
 
     /// Write the next piece into `buf`; `None` when the body is complete.
@@ -142,7 +151,7 @@ impl StateWriter {
                 }
                 Stage::Tracks => {
                     let Some(&id) = self.ids.get(self.next) else {
-                        self.stage = Stage::Tail;
+                        self.stage = Stage::Mid2;
                         continue;
                     };
                     self.next += 1;
@@ -150,6 +159,24 @@ impl StateWriter {
                     let Some(track) = tracker.get(id) else { continue };
                     let start = usize::from(self.wrote_any);
                     let Ok(n) = json::track_line(track, &self.ctx, &mut buf[start..]) else { continue };
+                    return Some(self.element(buf, start, n));
+                }
+                Stage::Mid2 => {
+                    (self.stage, self.next, self.wrote_any) = (Stage::Aircraft, 0, false);
+                    return Some(put(buf, json::STATE_TRACKS_TO_AIRCRAFT));
+                }
+                Stage::Aircraft => {
+                    let Some(&key) = self.aircraft.get(self.next) else {
+                        self.stage = Stage::Tail;
+                        continue;
+                    };
+                    self.next += 1;
+                    let tracker = hub.tracker.borrow();
+                    let Some(a) = tracker.get_aircraft(key) else { continue };
+                    let start = usize::from(self.wrote_any);
+                    let Ok(n) = json::aircraft_line(a, tracker.tracks(), &self.ctx, &mut buf[start..]) else {
+                        continue;
+                    };
                     return Some(self.element(buf, start, n));
                 }
                 Stage::Tail => {
@@ -188,12 +215,14 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
     const MAX_CHECKED: usize = 4;
     let tracker = hub.tracker.borrow();
     let links = tracker.open_links();
-    if tracker.len() > MAX_CHECKED || links.len() > MAX_CHECKED {
+    let aircraft = tracker.aircraft();
+    if tracker.len() > MAX_CHECKED || links.len() > MAX_CHECKED || aircraft.len() > MAX_CHECKED {
         return None;
     }
     let ctx = hub.context(now);
     let nodes = node_statuses(hub, now);
-    let mut reference = alloc::vec![0u8; json::state_max_len(tracker.len(), links.len(), nodes.len())];
+    let mut reference =
+        alloc::vec![0u8; json::state_max_len(tracker.len(), links.len(), aircraft.len(), nodes.len())];
     let mut env = [0u8; MAX_LINE];
     let env_len = envelope(hub, &ctx, &mut env);
     // Rebuild the reference with the same inputs the envelope used.
@@ -206,8 +235,9 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
         gps: gnss_status(),
         recording: sd::recording(),
         nodes: &nodes,
+        adsb: adsbee::status(hub, now),
     };
-    let ref_len = json::state(tracker.tracks(), links, &ctx, &status, &mut reference).ok()?;
+    let ref_len = json::state(tracker.tracks(), links, aircraft, &ctx, &status, &mut reference).ok()?;
 
     let mut streamed: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(ref_len);
     streamed.extend_from_slice(&env[..env_len]);
@@ -225,6 +255,14 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
             streamed.push(b',');
         }
         let n = json::track_line(t, &ctx, &mut line).ok()?;
+        streamed.extend_from_slice(&line[..n - 1]);
+    }
+    streamed.extend_from_slice(json::STATE_TRACKS_TO_AIRCRAFT);
+    for (i, a) in aircraft.iter().enumerate() {
+        if i > 0 {
+            streamed.push(b',');
+        }
+        let n = json::aircraft_line(a, tracker.tracks(), &ctx, &mut line).ok()?;
         streamed.extend_from_slice(&line[..n - 1]);
     }
     streamed.extend_from_slice(json::STATE_END);

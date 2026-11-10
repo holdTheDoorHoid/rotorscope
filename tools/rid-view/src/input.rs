@@ -1,4 +1,5 @@
-//! Input sources: node serial ports, recorded files, stdin, and the demo.
+//! Input sources: node serial ports, recorded files, stdin, an ADSBee, and
+//! the demo.
 //! Each runs on its own thread and sends [`Event`]s down one channel, so a
 //! slow or silent port never stalls the others.
 
@@ -34,6 +35,15 @@ pub enum Event {
     /// The source ended (EOF or error).
     End {
         node: u8,
+        why: String,
+    },
+    /// From the ADSBee (or the demo's simulated one): one CSBee line, parsed.
+    Adsb {
+        result: Result<adsb::Report, adsb::Error>,
+        at_ms: u64,
+    },
+    /// The ADSBee input ended.
+    AdsbEnd {
         why: String,
     },
 }
@@ -98,6 +108,52 @@ pub fn spawn_reader(
             }
         };
         let _ = tx.send(Event::End { node, why });
+    });
+    Ok(())
+}
+
+/// Read an ADSBee's CSBee output (`--adsbee`): its USB console or a
+/// USB-UART on its COMMS_UART pins, or a recorded file of the same text.
+/// With `realtime`, a recording plays back at one report per second (the
+/// ADSBee ends each once-a-second report with its `#S:` line).
+pub fn spawn_adsbee(
+    path: String,
+    realtime: bool,
+    start: Instant,
+    tx: Sender<Event>,
+) -> io::Result<()> {
+    let mut reader = open(Path::new(&path))?;
+    std::thread::spawn(move || {
+        let clock = Clock(start);
+        let mut split = adsb::LineSplitter::new();
+        let mut buf = [0u8; 512];
+        let why = loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break "end of input".to_string(),
+                Ok(n) => n,
+                Err(e) => break e.to_string(),
+            };
+            let mut gone = false;
+            split.feed(&buf[..n], |result| {
+                if gone {
+                    return;
+                }
+                let end_of_report = matches!(result, Ok(adsb::Report::Stats(_)));
+                gone = tx
+                    .send(Event::Adsb {
+                        result,
+                        at_ms: clock.ms(),
+                    })
+                    .is_err();
+                if realtime && end_of_report {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
+            if gone {
+                return;
+            }
+        };
+        let _ = tx.send(Event::AdsbEnd { why });
     });
     Ok(())
 }

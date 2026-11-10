@@ -9,9 +9,17 @@
 //! the system, and the position columns are empty because a sighting has
 //! none. `uas_id` and `id_type` carry the link's identifier only when
 //! `Config::show_link_ids` is set.
+//!
+//! ADS-B aircraft ([`aircraft_row`]) share them too: `track` is
+//! `ICAO-<hex>`, `uas_id` the callsign (`id_type` `Callsign`), `ua_type` the
+//! emitter category, `transports` `Adsb1090` or `Uat978`, `drone_lat`/
+//! `drone_lon`/`drone_alt_m` the aircraft's position and geometric altitude,
+//! and the last column, `baro_alt_m`, its pressure altitude. (For drones
+//! `baro_alt_m` is the Remote ID pressure altitude.)
 
 use core::fmt::Write;
 
+use crate::aircraft::{AircraftTrack, IcaoHex};
 use crate::json::round_bearing;
 use crate::openlinks::{LinkTrack, shown_id};
 use crate::text::{Buf, CsvField, FormatError, IdText, IsoTime, render};
@@ -23,7 +31,7 @@ pub const MAX_ROW: usize = 512;
 /// The header line, `\n`-terminated.
 pub const HEADER: &str = "utc,hub_ms,track,own_lat,own_lon,own_alt_m,uas_id,id_type,ua_type,\
 transports,drone_lat,drone_lon,drone_alt_m,height_m,speed_mps,op_lat,op_lon,rssi_dbm,\
-dist_m,brg_deg,op_dist_m,op_brg_deg\n";
+dist_m,brg_deg,op_dist_m,op_brg_deg,baro_alt_m\n";
 
 /// Write [`HEADER`] into `buf`.
 pub fn header(buf: &mut [u8]) -> Result<usize, FormatError> {
@@ -105,11 +113,12 @@ pub fn row(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, Format
         }
         writeln!(
             w,
-            ",{},{},{},{}",
+            ",{},{},{},{},{}",
             Opt(g.drone.map(|d| d.distance_m), 1),
             Opt(g.drone.map(|d| round_bearing(d.bearing_deg)), 1),
             Opt(g.operator.map(|d| d.distance_m), 1),
             Opt(g.operator.map(|d| round_bearing(d.bearing_deg)), 1),
+            Opt(loc.and_then(|l| l.altitude_pressure), 1),
         )
     })();
     w.finish()
@@ -161,8 +170,63 @@ pub fn link_row(t: &LinkTrack, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         if let Some(s) = t.latest() {
             write!(w, "{}", s.rssi)?;
         }
-        // No range or bearing either.
-        w.write_str(",,,,\n")
+        // No range, bearing or altitude either.
+        w.write_str(",,,,,\n")
+    })();
+    w.finish()
+}
+
+/// Write one row for an ADS-B aircraft (columns as [`HEADER`]; see the
+/// module docs for what each means here), `\n`-terminated.
+pub fn aircraft_row(
+    a: &AircraftTrack,
+    ctx: &Context,
+    buf: &mut [u8],
+) -> Result<usize, FormatError> {
+    let own = ctx.own;
+    let g = ctx.aircraft_geometry(a);
+    let pos = a.position.as_ref().map(|p| p.value);
+    let ft = |v: Option<i32>| v.map(|f| f64::from(f) * 0.3048);
+    let mut w = Buf::new(buf);
+    let _ = (|| -> core::fmt::Result {
+        if let Some(utc) = ctx.utc_ms {
+            write!(w, "{}", IsoTime(utc))?;
+        }
+        write!(
+            w,
+            ",{},ICAO-{},{},{},{},",
+            ctx.now_ms,
+            IcaoHex(a.key.icao),
+            Opt(own.map(|o| o.lat), 7),
+            Opt(own.map(|o| o.lon), 7),
+            Opt(own.and_then(|o| o.alt_m), 1),
+        )?;
+        if a.callsign.is_empty() {
+            w.write_char(',')?;
+        } else {
+            write!(w, "{},Callsign", CsvField(a.callsign.as_str()))?;
+        }
+        write!(
+            w,
+            ",{},{},{},{},{},,{},,,",
+            a.kind().name(),
+            match a.key.source {
+                adsb::Source::ModeS => "Adsb1090",
+                adsb::Source::Uat => "Uat978",
+            },
+            Opt(pos.map(|p| p.lat), 7),
+            Opt(pos.map(|p| p.lon), 7),
+            Opt(ft(a.gnss_alt_ft), 1),
+            Opt(a.speed_mps(), 2),
+        )?;
+        writeln!(
+            w,
+            "{},{},{},,,{}",
+            a.rssi_dbm,
+            Opt(g.range.map(|r| r.distance_m), 1),
+            Opt(g.range.map(|r| round_bearing(r.bearing_deg)), 1),
+            Opt(ft(a.baro_alt_ft), 1),
+        )
     })();
     w.finish()
 }

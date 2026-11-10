@@ -10,7 +10,10 @@
 //! - `gnss`: the MAX-M10S over I2C (or UART), plus PPS timestamps.
 //! - `periph` (S3 second core): `screen` (banded panel rendering, buttons),
 //!   `sd` (CSV log), `panel` (buzzer, battery), sharing one SPI bus (`bus`).
-//! - `demo` (feature): two synthetic drones in place of nodes.
+//! - `adsbee` (feature, S3): crewed aircraft from an ADSBee 1090 on UART2,
+//!   in their own table; never an alert.
+//! - `demo` (feature): two synthetic drones in place of nodes (and, with
+//!   `adsbee`, a synthetic helicopter).
 //!
 //! All tracker access is on the thread-mode executor of core 0, so it needs
 //! no lock; the second core only sees copies (`screen::UI_STATE`, SD rows).
@@ -24,6 +27,7 @@
     holding buffers for the duration of a data transfer."
 )]
 
+mod adsbee;
 mod api;
 mod bus;
 mod clock;
@@ -77,6 +81,11 @@ compile_error!("enable exactly one of the `esp32s3` / `esp32c5` features");
 // The C5 has two UARTs and both carry nodes.
 #[cfg(all(feature = "esp32c5", feature = "gps-uart"))]
 compile_error!("`gps-uart` is S3-only: the C5's two UARTs both carry nodes; use the I2C GPS");
+// The ADSBee needs a UART of its own (see adsbee.rs).
+#[cfg(all(feature = "esp32c5", feature = "adsbee"))]
+compile_error!("`adsbee` is S3-only: the C5's two UARTs both carry nodes");
+#[cfg(all(feature = "adsbee", feature = "gps-uart"))]
+compile_error!("`adsbee` and `gps-uart` both need the S3's third UART; use the I2C GPS");
 
 const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" };
 
@@ -125,10 +134,14 @@ struct BootLine {
     links: usize,
     /// How the GPS is wired: `"i2c"` or `"uart"` (feature `gps-uart`).
     gps: &'static str,
+    /// An ADSBee on UART2 (feature `adsbee`), and the aircraft table size.
+    adsbee: bool,
+    max_aircraft: usize,
     /// Screen controller the build drives.
     panel: &'static str,
     max_tracks: usize,
-    /// Static RAM the track table costs, bytes (open-link table included).
+    /// Static RAM the track table costs, bytes (open-link and aircraft
+    /// tables included).
     track_bytes: usize,
     /// Open FPV links the table holds, and whether their identifiers are
     /// shown (feature `show-link-ids`; off by default).
@@ -168,11 +181,13 @@ async fn main(spawner: Spawner) -> ! {
         demo: cfg!(feature = "demo"),
         station: cfg!(hub_station),
         open_hotspot: hotspot::OPEN,
-        links: pins::NODE_LINKS - usize::from(cfg!(feature = "gps-uart")),
+        links: pins::NODE_LINKS - usize::from(cfg!(feature = "gps-uart") || cfg!(feature = "adsbee")),
         gps: if cfg!(feature = "gps-uart") { "uart" } else { "i2c" },
+        adsbee: adsbee::ENABLED,
+        max_aircraft: hub::MAX_AIRCRAFT,
         panel: if cfg!(feature = "ili9341") { "ili9341" } else { "st7789" },
         max_tracks: hub::MAX_TRACKS,
-        track_bytes: core::mem::size_of::<tracker::Tracker<{ hub::MAX_TRACKS }>>(),
+        track_bytes: core::mem::size_of::<hub::HubTracker>(),
         max_open_links: tracker::openlinks::MAX_LINK_TRACKS,
         show_link_ids: hub::SHOW_LINK_IDS,
         heap_free: esp_alloc::HEAP.free(),
@@ -183,6 +198,10 @@ async fn main(spawner: Spawner) -> ! {
     // ---- Node links, on the interrupt executor (see links.rs) ----
     let uart_exec = UART_EXECUTOR.init(InterruptExecutor::new(peripherals.FROM_CPU_INTR2));
     let uart_spawner = uart_exec.start(Priority::Priority2);
+    #[cfg(feature = "adsbee")]
+    let pins::Pins { node_rx, gps_sda, gps_scl, pps, spi_sck, spi_mosi, spi_miso, screen_cs, screen_dc,
+        screen_backlight, sd_cs, buttons, buzzer, battery, adsbee_rx, .. } = pins;
+    #[cfg(not(feature = "adsbee"))]
     let pins::Pins { node_rx, gps_sda, gps_scl, pps, spi_sck, spi_mosi, spi_miso, screen_cs, screen_dc,
         screen_backlight, sd_cs, buttons, buzzer, battery, .. } = pins;
     #[cfg(feature = "esp32s3")]
@@ -191,12 +210,18 @@ async fn main(spawner: Spawner) -> ! {
     let [rx0, rx1] = node_rx;
     uart_spawner.spawn(links::reader(0, AnyUart::from(peripherals.UART0), rx0).expect("spawn reader 0"));
     uart_spawner.spawn(links::reader(1, AnyUart::from(peripherals.UART1), rx1).expect("spawn reader 1"));
-    // With `gps-uart` the GPS takes the S3's third UART, so node link 2 goes.
-    #[cfg(all(feature = "esp32s3", not(feature = "gps-uart")))]
+    // With `gps-uart` (the GPS) or `adsbee` (the ADSBee) the S3's third UART
+    // is taken, so node link 2 goes.
+    #[cfg(all(feature = "esp32s3", not(feature = "gps-uart"), not(feature = "adsbee")))]
     uart_spawner.spawn(links::reader(2, AnyUart::from(peripherals.UART2), rx2).expect("spawn reader 2"));
-    #[cfg(all(feature = "esp32s3", feature = "gps-uart"))]
+    #[cfg(all(feature = "esp32s3", any(feature = "gps-uart", feature = "adsbee")))]
     let _ = rx2;
     spawner.spawn(links::ingest(hub).expect("spawn ingest"));
+    #[cfg(feature = "adsbee")]
+    {
+        uart_spawner.spawn(adsbee::reader(AnyUart::from(peripherals.UART2), adsbee_rx).expect("spawn adsbee"));
+        spawner.spawn(adsbee::ingest(hub).expect("spawn adsbee ingest"));
+    }
 
     // ---- GPS (P1, P3) ----
     let (sda, scl) = (gps_sda, gps_scl);

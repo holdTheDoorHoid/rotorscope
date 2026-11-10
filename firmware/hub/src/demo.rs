@@ -13,6 +13,12 @@
 //! - A wfb-ng FPV link on channel 161 (video down, MAVLink up), sent as the
 //!   5 GHz node would: one `OpenLink` sighting per stream per second with a
 //!   running count. It exercises the open-link table and outputs.
+//! - With `adsbee`: a helicopter, callsign DEMOHELI, address DE0001, circling
+//!   1.5 km out at 900 ft, as the ADSBee would report it once a second. Its
+//!   CSBee line is built with `adsb::encode` and parsed back by the same
+//!   `adsb::LineSplitter` the UART uses, then queued like a UART report.
+//!   It is low and near, so it exercises the quiet "low aircraft" line, and
+//!   it must never alert.
 
 use core::f64::consts::PI;
 
@@ -195,6 +201,8 @@ pub async fn task(centre: (f64, f64)) {
             inject(fpv_sighting(port, seconds.saturating_mul(fps)));
         }
         let t_s = now_ms() as f64 / 1000.0;
+        #[cfg(feature = "adsbee")]
+        demo_aircraft(centre, t_s, seconds);
         for d in [&ALPHA, &BRAVO] {
             match messages(d, centre, t_s) {
                 Ok(msgs) => {
@@ -209,5 +217,79 @@ pub async fn task(centre: (f64, f64)) {
                 Err(_) => crate::usb::msg("err", "demo encode"),
             }
         }
+    }
+}
+
+/// The demo helicopter's report for this second (feature `adsbee`).
+#[cfg(feature = "adsbee")]
+fn demo_aircraft(centre: (f64, f64), t_s: f64, seconds: u32) {
+    use adsb::flag;
+    const R_M: f64 = 1_500.0;
+    const PERIOD_S: f64 = 160.0;
+    let th = 2.0 * PI * t_s / PERIOD_S;
+    let lat = centre.0 + (R_M * libm::cos(th) / EARTH_R).to_degrees();
+    let lon = centre.1 + (R_M * libm::sin(th) / (EARTH_R * libm::cos(centre.0.to_radians()))).to_degrees();
+    let dir = ((th.to_degrees() + 90.0) % 360.0) as f32;
+    let kt = (2.0 * PI * R_M / PERIOD_S / 0.514_444) as i32;
+    let flags = [
+        flag::AIRBORNE,
+        flag::BARO_ALT_VALID,
+        flag::POSITION_VALID,
+        flag::DIRECTION_VALID,
+        flag::SPEED_VALID,
+        flag::UPDATED_POSITION,
+    ]
+    .iter()
+    .fold(0u32, |f, b| f | 1 << b);
+    let a = adsb::Aircraft {
+        source: adsb::Source::ModeS,
+        icao: 0xDE0001,
+        flags,
+        callsign: adsb::Callsign::new("DEMOHELI").unwrap_or_default(),
+        squawk: Some(0o1200),
+        category: 7,
+        lat_deg: lat,
+        lon_deg: lon,
+        baro_alt_ft: 900,
+        gnss_alt_ft: 0,
+        direction_deg: dir,
+        speed_kt: kt,
+        baro_vrate_fpm: 0,
+        gnss_vrate_fpm: 0,
+        uat_emergency: 0,
+        nicnac: 0,
+        acdims: 0,
+        version: 2,
+        signal_dbm: -58,
+        signal_quality: 6,
+        frames_per_s: 2,
+        es_frames_per_s: 4,
+    };
+    let stats = adsb::Stats {
+        version: adsb::PROTOCOL_VERSION,
+        demods_per_s: 40,
+        raw_squitters_per_s: 3,
+        squitters_per_s: 2,
+        raw_extended_squitters_per_s: 5,
+        extended_squitters_per_s: 4,
+        raw_uat_per_s: 0,
+        uat_per_s: 0,
+        aircraft: 1,
+        tscal: 0,
+        uptime_s: seconds,
+    };
+    let mut line = [0u8; adsb::MAX_LINE];
+    let mut split = adsb::LineSplitter::new();
+    let mut queue = |r: Result<adsb::Report, adsb::Error>| match r {
+        Ok(r) => {
+            let _ = crate::adsbee::REPORTS.try_send(r);
+        }
+        Err(_) => crate::usb::msg("err", "demo csbee"),
+    };
+    if let Some(n) = adsb::encode::aircraft(&a, &mut line) {
+        split.feed(&line[..n], &mut queue);
+    }
+    if let Some(n) = adsb::encode::stats(&stats, &mut line) {
+        split.feed(&line[..n], &mut queue);
     }
 }

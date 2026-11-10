@@ -1,4 +1,5 @@
-//! The hub's shared state: the track table, node health, own position.
+//! The hub's shared state: the track table, node health, own position, and
+//! (feature `adsbee`) the ADS-B receiver's health.
 //!
 //! Everything here lives on the thread-mode executor only (the UART readers on
 //! the interrupt executor hand frames over through `links::FRAMES`), so plain
@@ -18,6 +19,22 @@ use crate::{clock, gnss, links, panel};
 /// Track table size. PLAN.md D7: 32 required, 64 goal. 64 fits without PSRAM
 /// (see the `"track_bytes"` field of the boot line for the real cost).
 pub const MAX_TRACKS: usize = 64;
+
+/// Aircraft table size: the tracker's default with an ADSBee (feature
+/// `adsbee`), else none at all, so a hub without one pays no RAM for it.
+pub const MAX_AIRCRAFT: usize = if crate::adsbee::ENABLED { tracker::aircraft::MAX_AIRCRAFT } else { 0 };
+
+/// The hub's tracker type.
+pub type HubTracker = Tracker<MAX_TRACKS, MAX_AIRCRAFT>;
+
+/// What the hub knows about the ADSBee besides its aircraft.
+#[derive(Clone, Copy, Default)]
+pub struct AdsbHealth {
+    /// Hub time of the last valid CSBee line.
+    pub last_ms: Option<u64>,
+    /// The last `#S:` statistics line.
+    pub stats: Option<adsb::Stats>,
+}
 
 /// A node is alive if any frame arrived within this long (Stats come every 1 s,
 /// Hello every 5 s).
@@ -126,8 +143,9 @@ pub struct OwnPos {
 }
 
 pub struct Hub {
-    pub tracker: RefCell<Tracker<MAX_TRACKS>>,
+    pub tracker: RefCell<HubTracker>,
     pub nodes: RefCell<[NodeStatus; NODE_LINKS]>,
+    pub adsb: Cell<AdsbHealth>,
     /// Set by `POST /api/own-pos` or the USB `p` command. Kept until cleared:
     /// a person typed it in, so it does not go stale like a GPS fix. Not kept
     /// across reboots yet (would need a flash write; see README).
@@ -144,8 +162,26 @@ impl Hub {
                 ..tracker::Config::default()
             })),
             nodes: RefCell::new(core::array::from_fn(|_| NodeStatus::default())),
+            adsb: Cell::new(AdsbHealth::default()),
             manual_pos: Cell::new(None),
         }
+    }
+
+    /// One CSBee report from the ADSBee (feature `adsbee`, or its demo).
+    /// Aircraft go to their own table: never a drone track, never an alert
+    /// (`announce_new` is deliberately not called).
+    #[cfg_attr(not(feature = "adsbee"), allow(dead_code))]
+    pub fn on_adsb(&self, report: &adsb::Report, now: u64) {
+        let mut h = self.adsb.get();
+        h.last_ms = Some(now);
+        match report {
+            adsb::Report::Aircraft(a) => {
+                self.tracker.borrow_mut().ingest_aircraft(a, now);
+            }
+            adsb::Report::Stats(s) => h.stats = Some(*s),
+        }
+        self.adsb.set(h);
+        crate::screen::mark_dirty();
     }
 
     /// One frame from link `node` (or the demo source).

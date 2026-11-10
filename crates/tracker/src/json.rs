@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::aircraft::{AircraftTrack, icao_hex, same_drone};
 use crate::openlinks::{LinkTrack, LinkTrackId, shown_id};
 use crate::text::{FormatError, Mac};
 use crate::{Band, Context, Track, TrackId, TrackState};
@@ -319,6 +320,127 @@ pub fn link_line(t: &LinkTrack, ctx: &Context, buf: &mut [u8]) -> Result<usize, 
     Ok(n + 1)
 }
 
+// --------------------------------------------------------------- aircraft --
+
+#[derive(Serialize)]
+struct AircraftLine<'a> {
+    t: &'static str,
+    /// Six upper-case hex digits.
+    icao: heapless::String<6>,
+    /// `"1090"` or `"978"` (UAT).
+    src: &'static str,
+    /// UAT address qualifier (2, 3 = relayed by a TIS-B ground station).
+    aq: u8,
+    state: TrackState,
+    call: Option<&'a str>,
+    /// Four octal digits, e.g. `"7700"`.
+    squawk: Option<heapless::String<4>>,
+    /// `"hijack"`, `"radio failure"` or `"emergency"` for 7500/7600/7700.
+    emerg: Option<&'static str>,
+    cat: i8,
+    kind: &'static str,
+    label: &'static str,
+    mil: bool,
+    air: bool,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    pos_age_ms: Option<u64>,
+    alt_baro_ft: Option<i32>,
+    alt_geo_ft: Option<i32>,
+    spd_kt: Option<i32>,
+    trk: Option<f32>,
+    vr_fpm: Option<i32>,
+    rssi: i16,
+    first_ms: u64,
+    last_ms: u64,
+    age_ms: u64,
+    /// The Remote ID drone track this probably is (ADS-B category UAV
+    /// within 300 m of it), else null.
+    drone: Option<TrackId>,
+    own: Option<AircraftOwn>,
+}
+
+#[derive(Serialize)]
+struct AircraftOwn {
+    dist_m: Option<f64>,
+    brg: Option<f64>,
+    above_m: Option<f64>,
+    /// Low aircraft nearby: a quiet heads-up, never an alert.
+    low: bool,
+}
+
+/// A buffer this size always holds one aircraft line (worst case: see the
+/// test). The hub streams these through its `MAX_LINE` buffer.
+pub const MAX_AIRCRAFT_LINE: usize = 704;
+const _: () = assert!(MAX_AIRCRAFT_LINE <= MAX_LINE);
+
+/// Write one aircraft as a JSON object followed by `\n` (`"t":"aircraft"`;
+/// schema in `crates/tracker/README.md`). `drones` is the drone table, for
+/// the `drone` field. Returns bytes written.
+pub fn aircraft_line(
+    a: &AircraftTrack,
+    drones: &[Track],
+    ctx: &Context,
+    buf: &mut [u8],
+) -> Result<usize, FormatError> {
+    let now = ctx.now_ms;
+    let pos = a.position.as_ref();
+    let own = ctx.own.map(|_| {
+        let g = ctx.aircraft_geometry(a);
+        AircraftOwn {
+            dist_m: g.range.map(|r| round1(r.distance_m)),
+            brg: g.range.map(|r| round_bearing(r.bearing_deg)),
+            above_m: g.above_m.map(round1),
+            low: g.low_nearby && ctx.aircraft_state(a) == TrackState::Active,
+        }
+    });
+    let line = AircraftLine {
+        t: "aircraft",
+        icao: icao_hex(a),
+        src: match a.key.source {
+            adsb::Source::ModeS => "1090",
+            adsb::Source::Uat => "978",
+        },
+        aq: a.address_qualifier,
+        state: ctx.aircraft_state(a),
+        call: (!a.callsign.is_empty()).then(|| a.callsign.as_str()),
+        squawk: a.squawk.map(|s| crate::text::render(Octal4(s))),
+        emerg: a.emergency(),
+        cat: a.category,
+        kind: a.kind().name(),
+        label: a.kind().label(),
+        mil: a.military,
+        air: a.airborne,
+        lat: pos.map(|p| p.value.lat),
+        lon: pos.map(|p| p.value.lon),
+        pos_age_ms: pos.map(|p| now.saturating_sub(p.rx_ms)),
+        alt_baro_ft: a.baro_alt_ft,
+        alt_geo_ft: a.gnss_alt_ft,
+        spd_kt: a.speed_kt,
+        trk: a.direction_deg,
+        vr_fpm: a.vrate_fpm,
+        rssi: a.rssi_dbm,
+        first_ms: a.first_seen_ms,
+        last_ms: a.last_seen_ms,
+        age_ms: now.saturating_sub(a.last_seen_ms),
+        drone: same_drone(a, drones, ctx),
+        own,
+    };
+    let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
+    let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
+    *nl = b'\n';
+    Ok(n + 1)
+}
+
+/// A squawk as four octal digits.
+pub(crate) struct Octal4(pub u16);
+
+impl core::fmt::Display for Octal4 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:04o}", self.0 & 0o7777)
+    }
+}
+
 // ------------------------------------------------------------------ state --
 //
 // The phone page polls `GET /api/state` about once a second and gets one
@@ -386,6 +508,22 @@ pub struct NodeStatus {
     pub drops: Option<u32>,
 }
 
+/// Health of the ADS-B receiver (an ADSBee on a hub UART), for the page's
+/// status strip. `None` in [`HubStatus::adsb`] when the hub has none built in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AdsbStatus {
+    /// A valid line arrived recently (the ADSBee reports once a second).
+    pub alive: bool,
+    /// Time since the last valid line; `None` if never.
+    pub age_ms: Option<u64>,
+    /// Valid frames per second over both bands, from its statistics line.
+    pub frames_per_s: Option<u32>,
+    /// Aircraft in the ADSBee's own table (may exceed the hub's).
+    pub aircraft: Option<u16>,
+    /// Lines refused (bad checksum, malformed), total since the hub booted.
+    pub errors: u32,
+}
+
 /// Everything `/api/state` reports besides the tracks and the `Context`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HubStatus<'a> {
@@ -398,6 +536,8 @@ pub struct HubStatus<'a> {
     pub recording: bool,
     /// One entry per attached node, in a stable order.
     pub nodes: &'a [NodeStatus],
+    /// The ADS-B receiver, if the hub has one built in.
+    pub adsb: Option<AdsbStatus>,
 }
 
 #[derive(Serialize)]
@@ -422,29 +562,36 @@ struct StateHead<'a> {
     gps: GpsStatus,
     rec: bool,
     nodes: &'a [NodeStatus],
+    adsb: Option<AdsbStatus>,
 }
 
 /// Schema version of the state object (`"v"`). Bump on incompatible change.
 pub const STATE_VERSION: u8 = 1;
 
-/// Bytes the state object needs besides its nodes, open links and tracks
-/// (worst case, with the empty arrays' brackets).
-pub const STATE_HEAD_MAX: usize = 448;
+/// Bytes the state object needs besides its nodes, open links, tracks and
+/// aircraft (worst case, with the empty arrays' brackets).
+pub const STATE_HEAD_MAX: usize = 576;
 /// Bytes one node entry needs (worst case, with its comma).
 pub const STATE_NODE_MAX: usize = 160;
 
 /// A buffer this size always holds the state object for `tracks` tracks,
-/// `links` open links and `nodes` nodes. E.g. 64 tracks, 8 links and 4
-/// nodes: about 124 KB (put it in PSRAM). A typical object is far smaller
-/// (~1 KB per track, ~0.4 KB per link); see `state` for what happens when it
-/// does not fit.
-pub const fn state_max_len(tracks: usize, links: usize, nodes: usize) -> usize {
-    STATE_HEAD_MAX + nodes * STATE_NODE_MAX + links * MAX_LINK_LINE + tracks * MAX_LINE
+/// `links` open links, `aircraft` aircraft and `nodes` nodes. E.g. 64
+/// tracks, 8 links, 32 aircraft and 4 nodes: about 147 KB (put it in PSRAM).
+/// A typical object is far smaller (~1 KB per track, ~0.4 KB per link or
+/// aircraft); see `state` for what happens when it does not fit.
+pub const fn state_max_len(tracks: usize, links: usize, aircraft: usize, nodes: usize) -> usize {
+    STATE_HEAD_MAX
+        + nodes * STATE_NODE_MAX
+        + links * MAX_LINK_LINE
+        + tracks * MAX_LINE
+        + aircraft * MAX_AIRCRAFT_LINE
 }
 
 /// Between the open links and the tracks of the state object. A server that
 /// streams the object in pieces (the hub) writes exactly these bytes.
 pub const STATE_LINKS_TO_TRACKS: &[u8] = b"],\"tracks\":[";
+/// Between the tracks and the aircraft.
+pub const STATE_TRACKS_TO_AIRCRAFT: &[u8] = b"],\"aircraft\":[";
 /// The end of the state object.
 pub const STATE_END: &[u8] = b"]}\n";
 
@@ -452,16 +599,18 @@ pub const STATE_END: &[u8] = b"]}\n";
 /// bytes written.
 ///
 /// `tracks` is normally `tracker.tracks()`, `links` is
-/// `tracker.open_links()`, and `ctx` is `tracker.context(now_ms, utc_ms)`, so
-/// the tracks agree with `own`. Every track is written exactly as
-/// [`track_line`] writes it, every link as [`link_line`]; the links come
-/// first, as `"open_links":[...]`, then `"tracks":[...]`.
+/// `tracker.open_links()`, `aircraft` is `tracker.aircraft()`, and `ctx` is
+/// `tracker.context(now_ms, utc_ms)`, so the tracks agree with `own`. Every
+/// track is written exactly as [`track_line`] writes it, every link as
+/// [`link_line`], every aircraft as [`aircraft_line`]; the links come first,
+/// as `"open_links":[...]`, then `"tracks":[...]`, then `"aircraft":[...]`.
 ///
 /// Returns [`FormatError::BufferTooSmall`] (and nothing usable) if `buf` is
 /// too small; [`state_max_len`] gives a size that always fits.
 pub fn state(
     tracks: &[Track],
     links: &[LinkTrack],
+    aircraft: &[AircraftTrack],
     ctx: &Context,
     hub: &HubStatus,
     buf: &mut [u8],
@@ -482,6 +631,7 @@ pub fn state(
         gps: hub.gps,
         rec: hub.recording,
         nodes: hub.nodes,
+        adsb: hub.adsb,
     };
     // `{...}` -> `{...,"open_links":[` : drop the closing brace and carry on.
     let mut n = serde_json_core::to_slice(&head, buf).map_err(|_| FormatError::BufferTooSmall)? - 1;
@@ -502,6 +652,15 @@ pub fn state(
         let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
         // `track_line` ends with '\n'; drop it inside the array.
         n += track_line(t, ctx, rest)? - 1;
+    }
+    put(buf, &mut n, STATE_TRACKS_TO_AIRCRAFT)?;
+    for (i, a) in aircraft.iter().enumerate() {
+        if i > 0 {
+            put(buf, &mut n, b",")?;
+        }
+        let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
+        // `aircraft_line` ends with '\n'; drop it inside the array.
+        n += aircraft_line(a, tracks, ctx, rest)? - 1;
     }
     put(buf, &mut n, STATE_END)?;
     Ok(n)

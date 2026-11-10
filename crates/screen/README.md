@@ -82,6 +82,7 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 | `alert`, `alert_more` | The new-drone banner, with "+1 more new". |
 | `detail`, `detail_no_fix` | Full ID, drone and pilot direction, height, speed, operator ID, Self-ID, signal per radio, and when last heard. With no fix, the pilot row shows the drone-to-pilot distance, which still works. |
 | `health` | Per node: frames/s, RID frames found, drops, uptime. A dead node shows NOT RESPONDING. Below that: GPS, tracks, SD log and power. |
+| `health_aircraft` | A hub with an ADSBee: the ADS node in the list and status bar (four nodes pack closer), and an AIRCRAFT line: active count, how many are LOW (accent colour), the nearest by callsign with distance and altitude. Never an alert. |
 | `settings` | The settings page, mid-edit. |
 | `status_warnings` | Status bar under stress: a 2D fix, every node dead, an SD error, 9% battery and no UTC. |
 | `status_gps_absent` | No GPS receiver ("NO GPS"), no SD card ("no SD"), on USB: the bench hub today. |

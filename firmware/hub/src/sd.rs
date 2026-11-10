@@ -3,7 +3,8 @@
 //! Two halves:
 //! - [`log_tick`] runs in the 1 Hz tick (core 0, where the tracker lives) and
 //!   formats `csv::row` for every *active* drone (and `csv::link_row` for
-//!   every active open FPV link) into the [`ROWS`] pipe. It
+//!   every active open FPV link, `csv::aircraft_row` for every active
+//!   ADS-B aircraft) into the [`ROWS`] pipe. It
 //!   never touches the card. When the pipe is full it waits at most
 //!   [`ROW_PATIENCE`] per row and then drops the row (counted), so a slow or
 //!   stuck card can never hold up the tick.
@@ -46,10 +47,10 @@ use esp_hal::delay::Delay;
 use esp_hal::gpio::Output;
 use tracker::csv::{self, MAX_ROW};
 use tracker::openlinks::MAX_LINK_TRACKS;
-use tracker::{Context, LinkTrackId, TrackId, TrackState};
+use tracker::{AircraftKey, Context, LinkTrackId, TrackId, TrackState};
 
 use crate::bus::{Bus, Speed, SpiBus};
-use crate::hub::{Hub, MAX_TRACKS, now_ms};
+use crate::hub::{Hub, MAX_AIRCRAFT, MAX_TRACKS, now_ms};
 use crate::{clock, gnss, usb};
 
 /// Rows waiting for the card. 4 KB is ~10 rows: enough for a normal second;
@@ -188,6 +189,25 @@ pub async fn log_tick(hub: &Hub, ctx: &Context) {
             let tracker = hub.tracker.borrow();
             let Some(l) = tracker.get_open_link(id) else { continue };
             csv::link_row(l, ctx, &mut row)
+        };
+        if let Ok(n) = n {
+            if push(&row[..n]).await {
+                ROWS_LOGGED.fetch_add(1, Relaxed);
+            } else {
+                ROWS_DROPPED.fetch_add(1, Relaxed);
+            }
+        }
+        embassy_futures::yield_now().await;
+    }
+    let aircraft: heapless::Vec<AircraftKey, MAX_AIRCRAFT> = {
+        let t = hub.tracker.borrow();
+        t.aircraft().iter().filter(|a| ctx.aircraft_state(a) == TrackState::Active).map(|a| a.key).collect()
+    };
+    for key in aircraft {
+        let n = {
+            let tracker = hub.tracker.borrow();
+            let Some(a) = tracker.get_aircraft(key) else { continue };
+            csv::aircraft_row(a, ctx, &mut row)
         };
         if let Ok(n) = n {
             if push(&row[..n]).await {

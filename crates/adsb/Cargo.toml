@@ -1,0 +1,16 @@
+[package]
+name = "adsb"
+description = "no_std parser for the ADSBee 1090's CSBee text output (aircraft and statistics lines, CRC-checked)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# CSBee line builder: test fixtures, the laptop viewer's --demo, the hub's demo.
+encode = []
+
+[dependencies]
+
+[dev-dependencies]
+# Tests always see the optional feature.
+adsb = { path = ".", features = ["encode"] }

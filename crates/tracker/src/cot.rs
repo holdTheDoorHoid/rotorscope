@@ -21,6 +21,8 @@
 
 use core::fmt::Write;
 
+use crate::aircraft::{AIRCRAFT_STALE_MS, AircraftTrack, IcaoHex, same_drone};
+use crate::json::Octal4;
 use crate::text::{Buf, FormatError, IdText, IsoTime, Mac, Xml, render};
 use crate::{Context, Track};
 use rid::message::UaType;
@@ -246,6 +248,110 @@ pub fn operator_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<us
             Xml(&base),
             sys.value.operator_location_type
         )
+    })();
+    w.finish()
+}
+
+// --------------------------------------------------------------- aircraft --
+
+/// The CoT type for an ADS-B aircraft, by emitter category: neutral
+/// (`n`) civilian air, since ADS-B is broadcast by cooperative civil
+/// traffic and a detector has no basis for any other affiliation. Rotary
+/// `a-n-A-C-H`, lighter-than-air `a-n-A-C-L`, fixed wing (and anything
+/// unknown) `a-n-A-C-F`. A UAV that carries ADS-B gets the same
+/// unknown-affiliation UAV type as a Remote ID drone; ground vehicles
+/// `a-n-G-E-V`; obstacles a spot map point.
+pub fn aircraft_type(kind: adsb::Kind) -> &'static str {
+    use adsb::Kind;
+    match kind {
+        Kind::Rotorcraft => "a-n-A-C-H",
+        Kind::LighterThanAir => "a-n-A-C-L",
+        Kind::Uav => "a-u-A-M-F-Q",
+        Kind::SurfaceVehicle => "a-n-G-E-V",
+        Kind::Obstacle => "b-m-p-s-m",
+        _ => "a-n-A-C-F",
+    }
+}
+
+/// Write an ADS-B aircraft's CoT event: uid `ICAO-<hex>` (the convention
+/// ADS-B-to-TAK bridges use), callsign the flight ID if known. Needs a
+/// position and UTC. `drones` is the drone table: an ADS-B "UAV" that is
+/// one of those drones ([`crate::aircraft::same_drone`]) is not written
+/// ([`FormatError::Duplicate`]); the drone's own event already shows it.
+pub fn aircraft_event(
+    a: &AircraftTrack,
+    drones: &[Track],
+    ctx: &Context,
+    buf: &mut [u8],
+) -> Result<usize, FormatError> {
+    let pos = a.position.as_ref().ok_or(FormatError::NoPosition)?;
+    if same_drone(a, drones, ctx).is_some() {
+        return Err(FormatError::Duplicate);
+    }
+    let time = ctx.utc_of(pos.rx_ms).ok_or(FormatError::NoTime)?;
+    let stale = time + 2 * AIRCRAFT_STALE_MS;
+    let mut uid: heapless::String<12> = heapless::String::new();
+    let _ = write!(uid, "ICAO-{}", IcaoHex(a.key.icao));
+    let call = if a.callsign.is_empty() {
+        uid.as_str()
+    } else {
+        a.callsign.as_str()
+    };
+    // `hae` should be above the ellipsoid: geometric altitude when sent,
+    // else pressure altitude (close to above sea level), flagged as such.
+    let (hae, altsrc) = match (a.gnss_alt_ft, a.baro_alt_ft) {
+        (Some(g), _) => (Some(g as f32 * 0.3048), "gps"),
+        (None, Some(b)) => (Some(b as f32 * 0.3048), "baro"),
+        _ => (None, "???"),
+    };
+
+    let mut w = Buf::new(buf);
+    let _ = (|| -> core::fmt::Result {
+        header(&mut w, &uid, aircraft_type(a.kind()), time, stale)?;
+        point(&mut w, pos.value.lat, pos.value.lon, hae, None, None)?;
+        write!(
+            w,
+            "<detail><contact callsign=\"{}\"/>\
+             <precisionlocation geopointsrc=\"gps\" altsrc=\"{altsrc}\"/>",
+            Xml(call),
+        )?;
+        if a.direction_deg.is_some() || a.speed_kt.is_some() {
+            write!(
+                w,
+                "<track course=\"{:.1}\" speed=\"{:.2}\"/>",
+                a.direction_deg.unwrap_or(0.0),
+                a.speed_mps().unwrap_or(0.0)
+            )?;
+        }
+        write!(w, "<remarks>ADS-B {}", IcaoHex(a.key.icao))?;
+        if a.key.source == adsb::Source::Uat {
+            w.write_str(" (UAT)")?;
+        }
+        write!(w, "; {}", a.kind().label())?;
+        if let Some(s) = a.squawk {
+            write!(w, "; Squawk: {}", Octal4(s))?;
+        }
+        if let Some(e) = a.emergency() {
+            write!(w, " ({e})")?;
+        }
+        if let Some(b) = a.baro_alt_ft {
+            write!(w, "; Altitude: {b} ft")?;
+        }
+        if let Some(v) = a.vrate_fpm {
+            write!(w, "; Vert rate: {v} ft/min")?;
+        }
+        if let Some(k) = a.speed_kt {
+            write!(w, "; Speed: {k} kt")?;
+        }
+        write!(w, "; RSSI: {}dBm", a.rssi_dbm)?;
+        if let Some(r) = ctx.aircraft_geometry(a).range {
+            write!(
+                w,
+                "; Range: {:.0} m; Bearing: {:.0}°",
+                r.distance_m, r.bearing_deg
+            )?;
+        }
+        w.write_str("</remarks></detail></event>")
     })();
     w.finish()
 }

@@ -506,6 +506,9 @@ function renderStrip(lost) {
         ? `<span class="chip" title="${esc(long)} receiver OK">${esc(short)} &#10003;</span>`
         : `<span class="chip bad" title="${esc(long)} receiver silent"><span class="x">${esc(short)}</span> &#10005;</span>`);
     }
+    if (st.adsb) p.push(st.adsb.alive
+      ? `<span class="chip" title="ADS-B receiver OK">ADS-B &#10003;</span>`
+      : `<span class="chip bad" title="ADS-B receiver silent"><span class="x">ADS-B</span> &#10005;</span>`);
     p.push(st.rec ? `<span class="chip good">&#9679; REC</span>` : `<span class="chip mut">REC off</span>`);
   }
   p.push(`<span id="clock">${clockText()}</span>`);
@@ -601,6 +604,8 @@ function renderRadar() {
     if (noPos) notes.push(`${noPos} drone(s) not sending a position yet: see List.`);
     if (far) notes.push(`${far} drone(s) beyond the edge, drawn on the rim.`);
   }
+  const low = lowAircraft().length;
+  if (low) notes.push(`${low} low aircraft nearby (ADS-B): see List.`);
   setHTML('radar-note', notes.join('<br>'));
 }
 
@@ -658,6 +663,7 @@ function renderList() {
       `</button>`);
   }
   o.push(...linkCards());
+  o.push(...aircraftCards());
   setHTML('v-list', o.join(''));
 }
 
@@ -680,6 +686,40 @@ function linkCards() {
   }
   o.push('<div class="mut" style="font-size:14px">A digital video or telemetry link is on the air nearby; its position is unknown.' +
     (all.some(l => !l.ids_shown) ? ' Identifiers are hidden by the hub.' : '') + '</div>');
+  return o;
+}
+
+/* Crewed aircraft from the ADS-B receiver. Awareness only: never an alert,
+   never on the radar; a quiet LOW tag for one low and close. Pilots' units:
+   altitude in feet unless metric is chosen. */
+const aircraft = () => (st && st.aircraft) || [];
+const lowAircraft = () => aircraft().filter(a => a.own && a.own.low && a.drone == null);
+function aircraftCards() {
+  if (!st || !st.adsb) return [];
+  const all = aircraft().slice().sort((a, b) =>
+    ((a.state === 'stale') - (b.state === 'stale')) ||
+    (((a.own || {}).dist_m ?? 1e9) - ((b.own || {}).dist_m ?? 1e9)));
+  const o = [`<h2>Aircraft (ADS-B)</h2>`];
+  if (!all.length) o.push(`<div class="mut">No aircraft heard.</div>`);
+  for (const a of all) {
+    const stale = a.state === 'stale', g = a.own;
+    const alt = a.alt_baro_ft ?? a.alt_geo_ft;
+    const altText = alt == null ? '?' : imp() ? alt + ' ft' : Math.round(alt * 0.3048) + ' m';
+    const where = !g ? '<span class="mut">distance unknown</span>'
+      : g.dist_m == null ? '<span class="mut">no position</span>'
+      : `<span class="big">${fmtDist(g.dist_m)}</span><span class="big">${bearing(g.brg)}</span>`;
+    const tags = (g && g.low && !stale ? '<span class="tag">LOW</span>' : '') +
+      (a.emerg ? `<span class="tag new">${esc(a.emerg.toUpperCase())}</span>` : '') +
+      (stale ? '<span class="tag">STALE</span>' : '');
+    o.push(`<div class="trk${stale ? ' stale' : ''}">` +
+      `<div class="r1"><span class="id mono">${esc(a.call || a.icao)}</span><span class="mut">${esc(a.label)}</span>${tags}</div>` +
+      `<div class="r2">${where}<span>Alt ${altText}</span></div>` +
+      `<div class="r3"><span class="mono">${esc(a.icao)}${a.src === '978' ? ' UAT' : ''}</span>` +
+      (a.squawk ? `<span>sq ${esc(a.squawk)}</span>` : '') +
+      (a.spd_kt != null ? `<span>${imp() ? a.spd_kt + ' kt' : fmtSpd(a.spd_kt * 0.514444)}</span>` : '') +
+      `<span>heard ${ago(a.age_ms)}</span>` +
+      (a.drone != null ? `<span>= drone #${a.drone}</span>` : '') + `</div></div>`);
+  }
   return o;
 }
 
@@ -846,6 +886,10 @@ function renderHub() {
       `<td>${n.rid_per_s} Remote ID/s<br><span class="mut">${n.seen_per_s ?? '?'} frames/s &middot; ${n.drops ?? '?'} dropped</span></td></tr>`);
   }
   if (!(st.nodes || []).length) o.push(`<tr><td colspan="3">No receivers attached.</td></tr>`);
+  const ad = st.adsb;
+  if (ad) o.push(`<tr><td>ADS-B (ADSBee)</td>` +
+    `<td>${ad.alive ? '&#10003; OK' : '<strong>&#10005; silent</strong>'}<br><span class="mut">${ad.age_ms == null ? 'never heard' : 'heard ' + ago(ad.age_ms)}</span></td>` +
+    `<td>${ad.aircraft ?? '?'} aircraft<br><span class="mut">${ad.frames_per_s ?? '?'} frames/s &middot; ${ad.errors} bad lines</span></td></tr>`);
   o.push(`</table><dl style="margin-top:8px">` +
     row('SD-card log', st.rec ? '&#9679; recording' : 'off') +
     row('Hub clock', st.utc_ms != null ? 'GPS time' : 'no GPS time yet (shown: phone time)') +

@@ -1,7 +1,9 @@
 //! TAK Cursor-on-Target over UDP multicast (PLAN.md O1/O5).
 //!
-//! Once a second, every track with a position becomes a drone event, and every
-//! track with an operator position an operator event (`tracker::cot`), sent to
+//! Once a second, every track with a position becomes a drone event, every
+//! track with an operator position an operator event, and (feature `adsbee`)
+//! every active aircraft with a position an aircraft event (`tracker::cot`;
+//! an ADS-B "UAV" that is one of the drone tracks is skipped), sent to
 //! 239.2.3.1:6969: ATAK's default "SA multicast" input, so a phone joined to
 //! the hotspot shows the drones with no setup. One task per network (hotspot,
 //! and the station LAN when built).
@@ -18,9 +20,9 @@ use embassy_net::Stack;
 use embassy_net::udp::{PacketMetadata, UdpSocket};
 use embassy_time::{Duration, Instant, Ticker};
 use tracker::cot::{self, MAX_EVENT};
-use tracker::{FormatError, TrackId};
+use tracker::{AircraftKey, FormatError, TrackId, TrackState};
 
-use crate::hub::{Hub, MAX_TRACKS, now_ms};
+use crate::hub::{Hub, MAX_AIRCRAFT, MAX_TRACKS, now_ms};
 
 pub const GROUP: Ipv4Addr = Ipv4Addr::new(239, 2, 3, 1);
 pub const PORT: u16 = 6969;
@@ -102,6 +104,37 @@ pub async fn task(stack: Stack<'static>, hub: &'static Hub) {
                 // ~1.5 ms per event to format; let other tasks in between.
                 embassy_futures::yield_now().await;
             }
+        }
+        let aircraft: heapless::Vec<AircraftKey, MAX_AIRCRAFT> = hub
+            .tracker
+            .borrow()
+            .aircraft()
+            .iter()
+            .filter(|a| ctx.aircraft_state(a) == TrackState::Active)
+            .map(|a| a.key)
+            .collect();
+        for key in aircraft {
+            let n = {
+                let tracker = hub.tracker.borrow();
+                let Some(a) = tracker.get_aircraft(key) else { continue };
+                cot::aircraft_event(a, tracker.tracks(), &ctx, &mut event)
+            };
+            match n {
+                Ok(n) => match socket.send_to(&event[..n], dest).await {
+                    Ok(()) => {
+                        SENT.fetch_add(1, Relaxed);
+                    }
+                    Err(_) => {
+                        ERRORS.fetch_add(1, Relaxed);
+                    }
+                },
+                Err(FormatError::NoTime) => {
+                    NO_UTC.fetch_add(1, Relaxed);
+                }
+                // No position, or a drone already sent as itself.
+                Err(_) => {}
+            }
+            embassy_futures::yield_now().await;
         }
         let us = Instant::now().duration_since(t0).as_micros() as u32;
         TICK_MAX_US.fetch_max(us, Relaxed);

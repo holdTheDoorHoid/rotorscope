@@ -5,7 +5,9 @@
 //! laptop shows is what the hub would show. See `--help`. Open FPV links
 //! the Wi-Fi node recognises (wfb-ng, OpenHD, RubyFPV, DroneBridge) are
 //! listed below the drones, with their identifiers hidden unless
-//! `--show-link-ids` is given (the hub's policy too).
+//! `--show-link-ids` is given (the hub's policy too). Crewed aircraft from
+//! an ADSBee (`--adsbee`) are listed last, apart from drones, and never
+//! alert.
 
 mod demo;
 mod http;
@@ -27,10 +29,11 @@ use link::NodeRole;
 use parse::Line;
 use rid::Transport;
 use tracker::json::{
-    GpsState, GpsStatus, HubStatus, ManualPos, NodeStatus, OwnPosRequest, OwnSource,
+    AdsbStatus, GpsState, GpsStatus, HubStatus, ManualPos, NodeStatus, OwnPosRequest, OwnSource,
 };
 use tracker::{
-    Config, Context, LinkTrackId, Observation, TrackId, TrackState, Tracker, cot, csv, json,
+    AircraftKey, Config, Context, LinkTrackId, Observation, TrackId, TrackState, Tracker, cot, csv,
+    json,
 };
 use view::View;
 
@@ -52,9 +55,15 @@ OPTIONS:
     --cot udp://HOST:PORT    Send TAK Cursor-on-Target for each drone and
                              operator once a second, e.g. udp://239.2.3.1:6969
                              (ATAK's default multicast). Off by default.
+    --adsbee PORT            Read crewed aircraft from an ADSBee 1090: its
+                             USB console (after AT+PROTOCOL_OUT=CONSOLE,CSBEE),
+                             a USB-UART on its COMMS_UART pins, or a recorded
+                             file of its CSBee text. Listed apart from drones;
+                             never an alert.
     --demo                   Add two simulated drones circling --own-pos
-                             (or Philadelphia City Hall), and a simulated
-                             wfb-ng FPV link. No hardware needed.
+                             (or Philadelphia City Hall), a simulated
+                             wfb-ng FPV link and three simulated aircraft
+                             (ADS-B). No hardware needed.
     --show-link-ids          Show open FPV links' identifiers (wfb-ng link
                              ID, RubyFPV vehicle ID, DroneBridge comm ID) and
                              their transmitter addresses. Off by default:
@@ -84,6 +93,7 @@ struct Options {
     realtime: bool,
     http: Option<String>,
     show_link_ids: bool,
+    adsbee: Option<String>,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -99,6 +109,7 @@ fn parse_args() -> Result<Options, String> {
         realtime: false,
         http: None,
         show_link_ids: false,
+        adsbee: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -135,11 +146,12 @@ fn parse_args() -> Result<Options, String> {
             "--realtime" => o.realtime = true,
             "--http" => o.http = Some(value("--http")?),
             "--show-link-ids" => o.show_link_ids = true,
+            "--adsbee" => o.adsbee = Some(value("--adsbee")?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.inputs.push(a),
         }
     }
-    if o.inputs.is_empty() && !o.demo {
+    if o.inputs.is_empty() && !o.demo && o.adsbee.is_none() {
         o.inputs.push("-".into());
     }
     if o.http.is_some() && o.once {
@@ -231,6 +243,19 @@ fn stats_rates(v: &serde_json::Value) -> (Option<u32>, Option<u32>) {
 
 /// A node counts as alive if heard within this long.
 const NODE_ALIVE_MS: u64 = 5_000;
+
+/// The ADSBee's health for the phone page (the ADSBee reports once a second).
+fn adsb_status(view: &View, now: u64) -> Option<AdsbStatus> {
+    let a = view.adsb.as_ref()?;
+    let age = a.last_ms.map(|l| now.saturating_sub(l));
+    Some(AdsbStatus {
+        alive: a.ended.is_none() && age.is_some_and(|x| x <= NODE_ALIVE_MS),
+        age_ms: age,
+        frames_per_s: a.stats.map(|s| s.valid_per_s()),
+        aircraft: a.stats.map(|s| s.aircraft),
+        errors: a.errors.min(u64::from(u32::MAX)) as u32,
+    })
+}
 /// Window for the Remote ID rate.
 const RATE_WINDOW_MS: u64 = 5_000;
 
@@ -301,6 +326,7 @@ struct Outputs {
     log: Option<File>,
     logged: HashMap<TrackId, u64>,
     logged_links: HashMap<LinkTrackId, u64>,
+    logged_aircraft: HashMap<AircraftKey, u64>,
     cot: Option<Cot>,
     cot_error_shown: bool,
 }
@@ -331,7 +357,22 @@ impl Outputs {
                 }
                 self.logged_links.insert(l.id, l.last_seen_ms);
             }
+            for a in tr.aircraft() {
+                if self
+                    .logged_aircraft
+                    .get(&a.key)
+                    .is_some_and(|&t| t >= a.last_seen_ms)
+                {
+                    continue;
+                }
+                if let Ok(n) = csv::aircraft_row(a, ctx, &mut buf) {
+                    let _ = f.write_all(&buf[..n]);
+                }
+                self.logged_aircraft.insert(a.key, a.last_seen_ms);
+            }
             let _ = f.flush();
+            self.logged_aircraft
+                .retain(|k, _| tr.get_aircraft(*k).is_some());
             self.logged.retain(|id, _| tr.get(*id).is_some());
             self.logged_links
                 .retain(|id, _| tr.get_open_link(*id).is_some());
@@ -352,6 +393,21 @@ impl Outputs {
                     }
                 }
             }
+            // Aircraft too (an ADS-B "UAV" that is a Remote ID drone is
+            // skipped: its drone event already shows it).
+            for a in tr
+                .aircraft()
+                .iter()
+                .filter(|a| ctx.aircraft_state(a) == TrackState::Active)
+            {
+                if let Ok(n) = cot::aircraft_event(a, tr.tracks(), ctx, &mut buf)
+                    && let Err(e) = c.socket.send_to(&buf[..n], c.target)
+                    && !self.cot_error_shown
+                {
+                    self.cot_error_shown = true;
+                    view.note(&hhmmss(utc_now()), format!("CoT send failed: {e}"));
+                }
+            }
         }
         if json_out {
             let mut out = std::io::stdout().lock();
@@ -362,6 +418,11 @@ impl Outputs {
             }
             for l in tr.open_links() {
                 if let Ok(n) = json::link_line(l, ctx, &mut buf) {
+                    let _ = out.write_all(&buf[..n]);
+                }
+            }
+            for a in tr.aircraft() {
+                if let Ok(n) = json::aircraft_line(a, tr.tracks(), ctx, &mut buf) {
                     let _ = out.write_all(&buf[..n]);
                 }
             }
@@ -387,6 +448,15 @@ fn run(o: Options) -> Result<(), String> {
         };
     }
     let mut live_sources = o.inputs.len();
+    if let Some(path) = &o.adsbee {
+        input::spawn_adsbee(path.clone(), o.realtime, start, tx.clone())
+            .map_err(|e| format!("--adsbee {path}: {e}"))?;
+        view.adsb = Some(view::AdsbInfo {
+            source: path.clone(),
+            ..Default::default()
+        });
+        live_sources += 1;
+    }
     if o.demo {
         let base = o.inputs.len() as u8;
         let center = o.own.map_or((39.952_583, -75.165_222), |(a, b, _)| (a, b));
@@ -400,6 +470,10 @@ fn run(o: Options) -> Result<(), String> {
             info.source = what.into();
             info.role = Some(role);
         }
+        view.adsb.get_or_insert_with(|| view::AdsbInfo {
+            source: "demo".into(),
+            ..Default::default()
+        });
         live_sources += 1;
     }
     drop(tx);
@@ -408,6 +482,7 @@ fn run(o: Options) -> Result<(), String> {
         log: None,
         logged: HashMap::new(),
         logged_links: HashMap::new(),
+        logged_aircraft: HashMap::new(),
         cot: o.cot.as_deref().map(Cot::open).transpose()?,
         cot_error_shown: false,
     };
@@ -530,6 +605,29 @@ fn run(o: Options) -> Result<(), String> {
                         info.ended = Some(why);
                     }
                 }
+                Event::Adsb { result, at_ms } => {
+                    now = now.max(at_ms);
+                    let info = view.adsb.get_or_insert_with(Default::default);
+                    match result {
+                        Ok(adsb::Report::Aircraft(a)) => {
+                            info.last_ms = Some(at_ms);
+                            info.aircraft_lines += 1;
+                            tr.ingest_aircraft(&a, now);
+                        }
+                        Ok(adsb::Report::Stats(s)) => {
+                            info.last_ms = Some(at_ms);
+                            info.stats = Some(s);
+                        }
+                        Err(adsb::Error::NotCsbee) => info.other_lines += 1,
+                        Err(_) => info.errors += 1,
+                    }
+                }
+                Event::AdsbEnd { why } => {
+                    live_sources -= 1;
+                    if let Some(info) = &mut view.adsb {
+                        info.ended = Some(why);
+                    }
+                }
             }
         }
         if !o.once {
@@ -590,10 +688,25 @@ fn run(o: Options) -> Result<(), String> {
                 },
                 recording: o.log.is_some(),
                 nodes: &nodes,
+                adsb: adsb_status(&view, now),
             };
-            let mut buf =
-                vec![0u8; json::state_max_len(tr.len(), tr.open_links().len(), nodes.len())];
-            if let Ok(n) = json::state(tr.tracks(), tr.open_links(), &ctx, &hub, &mut buf) {
+            let mut buf = vec![
+                0u8;
+                json::state_max_len(
+                    tr.len(),
+                    tr.open_links().len(),
+                    tr.aircraft().len(),
+                    nodes.len()
+                )
+            ];
+            if let Ok(n) = json::state(
+                tr.tracks(),
+                tr.open_links(),
+                tr.aircraft(),
+                &ctx,
+                &hub,
+                &mut buf,
+            ) {
                 buf.truncate(n);
                 if let Ok(mut s) = h.state.lock() {
                     *s = buf;

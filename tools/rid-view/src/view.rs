@@ -7,8 +7,9 @@ use std::fmt::Write;
 
 use rid::Transport;
 use rid::message::UaType;
+use tracker::aircraft::{icao_hex, same_drone};
 use tracker::openlinks::shown_id;
-use tracker::{Context, LinkTrack, Track, TrackId, TrackState, Tracker};
+use tracker::{AircraftTrack, Context, LinkTrack, Track, TrackId, TrackState, Tracker};
 
 /// Cursor to top-left; the screen is then overwritten line by line.
 pub const HOME: &str = "\x1b[H";
@@ -43,9 +44,25 @@ pub struct NodeInfo {
     pub drops: Option<u32>,
 }
 
+/// What we know about the ADSBee input (`--adsbee`, or the demo's).
+#[derive(Default)]
+pub struct AdsbInfo {
+    pub source: String,
+    /// Viewer time of the last valid line.
+    pub last_ms: Option<u64>,
+    pub stats: Option<adsb::Stats>,
+    pub aircraft_lines: u64,
+    /// Lines refused: bad checksum, malformed, too long.
+    pub errors: u64,
+    /// Other text (console log lines, AT replies on the USB console).
+    pub other_lines: u64,
+    pub ended: Option<String>,
+}
+
 pub struct View {
     pub ansi: bool,
     pub nodes: BTreeMap<u8, NodeInfo>,
+    pub adsb: Option<AdsbInfo>,
     /// When each drone was announced (hub ms), for the highlight.
     pub announced: HashMap<TrackId, u64>,
     /// Recent notable events, newest last.
@@ -145,6 +162,7 @@ impl View {
         Self {
             ansi,
             nodes: BTreeMap::new(),
+            adsb: None,
             announced: HashMap::new(),
             log: VecDeque::new(),
         }
@@ -192,6 +210,32 @@ impl View {
                 let _ = write!(line, ", unparsed: {}", info.bad_lines);
             }
             if let Some(e) = &info.ended {
+                let _ = write!(line, "  ({e})");
+            }
+            let _ = writeln!(s, "{line}{eol}");
+        }
+        if let Some(a) = &self.adsb {
+            let mut line = format!(
+                "  adsbee {}  aircraft lines: {}",
+                a.source, a.aircraft_lines
+            );
+            if let Some(st) = &a.stats {
+                let _ = write!(
+                    line,
+                    "  [csbee v{} {} valid/s, {} in its table, up {}s]",
+                    st.version,
+                    st.valid_per_s(),
+                    st.aircraft,
+                    st.uptime_s
+                );
+            }
+            if a.errors > 0 {
+                let _ = write!(line, ", bad lines: {}", a.errors);
+            }
+            if a.other_lines > 0 {
+                let _ = write!(line, ", other text: {}", a.other_lines);
+            }
+            if let Some(e) = &a.ended {
                 let _ = write!(line, "  ({e})");
             }
             let _ = writeln!(s, "{line}{eol}");
@@ -272,6 +316,7 @@ impl View {
             );
         }
         self.render_links(&mut s, tr, ctx, eol);
+        self.render_aircraft(&mut s, tr, ctx, eol);
         if !self.log.is_empty() {
             let _ = writeln!(s, "{eol}");
             for l in &self.log {
@@ -340,6 +385,77 @@ impl View {
                 latest.map_or("-".into(), |x| x.rssi.to_string()),
                 l.packets(),
                 age(ctx.now_ms.saturating_sub(l.last_seen_ms)),
+            );
+        }
+    }
+}
+
+impl View {
+    /// Crewed aircraft from the ADSBee, below everything else: awareness
+    /// only, never highlighted like a new drone. Nothing when there are none.
+    fn render_aircraft(&self, s: &mut String, tr: &Tracker, ctx: &Context, eol: &str) {
+        if tr.aircraft().is_empty() {
+            return;
+        }
+        let _ = writeln!(s, "{eol}");
+        let _ = writeln!(s, "  AIRCRAFT (ADS-B){eol}");
+        let _ = writeln!(
+            s,
+            "  {:<8} {:<6} {:<16} {:>4} {:>8} {:>5} {:>8} {:>8} {:>5} {:>6}  NOTE{eol}",
+            "CALL", "ICAO", "TYPE", "SQK", "ALT", "KT", "DIST", "BRG", "RSSI", "AGE",
+        );
+        let mut rows: Vec<(&AircraftTrack, tracker::AircraftGeometry)> = tr
+            .aircraft()
+            .iter()
+            .map(|a| (a, ctx.aircraft_geometry(a)))
+            .collect();
+        rows.sort_by(|(a, ga), (b, gb)| {
+            let st = |a| (ctx.aircraft_state(a) == TrackState::Stale) as u8;
+            let d = |g: &tracker::AircraftGeometry| g.range.map_or(f64::MAX, |r| r.distance_m);
+            st(a).cmp(&st(b)).then(d(ga).total_cmp(&d(gb)))
+        });
+        for (a, g) in rows {
+            let stale = ctx.aircraft_state(a) == TrackState::Stale;
+            let (pre, post) = if stale {
+                (self.style(DIM), self.style(RESET))
+            } else {
+                ("", "")
+            };
+            let mut note: Vec<String> = Vec::new();
+            if g.low_nearby && !stale {
+                note.push("LOW".into());
+            }
+            if let Some(e) = a.emergency() {
+                note.push(e.to_uppercase());
+            }
+            if let Some(id) = same_drone(a, tr.tracks(), ctx) {
+                note.push(format!("= drone #{}", id.0));
+            }
+            if a.key.source == adsb::Source::Uat {
+                note.push("UAT".into());
+            }
+            let _ = writeln!(
+                s,
+                "{pre}  {:<8} {:<6} {:<16} {:>4} {:>8} {:>5} {:>8} {:>8} {:>5} {:>6}  {}{post}{eol}",
+                if a.callsign.is_empty() {
+                    "-"
+                } else {
+                    a.callsign.as_str()
+                },
+                icao_hex(a).as_str(),
+                fit(a.kind().label(), 16),
+                a.squawk.map_or("-".into(), |q| format!("{q:04o}")),
+                a.baro_alt_ft.map_or("-".into(), |f| format!("{f}ft")),
+                a.speed_kt.map_or("-".into(), |k| k.to_string()),
+                g.range.map_or("-".into(), |r| dist(r.distance_m)),
+                g.range.map_or("-".into(), |r| format!(
+                    "{:.0}° {}",
+                    r.bearing_deg,
+                    compass(r.bearing_deg)
+                )),
+                a.rssi_dbm,
+                age(ctx.now_ms.saturating_sub(a.last_seen_ms)),
+                note.join(" "),
             );
         }
     }

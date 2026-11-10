@@ -176,6 +176,20 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
             uptime_s: n.uptime_s(),
         });
     }
+    // The ADSBee as a node, and the aircraft line (feature `adsbee`).
+    if let Some(a) = crate::adsbee::status(hub, now) {
+        let _ = st.nodes.push(screen::NodeStatus {
+            kind: NodeKind::Adsb,
+            alive: a.alive,
+            frames_per_s: a.frames_per_s.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+            rid_found: 0,
+            drops: a.errors,
+            uptime_s: hub.adsb.get().stats.map_or(0, |s| s.uptime_s),
+        });
+        // At most MAX_AIRCRAFT Vincenty solves; yield first.
+        embassy_futures::yield_now().await;
+        st.aircraft = Some(screen::from_tracker::aircraft_summary(hub.tracker.borrow().aircraft(), &ctx));
+    }
     st.power = panel::power();
     st.sd = sd::ui_state();
     st.hub_uptime_s = (now / 1000) as u32;
