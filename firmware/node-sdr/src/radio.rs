@@ -374,7 +374,7 @@ impl Radio {
     pub fn stats(&self) {
         let (produced, overrun) = ring::produced();
         println!(
-            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"probes":{},"rises":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{}}}"#,
+            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"probes":{},"rises":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
             now_us(),
             self.s.mode.name(),
             self.s.mhz,
@@ -393,7 +393,8 @@ impl Radio {
             self.n.crc_ok,
             self.n.last_decode_ms,
             self.n.gain_lost,
-            self.held != Held::Nothing
+            self.held != Held::Nothing,
+            esp_alloc::HEAP.free()
         );
     }
 

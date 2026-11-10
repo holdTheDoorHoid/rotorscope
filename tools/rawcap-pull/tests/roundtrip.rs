@@ -119,3 +119,38 @@ fn a_real_burst_decodes_after_the_round_trip() {
     });
     assert!(ok_bursts >= 2, "decoded {ok_bursts}");
 }
+
+#[test]
+fn spectrum_puts_a_positive_tone_on_the_positive_side() {
+    // I + jQ = exp(+j 2 pi 5 MHz t) at 40 MS/s, clip window: the strongest
+    // bin must be near +5 MHz (the bring-up orientation check relies on it).
+    let nib: Vec<u8> = (0..8192)
+        .map(|n| {
+            let ph = 2.0 * std::f64::consts::PI * 5e6 * n as f64 / 40e6;
+            let c = |v: f64| (300.0 * v).floor() as i16;
+            pack(Window::CLIP.quantise(c(ph.cos())), Window::CLIP.quantise(c(ph.sin())))
+        })
+        .collect();
+    let out = tmpdir("tone");
+    let logf = out.join("serial.log");
+    std::fs::write(&logf, lines(&nib, Kind::Nib8, 40_000_000, 2, Enc::B64).join("\n")).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_rawcap-pull"))
+        .arg(&logf)
+        .arg("--out")
+        .arg(&out)
+        .arg("--spectrum")
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&o.stdout);
+    let peak = s
+        .lines()
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let f: f64 = w.next()?.parse().ok()?;
+            (w.next()? == "MHz").then_some(())?;
+            let db: f64 = w.next()?.parse().ok()?;
+            Some((f, db))
+        })
+        .fold((0.0, -999.0), |a, b| if b.1 > a.1 { b } else { a });
+    assert!((peak.0 - 5.0).abs() < 1.0, "peak at {} MHz\n{s}", peak.0);
+}

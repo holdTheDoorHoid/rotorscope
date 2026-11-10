@@ -47,6 +47,11 @@ const HEAP_RECLAIMED: usize = 64 * 1024;
 
 static COMMANDS: Channel<CriticalSectionRawMutex, Command, 4> = Channel::new();
 
+/// Console commands baked in at build time and run after boot, one every
+/// 500 ms, separated by `;` (e.g. `NODE_SDR_BOOT="level;grab;dump" cargo fw`).
+/// For bring-up with a read-only serial capture such as tools/dev-board.sh.
+const BOOT_SCRIPT: Option<&str> = option_env!("NODE_SDR_BOOT");
+
 unsafe extern "C" {
     static _sdr_gap_start: u8;
     static _sdr_gap_end: u8;
@@ -166,16 +171,32 @@ async fn main(spawner: Spawner) -> ! {
         radio.boot();
     }
 
+    // How much heap the Wi-Fi driver really took (README.md "Memory").
+    println!(r#"{{"t":"mem","heap_used":{},"heap_free":{}}}"#, esp_alloc::HEAP.used(), esp_alloc::HEAP.free());
+
     let (rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(console(rx, tx).expect("spawn console"));
 
     let mut last_stats = Instant::now();
+    let mut script = BOOT_SCRIPT.unwrap_or("").split(';').map(str::trim).filter(|c| !c.is_empty());
+    let mut next_script = Instant::now() + Duration::from_secs(2);
     loop {
         let _ = with_timeout(Duration::from_millis(50), ring::NEW_DATA.wait()).await;
         while let Ok(c) = COMMANDS.try_receive() {
             radio.command(c);
         }
         radio.poll();
+        if Instant::now() >= next_script {
+            next_script = Instant::now() + Duration::from_millis(500);
+            if let Some(line) = script.next() {
+                println!(r#"{{"t":"boot_cmd","cmd":"{line}"}}"#);
+                match cmd::parse(line) {
+                    Ok(Some(c)) => radio.command(c),
+                    Ok(None) => {}
+                    Err(e) => println!(r#"{{"t":"err","what":"cmd","e":"{e}"}}"#),
+                }
+            }
+        }
         if last_stats.elapsed() >= Duration::from_secs(1) {
             last_stats = Instant::now();
             radio.tick();
