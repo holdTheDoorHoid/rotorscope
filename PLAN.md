@@ -223,6 +223,10 @@ ahead.
 - **Done when:** someone other than us builds one from the guide.
 
 ### Phase 6: ADSBee
+**BUILT 2026-11-09, untested on hardware:** `crates/adsb` (CSBee parser), hub feature `adsbee`
+(ADSBee TX → hub GPIO41, takes node C's UART), aircraft on phone/screen/CSV/CoT/rid-view.
+Setup and live test in `docs/ADSBEE.md`. A 4th UART without losing a node needs an SC16IS752 on the carrier PCB.
+
 - Read CSBEE over UART or Wi-Fi into the hub, and show aircraft on the same views.
 - Share the GPS with the ADSBee: one GPS output wire can feed two inputs.
 - Note that small drones almost never carry ADS-B. This is for awareness of crewed aircraft
@@ -302,7 +306,10 @@ ground.
    - Tested on RUB-SysSec's public Mini 2 and Mavic Air 2 recordings (fetched by a script, not
      copied into the repo: they are AGPL), and cross-checked against anarkiwi's decoder.
    - Also recognises O4's encrypted records and reports their session ID.
-2. **10b. C5 raw-capture layer in Rust** (about 8–12 days; the riskiest part).
+2. **10b. C5 raw-capture layer in Rust** — **WRITTEN 2026-11-09, not yet run on a chip:**
+   `crates/rawcap`, `firmware/node-sdr` (first-flash steps in its `BRINGUP.md`), `tools/rawcap-pull`.
+   The decoder needs PSRAM (XIAO ESP32-C5); `cargo fw-lite` captures without decoding.
+   (about 8–12 days; the riskiest part).
    - Shared with Phase 7's C5 FPV detector, so it is built once.
    - Calls the closed radio library we already ship (every needed function is present), routes
      the radio's debug sample bus to pins and back into memory through PARL_IO as a
