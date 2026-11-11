@@ -7,6 +7,7 @@ members = [
     "crates/gnss", "crates/screen", "crates/webui",
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull",
+    "tools/cc26xx-flash",
 ]
 
 [workspace.package]

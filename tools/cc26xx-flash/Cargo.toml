@@ -1,0 +1,12 @@
+[package]
+name = "cc26xx-flash"
+description = "Flash and back up a TI CC13x2/CC26x2 (e.g. Sonoff Zigbee 3.0 USB Dongle Plus) through its ROM serial bootloader"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# No default features: `libudev` would need the system libudev headers, and
+# we only open a port by path.
+serialport = { version = "4", default-features = false }
