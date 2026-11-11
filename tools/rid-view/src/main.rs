@@ -9,6 +9,9 @@
 //! an ADSBee (`--adsbee`) are listed last, apart from drones, and never
 //! alert.
 
+mod ble;
+#[cfg(all(feature = "ble", target_os = "linux"))]
+mod bluez;
 mod demo;
 mod http;
 mod input;
@@ -60,6 +63,13 @@ OPTIONS:
                              a USB-UART on its COMMS_UART pins, or a recorded
                              file of its CSBee text. Listed apart from drones;
                              never an alert.
+    --ble ADAPTER            Scan for Bluetooth Remote ID with a laptop
+                             adapter through BlueZ (e.g. hci1; no root
+                             needed). Repeat for several adapters. A BT4
+                             adapter hears legacy adverts only. Combines
+                             with node inputs, --adsbee and --demo.
+    --duration SECS          Stop live inputs (--ble) after SECS seconds.
+                             With --ble and --once, the default is 10.
     --demo                   Add two simulated drones circling --own-pos
                              (or Philadelphia City Hall), a simulated
                              wfb-ng FPV link and three simulated aircraft
@@ -94,6 +104,8 @@ struct Options {
     http: Option<String>,
     show_link_ids: bool,
     adsbee: Option<String>,
+    ble: Vec<String>,
+    duration: Option<u64>,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -110,6 +122,8 @@ fn parse_args() -> Result<Options, String> {
         http: None,
         show_link_ids: false,
         adsbee: None,
+        ble: Vec::new(),
+        duration: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -147,17 +161,28 @@ fn parse_args() -> Result<Options, String> {
             "--http" => o.http = Some(value("--http")?),
             "--show-link-ids" => o.show_link_ids = true,
             "--adsbee" => o.adsbee = Some(value("--adsbee")?),
+            "--ble" => o.ble.push(value("--ble")?),
+            "--duration" => {
+                o.duration = Some(
+                    value("--duration")?
+                        .parse()
+                        .map_err(|_| "--duration: not a number")?,
+                )
+            }
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.inputs.push(a),
         }
     }
-    if o.inputs.is_empty() && !o.demo && o.adsbee.is_none() {
+    if o.inputs.is_empty() && !o.demo && o.adsbee.is_none() && o.ble.is_empty() {
         o.inputs.push("-".into());
     }
     if o.http.is_some() && o.once {
         return Err("--http serves a live page; it cannot be used with --once".into());
     }
-    if o.inputs.len() > 200 {
+    if o.once && !o.ble.is_empty() && o.duration.is_none() {
+        o.duration = Some(10);
+    }
+    if o.inputs.len() + o.ble.len() > 200 {
         return Err("too many inputs".into());
     }
     Ok(o)
@@ -431,6 +456,31 @@ impl Outputs {
     }
 }
 
+#[cfg(all(feature = "ble", target_os = "linux"))]
+fn spawn_ble(
+    node: u8,
+    adapter: &str,
+    secs: Option<u64>,
+    start: Instant,
+    tx: mpsc::Sender<Event>,
+) -> Result<String, String> {
+    bluez::spawn_scan(node, adapter, secs.map(Duration::from_secs), start, tx)
+        .map_err(|e| format!("--ble {adapter}: {e}"))
+}
+
+#[cfg(not(all(feature = "ble", target_os = "linux")))]
+fn spawn_ble(
+    _node: u8,
+    adapter: &str,
+    _secs: Option<u64>,
+    _start: Instant,
+    _tx: mpsc::Sender<Event>,
+) -> Result<String, String> {
+    Err(format!(
+        "--ble {adapter}: this build has no Bluetooth support (needs Linux and the `ble` feature)"
+    ))
+}
+
 fn run(o: Options) -> Result<(), String> {
     let start = Instant::now();
     let clock = Clock(start);
@@ -448,6 +498,14 @@ fn run(o: Options) -> Result<(), String> {
         };
     }
     let mut live_sources = o.inputs.len();
+    for (i, adapter) in o.ble.iter().enumerate() {
+        let node = (o.inputs.len() + i) as u8;
+        let source = spawn_ble(node, adapter, o.duration, start, tx.clone())?;
+        let info = view.nodes.entry(node).or_default();
+        info.source = source;
+        info.role = Some(NodeRole::Ble);
+        live_sources += 1;
+    }
     if let Some(path) = &o.adsbee {
         input::spawn_adsbee(path.clone(), o.realtime, start, tx.clone())
             .map_err(|e| format!("--adsbee {path}: {e}"))?;
@@ -458,7 +516,7 @@ fn run(o: Options) -> Result<(), String> {
         live_sources += 1;
     }
     if o.demo {
-        let base = o.inputs.len() as u8;
+        let base = (o.inputs.len() + o.ble.len()) as u8;
         let center = o.own.map_or((39.952_583, -75.165_222), |(a, b, _)| (a, b));
         demo::spawn(center, !o.once, o.demo_secs, start, base, tx.clone());
         for (n, what, role) in [

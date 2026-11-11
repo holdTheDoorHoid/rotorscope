@@ -6,6 +6,12 @@ version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# `--ble ADAPTER`: scan with a laptop Bluetooth adapter through BlueZ over
+# D-Bus (Linux; no root). zbus is pure Rust, so no libdbus is needed.
+default = ["ble"]
+ble = ["dep:zbus"]
+
 [dependencies]
 # Same merge/expiry/format code as the hub.
 tracker.workspace = true
@@ -23,3 +29,6 @@ serde.workspace = true
 serde_json = "1"
 # termios, to put a serial port in raw mode (no echo back into the node).
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", optional = true, default-features = false, features = ["blocking-api", "async-io"] }
