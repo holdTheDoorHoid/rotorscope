@@ -198,6 +198,35 @@ pub fn preflight(image: &[u8], flash_size: u32) -> std::result::Result<ccfg::Rep
     Ok(r)
 }
 
+/// After an erase, check the chip can take `image` bit for bit. Main
+/// flash must be blank. The CCFG is not: the ROM's BANK_ERASE writes
+/// back BL_CONFIG.BOOTLOADER_ENABLE, CCFG_TI_OPTIONS and both
+/// CCFG_TAP_DAP words (0xC5 bytes) so an erased chip keeps its
+/// bootloader and debug access. Programming can only clear bits, so each
+/// CCFG byte the image wants must be a subset of what the erase left.
+pub fn erased_ok<L: Link>(bsl: &mut Bsl<L>, image: &[u8]) -> Result<()> {
+    let main = (image.len() - CCFG_LEN) as u32;
+    let blank = crc32(&vec![0xFF; main as usize]);
+    let after = bsl.crc32(0, main)?;
+    if after != blank {
+        return Err(Error::Verify(format!(
+            "flash below the CCFG not blank after erase (CRC32 0x{after:08X}, blank is 0x{blank:08X})"
+        )));
+    }
+    let left = read_range(bsl, main, CCFG_LEN as u32, &mut |_, _| {})?;
+    let want = &image[main as usize..];
+    if let Some(i) = (0..CCFG_LEN).find(|&i| want[i] & left[i] != want[i]) {
+        return Err(Error::Verify(format!(
+            "after the erase the CCFG byte at 0x{:X} is 0x{:02X}; the image needs 0x{:02X}, \
+             which programming cannot reach (it only clears bits)",
+            main as usize + i,
+            left[i],
+            want[i]
+        )));
+    }
+    Ok(())
+}
+
 /// Erase, program and verify. The caller has already connected and
 /// identified the chip, and run [`preflight`].
 pub fn program<L: Link>(
@@ -221,13 +250,7 @@ pub fn program<L: Link>(
         }
         Err(e) => return Err(e),
     };
-    let blank = crc32(&vec![0xFF; image.len()]);
-    let after = bsl.crc32(0, size)?;
-    if after != blank {
-        return Err(Error::Verify(format!(
-            "flash not blank after erase (CRC32 0x{after:08X}, blank is 0x{blank:08X})"
-        )));
-    }
+    erased_ok(bsl, image)?;
 
     let runs = runs(image);
     let total: usize = runs.iter().map(|(s, e)| e - s).sum();

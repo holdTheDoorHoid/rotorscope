@@ -300,6 +300,15 @@ impl Sim {
                     status::FLASH_FAIL
                 } else {
                     self.flash.fill(0xFF);
+                    // As the real ROM does (seen on a CC2652P): keep the
+                    // bootloader enabled and debug access open.
+                    let base = self.flash.len() - CCFG_LEN;
+                    self.flash[base + 0x33] = 0xC5; // BL_CONFIG.BOOTLOADER_ENABLE
+                    self.flash[base + 0x38] = 0xC5; // CCFG_TI_OPTIONS.TI_FA_ENABLE
+                    for off in [0x3C, 0x40] {
+                        // CCFG_TAP_DAP_0/1: C5 C5 C5 FF
+                        self.flash[base + off..base + off + 3].fill(0xC5);
+                    }
                     status::SUCCESS
                 }
             }

@@ -198,6 +198,11 @@ fn cmd_read(o: &Opts, out: &Path) -> Result<(), String> {
         out.display()
     );
     if let Some(c) = Ccfg::from_image(&data).filter(|_| len == info.flash_size()) {
+        if c.image_valid != 0 {
+            println!(
+                "this backup holds no bootable image (IMAGE_VALID_CONF is not 0): an erased or half-written chip"
+            );
+        }
         let r = ccfg::check(&c, info.sectors);
         println!(
             "backup CCFG {} keep the bootloader reachable, so it can be flashed back with this tool",

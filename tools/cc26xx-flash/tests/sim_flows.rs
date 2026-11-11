@@ -12,8 +12,7 @@ const SIZE: usize = CC2652P_FLASH as usize;
 /// The CCFG records (0x57FA8..0x58000) of Sniffle v1.11.0's CC2652P image
 /// (nccgroup/Sniffle, GPL-3.0), copied verbatim from
 /// `sniffle_cc1352p1_cc2652p1.hex` (SHA-256 5a1332ae...62daf1).
-const SNIFFLE_CCFG: &str =
-    include_str!("data/sniffle-v1.11.0-cc2652p1-ccfg.hex");
+const SNIFFLE_CCFG: &str = include_str!("data/sniffle-v1.11.0-cc2652p1-ccfg.hex");
 
 fn set_word(img: &mut [u8], ccfg_off: usize, v: u32) {
     let at = img.len() - CCFG_LEN + ccfg_off;
@@ -266,4 +265,47 @@ fn full_sniffle_file() {
 #[test]
 fn off_image_valid_constant() {
     assert_eq!(OFF_IMAGE_VALID, 0x44);
+}
+
+#[test]
+fn bank_erase_keeps_rom_ccfg_fields() {
+    let mut b = connected(Sim::new(image(20)));
+    b.bank_erase().unwrap();
+    let left = b.link().ccfg_block().to_vec();
+    // The real chip read back after a bank erase, 0x57FD8..0x57FF0.
+    assert_eq!(
+        &left[0x30..0x48],
+        &[
+            0xFF, 0xFF, 0xFF, 0xC5, 0xFF, 0xFF, 0xFF, 0xFF, 0xC5, 0xFF, 0xFF, 0xFF, 0xC5, 0xC5,
+            0xC5, 0xFF, 0xC5, 0xC5, 0xC5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+        ]
+    );
+    ops::erased_ok(&mut b, &image(21)).unwrap();
+}
+
+#[test]
+fn image_the_erase_cannot_take_is_caught_before_writing() {
+    // TAP_DAP_0 all ones: the erase leaves C5 there, which cannot be
+    // programmed back up to FF.
+    let mut img = image(22);
+    set_word(&mut img, 0x3C, 0xFFFF_FFFF);
+    ops::preflight(&img, CC2652P_FLASH).unwrap();
+    let mut b = connected(Sim::new(image(23)));
+    let e = ops::program(&mut b, &img, &mut |_, _, _| {}).unwrap_err();
+    assert!(e.to_string().contains("0x57FE4"), "{e}");
+    assert!(!b.link().commands.contains(&cmd::SEND_DATA));
+}
+
+/// Restoring a real Z-Stack backup made with `read`, when one is given.
+#[test]
+#[ignore = "needs BACKUP_BIN=path/to/backup.bin"]
+fn restore_backup_file() {
+    let p = std::env::var("BACKUP_BIN").expect("BACKUP_BIN");
+    let img = ops::load_image(std::path::Path::new(&p), CC2652P_FLASH).unwrap();
+    ops::preflight(&img, CC2652P_FLASH).unwrap();
+    let mut b = connected(Sim::new(image(24)));
+    ops::program(&mut b, &img, &mut |_, _, _| {}).unwrap();
+    assert_eq!(b.link().flash, img);
+    b.reset().unwrap();
+    assert_eq!(b.into_link().mode, Mode::App);
 }
