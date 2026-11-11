@@ -16,6 +16,8 @@ mod demo;
 mod http;
 mod input;
 mod parse;
+#[cfg(target_os = "linux")]
+mod sniffle;
 mod view;
 
 use std::collections::HashMap;
@@ -68,8 +70,19 @@ OPTIONS:
                              needed). Repeat for several adapters. A BT4
                              adapter hears legacy adverts only. Combines
                              with node inputs, --adsbee and --demo.
-    --duration SECS          Stop live inputs (--ble) after SECS seconds.
-                             With --ble and --once, the default is 10.
+    --sniffle PORT           Scan for Bluetooth 5 Remote ID with a TI
+                             CC26x2 dongle running Sniffle firmware (e.g. a
+                             Sonoff Zigbee 3.0 USB Dongle Plus flashed with
+                             tools/cc26xx-flash; see docs/SONOFF.md). Hears
+                             legacy, extended and Long Range adverts, with
+                             RSSI. Passive: the dongle never transmits.
+    --sniffle-mode MODE      What the Sniffle dongle listens for on primary
+                             channel 37: 1m (legacy + extended, default),
+                             coded (Long Range only), or alt (switch
+                             between the two every 3 s; hears each half
+                             the time).
+    --duration SECS          Stop live inputs (--ble, --sniffle) after SECS
+                             seconds. With --once, the default is 10.
     --demo                   Add two simulated drones circling --own-pos
                              (or Philadelphia City Hall), a simulated
                              wfb-ng FPV link and three simulated aircraft
@@ -105,6 +118,8 @@ struct Options {
     show_link_ids: bool,
     adsbee: Option<String>,
     ble: Vec<String>,
+    sniffle: Vec<String>,
+    sniffle_mode: String,
     duration: Option<u64>,
 }
 
@@ -123,6 +138,8 @@ fn parse_args() -> Result<Options, String> {
         show_link_ids: false,
         adsbee: None,
         ble: Vec::new(),
+        sniffle: Vec::new(),
+        sniffle_mode: "1m".into(),
         duration: None,
     };
     let mut args = std::env::args().skip(1);
@@ -162,6 +179,8 @@ fn parse_args() -> Result<Options, String> {
             "--show-link-ids" => o.show_link_ids = true,
             "--adsbee" => o.adsbee = Some(value("--adsbee")?),
             "--ble" => o.ble.push(value("--ble")?),
+            "--sniffle" => o.sniffle.push(value("--sniffle")?),
+            "--sniffle-mode" => o.sniffle_mode = value("--sniffle-mode")?,
             "--duration" => {
                 o.duration = Some(
                     value("--duration")?
@@ -173,16 +192,27 @@ fn parse_args() -> Result<Options, String> {
             _ => o.inputs.push(a),
         }
     }
-    if o.inputs.is_empty() && !o.demo && o.adsbee.is_none() && o.ble.is_empty() {
+    if o.inputs.is_empty()
+        && !o.demo
+        && o.adsbee.is_none()
+        && o.ble.is_empty()
+        && o.sniffle.is_empty()
+    {
         o.inputs.push("-".into());
     }
     if o.http.is_some() && o.once {
         return Err("--http serves a live page; it cannot be used with --once".into());
     }
-    if o.once && !o.ble.is_empty() && o.duration.is_none() {
+    if o.once && !(o.ble.is_empty() && o.sniffle.is_empty()) && o.duration.is_none() {
         o.duration = Some(10);
     }
-    if o.inputs.len() + o.ble.len() > 200 {
+    if !["1m", "coded", "alt"].contains(&o.sniffle_mode.to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "--sniffle-mode: {:?} is not 1m, coded or alt",
+            o.sniffle_mode
+        ));
+    }
+    if o.inputs.len() + o.ble.len() + o.sniffle.len() > 200 {
         return Err("too many inputs".into());
     }
     Ok(o)
@@ -481,6 +511,32 @@ fn spawn_ble(
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn spawn_sniffle(
+    node: u8,
+    path: &str,
+    mode: &str,
+    secs: Option<u64>,
+    start: Instant,
+    tx: mpsc::Sender<Event>,
+) -> Result<String, String> {
+    let mode = sniffle::Primary::parse(mode).ok_or("bad --sniffle-mode")?;
+    sniffle::spawn(node, path, mode, secs.map(Duration::from_secs), start, tx)
+        .map_err(|e| format!("--sniffle {path}: {e}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_sniffle(
+    _node: u8,
+    path: &str,
+    _mode: &str,
+    _secs: Option<u64>,
+    _start: Instant,
+    _tx: mpsc::Sender<Event>,
+) -> Result<String, String> {
+    Err(format!("--sniffle {path}: only built on Linux"))
+}
+
 fn run(o: Options) -> Result<(), String> {
     let start = Instant::now();
     let clock = Clock(start);
@@ -506,6 +562,14 @@ fn run(o: Options) -> Result<(), String> {
         info.role = Some(NodeRole::Ble);
         live_sources += 1;
     }
+    for (i, path) in o.sniffle.iter().enumerate() {
+        let node = (o.inputs.len() + o.ble.len() + i) as u8;
+        let source = spawn_sniffle(node, path, &o.sniffle_mode, o.duration, start, tx.clone())?;
+        let info = view.nodes.entry(node).or_default();
+        info.source = source;
+        info.role = Some(NodeRole::Ble);
+        live_sources += 1;
+    }
     if let Some(path) = &o.adsbee {
         input::spawn_adsbee(path.clone(), o.realtime, start, tx.clone())
             .map_err(|e| format!("--adsbee {path}: {e}"))?;
@@ -516,7 +580,7 @@ fn run(o: Options) -> Result<(), String> {
         live_sources += 1;
     }
     if o.demo {
-        let base = (o.inputs.len() + o.ble.len()) as u8;
+        let base = (o.inputs.len() + o.ble.len() + o.sniffle.len()) as u8;
         let center = o.own.map_or((39.952_583, -75.165_222), |(a, b, _)| (a, b));
         demo::spawn(center, !o.once, o.demo_secs, start, base, tx.clone());
         for (n, what, role) in [

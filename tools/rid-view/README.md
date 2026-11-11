@@ -35,6 +35,40 @@ cargo run --release -p rid-view -- --ble hci1 --once --duration 20   # one table
   same advert are therefore not counted. Every Remote ID advert carries a new counter, so
   none of those are lost.
 
+## Bluetooth 5 with a Sonoff dongle (`--sniffle`)
+
+A Sonoff Zigbee 3.0 USB Dongle Plus (CC2652P) flashed with NCC Group's Sniffle
+firmware hears what a BT4 laptop adapter cannot: BT5 extended adverts and Long
+Range (coded PHY). `docs/SONOFF.md` has the flashing steps (with
+`tools/cc26xx-flash`) and the restore.
+
+```bash
+cargo run --release -p rid-view -- --sniffle /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_...-if00-port0
+cargo run --release -p rid-view -- --sniffle "$PORT" --sniffle-mode coded   # Long Range
+```
+
+- Our own host for Sniffle's serial protocol (`src/sniffle.rs`): base64 lines
+  at 2 Mbaud. It sets up a **passive** capture on primary channel 37 that
+  follows aux pointers, with no MAC filter and CRC checking on, and checks the
+  link with a marker echo. It never sends a scan, advertise or connect
+  command.
+- Each packet comes with its channel, PHY, PDU type and RSSI, so the transport
+  is exact. Legacy PDUs on 1M are `BleLegacy` (`B4`). AUX_ADV_IND on 1M or 2M
+  is `BleExtended` (`B5`). Coded PHY, or anything heard while listening on a
+  coded primary, is `BleLongRange` (`LR`). Remote ID service data goes through
+  `rid::ble::extract`. An AUX_ADV_IND without AdvA takes the address its
+  ADV_EXT_IND announced, matched by AdvDataInfo.
+- **Modes** (`--sniffle-mode`): `1m` (default; legacy + extended), `coded` (Long
+  Range only), `alt` (switches every 3 s). One radio does one primary PHY at a
+  time; use two dongles to cover both continuously.
+- The node line shows `adv` (all adverts heard per second), `rid` (Remote ID
+  ones), `phy`, and the firmware version from the handshake.
+- **Measured 2026-11-11:** `rid-ble-beacon hci0` → Sonoff, about 7.2 Remote ID
+  adverts per second (217 in 30 s), RSSI −37 to −40 dBm, every field decoded,
+  all labelled `B4`. Extended and Long Range decode is unit-tested with
+  constructed packets only; nothing here transmits BT5 (`hci0` is BT 4.2,
+  `hci1` BT 4.0).
+
 ## Laptop test transmitter (`tools/rid-ble-beacon`)
 
 `rid-ble-beacon` sends Bluetooth Remote ID test adverts from the laptop. It is for the

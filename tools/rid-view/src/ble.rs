@@ -46,16 +46,31 @@ pub fn rid_line(mac: [u8; 6], rssi: i16, service_data: &[u8]) -> Option<RidLine>
     ad.extend_from_slice(&rid::ble::UUID);
     ad.extend_from_slice(service_data);
     let found = rid::ble::extract(&ad)?;
+    // A BT4 controller only receives legacy adverts. An extended advert
+    // relayed by a BT5 adapter would carry a pack; the tracker treats both
+    // alike apart from this label.
+    let transport = if found.payload.len() > rid::MESSAGE_SIZE {
+        Transport::BleExtended
+    } else {
+        Transport::BleLegacy
+    };
+    rid_line_from_adv(transport, 0, mac, rssi, &ad)
+}
+
+/// A Remote ID detection from raw advertising data (AD structures), as a
+/// radio that hands over whole adverts (Sniffle) sees it. `None` if the
+/// advert carries no Remote ID service data.
+pub fn rid_line_from_adv(
+    transport: Transport,
+    channel: u8,
+    mac: [u8; 6],
+    rssi: i16,
+    adv_data: &[u8],
+) -> Option<RidLine> {
+    let found = rid::ble::extract(adv_data)?;
     let mut out = RidLine {
-        // A BT4 controller only receives legacy adverts. An extended advert
-        // relayed by a BT5 adapter would carry a pack; the tracker treats
-        // both alike apart from this label.
-        transport: if found.payload.len() > rid::MESSAGE_SIZE {
-            Transport::BleExtended
-        } else {
-            Transport::BleLegacy
-        },
-        channel: 0,
+        transport,
+        channel,
         rssi: rssi.clamp(i16::from(i8::MIN), 0) as i8,
         mac,
         counter: found.counter,
