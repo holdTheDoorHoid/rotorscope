@@ -87,3 +87,10 @@ codegen-units = 1
 debug         = 2
 lto           = 'fat'
 opt-level     = 's'
+
+# Local fix to esp-radio 1.0.0-beta.1 (ESP32-C5 only): keep the shared RF
+# front-end clocks on while BLE is up, so BLE can transmit with Wi-Fi started.
+# A verbatim copy of the crates.io release with one file changed; see
+# ../patches/README.md. Drop this once upstream esp-radio carries the fix.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }
