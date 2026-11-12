@@ -148,5 +148,36 @@ band a DroneID burst could be skipped. To do: re-tune `trig` for gain 83 (higher
 cheaper duration pre-check before stopping the ring) and repeat with the bench quiet. DC drift over
 the ten minutes was not measured (the snapshot was only at boot).
 
-Next for node-sdr: trigger re-tune and a quiet re-soak with snapshots at the end, step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
+## Trigger re-tune (2026-11-12) — capture time 70 % → 96 %
+
+The real cost was not skipped blocks but **blind time**: every rise froze the ring for a full-rate
+look at the window, about 4 ms each. Capture time = `isrs` × 3584 / 40 MB per second. Two changes:
+
+1. `rawcap::trigger` now follows each hot run (bridging one cold probe) and reports it only when
+   its probe-resolution length could be DroneID (`min_us..=max_us` ± one 51.2 µs block). Shorter
+   and longer runs are counted as `gated` (new `stats` field) and never stop the ring. Host tests:
+   2/4/6/40-probe runs gated, 11/12-probe runs kept, one dip bridged; the real-recording pipeline
+   test still decodes every burst.
+2. A full look measures only the segments around the hot run, at every 4th sample (`SUB`).
+
+c5c, 5756 MHz, gain 83:
+
+| run | rises/s | gated/s | full looks/s | blind per look | capturing | skipped blocks/s |
+|---|---|---|---|---|---|---|
+| before (10 min, c5a beaconing) | 84 | – | 84 | 3.6 ms | 69.9 % | 42 |
+| gate only (60 s, c5a at 10 Hz) | 135 | 103 | 32 | 4.3 ms | 86.6 % | 13 |
+| gate + cheap look (60 s, same) | 141 | 103 | 38 | 1.1 ms | **96.0 %** | 13 |
+| gate + cheap look (10 min, c5a silent) | 105 | 69 | 35 | 1.2 ms | 95.8 % | 407 |
+
+What still passes the gate are clusters of short Wi-Fi frames (SIFS/DIFS gaps fall between
+probes), which the full look then measures as 0–100 µs and rejects. The hold path still works
+(a 100–900 µs `trig` held and dumped a 5 GHz frame; I/Q check repeated: +17.8 dB).
+
+The ten-minute soak: no resets, `dma_err` 0, `gain_lost` 0, `overrun` never, heap constant; DC at
+gain 83 drifted from (0, −17) at boot to (−5, 14) after ten minutes: negligible. `skipped` was
+irregular (median 182/s, single seconds up to 2,353, i.e. the loop stalled ~70 ms at times):
+about 2 % of blocks unprobed, so roughly 94 % of the air is inspected overall. Suspect: esp-rtos
+time slices given to the Wi-Fi driver's tasks. Follow-up, not a blocker.
+
+Next for node-sdr: find the occasional loop stalls (skipped blocks), step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
 trigger statistics), 12 (ten-minute soak, including DC drift as the board warms), and 11 with a DJI drone.

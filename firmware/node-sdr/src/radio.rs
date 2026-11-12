@@ -33,6 +33,8 @@ pub const WINDOW_BYTES: usize = 2 * CAPTURE_LEN + 2 * HB_REACH;
 const PRE_BYTES: u64 = 4096;
 /// Extent measurement segment: 400 bytes = 10 µs at 40 MS/s.
 const SEG: usize = 400;
+/// Sample stride when measuring a frozen window's burst (see `window`).
+const SUB: usize = 4;
 /// Largest Path B grab: the ring minus the node being written.
 const GRAB_BYTES: usize = RING_BYTES - NODE_BYTES;
 
@@ -338,12 +340,28 @@ impl Radio {
     fn window(&mut self, start: u64, r: Rise) -> bool {
         let get = reader(start);
         let cfg = self.s.trig;
-        let seg_power = |k: usize| -> u32 { (k * SEG..(k + 1) * SEG).map(|j| POWER[get(j) as usize] as u32).sum() };
+        // Every SUB-th sample of a segment, scaled back up: the length and level
+        // only need a power estimate per 10 µs segment, and this is the costly
+        // part of a look (the ring is stopped while it runs: ~4 ms per look at
+        // full rate, 2026-11-12). Only the segments around the trigger's hot run
+        // are measured when the trigger reported one.
+        let seg_power = |k: usize| -> u32 {
+            (k * SEG..(k + 1) * SEG).step_by(SUB).map(|j| POWER[get(j) as usize] as u32).sum::<u32>() * SUB as u32
+        };
         let segs = WINDOW_BYTES / SEG;
+        let (lo, hi) = if r.probes > 0 {
+            let at = (r.pos - start) as usize;
+            let lo = at.saturating_sub(cfg.block as usize) / SEG;
+            let hi = (at + (r.probes as usize + 1) * cfg.block as usize).div_ceil(SEG).min(segs);
+            (lo, hi)
+        } else {
+            (0, segs)
+        };
         // Floor per segment, from the trigger's per-probe floor.
         let floor_seg = (r.floor as u64 * SEG as u64 / cfg.probe as u64).max(1);
         let thr = (floor_seg * cfg.ratio_q8 as u64 / 256) as u32;
-        let (first, n) = extent((0..segs).map(seg_power), thr);
+        let (first, n) = extent((lo..hi).map(seg_power), thr);
+        let first = first + lo;
         let dur_us = (n * SEG) as u32 * 1_000_000 / RATE_B;
         let mean_seg: u64 = if n > 0 { (first..first + n).map(|k| seg_power(k) as u64).sum::<u64>() / n as u64 } else { 0 };
         // 0 dBFS = both axes on the rails (POWER 450 per sample).
@@ -430,7 +448,7 @@ impl Radio {
     pub fn stats(&self) {
         let (produced, overrun) = ring::produced();
         println!(
-            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"probes":{},"rises":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
+            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
             now_us(),
             self.s.mode.name(),
             self.s.mhz,
@@ -440,6 +458,7 @@ impl Radio {
             ring::DMA_ERRORS.load(core::sync::atomic::Ordering::Relaxed),
             self.trig.probes,
             self.trig.rises,
+            self.trig.gated,
             self.trig.floor(),
             self.n.accepted,
             self.n.rejected,

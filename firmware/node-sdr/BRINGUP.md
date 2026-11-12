@@ -210,9 +210,13 @@ clip step at maximum gain.
 
 Plain boot at 5756 MHz for 60 s (`tools/dev-board.sh $ELF 60 $B`).
 
-Good: `rises` a few per second or fewer; `ev` lines (energy of the wrong length) for Wi-Fi traffic,
-at most five a second; `accepted` 0 without a DJI drone; `lapped` 0. Tune with
-`trig <dB> [min_us max_us]` (default 6 dB, 450–800 µs). On 2.4 GHz (`freq 2414`, DroneID 2414.5)
+At gain 83 every Wi-Fi frame is a `rise`, so expect tens to hundreds a second in a busy band. The
+trigger follows each hot run and drops the ones whose length cannot be DroneID right away
+(`gated`), without stopping the ring; only the rest get a full look (`rejected` + `accepted`, and
+`ev` lines for rejects, at most five a second). Good: `accepted` 0 without a DJI drone, `lapped`
+near 0, and the ring capturing most of the time: `isrs` × 3584 / 40,000,000 per second ≥ 0.95
+(each full look stops the ring for about 1 ms). Tune with `trig <dB> [min_us max_us]` (default 6 dB,
+450–800 µs; the same limits drive the early length gate). On 2.4 GHz (`freq 2414`, DroneID 2414.5)
 expect many more `ev` lines; spurs at 2400/2440/2448/2480/2496 MHz are board-made.
 
 ## 11. A real DroneID burst

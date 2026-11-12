@@ -8,11 +8,15 @@
 //! with a fast-down, slow-up average, so a burst barely moves it and a
 //! quieter band is learnt within a few blocks.
 //!
-//! A *rise* is `min_hot` consecutive probes above `floor * ratio`. The
-//! firmware then waits until the stream has run a full capture window past
-//! the rise, freezes the ring, and measures the burst on the frozen window at
-//! full rate ([`extent`]) before handing it to the decoder. Duration gating
-//! there (DroneID: 0.57-0.64 ms) rejects most Wi-Fi frames without a decode.
+//! A *rise* is `min_hot` consecutive probes above `floor * ratio`. The trigger
+//! then follows the hot run (bridging up to `bridge` cold probes) until it
+//! ends, and only reports it if its probe-resolution length could be a
+//! DroneID burst (`min_us..=max_us`, give or take one block). Wi-Fi frames
+//! (80-300 µs) and long transmissions are dropped right here, without
+//! stopping the ring: on 2026-11-12, at gain 83 in a busy 5 GHz band, every
+//! frame used to freeze the ring for a full-rate look, 84 a second, and the
+//! loop fell behind (42 blocks/s skipped). A reported rise is then measured
+//! on the frozen window at full rate ([`extent`]) and gated again exactly.
 //!
 //! The ZC check that confirms "DJI" is Phase 10c; this module only finds
 //! energy.
@@ -36,6 +40,14 @@ pub struct Config {
     /// frozen window).
     pub min_us: u32,
     pub max_us: u32,
+    /// Block duration in ns (2048 bytes at 40 MB/s = 51.2 µs), for the
+    /// probe-resolution length gate.
+    pub block_ns: u32,
+    /// Cold probes tolerated inside one hot run.
+    pub bridge: u8,
+    /// Gate on the run's length before reporting (false: report every rise
+    /// as soon as it has `min_hot` hot probes, the old behaviour).
+    pub gate: bool,
 }
 
 impl Default for Config {
@@ -50,6 +62,9 @@ impl Default for Config {
             // DroneID: 8 symbols ~572 µs, 9 symbols ~643 µs (RESEARCH.md).
             min_us: 450,
             max_us: 800,
+            block_ns: 51_200,
+            bridge: 1,
+            gate: true,
         }
     }
 }
@@ -61,6 +76,9 @@ pub struct Rise {
     /// Probe power sum of the hot probe and the floor it beat.
     pub power: u32,
     pub floor: u32,
+    /// Blocks from the first to the last hot probe, inclusive (0 when
+    /// reported ungated, before the run ended).
+    pub probes: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,17 +86,36 @@ pub struct Trigger {
     pub cfg: Config,
     /// Floor in probe-sum units x 256 (0 = not yet learnt).
     floor_q8: u64,
-    hot: u8,
+    /// Hot probes in the current run, the last one's position, and cold
+    /// probes since it.
+    run_hot: u32,
+    last_hot: u64,
+    cold: u8,
     first_hot: u64,
     first_power: u32,
-    /// Probes fed and rises found.
+    first_floor: u32,
+    /// Probes fed, rises found (runs reaching `min_hot`), and rises whose
+    /// length ruled them out before any full-rate look.
     pub probes: u32,
     pub rises: u32,
+    pub gated: u32,
 }
 
 impl Trigger {
     pub const fn new(cfg: Config) -> Self {
-        Trigger { cfg, floor_q8: 0, hot: 0, first_hot: 0, first_power: 0, probes: 0, rises: 0 }
+        Trigger {
+            cfg,
+            floor_q8: 0,
+            run_hot: 0,
+            last_hot: 0,
+            cold: 0,
+            first_hot: 0,
+            first_power: 0,
+            first_floor: 0,
+            probes: 0,
+            rises: 0,
+            gated: 0,
+        }
     }
 
     /// Current floor, probe-sum units.
@@ -89,7 +126,33 @@ impl Trigger {
     /// Forget the floor (after a retune or gain change).
     pub fn reset(&mut self) {
         self.floor_q8 = 0;
-        self.hot = 0;
+        self.run_hot = 0;
+        self.cold = 0;
+    }
+
+    /// Could a hot run spanning `probes` blocks be a burst of `min_us..=max_us`?
+    /// The true length is within one block either side of the probe span.
+    pub fn length_ok(&self, probes: u32) -> bool {
+        let block_us = self.cfg.block_ns.div_ceil(1000);
+        let span_us = probes.saturating_mul(self.cfg.block_ns) / 1000;
+        span_us + block_us >= self.cfg.min_us && span_us <= self.cfg.max_us + block_us
+    }
+
+    /// The current run ended: report it if it rose and its length fits.
+    fn end_run(&mut self) -> Option<Rise> {
+        let rose = self.run_hot >= self.cfg.min_hot as u32;
+        let probes = ((self.last_hot - self.first_hot) / self.cfg.block.max(1) as u64) as u32 + 1;
+        self.run_hot = 0;
+        self.cold = 0;
+        if !rose || !self.cfg.gate {
+            return None;
+        }
+        if self.length_ok(probes) {
+            Some(Rise { pos: self.first_hot, power: self.first_power, floor: self.first_floor, probes })
+        } else {
+            self.gated = self.gated.wrapping_add(1);
+            None
+        }
     }
 
     /// Feed one probe: `pos` is the stream position of its block, `power`
@@ -103,25 +166,36 @@ impl Trigger {
         }
         let hot = p > (self.floor_q8 >> 8) * self.cfg.ratio_q8 as u64;
         if hot {
-            if self.hot == 0 {
+            if self.run_hot == 0 {
                 self.first_hot = pos;
                 self.first_power = power;
+                self.first_floor = self.floor();
             }
-            self.hot = self.hot.saturating_add(1);
-            if self.hot == self.cfg.min_hot {
+            self.run_hot += 1;
+            self.last_hot = pos;
+            self.cold = 0;
+            if self.run_hot == self.cfg.min_hot as u32 {
                 self.rises = self.rises.wrapping_add(1);
-                return Some(Rise { pos: self.first_hot, power: self.first_power, floor: self.floor() });
+                if !self.cfg.gate {
+                    return Some(Rise { pos: self.first_hot, power: self.first_power, floor: self.first_floor, probes: 0 });
+                }
             }
             return None;
         }
-        self.hot = 0;
+        let mut out = None;
+        if self.run_hot > 0 {
+            self.cold += 1;
+            if self.cold > self.cfg.bridge {
+                out = self.end_run();
+            }
+        }
         if p < self.floor_q8 {
             self.floor_q8 -= (self.floor_q8 - p) >> self.cfg.down_shift;
         } else {
             self.floor_q8 += (p - self.floor_q8) >> self.cfg.up_shift;
         }
         self.floor_q8 = self.floor_q8.max(1);
-        None
+        out
     }
 }
 
@@ -193,6 +267,72 @@ mod tests {
         assert_eq!(rises[1].pos, 1500 * 2048);
         assert!((850..1150).contains(&rises[0].floor), "floor {}", rises[0].floor);
         assert_eq!(t.rises, 2);
+    }
+
+    /// Bursts of a given probe length at 10 dB over noise; what comes out.
+    fn run_lengths(cfg: Config, lens: &[u64]) -> (Vec<Rise>, Trigger) {
+        let mut t = Trigger::new(cfg);
+        let mut s = 7;
+        let mut out = vec![];
+        let mut k = 0u64;
+        for _ in 0..300 {
+            t.feed(k * 2048, noise(&mut s));
+            k += 1;
+        }
+        for &n in lens {
+            for _ in 0..n {
+                if let Some(r) = t.feed(k * 2048, 10 * noise(&mut s)) {
+                    out.push(r);
+                }
+                k += 1;
+            }
+            for _ in 0..40 {
+                if let Some(r) = t.feed(k * 2048, noise(&mut s)) {
+                    out.push(r);
+                }
+                k += 1;
+            }
+        }
+        (out, t)
+    }
+
+    #[test]
+    fn length_gate_keeps_droneid_drops_wifi() {
+        // 51.2 µs blocks: Wi-Fi frames of 2, 4, 6 probes (100-300 µs), DroneID
+        // 11 and 12 probes (~570 / ~640 µs), a long 40-probe transmission.
+        let (rises, t) = run_lengths(Config::default(), &[2, 4, 6, 11, 12, 40]);
+        let spans: Vec<u32> = rises.iter().map(|r| r.probes).collect();
+        assert_eq!(spans, vec![11, 12]);
+        assert_eq!(t.rises, 6);
+        assert_eq!(t.gated, 4);
+    }
+
+    #[test]
+    fn one_cold_probe_inside_a_burst_is_bridged() {
+        let mut t = Trigger::new(Config::default());
+        let mut s = 9;
+        for k in 0..300u64 {
+            t.feed(k * 2048, noise(&mut s));
+        }
+        let mut got = vec![];
+        for k in 300..360u64 {
+            let hot = (300..312).contains(&k) && k != 306;
+            if let Some(r) = t.feed(k * 2048, if hot { 10 * noise(&mut s) } else { noise(&mut s) }) {
+                got.push(r);
+            }
+        }
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].pos, 300 * 2048);
+        assert_eq!(got[0].probes, 12);
+    }
+
+    #[test]
+    fn ungated_reports_at_min_hot() {
+        let cfg = Config { gate: false, ..Config::default() };
+        let (rises, t) = run_lengths(cfg, &[2, 4, 40]);
+        assert_eq!(rises.len(), 3);
+        assert!(rises.iter().all(|r| r.probes == 0));
+        assert_eq!(t.gated, 0);
     }
 
     #[test]
