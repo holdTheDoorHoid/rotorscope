@@ -8,7 +8,7 @@ transmits. Keep the logs: they are the evidence for any fix.
 
 ```sh
 ELF=firmware/node-sdr/target/riscv32imac-unknown-none-elf/release/node-sdr
-B=c5                      # the board name in tools/dev-board.sh (another agent is adding it)
+B=c5b                     # the board name in tools/boards.local (see docs/BENCH.md)
 ```
 
 `tools/dev-board.sh` flashes and *reads* the port; it does not send anything. Two ways to give
@@ -93,7 +93,9 @@ carrying I/Q: the free-running engine did not start or the lane word is wrong (s
 
 ## 4. Path B ring running
 
-Plain boot (no commands); watch `stats` for 10 s.
+Boot with `NODE_SDR_BOOT="trig 30"` and watch `stats` for 10 s. (Every trigger rise stops the
+ring to inspect a window and restarts it, which resets `produced` and pauses `isrs`; with Wi-Fi
+around that is 10–20 times a second, so a plain boot reads about 6 % low and `produced` jumps around.)
 
 Good: `produced` rises by **40,000,000 ± 0.01 % per second**; `isrs` by about 11,160 per second
 (one per 3584-byte node); `dma_err` 0; `overrun` false; `probes` about 19,500 per second; `floor`
