@@ -263,6 +263,10 @@ def check_boards(t: Test) -> str | None:
         r = resolve(board)
         if not r:
             return f"board '{board}' is not registered (tools/dev-board.sh --register)"
+        # A C5 vanishes from USB for a moment while its app starts; give it time to return.
+        deadline = time.time() + 10
+        while not os.path.exists(r[0]) and time.time() < deadline:
+            time.sleep(0.2)
         if not os.path.exists(r[0]):
             return f"board '{board}' is registered but not plugged in ({r[0]})"
         if r[1] != CHIP_NAME[chip]:

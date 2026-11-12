@@ -168,6 +168,8 @@ if (( dry )); then
   echo "[dry-run] reset (DTR/RTS) then read ${secs}s${send:+; after ${send_after}s type '$send'}"
   exit 0
 fi
+# A C5 leaves USB for a moment while its app starts: allow it up to 10 s to come back.
+for _ in $(seq 50); do [[ -e $port ]] && break; sleep 0.2; done
 [[ -e $port ]] || { echo "board $board: $port is not attached" >&2; exit 1; }
 [[ -z $elf || -f $elf ]] || { echo "no such ELF: $elf" >&2; exit 1; }
 
@@ -188,16 +190,35 @@ if [[ -n $elf ]]; then
   espflash flash --chip "$chip" --port "$port" --non-interactive "$elf" 2>&1 | tail -3
 fi
 python3 -I - "$port" "$secs" "$send" "$send_after" <<'PY'
-import sys, time, serial
+import os, sys, time, termios, serial
 port, secs, keys, after = sys.argv[1], float(sys.argv[2]), sys.argv[3], float(sys.argv[4])
+# The ESP32-C5 drops off USB for a moment as its app starts (the USB-Serial-JTAG
+# re-enumerates; the S3 does not). Ride it out: wait for the by-id path to come
+# back and reopen it, without resetting the board again.
+def reopen(deadline):
+    while time.time() < deadline:
+        if os.path.exists(port):
+            try: return serial.Serial(port, 115200, timeout=0.2)
+            except (serial.SerialException, OSError): pass
+        time.sleep(0.1)
+    return None
 s = serial.Serial(port, 115200, timeout=0.2)
 s.dtr = False; s.rts = True; time.sleep(0.1); s.rts = False   # USB-JTAG hard reset
-t0 = time.time(); end = t0 + secs
+t0 = time.time(); end = t0 + secs; drops = 0
 while time.time() < end:
-    if keys and time.time() - t0 >= after:
-        for ch in keys:              # one character at a time, like a person typing
-            s.write(ch.encode()); s.flush(); time.sleep(0.4)
-        keys = ""
-    b = s.read(4096)
-    if b: sys.stdout.write(b.decode(errors="replace")); sys.stdout.flush()
+    try:
+        if keys and time.time() - t0 >= after:
+            for ch in keys:              # one character at a time, like a person typing
+                s.write(ch.encode()); s.flush(); time.sleep(0.4)
+            keys = ""
+        b = s.read(4096)
+        if b: sys.stdout.write(b.decode(errors="replace")); sys.stdout.flush()
+    except (serial.SerialException, OSError, termios.error):
+        drops += 1
+        try: s.close()
+        except Exception: pass
+        s = reopen(min(end, time.time() + 10))
+        if s is None:
+            sys.stderr.write("dev-board: %s left USB and did not come back\n" % port); sys.exit(3)
+        sys.stderr.write("dev-board: USB re-enumerated (%d), reopened\n" % drops)
 PY

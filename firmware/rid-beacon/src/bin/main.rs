@@ -208,7 +208,7 @@ async fn main(spawner: Spawner) -> ! {
                 }
             }
         },
-        ble_advertise(&mut peripheral, centre),
+        ble_advertise(&stack, &mut peripheral, centre),
     )
     .await;
     unreachable!()
@@ -508,6 +508,21 @@ fn helper_set() -> AdvertisementSet<'static> {
     }
 }
 
+/// Delete every advertising set from the controller before configuring new ones.
+///
+/// trouble-host's `advertise_ext` reuses handles 0.. and stopping (dropping the
+/// `Advertiser`) only disables the sets: their old parameters and data stay. The
+/// ESP32-C5 controller then rejects turning a set that still holds 134 bytes of
+/// extended data into a legacy (31-byte) advert with "Invalid HCI Command
+/// Parameters", as the Core spec requires (Vol 4 Part E 7.8.53). Seen on the
+/// bench 2026-11-12: every C5 BLE test failed after the start-up probe left the
+/// coded set's data on handle 0. Clearing first makes each start a clean slate.
+async fn clear_adv_sets(stack: &Stack<'_, BleCtl, DefaultPacketPool>) {
+    if let Err(e) = stack.command(bt_hci::cmd::le::LeClearAdvSets::new()).await {
+        warn!("LE Clear Advertising Sets failed: {e:?}");
+    }
+}
+
 const NO_SET: AdvSet = AdvSet {
     adv_handle: AdvHandle::new(0),
     duration: bt_hci::param::Duration::from_u16(0),
@@ -515,7 +530,11 @@ const NO_SET: AdvSet = AdvSet {
 };
 
 #[allow(clippy::large_stack_frames, reason = "the future lives inside the main task's static storage, not on a stack")]
-async fn ble_advertise(peripheral: &mut Peripheral<'_, BleCtl, DefaultPacketPool>, centre: Centre) {
+async fn ble_advertise(
+    stack: &Stack<'_, BleCtl, DefaultPacketPool>,
+    peripheral: &mut Peripheral<'_, BleCtl, DefaultPacketPool>,
+    centre: Centre,
+) {
     let mut p = BlePayloads {
         legacy: [0; 31],
         ext: [0; rid_tx::BLE_EXT_LEN],
@@ -533,6 +552,7 @@ async fn ble_advertise(peripheral: &mut Peripheral<'_, BleCtl, DefaultPacketPool
     }
     for k in ble_kinds {
         let mut h = [NO_SET; 1];
+        clear_adv_sets(stack).await;
         let r = peripheral
             .advertise_ext(&[adv_set(k, p.data(k))], &mut h)
             .await;
@@ -592,6 +612,7 @@ async fn ble_advertise(peripheral: &mut Peripheral<'_, BleCtl, DefaultPacketPool
             let mut sets = sets;
             sets.swap(n, 3);
             let m = if ble_helper_enabled() { n + 1 } else { n };
+            clear_adv_sets(stack).await;
             peripheral
                 .advertise_ext(&sets[..m], &mut handles[..m])
                 .await
