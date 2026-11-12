@@ -200,8 +200,13 @@ async fn main(spawner: Spawner) -> ! {
         }
         if last_stats.elapsed() >= Duration::from_secs(1) {
             last_stats = Instant::now();
+            // Probe between the pieces of the once-a-second work: the ring holds
+            // only 1.43 ms, and the gain re-force plus a ~450-byte stats line
+            // over USB took about 2 ms, enough to fall a lap behind every second.
             radio.tick();
-            radio.stats();
+            radio.poll();
+            radio.stats_paced();
+            radio.poll();
         }
     }
 }

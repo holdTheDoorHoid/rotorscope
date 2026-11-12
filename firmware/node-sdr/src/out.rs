@@ -31,7 +31,14 @@ fn flush() {
     unsafe { CONF.write_volatile(0b001) }
 }
 
-struct Usb;
+/// Waits for the host up to `.0` per FIFO load.
+struct Usb(Duration);
+
+/// Set when a paced line found no host; cleared once the FIFO has room again.
+static HOST_GONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Paced (unrequested, periodic) output waits much less: a node with no host
+/// attached must not stall its loop.
+const WAIT_PACED: Duration = Duration::from_millis(3);
 
 impl Write for Usb {
     fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -40,7 +47,7 @@ impl Write for Usb {
                 flush();
                 let t0 = Instant::now();
                 while !room() {
-                    if t0.elapsed() > WAIT {
+                    if t0.elapsed() > self.0 {
                         return Err(fmt::Error);
                     }
                 }
@@ -55,7 +62,36 @@ impl Write for Usb {
 /// Print one line of a dump. Returns false if the host stopped reading, so
 /// the caller can abandon the rest instead of waiting on every line.
 pub fn line(args: fmt::Arguments) -> bool {
-    let ok = Usb.write_fmt(args).is_ok() && Usb.write_str("\n").is_ok();
+    let ok = Usb(WAIT).write_fmt(args).is_ok() && Usb(WAIT).write_str("\n").is_ok();
     flush();
     ok
+}
+
+/// Write `s` and a newline in pieces of at most `piece` bytes, calling
+/// `between` after each piece. `between` must not print. Gives up quietly
+/// (the rest of the line is dropped) if the host stops reading.
+pub fn paced(s: &str, piece: usize, mut between: impl FnMut()) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if HOST_GONE.load(Relaxed) {
+        if !room() {
+            return;
+        }
+        HOST_GONE.store(false, Relaxed);
+    }
+    let b = s.as_bytes();
+    let mut k = 0;
+    while k < b.len() {
+        let end = (k + piece).min(b.len());
+        // SAFETY of the slice: `s` is ASCII JSON, so any byte offset is a char boundary.
+        let ok = Usb(WAIT_PACED).write_str(core::str::from_utf8(&b[k..end]).unwrap_or("")).is_ok();
+        flush();
+        if !ok {
+            HOST_GONE.store(true, Relaxed);
+            return;
+        }
+        between();
+        k = end;
+    }
+    let _ = Usb(WAIT_PACED).write_str("\n");
+    flush();
 }

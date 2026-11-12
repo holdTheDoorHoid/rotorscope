@@ -58,6 +58,9 @@ pub static NEW_DATA: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static ISRS: AtomicU32 = AtomicU32::new(0);
 /// Descriptor errors / empty-descriptor and FIFO overflow events.
 pub static DMA_ERRORS: AtomicU32 = AtomicU32::new(0);
+/// Nodes taken as finished because their length write-back never arrived
+/// (see `walk_nodes`).
+pub static WB_LOST: AtomicU32 = AtomicU32::new(0);
 
 /// The ring as bytes. Only read data the producer count says is complete.
 pub fn bytes() -> &'static [u8] {
@@ -220,13 +223,32 @@ fn walk_nodes() -> usize {
     critical_section::with(|cs| {
         let cell = WALKER.borrow(cs);
         let mut w = cell.get();
+        // A node can lose its length write-back: if this handler runs more
+        // than a lap late, recycling the node the DMA is just rewriting
+        // clobbers the new length. That happened every second (2026-11-12):
+        // esp-println holds a critical section while it writes, and the ~1.6 ms
+        // stats line kept this interrupt off for more than the 1.43 ms ring.
+        // The walker then waited a whole lap on that node and the probe loop
+        // fell a ring behind. Stats are now paced (`Radio::stats_paced`), which
+        // removed it; as a safety net, since the DMA fills nodes strictly in
+        // order, a node whose next two nodes are written is finished, full,
+        // whatever its own dw0 says (counted in `wb_lost`). Only nodes not yet
+        // recycled can hold a length, so these are this lap's.
+        let written = |i: usize| -> bool {
+            // SAFETY: reading our own descriptor.
+            unsafe { dw0::length(core::ptr::addr_of!((*desc(i % NODES)).dw0).read_volatile()) != 0 }
+        };
         let n = w.walk(|i| {
             let d = desc(i);
             // SAFETY: our descriptor; the DMA writes dw0 back when a node
             // finishes and we recycle it here.
             unsafe {
                 let v = core::ptr::addr_of!((*d).dw0).read_volatile();
-                let len = dw0::length(v);
+                let mut len = dw0::length(v);
+                if len == 0 && written(i + 1) && written(i + 2) {
+                    len = NODE_BYTES as u32;
+                    WB_LOST.fetch_add(1, Relaxed);
+                }
                 if len != 0 {
                     core::ptr::addr_of_mut!((*d).dw0).write_volatile(dw0::recycle(v));
                 }

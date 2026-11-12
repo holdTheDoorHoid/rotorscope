@@ -282,8 +282,9 @@ impl Radio {
         );
     }
 
-    /// Called after the ring signalled new data (and periodically).
-    pub fn poll(&mut self) {
+    /// Feed the trigger every probe the ring has ready. Never prints, so it is
+    /// safe to call between the pieces of a paced output line.
+    pub fn probe(&mut self) {
         if !self.phy_ok || self.s.mode == Mode::Idle || self.held != Held::Nothing {
             return;
         }
@@ -312,6 +313,15 @@ impl Radio {
             }
             self.next_block += cfg.block as u64;
         }
+    }
+
+    /// Called after the ring signalled new data (and periodically).
+    pub fn poll(&mut self) {
+        if !self.phy_ok || self.s.mode == Mode::Idle || self.held != Held::Nothing {
+            return;
+        }
+        self.probe();
+        let (produced, _) = ring::produced();
         let Some(r) = self.pending else { return };
         let start = r.pos.saturating_sub(PRE_BYTES);
         let end = start + WINDOW_BYTES as u64;
@@ -445,10 +455,11 @@ impl Radio {
         }
     }
 
-    pub fn stats(&self) {
+    fn stats_line(&self, line: &mut Line) {
         let (produced, overrun) = ring::produced();
-        println!(
-            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
+        let _ = write!(
+            line,
+            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
             now_us(),
             self.s.mode.name(),
             self.s.mhz,
@@ -456,6 +467,7 @@ impl Radio {
             self.s.window.name(),
             ring::ISRS.load(core::sync::atomic::Ordering::Relaxed),
             ring::DMA_ERRORS.load(core::sync::atomic::Ordering::Relaxed),
+            ring::WB_LOST.load(core::sync::atomic::Ordering::Relaxed),
             self.trig.probes,
             self.trig.rises,
             self.trig.gated,
@@ -471,6 +483,24 @@ impl Radio {
             self.held != Held::Nothing,
             esp_alloc::HEAP.free()
         );
+    }
+
+    pub fn stats(&self) {
+        let mut line = Line::new();
+        self.stats_line(&mut line);
+        println!("{}", line.as_str());
+    }
+
+    /// The once-a-second stats line, written in 128-byte pieces with a probe
+    /// pass between them. Printed whole (esp-println, interrupts off) it took
+    /// about 1.6 ms over USB, longer than the 1.43 ms ring: the loop fell a lap
+    /// behind and the DMA interrupt ran a lap late every second. Rule: nothing
+    /// printed while the ring runs may take more than about a millisecond
+    /// (~300 bytes); `ev` lines are ~180.
+    pub fn stats_paced(&mut self) {
+        let mut line = Line::new();
+        self.stats_line(&mut line);
+        crate::out::paced(line.as_str(), 128, || self.probe());
     }
 
     /// Housekeeping between captures (about once a second).

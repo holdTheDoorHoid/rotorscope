@@ -179,5 +179,30 @@ irregular (median 182/s, single seconds up to 2,353, i.e. the loop stalled ~70 m
 about 2 % of blocks unprobed, so roughly 94 % of the air is inspected overall. Suspect: esp-rtos
 time slices given to the Wi-Fi driver's tasks. Follow-up, not a blocker.
 
-Next for node-sdr: find the occasional loop stalls (skipped blocks), step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
+## Loop stalls found and fixed (2026-11-12) — 0 skipped blocks in ten minutes
+
+Measured with temporary instrumentation on c5c (loop timing, interrupt-to-task wake latency, how
+many ring nodes each DMA interrupt found):
+
+- Not CPU load (the probe loop was busy 32 %) and not the scheduler (wake latency ~25 µs).
+- The loop was regularly a whole ring behind because some DMA interrupts found no finished node
+  for a full lap, then many at once: the head node's length write-back was missing.
+- Cause: the once-a-second `stats` line (~500 bytes) took **1.6 ms** to print, longer than the
+  1.43 ms ring, and esp-println prints inside a critical section, so the DMA interrupt was held off
+  more than a lap. Late, it recycled the node the DMA was just rewriting and wiped its new length;
+  the walker then waited a lap on it.
+
+Fixes: the stats line goes out in 128-byte pieces with a probe pass between them (`out::paced`,
+3 ms host wait and a no-host latch so a node without USB never stalls), and as a safety net the
+walker treats a node as finished when the next two are written (`wb_lost` in `stats`).
+
+| ten minutes, c5c, 5756 MHz, gain 83 | skipped blocks | lapped | capturing |
+|---|---|---|---|
+| before | 243,658 (407/s; single seconds up to 2,353) | 334 | 95.8 % |
+| after | **0** | **0** | 95.8 % (the ~4 % left is the 1 ms full looks) |
+
+`wb_lost` stayed 0 for the whole run, which confirms the late interrupt as the cause. Rule for new
+code: nothing printed while the ring runs may take more than about a millisecond (~300 bytes).
+
+Next for node-sdr: step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
 trigger statistics), 12 (ten-minute soak, including DC drift as the board warms), and 11 with a DJI drone.
