@@ -12,9 +12,9 @@ and [RESEARCH.md](RESEARCH.md) for the survey behind them.
 | Node-to-hub wire format | `crates/link` | Done (postcard + COBS over UART). |
 | Hub track logic | `crates/tracker` | Done: merges by UAS ID across radios (2.4 and 5 GHz Wi-Fi kept apart), Vincenty range/bearing, JSON / TAK CoT / CSV output. Runs on the hub. |
 | Hub firmware | `firmware/hub` | S3 runs on the bench: node links, hotspot + phone page, CoT, USB, plus GPS (I2C, PPS), banded 320x240 screen, buttons, buzzer, SD CSV log and battery on the second core. With nothing attached each reports absent and the rest runs; untested against a real GPS, panel or card. |
-| Wi-Fi listener (2.4 GHz S3, 5 GHz C5) | `firmware/node-wifi` | S3 verified on hardware: sniffs and hops channels for 60 s with no drops. C5 builds only. |
-| Bluetooth listener (legacy + Long Range) | `firmware/node-ble` | S3 verified: decoded a BT4 Remote ID broadcast from a laptop. C5 builds only. Long Range not yet heard on air. |
-| Test transmitter | `firmware/rid-beacon` | S3 verified: the laptop received the Wi-Fi beacon and BT4 adverts. NAN, BT5 extended and Long Range transmit with no errors but haven't been heard by a receiver yet. C5: BT4 legacy decoded by the laptop (`rid-view --ble`) with Wi-Fi running (2026-11-12), which needs the esp-radio clock fix in `firmware/patches`. |
+| Wi-Fi listener (2.4 GHz S3, 5 GHz C5) | `firmware/node-wifi` | S3 verified on hardware: sniffs and hops channels for 60 s with no drops. C5 verified on air (2026-11-12): decodes 5 GHz beacon and NAN Remote ID from a C5 `rid-beacon` on channel 149. |
+| Bluetooth listener (legacy + Long Range) | `firmware/node-ble` | S3 verified: decoded a BT4 Remote ID broadcast from a laptop. C5 verified on air (2026-11-12): BT4 legacy, BT5 extended and Long Range all decoded from a C5 `rid-beacon` (bench `--group c5`). |
+| Test transmitter | `firmware/rid-beacon` | S3 verified: the laptop received the Wi-Fi beacon and BT4 adverts. NAN, BT5 extended and Long Range transmit with no errors but haven't been heard by a receiver yet. C5 verified on air (2026-11-12): all five transmitters (5 GHz beacon and NAN, BT4, BT5 extended, Long Range) heard by a second C5; BT4 also decoded by the laptop. Needs the esp-radio clock fix in `firmware/patches`. |
 | Open FPV link detection | `crates/openlink`, `firmware/node-wifi`, `crates/tracker` | Built and unit-tested (2026-11-09): recognises wfb-ng/OpenIPC, OpenHD, RubyFPV and DroneBridge frames by their headers, lists them apart from drones, identifiers hidden unless opted in. Not yet heard on air. |
 | Crewed aircraft (ADS-B via ADSBee 1090) | `crates/adsb`, `crates/tracker`, `firmware/hub` (feature `adsbee`), `tools/rid-view --adsbee` | Built and tested on the laptop (2026-11-09): CRC-checked CSBee parser, a separate aircraft table on every output, never an alert. Not yet run against the ADSBee; see `docs/ADSBEE.md`. |
 | Laptop viewer | `tools/rid-view` | Done. Reads node USB output, files or stdin; can send TAK CoT; has `--demo`. |
@@ -25,8 +25,8 @@ and [RESEARCH.md](RESEARCH.md) for the survey behind them.
 **Verified end to end:** laptop Bluetooth broadcasting a test Remote ID → S3 running
 `node-ble` → `rid-view` showing the drone.
 
-**Next, once the second S3 and the C5s arrive:** run `rid-beacon` on one board and the
-listeners on another. That proves Wi-Fi NAN, BT5 Long Range, and (on the C5) 5 GHz.
+**Next:** the S3 pair (`tools/bench/run.py --group s3`) and the mixed-chip tests, and the
+C5 raw-capture receiver's DC-offset fix (`firmware/node-sdr/BRINGUP-RESULTS.md`).
 
 ## Building
 

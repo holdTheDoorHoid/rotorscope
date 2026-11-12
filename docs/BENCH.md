@@ -50,8 +50,8 @@ The last lines are a table. For each test:
 
 The exit code is 0 only if everything passed.
 
-Most interesting first results: **`s3-to-s3-ble-lr`** (Bluetooth Long Range has never been heard on air)
-and **`s3-to-s3-wifi-nan`**, **`s3-to-s3-ble5`** (transmit with no errors but not heard yet).
+First results (2026-11-12): all five `--group c5` tests PASS, including Bluetooth Long Range and
+5 GHz NAN. A C5 drops off USB for about a second as its app starts; the tools wait for it.
 
 ## Hub wiring (two boards)
 
