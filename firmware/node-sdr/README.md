@@ -5,8 +5,9 @@ for DJI DroneID bursts, and hands each one to `crates/droneid`. **Receive-only**
 runs only to power and calibrate the PHY; the MAC's transmit queues are stopped and checked, and
 nothing here can send a frame or a tone.
 
-**Status: builds (`cargo fw` and `cargo fw-lite`), clippy-clean, host logic tested. Never run on
-hardware.** [BRINGUP.md](BRINGUP.md) is the first-flash checklist.
+**Status: builds (`cargo fw` and `cargo fw-lite`), clippy-clean, host logic tested; bring-up on two
+XIAO ESP32-C5 boards under way ([BRINGUP-RESULTS.md](BRINGUP-RESULTS.md)).** [BRINGUP.md](BRINGUP.md)
+is the first-flash checklist.
 
 | Path | What | Rate | Bits | Length |
 |---|---|---|---|---|
@@ -46,7 +47,7 @@ Everything is JSON lines on USB-Serial-JTAG (`"t"` tags: `hello psram mem phy st
 grab held decode bus err ok help boot_cmd`), plus dump lines (`@H/@D/@E`). Commands (one per line;
 `help` lists them; grammar in `crates/rawcap/src/cmd.rs`):
 
-`stats`, `phy`, `freq <MHz>`, `offset <kHz>`, `gain <idx>`, `lpf <0-63>|off`,
+`stats`, `phy`, `freq <MHz>`, `offset <kHz>`, `gain <idx>`, `lpf <0-63>|off`, `dcal [ref | auto on|off]`,
 `win clip|fold5|fold`, `edge rise|fall`, `pins xiao|alt`, `swap on|off`,
 `trig <dB> [min_us max_us]`, `mode detect|hold|idle`, `snap`, `grab`, `level`, `decode`,
 `dump [raw|c16] [b64|hex]`, `resend <first> [last]`, `reveal on|off`, `resume`, `bootloader`
@@ -94,6 +95,18 @@ cargo run --release -p droneid-file -- caps/c5-1.cs16 --rate 40000000 --format c
    `phy_disable_agc` + `phy_rfagc_disable`; `phy_force_rx_gain`; the BBTOP low-pass capacitor
    code 12 (about 20 MHz full width, so neither 40 MS/s nor 20 MS/s aliases). Gain and AGC are
    re-checked every second and re-forced if lost (`gain_lost`).
+   **Receive DC offset.** Each of the PHY's 90 gain-memory entries carries analog DC trims, taken
+   from tables the PHY measures once at boot (on 5 GHz at seven reference LOs, 5210–5855 MHz). On
+   our boards that boot measurement comes out at or near the untrimmed default, different every
+   boot, and with a forced gain nothing re-measures it, so the DC offset grew with gain until the
+   ADC railed at index ≥ 75. `phy::dc_recal` therefore re-runs the PHY's own RX DC measurement
+   (`phy_set_rx_gain_cal_dc`) at boot and on every `freq` change, with `phy_chip_set_chan_ana`
+   wrapped (`--wrap`, build.rs) so all seven table bins are measured at *our* LO, then rebuilds the
+   gain memory (ESPARGOS esp-sdr does the same on the C5). About 22 ms on 5 GHz, 4–5 ms on 2.4 GHz.
+   The measurement is receive-only (its callees are pbus test forces, the DCO DAC search and the DC
+   estimator; it gates the digital TX clock but never powers the TX chain), and the PHY's loopback
+   IQ step, which does send a tone, is not reached. Result: DC within about ±50 codes at every gain
+   up to 83 (BRINGUP-RESULTS.md).
 2. **Debug bus** (`src/engine.rs`). The dump engine is started free-running (raw source 15, rate
    index 0, endless count) and SRAM block 1 is handed straight back; the engine writes nothing
    more, but `MODEM_DIAG[19:0]` keeps carrying I (19:10) and Q (9:0).
@@ -146,7 +159,9 @@ stopped during every decode (needs a `droneid` change).
 
 ## PHY ABI
 
-`src/phy.rs` calls 13 private entry points of the closed `libphy.a` / `libpp.a`. Each declaration
+`src/phy.rs` calls 16 private entry points of the closed `libphy.a` / `libpp.a`, reads and writes
+documented offsets of its `phy_param` state (band byte, calibration flags, RX DC tables), and
+wraps one (`phy_chip_set_chan_ana`). Each declaration
 records which argument registers the disassembly of *our* blob reads, and the GPL callers (C5VRX,
 ESPARGOS esp-sdr, esp-sdr-zephyr) that run on it. The blob is ESP-IDF 6.0.2's C5 PHY, version
 `edb400d6` (built Mar 10 2026): the same file C5VRX pins by SHA-256. Two guards, after CapnBry's

@@ -33,6 +33,11 @@ fn main() {
     // the last linker script.
     println!("cargo:rustc-link-arg=-Tsdr_bank.x");
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+    // Route libphy's `phy_chip_set_chan_ana` through `phy::__wrap_...` so the
+    // receive DC calibration measures at our LO, not its reference channels
+    // (src/phy.rs `dc_recal`). Callers in other objects of libphy.a are
+    // redirected; the wrapper passes every other call through unchanged.
+    println!("cargo:rustc-link-arg=--wrap=phy_chip_set_chan_ana");
     // A map file next to the ELF, for the memory figures in README.md.
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     if let Some(profile_dir) = out.ancestors().nth(3) {

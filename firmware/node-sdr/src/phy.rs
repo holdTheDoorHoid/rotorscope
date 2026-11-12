@@ -72,6 +72,39 @@ unsafe extern "C" {
     /// `libpp.a lmac.o`: stops the MAC's hardware TX queues. Reads no
     /// argument registers (it loads its own), result unused.
     fn lmac_stop_hw_txq();
+
+    // ---- receive DC-offset calibration (see [`dc_recal`]) ----
+
+    /// `phy_init.o`: the PHY's calibration state, 0x438 bytes (`nm -S`).
+    /// Offsets used here, each read from the disassembly of `phy_bb_init`
+    /// and `phy_cal_param_track` (the PHY's own temperature re-cal):
+    /// 0x2a band byte (1 = 5 GHz), 0x94 calibration flags (0x80 = RX DC
+    /// measured, 0x400 = RX IQ measured), RX DC tables 0x138/0x380 and
+    /// 0x15c/0x388 (2.4 GHz) and 0x180/0x390 (5 GHz).
+    static mut phy_param: [u8; 0x438];
+    /// `phy_rx_cal.o`: measures the receive DC offset for every RF gain
+    /// step and stores it in (`rf_dc`, `bb_dc`). Disassembly: a0 (table
+    /// variant) and a2/a3 passed on to `phy_rfrx_rxdc_cal_new`; a1 != 0 = 9
+    /// RF gain steps (else 7). On 5 GHz it visits seven reference LOs (5210,
+    /// 5290, 5530, 5610, 5690, 5775, 5855 MHz, `.rodata+0x38`) through
+    /// `phy_chip_set_chan_ana`, on 2.4 GHz one (2432). Its callees are RX
+    /// only: pbus test-mode forces, `phy_pbus_set_rxgain`, the DCO DAC
+    /// search (`phy_rx_dco_cal_1step_new`), the DC estimator, and the
+    /// digital TX *clock* gate `phy_set_txclk_en` (0x600a0890 bits 17:16,
+    /// on then off). Nothing powers the TX chain or starts a tone.
+    fn phy_set_rx_gain_cal_dc(variant: u32, all_steps: u32, rf_dc: *mut u8, bb_dc: *mut u8);
+    /// `phy_rx_cal.o`: 2.4 GHz ADC-rate DC step, no arguments; same RX-only
+    /// callees (`phy_adc_rate_set`, `phy_dc_iq_est_new`, `phy_pbus_set_dco`).
+    fn phy_adc_rate_cal_rxdc();
+    /// `phy_rx_gain.o`: rebuilds the 90-entry RX gain memory (0x600a0844..
+    /// 0x600a0850, `phy_write_gain_mem`) for `mhz`; each entry carries the
+    /// RF and baseband DC trims interpolated from the tables above.
+    /// `phy_chip_set_chan` calls it as (mhz, 0).
+    fn phy_set_rx_gain_table(mhz: u32, mode: u32);
+    /// The original `phy_chip_set_chan_ana` (`phy_rfpll.o`), reached through
+    /// `--wrap` (build.rs). One argument, the LO in MHz, passed on to
+    /// `phy_set_channel_rfpll_freq_new`.
+    fn __real_phy_chip_set_chan_ana(mhz: u32);
 }
 
 // ------------------------------------------------------------- registers --
@@ -99,10 +132,137 @@ const LPF_REG: u32 = 6;
 /// at 40 MS/s (debug bus every other sample) and at 20 MS/s (Path A), and
 /// keeps the 9 MHz DroneID burst at +0.5 MHz well inside.
 pub const LPF_DEFAULT: u8 = 12;
-/// Default forced gain. esp-sdr's index while the AGC rules is 40; the C5's
-/// largest calibrated index is 77-89 depending on band. The bring-up
-/// checklist sets it from `level`.
-pub const GAIN_DEFAULT: u8 = 40;
+/// Default forced gain, from the bring-up gain sweep (BRINGUP-RESULTS.md,
+/// step 6, after the DC fix): at 5756 MHz index 83 (`gain_max` on 5 GHz)
+/// puts the noise at 43-51 codes RMS on two boards, the nearest any index
+/// gets to the clip window's 48-80, with DC within a few tens of codes. The
+/// gain steps are about 1 dB (RMS 20 at 75, 32 at 79, 48 at 83).
+pub const GAIN_DEFAULT: u8 = 83;
+
+// ------------------------------------------------- receive DC calibration --
+
+/// Band byte, flags word and table offsets inside `phy_param` (see the
+/// extern block).
+const PP_BAND: usize = 0x2a;
+const PP_FLAGS: usize = 0x94;
+const PP_DC_24: [(usize, usize); 2] = [(0x138, 0x380), (0x15c, 0x388)];
+const PP_DC_5: (usize, usize) = (0x180, 0x390);
+/// `phy_cal_param_track` clears 0x281 before re-measuring and `phy_bb_init`
+/// sets 0x80 after. 0x400 (IQ valid) is left alone: the loopback IQ step
+/// (`phy_set_rx_gain_cal_iq`, which does send a tone) is reached only from
+/// `phy_bb_init` and `phy_cal_param_track`, neither of which we call.
+const FLAG_RXDC: u32 = 0x80;
+const FLAG_EXPIRE: u32 = 0x280;
+const FLAG_IQ: u32 = 0x400;
+
+/// The LO the DC measurement must use instead of the PHY's reference
+/// channels; 0 = pass through. Only [`dc_recal`] sets it, synchronously.
+static MEASURE_MHZ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Every `phy_chip_set_chan_ana` call goes through here (`--wrap`, build.rs).
+/// Outside [`dc_recal`] it passes the request through unchanged.
+#[unsafe(no_mangle)]
+extern "C" fn __wrap_phy_chip_set_chan_ana(mhz: u32) {
+    let m = MEASURE_MHZ.load(core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the original, with its own argument or our LO.
+    unsafe { __real_phy_chip_set_chan_ana(if m != 0 { m } else { mhz }) }
+}
+
+fn pp() -> *mut u8 {
+    core::ptr::addr_of_mut!(phy_param) as *mut u8
+}
+fn pp_u32(off: usize) -> u32 {
+    // SAFETY: inside the 0x438-byte object, 4-aligned offsets only.
+    unsafe { (pp().add(off) as *const u32).read_volatile() }
+}
+fn pp_set_u32(off: usize, v: u32) {
+    // SAFETY: as `pp_u32`.
+    unsafe { (pp().add(off) as *mut u32).write_volatile(v) }
+}
+
+/// Result of the last receive DC calibration.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DcCal {
+    /// Calibrations run since boot (ours, not the PHY's boot one).
+    pub n: u32,
+    /// LO it was measured at; 0 = the PHY's reference channels (`dcal ref`).
+    pub mhz: u16,
+    /// 5 GHz tables (else 2.4 GHz).
+    pub band5: bool,
+    /// Duration in microseconds.
+    pub us: u32,
+    /// `phy_param` flag 0x80 (RX DC measured) after the run.
+    pub valid: bool,
+    /// IQ flag still set (the loopback IQ step was not, and will not be, run).
+    pub iq_kept: bool,
+    /// First RF DC table row of the active band: (I, Q) trim per RF gain step.
+    pub rf_dc: [[u16; 2]; 9],
+}
+
+/// Re-measure the receiver's DC offset at `mhz` (or, with `mhz` = 0, at the
+/// PHY's own reference channels, as at boot) and rebuild the gain memory.
+///
+/// Why: every gain-memory entry carries analog DC trims, measured once at
+/// boot at seven 5 GHz reference LOs (one at 2.4 GHz) and interpolated at
+/// channel setup. Forcing a gain selects an entry but nothing re-measures
+/// it; at high gain the residual rails the ADC (BRINGUP-RESULTS step 6).
+/// The sequence follows ESPARGOS esp-sdr `rx_recalibrate_locked` (C5) and
+/// the PHY's own `phy_cal_param_track`, minus the latter's loopback IQ step.
+///
+/// Receive-only: see the extern notes. The manual gain is released for the
+/// measurement (it sweeps its own gains); the caller re-applies [`apply`].
+pub fn dc_recal(mhz: u16, n: u32) -> DcCal {
+    let t0 = esp_hal::time::Instant::now();
+    // The measurement's gain sweep must not be overridden by our force.
+    wr(AGC_FORCE, rd(AGC_FORCE) & !(1 << 23));
+    let flags = pp_u32(PP_FLAGS);
+    MEASURE_MHZ.store(mhz as u32, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: see the extern declarations; PHY up, nothing else drives it
+    // (esp-radio runs no PHY tracking task: no caller of
+    // `phy_param_track_tot` in any linked archive).
+    unsafe {
+        if mhz != 0 {
+            __real_phy_chip_set_chan_ana(mhz as u32);
+        }
+        pp_set_u32(PP_FLAGS, flags & !FLAG_EXPIRE);
+        let band5 = *pp().add(PP_BAND) != 0;
+        if band5 {
+            phy_set_rx_gain_cal_dc(0, 1, pp().add(PP_DC_5.0), pp().add(PP_DC_5.1));
+        } else {
+            phy_set_rx_gain_cal_dc(0, 1, pp().add(PP_DC_24[0].0), pp().add(PP_DC_24[0].1));
+            phy_adc_rate_cal_rxdc();
+            phy_set_rx_gain_cal_dc(1, 1, pp().add(PP_DC_24[1].0), pp().add(PP_DC_24[1].1));
+        }
+        pp_set_u32(PP_FLAGS, pp_u32(PP_FLAGS) | FLAG_RXDC);
+        MEASURE_MHZ.store(0, core::sync::atomic::Ordering::Relaxed);
+        if mhz != 0 {
+            phy_set_rx_gain_table(mhz as u32, 0);
+        }
+    }
+    let us = t0.elapsed().as_micros() as u32;
+    let mut c = dc_readback();
+    c.n = n;
+    c.mhz = mhz;
+    c.us = us;
+    c
+}
+
+/// The DC calibration state as `phy_param` holds it now (n/mhz/us zero).
+pub fn dc_readback() -> DcCal {
+    let flags = pp_u32(PP_FLAGS);
+    // SAFETY: byte read inside the object.
+    let band5 = unsafe { *pp().add(PP_BAND) } != 0;
+    let base = if band5 { PP_DC_5.0 } else { PP_DC_24[0].0 };
+    let mut rf_dc = [[0u16; 2]; 9];
+    for (k, e) in rf_dc.iter_mut().enumerate() {
+        // SAFETY: 9 x 4 bytes from a table start, inside the object.
+        unsafe {
+            let p = pp().add(base + 4 * k) as *const u16;
+            *e = [p.read_volatile(), p.add(1).read_volatile()];
+        }
+    }
+    DcCal { band5, valid: flags & FLAG_RXDC != 0, iq_kept: flags & FLAG_IQ != 0, rf_dc, ..DcCal::default() }
+}
 
 #[inline(always)]
 fn rd(a: usize) -> u32 {

@@ -59,7 +59,8 @@ Good, in this order:
 ```text
 {"t":"hello","fw":"node-sdr",...,"decode":true,"bank":"0x40820000","heap_gap":53496,"heap_reclaimed":65536,"stack":58784}
 {"t":"psram","bytes":8388608,"receiver":~123700,"at":"0x4..."}      (exact size of droneid::rx::Receiver)
-{"t":"phy","version":"<n>,edb400d6,Mar 10 2026,...","abi_ok":true,"mhz":5756,"gain_forced":true,"gain":40,"gain_max":7x-8x,"agc_off":true,"lpf":[12,12],"txq_off":true}
+{"t":"phy",...,"mhz":5756,"gain_forced":true,"gain":83,"gain_max":7x-8x,"agc_off":true,"lpf":[12,12],"txq_off":true,"dc_cal":{"n":0,"mhz":0,...}}
+{"t":"phy","version":"<n>,edb400d6,Mar 10 2026,...","abi_ok":true,"mhz":5756,"gain_forced":true,"gain":83,"gain_max":7x-8x,"agc_off":true,"lpf":[12,12],"txq_off":true,"dc_cal":{"n":1,"mhz":5756,"band":"5g","us":2xxxx,"valid":true,"iq_kept":true,"auto":true,"rf_dc":[[27x,26x],...]}}
 {"t":"mem","heap_used":...,"heap_free":...}
 {"t":"stats",...}   every second
 ```
@@ -70,10 +71,13 @@ Good, in this order:
 | `"t":"err","what":"psram"` with `bytes:0` | PSRAM not found: wrong board (C5HF4?) or esp-hal's C5 PSRAM init failed. `cargo fw-lite` still exercises everything else. |
 | `"what":"wifi_init"` | Heap too small for the Wi-Fi driver (`mem` line), or esp-radio failed; capture cannot start without it. |
 | `"what":"phy_abi"`, `abi_ok:false` | The linked libphy is not `edb400d6`. The firmware refuses the private calls by design. |
-| `gain_forced:false` or `gain` ≠ 40 | The forced-gain register write did not stick: `phy_force_rx_gain` ABI or the AGC re-enabling itself. |
+| `gain_forced:false` or `gain` ≠ 83 | The forced-gain register write did not stick: `phy_force_rx_gain` ABI or the AGC re-enabling itself. |
 | `agc_off:false` | `phy_disable_agc` did nothing; snapshots will show the gain index changing. |
 | `lpf` not `[12,12]` | BBTOP block/host/reg wrong for this chip (esp-sdr says host 1, regs 6/7). Captures still work, just wider. |
 | `txq_off:false` | MAC TX queues re-enabled: **stop and investigate** before anything else (receive-only is a hard rule). |
+| First `phy` line's `dc_cal.rf_dc` all one value, or Q all 256 | Normal: that is the PHY's own boot DC calibration, which on 5 GHz comes out at or near the untrimmed default (see BRINGUP-RESULTS.md). The second line (`n` 1) is ours, at the tuned LO. |
+| `dc_cal.n` 0 on the second line, `valid:false`, or `us` ≫ 30,000 | Our receive DC calibration (`phy::dc_recal`) did not run or did not finish; expect the DC offset to rail the ADC at gain ≥ 75 (step 6). |
+| `dc_cal.iq_kept:false` | The PHY's IQ-calibrated flag is clear. Nothing we call runs the IQ step (which transmits a tone), but report it. |
 | `gain_max` 0 or > 95 | Different PHY register map; the snapshot gain field (step 5) is the cross-check. |
 | Board will not take the next flash | The modem domain keeps running across the USB reset (C5VRX saw this). Type or bake `bootloader` first; failing that, hold BOOT while plugging in. |
 
@@ -117,9 +121,10 @@ settles; `rises` small in a quiet band.
 NODE_SDR_BOOT="snap" cargo fw && tools/dev-board.sh $ELF 10 $B
 ```
 
-Good: `{"t":"snap","words":16380,"us":82x,...,"dc":[d,d],"rms":[r,r],"peak":p,"railed":0,...,"gain_word":[40,40],"advice":"..."}`.
+Good: `{"t":"snap","words":16380,"us":82x,...,"dc":[d,d],"rms":[r,r],"peak":p,"railed":0,...,"gain_word":[83,83],"advice":"..."}`.
 `us` near 822 (16,380 samples at 20 MS/s). `gain_word` equal to the forced gain proves the forced
-gain is what the ADC saw. DC within a few tens of codes (esp-sdr-zephyr: grows with gain).
+gain is what the ADC saw. DC within a few tens of codes at every gain, thanks to the DC
+calibration at the tuned LO (without it, it grows with gain until the ADC rails; see step 6).
 
 | Symptom | Most likely |
 |---|---|
@@ -128,15 +133,24 @@ gain is what the ADC saw. DC within a few tens of codes (esp-sdr-zephyr: grows w
 | `us` ≈ 205 / 410 | Rate field ignored (80 or 40 MS/s): the rate index bits 23:21. |
 | `rms` 0 and `dc` constant | RX chain off: `phy_pbus_xpd_rx_on` / `phy_set_rxclk_en`, or wrong source. |
 | `gain_word` ≠ forced gain, or first ≠ last | AGC still active (step 2 `agc_off`). |
+| `dc` beyond about ±60 codes, growing with gain | The DC calibration is stale (temperature) or did not run: type `dcal` and `level` again; compare `dcal ref` (the PHY's reference LOs, as at boot). |
 
 The snapshot holds; `resume` (or the next boot) restarts the ring.
 
 ## 6. Set the gain
 
 ```sh
-NODE_SDR_BOOT="gain 20;level;gain 30;level;gain 40;level;gain 50;level;gain 60;level;gain 70;level" cargo fw
+NODE_SDR_BOOT="gain 40;level;gain 55;level;gain 65;level;gain 75;level;gain 79;level;gain 83;level" cargo fw
 tools/dev-board.sh $ELF 20 $B
 ```
+
+The receiver's DC offset is re-measured at the tuned LO at boot and on every `freq` change
+(`dcal auto on`, the default; `dc_cal` in the `phy` line). `dcal` re-measures by hand (for example
+after a large temperature change), `dcal ref` measures at the PHY's own reference LOs instead, as
+its boot calibration does, for before/after comparisons. A gain change needs no re-measurement:
+the calibration covers every gain index. A `level` whose `rms` is in the hundreds with `railed`
+non-zero but `dc` near 0 caught a real burst (a nearby access point or bench transmitter), not a
+DC problem: run `level` again.
 
 Each `level` prints a `snap` line with an `advice`. For the default clip window you want the noise
 RMS (antenna on, quiet band) around **48–80 codes** (about one 4-bit step), `railed` 0, `over256`

@@ -9,7 +9,7 @@ use core::fmt::Write as _;
 
 use droneid::math::{C16, remove_dc};
 use esp_println::println;
-use rawcap::cmd::{Command, Mode};
+use rawcap::cmd::{Command, Dcal, Mode};
 use rawcap::crc32::Crc32;
 use rawcap::dsp::{HB_REACH, decimate_nibbles};
 use rawcap::dump::{self, CHUNK, Enc, Kind, LINE_MAX, Meta};
@@ -124,6 +124,10 @@ pub struct Radio {
     #[cfg(feature = "decode")]
     rx: Option<&'static mut droneid::rx::Receiver>,
     pub phy_ok: bool,
+    /// Last receive DC calibration (ours), and the setting it was made for.
+    dc: phy::DcCal,
+    dc_for_mhz: u16,
+    dc_auto: bool,
 }
 
 fn now_us() -> u64 {
@@ -163,6 +167,9 @@ impl Radio {
             #[cfg(feature = "decode")]
             rx: None,
             phy_ok: false,
+            dc: phy::DcCal::default(),
+            dc_for_mhz: 0,
+            dc_auto: true,
         }
     }
 
@@ -193,8 +200,15 @@ impl Radio {
             );
             return;
         }
-        let rb = phy::apply(self.tune());
+        // First the PHY's own boot calibration as found (`dc_cal.n` 0), then,
+        // with `dcal auto`, ours at this LO.
+        let mut rb = phy::apply(self.tune());
+        self.dc = phy::dc_readback();
         self.print_phy(&rb);
+        if self.dc_auto {
+            rb = self.dc_cal(self.s.mhz);
+            self.print_phy(&rb);
+        }
         route::connect(&self.s.pins, self.lanes());
         ring::install();
         self.restart();
@@ -214,9 +228,37 @@ impl Radio {
         ring::start(self.s.falling_edge);
     }
 
+    /// Tune and lock the receiver; with `dcal auto` on, re-measure the DC
+    /// offset first whenever the LO changed (the calibration covers every
+    /// gain index, so a gain or filter change needs none).
+    fn apply(&mut self) -> phy::Readback {
+        let rb = phy::apply(self.tune());
+        if self.dc_auto && self.dc_for_mhz != self.s.mhz {
+            return self.dc_cal(self.s.mhz);
+        }
+        rb
+    }
+
+    /// Run the DC calibration (`mhz` 0 = the PHY's reference LOs), then
+    /// re-apply our settings, which rebuilds the gain memory from it and
+    /// forces the gain and the AGC off again. The engine stays stopped
+    /// until the caller restarts it.
+    fn dc_cal(&mut self, mhz: u16) -> phy::Readback {
+        ring::stop();
+        engine::stop();
+        self.dc = phy::dc_recal(mhz, self.dc.n + 1);
+        self.dc_for_mhz = self.s.mhz;
+        phy::apply(self.tune())
+    }
+
     fn print_phy(&self, rb: &phy::Readback) {
+        let d = &self.dc;
+        let mut rf = Line::new();
+        for (k, e) in d.rf_dc.iter().enumerate() {
+            let _ = write!(rf, "{}[{},{}]", if k == 0 { "" } else { "," }, e[0], e[1]);
+        }
         println!(
-            r#"{{"t":"phy","version":"{}","abi_ok":{},"mhz":{},"gain_forced":{},"gain":{},"gain_max":{},"agc_off":{},"lpf":[{},{}],"txq_off":{}}}"#,
+            r#"{{"t":"phy","version":"{}","abi_ok":{},"mhz":{},"gain_forced":{},"gain":{},"gain_max":{},"agc_off":{},"lpf":[{},{}],"txq_off":{},"dc_cal":{{"n":{},"mhz":{},"band":"{}","us":{},"valid":{},"iq_kept":{},"auto":{},"rf_dc":[{}]}}}}"#,
             phy::version(),
             self.phy_ok,
             self.s.mhz,
@@ -226,7 +268,15 @@ impl Radio {
             rb.agc_off,
             rb.lpf[0],
             rb.lpf[1],
-            rb.txq_off
+            rb.txq_off,
+            d.n,
+            d.mhz,
+            if d.band5 { "5g" } else { "2g4" },
+            d.us,
+            d.valid,
+            d.iq_kept,
+            self.dc_auto,
+            rf.as_str()
         );
     }
 
@@ -442,6 +492,21 @@ impl Radio {
                 self.s.lpf = l;
                 self.retune();
             }
+            Command::Dcal(d) => {
+                if !self.phy_ok {
+                    return err("phy_abi");
+                }
+                match d {
+                    Dcal::Auto(on) => {
+                        self.dc_auto = on;
+                        ok("dcal_auto", if on { "on" } else { "off" });
+                    }
+                    Dcal::Now | Dcal::Ref => {
+                        self.dc_cal(if d == Dcal::Now { self.s.mhz } else { 0 });
+                        self.retune();
+                    }
+                }
+            }
             Command::Win(w) => {
                 self.s.window = w;
                 route::set_lanes(&self.s.pins, self.lanes());
@@ -520,7 +585,7 @@ impl Radio {
             return err("phy_abi");
         }
         ring::stop();
-        let mut rb = phy::apply(self.tune());
+        let mut rb = self.apply();
         if self.s.offset_khz != 0 {
             phy::set_offset_khz(self.s.offset_khz, self.s.gain);
             rb = phy::readback();
@@ -791,6 +856,7 @@ fn help() {
     for l in [
         "help | stats | phy",
         "freq <MHz> | gain <idx> | lpf <0-63>|off | win clip|fold5|fold | edge rise|fall | swap on|off",
+        "dcal [ref | auto on|off] (receive DC-offset calibration)",
         "trig <dB> [min_us max_us] | mode detect|hold|idle | reveal on|off",
         "snap (Path A, 10-bit 20 MS/s) | grab (Path B ring) | level | decode",
         "dump [raw|c16] [b64|hex] | resend <first> [last] | resume",
