@@ -24,7 +24,8 @@ If you move a board to a different USB port nothing changes, because it is found
 |---|---|---|---|---|
 | Wi-Fi beacon, Wi-Fi NAN, Bluetooth 4, 5 and Long Range (2.4 GHz) | `tools/bench/run.py --group s3` | `s3`, `s3b` | `s3` | `s3b` |
 | Same, 5 GHz Wi-Fi, and C5 Bluetooth | `tools/bench/run.py --group c5` | `c5a`, `c5b` | `c5a` | `c5b` |
-| Mixed chips (C5 sends, S3 listens; S3 sends, C5 listens, Bluetooth only) | `tools/bench/run.py --group cross` | `s3`, `c5a` | see `--list` | |
+| Mixed chips (C5 sends, S3 listens; S3 sends, C5 listens) | `tools/bench/run.py --group cross` | `s3`, `c5a`, `c5b` | see `--list` | |
+| A C5 as the 2.4 GHz Wi-Fi node (`node-wifi` built `cargo fw24`) | `tools/bench/run.py c5-to-c5-wifi24-beacon c5-to-c5-wifi24-nan s3-to-c5-wifi24-beacon s3-to-c5-wifi24-nan` | `c5a`, `c5b`, `s3` | `c5a` or `s3` | `c5b` |
 | Node to hub over wires | `tools/bench/run.py --group hub` | see "Hub wiring" | node | hub (`s3`) |
 
 One test at a time: `tools/bench/run.py --list` shows every test name, then for example
@@ -51,7 +52,8 @@ The last lines are a table. For each test:
 The exit code is 0 only if everything passed.
 
 First results (2026-11-12): all five `--group c5` tests and all eight `--group cross` tests PASS,
-including Bluetooth Long Range in both directions and 5 GHz NAN. A C5 drops off USB for about a second as its app starts; the tools wait for it.
+including Bluetooth Long Range in both directions and 5 GHz NAN. A C5 built as the 2.4 GHz Wi-Fi
+node passes all four of its tests (beacon and NAN, from a C5 and from the S3). A C5 drops off USB for about a second as its app starts; the tools wait for it.
 
 ## Hub wiring (two boards)
 

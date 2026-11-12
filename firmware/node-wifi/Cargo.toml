@@ -41,6 +41,9 @@ esp32c5 = [
   "esp-radio/esp32c5",
   "dep:esp-wifi-sys-esp32c5",
 ]
+# With esp32c5: listen on 2.4 GHz (channels 6/1/11, role Wifi24) instead of
+# 5 GHz, so a C5 can be Node A. Build with `cargo fw24` from c5/.
+band24 = []
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }

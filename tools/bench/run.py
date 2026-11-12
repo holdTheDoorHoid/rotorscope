@@ -46,6 +46,7 @@ CHIP_NAME = {"s3": "esp32s3", "c5": "esp32c5"}
 class Firmware:
     name: str
     chip: str  # "s3" | "c5"
+    variant: str = ""  # "band24": node-wifi on a C5 listening on 2.4 GHz
 
     @property
     def dir(self) -> Path:
@@ -56,6 +57,8 @@ class Firmware:
 
     @property
     def cmd(self) -> str:
+        if self.variant == "band24":
+            return "cargo fw24"
         if self.name in ("node-wifi", "hub"):
             return "cargo fw"
         if self.chip == "s3":
@@ -66,7 +69,8 @@ class Firmware:
     @property
     def elf(self) -> Path:
         t = S3_TARGET if self.chip == "s3" else C5_TARGET
-        return FW / self.name / "target" / t / "release" / self.name
+        tdir = "target-band24" if self.variant == "band24" else "target"
+        return FW / self.name / tdir / t / "release" / self.name
 
     def build_argv(self) -> list[str]:
         pre = ". ~/export-esp.sh >/dev/null 2>&1; " if self.chip == "s3" else ""
@@ -90,22 +94,26 @@ class Test:
     band: str | None = None   # rf Wi-Fi: "2.4" | "5"
     tx_keys: str = ""         # rid-beacon console keys (leading x = silence all first)
     hub_link: int = 0         # hub: which hub node link the node is wired to
+    rx_variant: str = ""      # rf: listener build variant ("band24": C5 node-wifi on 2.4 GHz)
 
 
 _KEYS = {"WifiBeacon": "w", "WifiNan": "n", "BleLegacy": "l", "BleExtended": "e", "BleLongRange": "c"}
 
 
-def _rf(tx, rx, name, transport, band):
+def _rf(tx, rx, name, transport, band, rx_variant=""):
     keys = "x" + _KEYS[transport]
     if tx == "c5" and band == "2.4":
         keys += "b"       # C5 beacon defaults to 5 GHz ch149; 'b' moves it to 2.4 GHz ch6
     boards = {("s3", "s3"): ("s3", "s3b"), ("c5", "c5"): ("c5a", "c5b"),
               ("c5", "s3"): ("c5a", "s3"), ("s3", "c5"): ("s3", "c5a")}[(tx, rx)]
+    if rx_variant == "band24" and (tx, rx) == ("s3", "c5"):
+        boards = ("s3", "c5b")
     bandtxt = {None: "", "2.4": " 2.4 GHz", "5": " 5 GHz"}[band]
     return Test(f"{tx}-to-{rx}-{name}", "rf", f"{tx.upper()} rid-beacon -> {rx.upper()} "
                 f"{'node-wifi' if transport.startswith('Wifi') else 'node-ble'}: {transport}{bandtxt}",
                 tx, rx, boards[0], boards[1],
-                "node-wifi" if transport.startswith("Wifi") else "node-ble", transport, band, keys)
+                "node-wifi" if transport.startswith("Wifi") else "node-ble", transport, band, keys,
+                rx_variant=rx_variant)
 
 
 def _build_tests() -> dict[str, Test]:
@@ -117,12 +125,16 @@ def _build_tests() -> dict[str, Test]:
     for name, tr in [("wifi5-beacon", "WifiBeacon"), ("wifi5-nan", "WifiNan")]:
         t.append(_rf("c5", "c5", name, tr, "5"))
     t += [_rf("c5", "c5", n, tr, None) for n, tr in ble]
-    # C5 transmits on 2.4 GHz (console 'b'); the S3 listener hears it. The reverse (S3 -> C5
-    # Wi-Fi) makes no sense: the S3 has no 5 GHz radio and node-wifi on a C5 only listens on 5.
+    # C5 transmits on 2.4 GHz (console 'b'); the S3 listener hears it. S3 -> C5 Wi-Fi needs the
+    # C5 listener built for 2.4 GHz (`band24`, below): the S3 has no 5 GHz radio.
     for name, tr in [("wifi24-beacon", "WifiBeacon"), ("wifi24-nan", "WifiNan")]:
         t.append(_rf("c5", "s3", name, tr, "2.4"))
     t += [_rf("c5", "s3", n, tr, None) for n, tr in ble]
     t += [_rf("s3", "c5", n, tr, None) for n, tr in ble]
+    # A C5 as Node A: node-wifi built with `band24` listens on 2.4 GHz (channels 6/1/11).
+    for name, tr in [("wifi24-beacon", "WifiBeacon"), ("wifi24-nan", "WifiNan")]:
+        t.append(_rf("c5", "c5", name, tr, "2.4", rx_variant="band24"))
+        t.append(_rf("s3", "c5", name, tr, "2.4", rx_variant="band24"))
     # Node -> hub over UART. Hub is always an S3. Link numbers follow firmware/hub/src/pins.rs:
     # link 0 = Wi-Fi 2.4 node, link 1 = Bluetooth node, link 2 = Wi-Fi 5 GHz node.
     for chip, fwname, link in [("s3", "node-wifi", 0), ("s3", "node-ble", 1),
@@ -206,7 +218,7 @@ def wait_for(p: subprocess.Popen, log: Path, ready, timeout: float, what: str) -
 
 def plan_lines(t: Test, a) -> list[str]:
     tx_fw = Firmware("rid-beacon" if t.kind == "rf" else t.listener, t.tx_chip)
-    rx_fw = Firmware(t.listener if t.kind == "rf" else "hub", t.rx_chip)
+    rx_fw = Firmware(t.listener, t.rx_chip, t.rx_variant) if t.kind == "rf" else Firmware("hub", t.rx_chip)
     L = [f"{t.id}: {t.desc}"]
     for role, board, chip in (("transmitter" if t.kind == "rf" else "node       ", t.tx_board, t.tx_chip),
                               ("listener   " if t.kind == "rf" else "hub        ", t.rx_board, t.rx_chip)):
@@ -275,7 +287,7 @@ def check_boards(t: Test) -> str | None:
 
 
 def run_rf(t: Test, a, d: Path) -> dict:
-    tx_fw, rx_fw = Firmware("rid-beacon", t.tx_chip), Firmware(t.listener, t.rx_chip)
+    tx_fw, rx_fw = Firmware("rid-beacon", t.tx_chip), Firmware(t.listener, t.rx_chip, t.rx_variant)
     txlog, rxlog = d / "tx.log", d / "rx.log"
     tx = rx = None
     try:
@@ -399,7 +411,8 @@ def main(argv=None) -> int:
             r = dict(result="ERROR", reason=err, hits=0, d=d)
         else:
             err = build([Firmware("rid-beacon" if t.kind == "rf" else t.listener, t.tx_chip),
-                         Firmware(t.listener if t.kind == "rf" else "hub", t.rx_chip)], a)
+                         Firmware(t.listener, t.rx_chip, t.rx_variant) if t.kind == "rf"
+                         else Firmware("hub", t.rx_chip)], a)
             r = dict(result="ERROR", reason=err, hits=0, d=d) if err else (run_rf if t.kind == "rf" else run_hub)(t, a, d)
         print(f"  -> {r['result']}: {r['reason']}")
         results.append((t, r))

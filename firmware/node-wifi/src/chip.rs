@@ -1,5 +1,6 @@
-//! Everything that differs between Node A (ESP32-S3, 2.4 GHz) and Node C
-//! (ESP32-C5, 5 GHz). The rest of the firmware is chip-agnostic.
+//! Everything that differs between Node A (2.4 GHz: ESP32-S3, or an ESP32-C5
+//! built with the `band24` feature) and Node C (ESP32-C5, 5 GHz). The rest of
+//! the firmware is chip-agnostic.
 
 use esp_radio::wifi::WifiController;
 use serde::Serialize;
@@ -11,6 +12,18 @@ pub use esp_wifi_sys_esp32s3::include as sys;
 
 #[cfg(all(feature = "esp32s3", feature = "esp32c5"))]
 compile_error!("enable exactly one of the `esp32s3` / `esp32c5` features");
+#[cfg(all(feature = "band24", not(feature = "esp32c5")))]
+compile_error!("`band24` is for the ESP32-C5 (the S3 is 2.4 GHz anyway)");
+
+/// The 2.4 GHz plan, shared by the S3 and a C5 built with `band24`.
+///
+/// NAN Remote ID is always on channel 6 at 2.4 GHz, and most beacon
+/// transmitters follow it, so channel 6 gets ~75% of air time. Short visits
+/// to 1 and 11 catch beacon-only modules configured elsewhere; Remote ID
+/// repeats at least once a second, so a 50 ms visit every 400 ms still
+/// lands on several transmissions per second of exposure.
+#[allow(dead_code, reason = "unused by a 5 GHz C5 build")]
+const PLAN_24: &[Hop] = &[Hop(6, 150), Hop(1, 50), Hop(6, 150), Hop(11, 50)];
 
 /// One stop on the channel plan. Serializes as `[channel, dwell_ms]`.
 #[derive(Clone, Copy, Serialize)]
@@ -45,14 +58,7 @@ mod imp {
     pub const ROLE: link::NodeRole = link::NodeRole::Wifi24;
     pub const HEAP_BYTES: usize = 73_744;
 
-    /// NAN Remote ID is always on channel 6 at 2.4 GHz, and most beacon
-    /// transmitters follow it, so channel 6 gets ~75% of air time. Short visits
-    /// to 1 and 11 catch beacon-only modules configured elsewhere; Remote ID
-    /// repeats at least once a second, so a 50 ms visit every 400 ms still
-    /// lands on several transmissions per second of exposure.
-    const HOME_MS: u64 = 150;
-    const VISIT_MS: u64 = 50;
-    pub const PLAN: &[Hop] = &[Hop(6, HOME_MS), Hop(1, VISIT_MS), Hop(6, HOME_MS), Hop(11, VISIT_MS)];
+    pub const PLAN: &[Hop] = super::PLAN_24;
 
     /// Hub link: UART1 routed to the pins labelled TX/RX (D6/D7) on a XIAO
     /// ESP32-S3. These are UART0's default pins, so the ROM bootloader's boot
@@ -72,18 +78,26 @@ mod imp {
     use super::Hop;
 
     pub const CHIP: &str = "esp32c5";
+    #[cfg(not(feature = "band24"))]
     pub const ROLE: link::NodeRole = link::NodeRole::Wifi5;
+    /// `band24`: the C5 as Node A, so every node can be the same board.
+    #[cfg(feature = "band24")]
+    pub const ROLE: link::NodeRole = link::NodeRole::Wifi24;
     pub const HEAP_BYTES: usize = 65_536;
 
     /// Also listen on UNII-1 (36-48). Off by default: field reports (DRONK,
     /// drone-mesh-mapper) put 5 GHz Remote ID in UNII-3, and every extra
     /// channel dilutes time on 149.
+    #[cfg(not(feature = "band24"))]
     pub const INCLUDE_UNII1: bool = false;
 
     /// Channel 149 is the 5 GHz anchor (DJI Avata heard there by DRONK), so it
     /// gets ~75% of air time; 153-165 are visited in turn.
+    #[cfg(not(feature = "band24"))]
     const HOME_MS: u64 = 150;
+    #[cfg(not(feature = "band24"))]
     const VISIT_MS: u64 = 50;
+    #[cfg(not(feature = "band24"))]
     const UNII3: &[Hop] = &[
         Hop(149, HOME_MS),
         Hop(153, VISIT_MS),
@@ -94,6 +108,7 @@ mod imp {
         Hop(149, HOME_MS),
         Hop(165, VISIT_MS),
     ];
+    #[cfg(not(feature = "band24"))]
     const UNII3_AND_UNII1: &[Hop] = &[
         Hop(149, HOME_MS),
         Hop(153, VISIT_MS),
@@ -112,7 +127,10 @@ mod imp {
         Hop(149, HOME_MS),
         Hop(48, VISIT_MS),
     ];
+    #[cfg(not(feature = "band24"))]
     pub const PLAN: &[Hop] = if INCLUDE_UNII1 { UNII3_AND_UNII1 } else { UNII3 };
+    #[cfg(feature = "band24")]
+    pub const PLAN: &[Hop] = super::PLAN_24;
 
     /// Hub link: UART1 on the C5's UART0 default TX pin (labelled TX on a XIAO
     /// ESP32-C5). Check against your board's pinout before wiring.
@@ -155,9 +173,13 @@ pub fn configure_radio(ctl: &mut WifiController<'_>) -> Result<(), &'static str>
     #[cfg(feature = "esp32c5")]
     {
         // The C5 radio is on one band at a time; AUTO would let the driver move
-        // it. Pin it to 5 GHz before the first set_channel.
+        // it. Pin it to our band before the first set_channel.
+        #[cfg(not(feature = "band24"))]
         ctl.set_band_mode(esp_radio::wifi::BandMode::_5G)
             .map_err(|_| "set_band_mode(5G)")?;
+        #[cfg(feature = "band24")]
+        ctl.set_band_mode(esp_radio::wifi::BandMode::_2_4G)
+            .map_err(|_| "set_band_mode(2.4G)")?;
     }
     #[cfg(not(feature = "esp32c5"))]
     let _ = ctl;

@@ -4,7 +4,7 @@ One source tree, two nodes:
 
 | Node | Chip | Band | Channel plan |
 |---|---|---|---|
-| A | ESP32-S3 | 2.4 GHz | 6 (150 ms) → 1 (50 ms) → 6 (150 ms) → 11 (50 ms): ~75% on 6 |
+| A | ESP32-S3, or ESP32-C5 built `cargo fw24` | 2.4 GHz | 6 (150 ms) → 1 (50 ms) → 6 (150 ms) → 11 (50 ms): ~75% on 6 |
 | C | ESP32-C5 | 5 GHz | 149 (150 ms) alternating with 153/157/161/165 (50 ms each): ~75% on 149. Set `INCLUDE_UNII1` in `src/chip.rs` to add 36–48. |
 
 It listens in promiscuous mode (receive-only), finds Remote ID beacons (vendor element
@@ -28,6 +28,8 @@ cd firmware/node-wifi/s3 && cargo fw
 
 # Node C, ESP32-C5 (RISC-V: stable Rust)
 cd firmware/node-wifi/c5 && cargo fw
+# Node A on an ESP32-C5 instead (2.4 GHz, same plan as the S3; verified on air 2026-11-12)
+cd firmware/node-wifi/c5 && cargo fw24   # -> ../target-band24/riscv32imac-unknown-none-elf/release/node-wifi
 #   -> firmware/node-wifi/target/riscv32imac-unknown-none-elf/release/node-wifi
 ```
 

@@ -141,9 +141,9 @@ class Matrix(unittest.TestCase):
                     # 5 GHz needs C5 at both ends: the S3 has no 5 GHz radio.
                     if t.band == "5":
                         self.assertEqual((t.tx_chip, t.rx_chip), ("c5", "c5"))
-                    # node-wifi on a C5 only listens on 5 GHz.
+                    # node-wifi on a C5 listens on 5 GHz, or on 2.4 GHz when built `band24`.
                     if t.rx_chip == "c5" and t.transport.startswith("Wifi"):
-                        self.assertEqual(t.band, "5")
+                        self.assertEqual(t.band, "2.4" if t.rx_variant == "band24" else "5")
         self.assertEqual(len({t.id for t in run.TESTS.values()}), len(run.TESTS))
 
 

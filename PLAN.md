@@ -153,7 +153,7 @@ reached 1.0 in October 2025, and the ESP32-C5 is supported in it, including 5 GH
 
 | Part | Stack | Confidence | Main risk |
 |---|---|---|---|
-| Node A: 2.4 GHz Wi-Fi RID (S3) | `esp-hal` 1.2 + `esp-radio` sniffer | High | No one has yet shown NAN frames arriving through the Rust sniffer. |
+| Node A: 2.4 GHz Wi-Fi RID (S3, or C5 built `band24`) | `esp-hal` 1.2 + `esp-radio` sniffer | High | Done on both chips: beacon and NAN decoded on air (C5 listener 2026-11-12). |
 | Node B: Bluetooth RID (S3 or C5) | `esp-radio` BLE + `trouble-host` extended scan, both PHYs | Medium | Long Range scanning from Rust is unproven on both chips. Phase 2 tests S3 first and switches to a C5 if needed. |
 | Node C: 5 GHz Wi-Fi RID (C5) | `esp-radio` sniffer + 5 GHz band + country "US" | Medium | The 5 GHz sniffer is new. A recent change to the default country can block channel 149, so set "US" explicitly. |
 | Hub, GPS, screen, SD, web | `esp-hal` + embassy, `ublox`/`nmea` crates | High | The web UI and TLS-free hotspot are ordinary work. |
@@ -393,6 +393,15 @@ Walksnail + OpenIPC).
 - **Skip:** CC1101, CC2500, A7105 and CYRF6936. They duplicate the LR1121 or cover declining protocols.
 - Time sync across nodes using the GPS PPS pulse.
 
+### Node chip (2026-11-12)
+- **Every node can be a XIAO ESP32-C5.** On the bench, a C5 passed every node role:
+  - 2.4 GHz and 5 GHz Wi-Fi Remote ID, beacon and NAN (`node-wifi`, `cargo fw24` for 2.4 GHz);
+  - BT4, BT5 extended and Long Range (`node-ble`);
+  - raw capture for DroneID (`node-sdr`).
+- **One chip per job still applies:** each chip has one radio and can listen to one band at a time.
+- **Gains:** one board type for all nodes, one stock-Rust toolchain for them, and 5 GHz plus raw capture that the S3 lacks.
+- **Costs:** a younger Rust stack. Two esp-radio C5 bugs were fixed in this repo (BLE transmit clock; receive DC calibration).
+
 ### Hub chip (decided 2026-11-09)
 - **ESP32-S3 N16R8** (8 MB PSRAM): same toolchain and code as today.
   - PSRAM support in esp-hal is still marked unstable.
@@ -403,7 +412,11 @@ Walksnail + OpenIPC).
   - Its PSRAM support in esp-hal is a stub.
   - Its video encoders are C-only.
 - **Not the Pico 2 W.** It needs a second toolchain and flasher for kit buyers, and has 2.4 GHz only. Its PIO serial ports are its one real advantage.
-- **Watch the ESP32-S31**: Espressif's RISC-V successor to the S3, with hardware JPEG and stable Rust. It entered mass production in July 2026, but no boards were found yet.
+- **Watch the ESP32-S31**: Espressif's RISC-V successor to the S3.
+  - Hardware: 2× 320 MHz cores with FPU, 4 UARTs, 60 GPIO, high-speed USB, a JPEG encoder, and 8–32 MB in-package PSRAM. Wi-Fi is 2.4 GHz only.
+  - Availability: mass production since 2026-07-27. Modules exist (WROOM-1 N16R8V and others), but only AliExpress-class dev boards.
+  - Rust (2026-11-12): esp-hal lists it as "early stages"; DMA, PSRAM, USB and JPEG are unstable; esp-radio Wi-Fi is beta. ESP-IDF has open early-silicon issues (PSRAM init, Wi-Fi scan).
+  - Plan: prototype a hub on it in parallel; switch when SoftAP and PSRAM prove out.
 
 ---
 
