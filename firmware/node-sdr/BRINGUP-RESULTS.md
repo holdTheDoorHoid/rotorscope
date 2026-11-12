@@ -36,11 +36,78 @@ has already pinned one ADC at its rail. Because it is the ADC that rails, digita
 (`math::remove_dc`) cannot rescue it: the fix has to be analog, in the receiver's own DC-offset
 correction (DCOC), which normally tracks the AGC's gain and which we turn off by forcing the gain.
 
+## Step 6 again, after the DC fix (branch `fix/node-sdr-dcoc`)
+
+**Root cause.** Every entry of the PHY's 90-entry RX gain memory (`phy_write_gain_mem`, registers
+0x600a0844–0x600a0850) carries analog DC trims for its gain index, built by
+`phy_set_rx_gain_table` from RX DC tables in `phy_param` (5 GHz: RF trims at +0x180, seven
+reference LOs × 9 RF gain steps × (I, Q); baseband at +0x390). The PHY measures those tables once,
+in `phy_bb_init` at boot (`phy_set_rx_gain_cal_dc`, flag 0x80 in `phy_param+0x94`); esp-radio runs no
+re-calibration task (nothing links `phy_param_track_tot`). On our boards the boot 5 GHz table is
+unusable: read straight after boot it is one value repeated, near the DAC mid-code and different
+every boot, e.g. c5b `[366,182]`×9, `[362,204]`×9, `[259..268, 256]`, c5c `[350,373]`… (Q stuck at 256 =
+untrimmed). Re-measured later in the same boot it is a proper per-step curve (c5b
+`[273,260] … [282,236]`). A forced gain selects an entry with those bad trims, and nothing
+re-measures them, so the offset grew with gain until the ADC railed. The AGC is not involved: the
+fix keeps it off.
+
+**Fix.** `phy::dc_recal` re-runs `phy_set_rx_gain_cal_dc` at boot and on every `freq` change, with
+`phy_chip_set_chan_ana` wrapped (`--wrap`) so all seven bins are measured at the tuned LO, then
+`phy_set_rx_gain_table` and our usual `apply` (gain forced, AGC off). The sequence is ESPARGOS
+esp-sdr's `rx_recalibrate_locked` for the C5; every offset was re-read from our blob's
+`phy_bb_init` and `phy_cal_param_track`. Receive-only: its callees are pbus test forces, the DCO
+DAC search, the DC estimator and the digital TX clock gate (no TX chain power-up, no tone); the
+loopback IQ step (`phy_set_rx_gain_cal_iq`, which sends a tone) is reached only from `phy_bb_init`
+and `phy_cal_param_track`, neither of which we call. Takes 21–25 ms on 5 GHz, 4–5 ms on 2.4 GHz;
+`txq_off` stayed true throughout. New console command `dcal [ref | auto on|off]`; the `phy` line
+gained `dc_cal`.
+
+5756 MHz, clip window, antenna on, same boot each (firmware built with `dcal auto` off for the
+"before" half, then `dcal`). Two `level`s per gain; `dc` is the mean, I/Q.
+
+| gain | c5b before: DC | c5b after: DC | RMS after | c5c before: DC | c5c after: DC | RMS after |
+|---|---|---|---|---|---|---|
+| 40 | −167, 177 | 2, 0 | 0.9 | −1, 0 | 0, 2 | 0.9 |
+| 55 | −224, 205 | 3, 0 | 2.4 | −3, −4 | 0, 2 | 2.0 |
+| 65 | −38, −230 | 4…7, 0 | 6.6–7.1 | −7, −14 | −1…2, 6 | 5.9 |
+| 75 | 395, **−512 (railed)** | 5…10, 0…4 | 20 | −16, −38 | −5, 15 | 25 |
+| 83 | **511, −512 (both railed)** | 0…4, −5…−13 | 48–50 | −52, −95 | −19…−7, 31…33 | 43–44 |
+
+c5c happened to boot with a usable table that time (its next boot did not: `[350,373]`). The final
+firmware (`dcal auto` on, default) on both boards, including retunes:
+
+| board | 5756 g40 | g55 | g65 | g75 | g79 | g83 | 5776 g83 | 2414 g55 / g65 / g75 / g83 |
+|---|---|---|---|---|---|---|---|---|
+| c5b DC | 1, 0 | 3, 0 | 4, −5 | 11, −12 | 22, −27 | 41, −46 / 18, −20 | 9, 6 | 3,0 / −1,6 / 0,8 / −7,13 |
+| c5b RMS | 0.9 | 2.5 | 7.0 | 20 | 33 | 50 | 47 | 3.5 / 17 / – / 64 |
+| c5c DC | 1, 0 | 1, 0 | 1, −1 | 7, 0 | 8, −1 | 15, 1 / 11, −5 | 11, 44 | −1,1 / 0,2 / 2,7 / 16,10 |
+| c5c RMS | 0.9 | 3.1 | 6.2 | 18 | 29 | 44 | 43 | 3.4 / – / 33 / 84 |
+
+No railing from DC at any gain. A `–` is a `level` that caught a real burst (RMS in the hundreds,
+`railed` > 0, `dc` still near 0): c5a/s3 were transmitting on the same bench. `gain_max` is 83 on
+5 GHz, 81 on 2.4 GHz. Gain steps are about 1 dB. **`GAIN_DEFAULT` is now 83**: noise 43–51 codes
+RMS, the nearest any index gets to the clip window's 48–80.
+
+Path A + Path B pair (`gain G;snap;dump;resume;grab;dump`, `rawcap-pull --spectrum`): the centre
+bins against the in-band median (1–8 MHz from DC) of the averaged 1024-point spectrum.
+
+| dump | before (c5b, gain 65) | c5b after, g65 | c5b after, g83 | c5c after, g65 | c5c after, g83 |
+|---|---|---|---|---|---|
+| Path A (w32, 20 MS/s) | DC 4, −149; spike +41.0 dB | DC 3, 3; +14.4 dB | DC 15, −10; +12.7 dB | DC 1, −2; +11.0 dB | DC 15, −12; +10.9 dB |
+| Path B (nib8 clip, 40 MS/s) | +29.6 dB | +8.6 dB | +10.8 dB | +7.6 dB | +8.4 dB |
+
+What is left is a few codes of offset (a 3-code DC already makes a 10–14 dB bin over 7-code noise
+in a 1024-point FFT); `math::remove_dc` takes it out before decoding. Logs and dumps:
+`firmware/node-sdr/bench-logs/dcoc/` (local, gitignored).
+
+Still open: the DC drift with temperature over hours (no re-measurement except on retune or
+`dcal`; esp-sdr also re-measures when the PHY's own tracking replaces the tables, which cannot
+happen here); why the boot calibration fails on 5 GHz (it runs in `phy_bb_init` before the first
+5 GHz channel setup; not needed for the fix); the gain-83 headroom against strong nearby bursts in
+the field.
+
 Next for node-sdr, in order:
 
-1. Find how the PHY applies RX DC-offset calibration per gain index on the C5 (esp-sdr /
-   esp-sdr-zephyr / C5VRX, and the `phy_*` symbols in the pinned libphy), and re-run it, or
-   load the table entry, after `phy_force_rx_gain`. Success: DC within a few tens of codes at gain 75–83.
-2. Then repeat step 6 to pick `GAIN_DEFAULT`, and steps 7–9 with an access point on channel 149.
-3. Fix the step-4 expectation in BRINGUP.md: `produced` and `isrs` restart at every trigger
+1. Steps 7–9 at gain 83 with an access point on channel 149, then step 10–12.
+2. Fix the step-4 expectation in BRINGUP.md: `produced` and `isrs` restart at every trigger
    inspection (each rise stops and restarts the ring), so measure the rate with `trig 30`.

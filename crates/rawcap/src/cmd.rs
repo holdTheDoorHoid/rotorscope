@@ -9,6 +9,9 @@
 //! gain <index>              forced RX gain index
 //! win clip|fold5|fold       Path B 4-bit window (default clip)
 //! lpf <0-63>|off            analog low-pass capacitor code (default 12)
+//! dcal                      re-measure the receiver DC offset at this LO
+//! dcal ref                  re-measure at the PHY's reference LOs (as at boot)
+//! dcal auto on|off          re-measure on every retune (default on)
 //! edge rise|fall            PARL_IO sampling edge
 //! pins xiao|alt             debug-bus loopback pads (route.rs)
 //! swap on|off               I/Q orientation: Path A takes I from the low
@@ -52,6 +55,18 @@ impl Mode {
     }
 }
 
+/// What `dcal` does (receive DC-offset calibration).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dcal {
+    /// Measure now at the current LO.
+    Now,
+    /// Measure at the PHY's own reference LOs, as its boot calibration does
+    /// (for before/after comparisons).
+    Ref,
+    /// Measure automatically at boot and on every frequency change.
+    Auto(bool),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Help,
@@ -65,6 +80,7 @@ pub enum Command {
     Win(Window),
     /// `None` = leave the PHY's own calibration.
     Lpf(Option<u8>),
+    Dcal(Dcal),
     /// true = sample on the falling edge.
     Edge(bool),
     Swap(bool),
@@ -142,6 +158,12 @@ pub fn parse(line: &str) -> Result<Option<Command>, &'static str> {
             _ => Command::Lpf(Some(num(a, "lpf <0-63>|off").and_then(|c: u8| {
                 if c <= 63 { Ok(c) } else { Err("lpf <0-63>|off") }
             })?)),
+        },
+        "dcal" => match (a, b) {
+            (None, _) => Command::Dcal(Dcal::Now),
+            (Some("ref"), None) => Command::Dcal(Dcal::Ref),
+            (Some("auto"), v) => Command::Dcal(Dcal::Auto(on_off(v)?)),
+            _ => return Err("dcal [ref | auto on|off]"),
         },
         "edge" => match a {
             Some("rise") => Command::Edge(false),
@@ -298,6 +320,11 @@ mod tests {
         assert_eq!(parse("resend 4"), Ok(Some(Command::Resend { first: 4, last: 4 })));
         assert_eq!(parse("resend 4 9"), Ok(Some(Command::Resend { first: 4, last: 9 })));
         assert!(parse("resend 9 4").is_err());
+        assert_eq!(parse("dcal"), Ok(Some(Command::Dcal(Dcal::Now))));
+        assert_eq!(parse("dcal ref"), Ok(Some(Command::Dcal(Dcal::Ref))));
+        assert_eq!(parse("dcal auto off"), Ok(Some(Command::Dcal(Dcal::Auto(false)))));
+        assert!(parse("dcal auto").is_err());
+        assert!(parse("dcal 5756").is_err());
         assert_eq!(parse("reveal on"), Ok(Some(Command::Reveal(true))));
         assert_eq!(parse("edge fall"), Ok(Some(Command::Edge(true))));
         assert_eq!(parse("mode idle"), Ok(Some(Command::Mode(Mode::Idle))));
