@@ -50,8 +50,8 @@ The last lines are a table. For each test:
 
 The exit code is 0 only if everything passed.
 
-First results (2026-11-12): all five `--group c5` tests PASS, including Bluetooth Long Range and
-5 GHz NAN. A C5 drops off USB for about a second as its app starts; the tools wait for it.
+First results (2026-11-12): all five `--group c5` tests and all eight `--group cross` tests PASS,
+including Bluetooth Long Range in both directions and 5 GHz NAN. A C5 drops off USB for about a second as its app starts; the tools wait for it.
 
 ## Hub wiring (two boards)
 
