@@ -780,13 +780,18 @@ impl Radio {
             crc: crc.finish(),
         };
         self.last_dump = Some((meta, src));
-        println!("@H {meta}");
-        self.send_lines(&meta, src, 0, meta.lines().saturating_sub(1));
+        if !crate::out::line(format_args!("@H {meta}")) {
+            return;
+        }
+        if !self.send_lines(&meta, src, 0, meta.lines().saturating_sub(1)) {
+            return;
+        }
         let mut buf = [0u8; LINE_MAX];
-        println!("{}", dump::end_line(&mut buf, &meta));
+        crate::out::line(format_args!("{}", dump::end_line(&mut buf, &meta)));
     }
 
-    fn send_lines(&self, meta: &Meta, src: Source, first: u32, last: u32) {
+    /// Returns false if the host stopped reading (the rest is not sent).
+    fn send_lines(&self, meta: &Meta, src: Source, first: u32, last: u32) -> bool {
         let mut buf = [0u8; LINE_MAX];
         let mut chunk = [0u8; CHUNK];
         for seq in first..=last.min(meta.lines().saturating_sub(1)) {
@@ -795,8 +800,11 @@ impl Radio {
             for (j, c) in chunk[..n].iter_mut().enumerate() {
                 *c = self.source_byte(src, a + j);
             }
-            println!("{}", dump::data_line(&mut buf, meta.id, seq, &chunk[..n], meta.enc));
+            if !crate::out::line(format_args!("{}", dump::data_line(&mut buf, meta.id, seq, &chunk[..n], meta.enc))) {
+                return false;
+            }
         }
+        true
     }
 
     fn resend(&self, first: u32, last: u32) {
@@ -810,9 +818,10 @@ impl Radio {
         if !intact {
             return err("the dumped capture has been replaced; dump again");
         }
-        self.send_lines(&meta, src, first, last);
-        let mut buf = [0u8; LINE_MAX];
-        println!("{}", dump::end_line(&mut buf, &meta));
+        if self.send_lines(&meta, src, first, last) {
+            let mut buf = [0u8; LINE_MAX];
+            crate::out::line(format_args!("{}", dump::end_line(&mut buf, &meta)));
+        }
     }
 }
 

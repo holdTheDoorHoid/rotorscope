@@ -209,7 +209,14 @@ while time.time() < end:
     try:
         if keys and time.time() - t0 >= after:
             for ch in keys:              # one character at a time, like a person typing
-                s.write(ch.encode()); s.flush(); time.sleep(0.4)
+                s.write(ch.encode()); s.flush()
+                # Keep reading while we pause: Linux buffers only 4 KB of unread
+                # input, after which the board's output stalls and is dropped
+                # (a typed `dump` used to lose everything after ~4 KB).
+                t_key = time.time()
+                while time.time() - t_key < 0.4:
+                    b = s.read(4096)
+                    if b: sys.stdout.write(b.decode(errors="replace")); sys.stdout.flush()
             keys = ""
         b = s.read(4096)
         if b: sys.stdout.write(b.decode(errors="replace")); sys.stdout.flush()

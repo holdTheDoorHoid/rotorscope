@@ -106,8 +106,35 @@ happen here); why the boot calibration fails on 5 GHz (it runs in `phy_bb_init` 
 5 GHz channel setup; not needed for the fix); the gain-83 headroom against strong nearby bursts in
 the field.
 
-Next for node-sdr, in order:
+Independent check on c5c after the merge (5756 MHz, auto calibration): DC 0,0 / 9,−6 / 17,−22 /
+34,−49 at gains 40 / 65 / 75 / 83, RMS 57 at 83, nothing railed; `freq 5776` re-calibrated in 23 ms.
 
-1. Steps 7–9 at gain 83 with an access point on channel 149, then step 10–12.
-2. Fix the step-4 expectation in BRINGUP.md: `produced` and `isrs` restart at every trigger
-   inspection (each rise stops and restarts the ring), so measure the rate with `trig 30`.
+## Step 8: I/Q orientation (c5c, 2026-11-12) — PASS, no swap
+
+Transmitter: `c5a` running `rid-beacon` (`RID_BEACON_HZ=10`, keys `xwn`: Wi-Fi beacon + NAN on
+channel 149, 5735–5755 MHz, 2 dBm, about 1 m away). Receiver: `freq 5740;gain G;trig 8 100 900;mode hold`,
+then a typed `dump`, so the channel occupies −5..+15 MHz of the capture. Pure-Python spectrum of the
+held burst only, mean power in-channel (+5..+14 MHz) against out-of-channel (−14..−5 MHz):
+
+| gain | clipped samples in the burst | +5..+14 vs −14..−5 |
+|---|---|---|
+| 83 | 39 % | (too clipped to judge) |
+| 60 | 44 % | +6.7 dB |
+| 40 | 0 % | **+17.5 dB** |
+
+The energy is on the side it should be: I/Q are not mirrored; `swap_iq` stays false. Note the
+headroom finding: a 2 dBm Wi-Fi transmitter at 1 m clips the 4-bit window even at gain 60, so gain
+83 is right for distant drones but a close transmitter will clip (this is where `win fold` or a
+lower gain earns its keep).
+
+## Dumps over a busy USB hub
+
+Every typed `dump` lost everything after ~4 KB. Cause: `tools/dev-board.sh` slept 0.4 s after
+each typed key without reading; Linux holds only 4 KB of unread tty input, so the board's FIFO
+stalled and esp-println (about 1 ms of patience) dropped the rest, including `resend` output.
+Fixed both ends: dev-board.sh keeps reading while it types, and dump lines now go through
+`src/out.rs`, which waits up to 250 ms per FIFO load and abandons the dump only if the host is gone.
+After the fix: 683/683 lines, CRC good.
+
+Next for node-sdr: step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
+trigger statistics), 12 (ten-minute soak, including DC drift as the board warms), and 11 with a DJI drone.
