@@ -416,7 +416,7 @@ Walksnail + OpenIPC).
   - Hardware: 2× 320 MHz cores with FPU, 4 UARTs, 60 GPIO, high-speed USB, a JPEG encoder, and 8–32 MB in-package PSRAM. Wi-Fi is 2.4 GHz only.
   - Availability: mass production since 2026-07-27. Modules exist (WROOM-1 N16R8V and others), but only AliExpress-class dev boards.
   - Rust (2026-11-12): esp-hal lists it as "early stages"; DMA, PSRAM, USB and JPEG are unstable; esp-radio Wi-Fi is beta. ESP-IDF has open early-silicon issues (PSRAM init, Wi-Fi scan).
-  - Plan: prototype a hub on it in parallel; switch when SoftAP and PSRAM prove out.
+  - Decided 2026-11-12 (owner): stay on the S3 for the hub, no parallel S31 prototype for now. Revisit when esp-hal and esp-radio mark the S31 stable, or a XIAO/DevKitC-class board ships.
 
 ---
 
