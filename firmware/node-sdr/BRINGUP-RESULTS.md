@@ -136,5 +136,17 @@ Fixed both ends: dev-board.sh keeps reading while it types, and dump lines now g
 `src/out.rs`, which waits up to 250 ms per FIFO load and abandons the dump only if the host is gone.
 After the fix: 683/683 lines, CRC good.
 
-Next for node-sdr: step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
+## Steps 10 + 12: ten-minute soak (c5c, 5756 MHz, gain 83, defaults) — stable, one capacity finding
+
+598 one-second `stats` lines, `up_us` monotonic (no resets), `dma_err` 0, `gain_lost` 0, `overrun`
+never, `heap_free` constant at 82,780. But `rises` ran at **84/s** (all rejected: none were
+DroneID-length), `skipped` at 42/s, `lapped` 0.2/s, and `ev` lines at 4.9/s. Part of the load was
+our own `c5a` still sending 10 Hz test beacons on channel 149 (a board keeps running after its log
+session ends); the opening snapshot caught one (296 railed samples). Even so, at gain 83 the default
+6 dB trigger rises on every Wi-Fi frame, and the loop cannot inspect them all, so in a busy 5 GHz
+band a DroneID burst could be skipped. To do: re-tune `trig` for gain 83 (higher threshold, or a
+cheaper duration pre-check before stopping the ring) and repeat with the bench quiet. DC drift over
+the ten minutes was not measured (the snapshot was only at boot).
+
+Next for node-sdr: trigger re-tune and a quiet re-soak with snapshots at the end, step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
 trigger statistics), 12 (ten-minute soak, including DC drift as the board warms), and 11 with a DJI drone.
