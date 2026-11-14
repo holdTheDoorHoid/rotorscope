@@ -105,3 +105,13 @@ tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 90
 If `lines` stays 0 with the ADSBee showing aircraft on its console: check
 the TX/GPIO41 wire and ground first, then `AT+PROTOCOL_OUT?` on the ADSBee.
 If `errors` climbs: send the recording from step 1.
+
+## Result: laptop, real unit (2026-11-14)
+
+Step 1 on the owner's ADSBee 1090 (firmware 0.9.0, indoors, centre city Philadelphia):
+30 s gave **77 `#A:` aircraft lines, 0 bad lines**, `#S:` version 2. `rid-view --adsbee` listed
+6 aircraft, among them two arrivals about 7.4 km south at 575-925 ft (the PHL approach), an
+airliner at 12,000 ft 10 km NNE and one at 24,000 ft 22 km N; one aircraft had no position
+yet. RSSI -71/-72 dBm. The parser (`crates/adsb`) agrees with the real CSBee layout. The console
+output was set back to `CONSOLE,NONE` afterwards; nothing was saved. Not yet tried: the
+ADSBee wired into a hub (the P4 has no `adsbee` input yet; the S3 build does).
