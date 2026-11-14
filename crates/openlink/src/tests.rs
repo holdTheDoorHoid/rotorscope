@@ -543,3 +543,42 @@ fn sightings_keep_streams_apart_and_evict_the_quietest() {
     z.record(&a, 1, 1, 1);
     assert_eq!(z.iter().count(), 0);
 }
+
+// ------------------------------------------------------- bench builders --
+
+/// The test beacon's fake frames must classify as their system, with the
+/// fake identifier, and never with a real default ID.
+#[test]
+fn fake_frames_classify() {
+    use crate::build::*;
+    for sys in System::ALL {
+        for seq in [0u32, 1, 4095, 4096, 0x00FF_FFFF, u32::MAX] {
+            let mut buf = [0u8; MAX_LEN + FCS.len()];
+            let n = fake_frame(sys, seq, &mut buf).unwrap();
+            buf[n..n + 4].copy_from_slice(&FCS);
+            let got = classify(&buf[..n + 4]).unwrap_or_else(|| panic!("{sys:?} seq {seq}"));
+            assert_eq!(got.system, sys);
+            assert_eq!(got.id, fake_id(sys), "{sys:?}");
+            assert_eq!(got.direction, Direction::AirToGround, "{sys:?}");
+            assert_ne!(got.id, Some(WFB_DEFAULT_LINK_ID));
+            // The MPDU alone also classifies (no FCS slot).
+            assert_eq!(classify_mpdu(&buf[..n]), Some(got));
+        }
+    }
+    // A buffer that is too small is refused, not truncated.
+    assert_eq!(fake_frame(System::WfbNg, 0, &mut [0u8; 40]), None);
+}
+
+#[test]
+fn fake_frames_carry_the_marker_text() {
+    use crate::build::*;
+    for sys in System::ALL {
+        let mut buf = [0u8; MAX_LEN];
+        let n = fake_frame(sys, 7, &mut buf).unwrap();
+        let body = &buf[..n];
+        assert!(
+            body.windows(10).any(|w| w == &FAKE_PAYLOAD[..10]),
+            "{sys:?} has no marker text"
+        );
+    }
+}

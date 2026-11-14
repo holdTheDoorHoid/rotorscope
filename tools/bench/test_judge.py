@@ -147,5 +147,57 @@ class Matrix(unittest.TestCase):
         self.assertEqual(len({t.id for t in run.TESTS.values()}), len(run.TESTS))
 
 
+# Real lines, from the first on-air run (bench-logs/20261114-180904/open-wfb-ng-ch149).
+OPEN_RX = """\
+{"t":"hello","fw":"node-wifi"}
+{"t":"open","sys":"WfbNg","id":8280045,"port":0,"dir":"AirToGround","ch":149,"rssi":-42,"mac":"57:42:7e:57:ed:00","up_us":1040345,"n":4}
+{"t":"open","sys":"WfbNg","id":8280045,"port":0,"dir":"AirToGround","ch":149,"rssi":-42,"mac":"57:42:7e:57:ed:00","up_us":2040372,"n":19}
+{"t":"open","sys":"WfbNg","id":8280045,"port":0,"dir":"AirToGround","ch":149,"rssi":-43,"mac":"57:42:7e:57:ed:00","up_us":3040347,"n":34}
+{"t":"stats","up_us":29794716,"ch":149,"seen":643,"fps":24,"data":560,"open":429}
+"""
+OPEN_TX = """\
+{"t":"tx","up":44,"band":"5","ch":149,"beacon":0,"nan":0,"ble4":0,"ble5":0,"ble_lr":0,"open_sys":"wfb-ng","open":20,"fail":0,"on":"wnlec"}
+"""
+
+
+class OpenLinks(unittest.TestCase):
+    def test_pass(self):
+        v = judge.judge_open(OPEN_RX, "wfb-ng", 149, 3)
+        self.assertTrue(v.passed, v.reason)
+        self.assertEqual(v.evidence["rssi_min"], -43)
+        self.assertEqual(v.evidence["open_frames"], 34)
+
+    def test_wrong_channel_system_or_id(self):
+        self.assertIn("on ch [149]", judge.judge_open(OPEN_RX, "wfb-ng", 165, 3).reason)
+        self.assertIn("none the fake", judge.judge_open(OPEN_RX, "rubyfpv", 149, 3).reason)
+        # The real default link ID is someone else's link, never ours.
+        foreign = OPEN_RX.replace("8280045", str(0x7505D6))
+        v = judge.judge_open(foreign, "wfb-ng", 149, 3)
+        self.assertFalse(v.passed)
+        self.assertIn("someone else", v.reason)
+
+    def test_too_few(self):
+        self.assertFalse(judge.judge_open(OPEN_RX, "wfb-ng", 149, 4).passed)
+
+    def test_silent_listener(self):
+        v = judge.judge_open('{"t":"hello"}\n{"t":"stats","data":12}\n', "openhd", 6, 3)
+        self.assertIn("12 data frames", v.reason)
+
+    def test_ready(self):
+        self.assertTrue(judge.open_ready(OPEN_TX, "wfb-ng", 149))
+        self.assertFalse(judge.open_ready(OPEN_TX, "wfb-ng", 165))
+        self.assertFalse(judge.open_ready(OPEN_TX.replace("wnlec", "Wnlec"), "wfb-ng", 149))
+        self.assertFalse(judge.open_ready(OPEN_TX.replace('"open":20', '"open":0'), "wfb-ng", 149))
+
+    def test_table(self):
+        opens = [t for t in run.TESTS.values() if t.kind == "open"]
+        self.assertEqual(len(opens), 16)
+        for t in opens:
+            with self.subTest(t.id):
+                self.assertTrue(t.tx_keys.startswith("x"))
+                self.assertEqual(t.rx_variant == "band24", t.channel == 6)
+                self.assertEqual((t.tx_board, t.rx_board), ("c5b", "c5a"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,6 +47,9 @@ esp32c5 = [
 # All Remote ID encoding goes through the shared crate (see src/rid_tx.rs), so
 # the transmitter and the receivers agree on every byte.
 rid = { path = "../../crates/rid", features = ["encode"] }
+# Fake open-FPV frames (wfb-ng, OpenHD, RubyFPV, DroneBridge), built by the
+# same crate the receivers classify with.
+openlink = { path = "../../crates/openlink", features = ["build"] }
 
 esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "log-04"] }

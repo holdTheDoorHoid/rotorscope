@@ -72,6 +72,10 @@
 
 mod sightings;
 
+/// Fake bench frames (feature `build`), for the test beacon.
+#[cfg(feature = "build")]
+pub mod build;
+
 pub use sightings::{Sighting, Sightings};
 
 /// Bytes the ESP32 promiscuous callback delivers past the end of the MPDU

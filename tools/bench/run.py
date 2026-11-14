@@ -5,12 +5,15 @@
     tools/bench/run.py s3-to-s3-wifi-beacon            # flash both boards, run, PASS/FAIL
     tools/bench/run.py --group s3 --seconds 40
     tools/bench/run.py --all --dry-run                 # show the plan, touch nothing
+    tools/bench/run.py --group openlink                # fake open-FPV links (wfb-ng, OpenHD, ...)
 
 Per RF test: build (or reuse) rid-beacon and the listener, start the transmitter board, type the
 console keys that leave only the wanted transport on, wait until it is sending, flash and start
 the listener board, capture N seconds, stop the transmitter, and judge the LISTENER's output
 (judge.judge_listener): at least M decoded detections of the fake identity TESTDRONE0000000001
-with the right transport (and band). Raw logs go to bench-logs/<timestamp>/<test>/.
+with the right transport (and band). Open-link tests (kind "open") type a fake system's key
+and a channel key instead, and PASS on M "open" reports of that system, with its fake ID, on
+that channel (judge.judge_open). Raw logs go to bench-logs/<timestamp>/<test>/.
 
 Hardware access is only ever through tools/dev-board.sh (per-board lock, by-id paths). This
 script never opens a serial port, never calls adb/espflash directly, and never transmits except
@@ -83,7 +86,7 @@ class Firmware:
 @dataclass(frozen=True)
 class Test:
     id: str
-    kind: str                 # "rf" | "hub"
+    kind: str                 # "rf" | "hub" | "open"
     desc: str
     tx_chip: str              # rf: beacon chip.  hub: node chip
     rx_chip: str              # rf: listener chip. hub: hub chip
@@ -95,6 +98,8 @@ class Test:
     tx_keys: str = ""         # rid-beacon console keys (leading x = silence all first)
     hub_link: int = 0         # hub: which hub node link the node is wired to
     rx_variant: str = ""      # rf: listener build variant ("band24": C5 node-wifi on 2.4 GHz)
+    open_sys: str = ""        # open: judge.OPEN_SYSTEMS short name ("wfb-ng", ...)
+    channel: int = 0          # open: Wi-Fi channel the fake link is sent on
 
 
 _KEYS = {"WifiBeacon": "w", "WifiNan": "n", "BleLegacy": "l", "BleExtended": "e", "BleLongRange": "c"}
@@ -114,6 +119,18 @@ def _rf(tx, rx, name, transport, band, rx_variant=""):
                 tx, rx, boards[0], boards[1],
                 "node-wifi" if transport.startswith("Wifi") else "node-ble", transport, band, keys,
                 rx_variant=rx_variant)
+
+
+def _open(system: str, channel: int) -> Test:
+    """C5 rid-beacon sends one fake open-FPV link on one channel; a C5 node-wifi hears it.
+    Channel 6 needs the listener built for 2.4 GHz (`band24`)."""
+    keys = "x" + judge.CHANNEL_KEYS[channel] + judge.OPEN_KEYS[system]
+    band24 = channel <= 14
+    return Test(f"open-{system}-ch{channel}", "open",
+                f"C5 rid-beacon fake {system} on ch {channel} -> C5 node-wifi"
+                + (" (2.4 GHz build)" if band24 else ""),
+                "c5", "c5", "c5b", "c5a", "node-wifi", band="2.4" if band24 else "5",
+                tx_keys=keys, rx_variant="band24" if band24 else "", open_sys=system, channel=channel)
 
 
 def _build_tests() -> dict[str, Test]:
@@ -143,6 +160,8 @@ def _build_tests() -> dict[str, Test]:
         t.append(Test(f"hub-uart-{chip}-{kind}", "hub",
                       f"{chip.upper()} {fwname} -> S3 hub, UART link {link}",
                       chip, "s3", "s3b" if chip == "s3" else "c5a", "s3", fwname, hub_link=link))
+    # Fake open-FPV links: every system on every channel the beacon offers.
+    t += [_open(s, ch) for ch in (149, 161, 165, 6) for s in judge.OPEN_SYSTEMS]
     return {x.id: x for x in t}
 
 
@@ -150,7 +169,8 @@ TESTS = _build_tests()
 GROUPS = {"s3": lambda t: t.id.startswith("s3-to-s3"), "c5": lambda t: t.id.startswith("c5-to-c5"),
           "cross": lambda t: t.id.startswith(("c5-to-s3", "s3-to-c5")),
           "hub": lambda t: t.kind == "hub", "ble": lambda t: t.kind == "rf" and t.transport.startswith("Ble"),
-          "wifi": lambda t: t.kind == "rf" and t.transport.startswith("Wifi")}
+          "wifi": lambda t: t.kind == "rf" and t.transport.startswith("Wifi"),
+          "openlink": lambda t: t.kind == "open"}
 
 TX_BASE = 180          # transmitter capture = seconds + this; it is stopped as soon as the listener ends
 START_TIMEOUT = 720    # lock wait (10 min) + flash
@@ -217,18 +237,27 @@ def wait_for(p: subprocess.Popen, log: Path, ready, timeout: float, what: str) -
 
 
 def plan_lines(t: Test, a) -> list[str]:
-    tx_fw = Firmware("rid-beacon" if t.kind == "rf" else t.listener, t.tx_chip)
-    rx_fw = Firmware(t.listener, t.rx_chip, t.rx_variant) if t.kind == "rf" else Firmware("hub", t.rx_chip)
+    radio = t.kind in ("rf", "open")
+    tx_fw = Firmware("rid-beacon" if radio else t.listener, t.tx_chip)
+    rx_fw = Firmware(t.listener, t.rx_chip, t.rx_variant) if radio else Firmware("hub", t.rx_chip)
     L = [f"{t.id}: {t.desc}"]
-    for role, board, chip in (("transmitter" if t.kind == "rf" else "node       ", t.tx_board, t.tx_chip),
-                              ("listener   " if t.kind == "rf" else "hub        ", t.rx_board, t.rx_chip)):
+    for role, board, chip in (("transmitter" if radio else "node       ", t.tx_board, t.tx_chip),
+                              ("listener   " if radio else "hub        ", t.rx_board, t.rx_chip)):
         r = resolve(board)
         L.append(f"  {role} board {board:<4} " + (f"{r[0]}" if r else "NOT REGISTERED (run: tools/dev-board.sh --register)")
                  + (f"  [registered chip {r[1]}, test wants {CHIP_NAME[chip]}]" if r and r[1] != CHIP_NAME[chip] else ""))
     for fw in (tx_fw, rx_fw):
         L.append(f"  build: {' '.join(fw.build_argv()[2:])}" + ("" if not a.no_build else "   (skipped: --no-build)"))
         L.append(f"         -> {fw.elf.relative_to(ROOT)}")
-    if t.kind == "rf":
+    if t.kind == "open":
+        L.append(f"  1. flash+reset transmitter, after 8 s type '{t.tx_keys}' on its console "
+                 f"(x = silence all, {judge.CHANNEL_KEYS[t.channel]} = ch {t.channel}, "
+                 f"{judge.OPEN_KEYS[t.open_sys]} = fake {t.open_sys})")
+        L.append(f"  2. wait until the transmitter reports only fake {t.open_sys} on ch {t.channel} (up to {READY_EXTRA} s)")
+        L.append(f"  3. flash+reset listener, capture {a.seconds} s")
+        L.append(f"  PASS: >= {a.min_hits} 'open' lines with sys={judge.OPEN_SYSTEMS[t.open_sys]}, "
+                 f"id={judge.OPEN_FAKE_ID[judge.OPEN_SYSTEMS[t.open_sys]]}, ch={t.channel}")
+    elif t.kind == "rf":
         L.append(f"  1. flash+reset transmitter, after 8 s type '{t.tx_keys}' on its console "
                  f"(x = silence all, then only {t.transport}{' on 2.4 GHz' if t.tx_keys.endswith('b') else ''})")
         L.append(f"  2. wait until the transmitter reports only {t.transport} on (up to {READY_EXTRA} s)")
@@ -293,18 +322,24 @@ def run_rf(t: Test, a, d: Path) -> dict:
     try:
         print(f"  [1/3] transmitter {t.tx_board}: flash + keys '{t.tx_keys}'")
         tx = launch(txlog, tx_fw.elf, a.seconds + TX_BASE, t.tx_board, t.tx_keys)
-        st = wait_for(tx, txlog, lambda s: judge.tx_ready(s, t.transport), START_TIMEOUT, "transmitter")
+        if t.kind == "open":
+            def ready(s):
+                return judge.open_ready(s, t.open_sys, t.channel)
+        else:
+            def ready(s):
+                return judge.tx_ready(s, t.transport)
+        st = wait_for(tx, txlog, ready, START_TIMEOUT, "transmitter")
         note = []
         if st == "exited":
             return dict(result="ERROR", reason="transmitter's dev-board.sh exited early: " + tail(txlog), hits=0, d=d)
         if st == "timeout":
             if not judge.parse_lines(txlog.read_text(errors="replace")):
                 return dict(result="ERROR", reason="transmitter never produced output (stuck lock, wrong board?)", hits=0, d=d)
-        if not judge.tx_ready(txlog.read_text(errors="replace"), t.transport):
+        if not ready(txlog.read_text(errors="replace")):
             # keys may not have taken effect; the beacon is on air with everything enabled, which
             # still tests the same transport, so go on and say so.
             time.sleep(READY_EXTRA)
-            if not judge.tx_ready(txlog.read_text(errors="replace"), t.transport):
+            if not ready(txlog.read_text(errors="replace")):
                 note.append("transmitter isolation not confirmed (other transports may be on)")
         print(f"  [2/3] listener {t.rx_board}: flash, capture {a.seconds} s")
         rx = launch(rxlog, rx_fw.elf, a.seconds, t.rx_board)
@@ -315,8 +350,12 @@ def run_rf(t: Test, a, d: Path) -> dict:
     finally:
         kill_group(tx)
         kill_group(rx)
-    v = judge.judge_listener(rxlog.read_text(errors="replace"), t.transport, t.band, a.min_hits)
-    ctx = judge.judge_beacon(txlog.read_text(errors="replace"), t.transport, t.band)
+    if t.kind == "open":
+        v = judge.judge_open(rxlog.read_text(errors="replace"), t.open_sys, t.channel, a.min_hits)
+        ctx = judge.judge_open_beacon(txlog.read_text(errors="replace"), t.open_sys, t.channel)
+    else:
+        v = judge.judge_listener(rxlog.read_text(errors="replace"), t.transport, t.band, a.min_hits)
+        ctx = judge.judge_beacon(txlog.read_text(errors="replace"), t.transport, t.band)
     reason = v.reason
     if not v.passed and ctx["notes"]:
         reason += "  | transmitter: " + "; ".join(ctx["notes"])
@@ -358,14 +397,16 @@ def evidence_str(r: dict) -> str:
     if "frames" in e:
         return f"{e['frames']} frames, corrupt {e.get('corrupt')}, role {e.get('role')}"
     ch = ",".join(map(str, e.get("channels", []))) or "-"
-    return (f"ch {ch}, rssi {e['rssi_min']}..{e['rssi_max']}, from {','.join(e['macs'])}")
+    extra = f", {e['open_frames']} frames" if "open_lines" in e else ""
+    macs = e["macs"][:3] + ([f"+{len(e['macs']) - 3} more"] if len(e["macs"]) > 3 else [])  # OpenHD's A2 changes per frame
+    return (f"ch {ch}, rssi {e['rssi_min']}..{e['rssi_max']}, from {','.join(macs)}{extra}")
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tests", nargs="*", help="test ids (see --list)")
     ap.add_argument("--all", action="store_true", help="every test")
-    ap.add_argument("--group", choices=sorted(GROUPS), help="s3, c5, cross, hub, ble, wifi")
+    ap.add_argument("--group", choices=sorted(GROUPS), help="s3, c5, cross, hub, ble, wifi, openlink")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--seconds", "-n", type=int, default=30, help="listener capture length (default 30)")
     ap.add_argument("--min-hits", "-m", type=int, default=3, help="RF: detections needed (default 3)")
@@ -410,10 +451,11 @@ def main(argv=None) -> int:
         if err:
             r = dict(result="ERROR", reason=err, hits=0, d=d)
         else:
-            err = build([Firmware("rid-beacon" if t.kind == "rf" else t.listener, t.tx_chip),
-                         Firmware(t.listener, t.rx_chip, t.rx_variant) if t.kind == "rf"
+            radio = t.kind in ("rf", "open")
+            err = build([Firmware("rid-beacon" if radio else t.listener, t.tx_chip),
+                         Firmware(t.listener, t.rx_chip, t.rx_variant) if radio
                          else Firmware("hub", t.rx_chip)], a)
-            r = dict(result="ERROR", reason=err, hits=0, d=d) if err else (run_rf if t.kind == "rf" else run_hub)(t, a, d)
+            r = dict(result="ERROR", reason=err, hits=0, d=d) if err else (run_rf if radio else run_hub)(t, a, d)
         print(f"  -> {r['result']}: {r['reason']}")
         results.append((t, r))
         (d / "result.json").write_text(json.dumps({k: (str(v) if isinstance(v, Path) else v) for k, v in r.items()}, indent=1, default=str))
@@ -421,7 +463,7 @@ def main(argv=None) -> int:
     w = max(len(t.id) for t, _ in results)
     lines = [f"\n{'TEST':<{w}}  {'TX':<4} {'RX':<4}  {'HITS':<7} RESULT  EVIDENCE"]
     for t, r in results:
-        hits = f"{r.get('hits', 0)}/{r.get('needed', a.min_hits if t.kind == 'rf' else a.min_frames)}"
+        hits = f"{r.get('hits', 0)}/{r.get('needed', a.min_frames if t.kind == 'hub' else a.min_hits)}"
         lines.append(f"{t.id:<{w}}  {t.tx_board:<4} {t.rx_board:<4}  {hits:<7} {r['result']:<6}  {evidence_str(r)}")
     out = "\n".join(lines)
     print(out)

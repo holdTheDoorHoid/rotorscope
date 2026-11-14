@@ -365,6 +365,9 @@ Decided 2026-11-09 (see RESEARCH.md "Autel, Skydio and digital FPV").
    - Link IDs and vehicle IDs are identifiers, shown only when opted in.
    - Bench checks needed: does ESP32 promiscuous mode deliver LDPC/STBC-coded frames
      (wfb-ng's default video profile), and does the C5 receive channel 165?
+   - **2026-11-14:** channel 165 answered **yes**; the fake frames of all four systems pass on
+     ch 6/149/161/165 (`--group openlink`, docs/BENCH.md). LDPC/STBC stays open: the ESP32 cannot
+     transmit it, so it needs real OpenIPC hardware.
 2. **11b. One fingerprint classifier on the raw-capture C5** (after 10b, sharing its capture
    layer). It measures, from a capture:
    - the cyclic-prefix autocorrelation lag (64 samples at 20 MS/s = Wi-Fi; about 1333 =
