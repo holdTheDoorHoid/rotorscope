@@ -1,5 +1,6 @@
 //! Node links on the P4: the ESP-NOW gateway on UART3 (header UART3-IN,
-//! RX = GPIO28), 921600 baud, `link` frames.
+//! RX = GPIO28, TX = GPIO27), 921600 baud, `link` frames in, `link::Command`s
+//! out (to the gateway's RX, XIAO D7 = GPIO12).
 //!
 //! A gateway link speaks for many nodes: a `Frame::Via { node, rssi }` names
 //! the sender of the one frame after it. Frames without a `Via` belong to the
@@ -10,6 +11,10 @@
 //! (FIFO 64 bytes full, or 10 idle symbols) moves bytes into an 8 KB ring
 //! (~90 ms of full-speed traffic) and `poll` decodes from the ring whenever
 //! the main loop gets to it.
+//!
+//! Sending is the other way round and much smaller (a few hundred bytes every
+//! few seconds): [`GatewayLink::send`] queues bytes, and `poll` tops up the
+//! 128-byte TX FIFO without ever waiting for it.
 
 use core::cell::RefCell;
 
@@ -54,7 +59,9 @@ fn on_uart() {
 }
 
 pub const BAUD: u32 = 921_600;
-const MAX_RELAYED: usize = 16;
+pub const MAX_RELAYED: usize = 16;
+/// Outgoing bytes waiting for the TX FIFO.
+const TX_QUEUE: usize = 4096;
 
 #[derive(Clone, Copy, Default)]
 pub struct NodeStats {
@@ -63,8 +70,16 @@ pub struct NodeStats {
     pub frames: u32,
     pub detections: u32,
     pub hello: bool,
-    /// From the node's Hello.
+    /// From the node's Hello or Status.
     pub role: Option<link::NodeRole>,
+    /// From the node's Status: roles it can take (mask of `NodeRole::bit`),
+    /// and the plan id it runs. `can` 0 = never sent a Status.
+    pub can: u8,
+    pub plan: u16,
+    /// What the coverage coordinator last asked of it, and whether the node
+    /// reports running exactly that.
+    pub assigned: Option<(link::NodeRole, u16)>,
+    pub applied: bool,
     /// From the node's last Stats.
     pub rid_found: u32,
     pub dropped: u32,
@@ -100,27 +115,85 @@ pub struct GatewayLink<'d> {
     pub out: Out,
     /// Frames dropped because `out` was full.
     pub out_full: u32,
+    tx: heapless::Deque<u8, TX_QUEUE>,
+    /// Bytes written to the TX FIFO, and bytes refused for want of queue room.
+    pub tx_bytes: u32,
+    pub tx_full: u32,
 }
 
 impl<'d> GatewayLink<'d> {
-    pub fn new(uart: impl esp_hal::uart::Instance + 'static, rx_pin: impl esp_hal::gpio::interconnect::PeripheralInput<'static>) -> Self {
+    pub fn new(
+        uart: impl esp_hal::uart::Instance + 'static,
+        rx_pin: impl esp_hal::gpio::interconnect::PeripheralInput<'static>,
+        tx_pin: impl esp_hal::gpio::interconnect::PeripheralOutput<'static>,
+    ) -> Self {
         let cfg = Config::default()
             .with_baudrate(BAUD)
             .with_rx(RxConfig::default().with_fifo_full_threshold(64).with_timeout(10));
-        let mut uart = Uart::new(uart, cfg).expect("UART3 config").with_rx(rx_pin);
+        let mut uart = Uart::new(uart, cfg).expect("UART3 config").with_rx(rx_pin).with_tx(tx_pin);
         uart.set_interrupt_handler(on_uart);
         critical_section::with(|cs| {
             uart.clear_interrupts(UartInterrupt::RxFifoFull | UartInterrupt::RxTimeout);
             uart.listen(UartInterrupt::RxFifoFull | UartInterrupt::RxTimeout);
             SERIAL.borrow_ref_mut(cs).replace(uart);
         });
-        Self { _uart: core::marker::PhantomData, dec: Decoder::new(), via: None, stats: LinkStats::default(), nodes: heapless::Vec::new(), out: Out::new(), out_full: 0 }
+        Self {
+            _uart: core::marker::PhantomData,
+            dec: Decoder::new(),
+            via: None,
+            stats: LinkStats::default(),
+            nodes: heapless::Vec::new(),
+            out: Out::new(),
+            out_full: 0,
+            tx: heapless::Deque::new(),
+            tx_bytes: 0,
+            tx_full: 0,
+        }
+    }
+
+    /// Queue `bytes` (whole frames) for the gateway. All or nothing: false,
+    /// and counted, if the queue lacks room.
+    pub fn send(&mut self, bytes: &[u8]) -> bool {
+        if self.tx.capacity() - self.tx.len() < bytes.len() {
+            self.tx_full += bytes.len() as u32;
+            return false;
+        }
+        for &b in bytes {
+            let _ = self.tx.push_back(b);
+        }
+        self.pump_tx();
+        true
+    }
+
+    /// Move queued bytes into the TX FIFO, as many as fit right now.
+    fn pump_tx(&mut self) {
+        if self.tx.is_empty() {
+            return;
+        }
+        let tx = &mut self.tx;
+        let written = critical_section::with(|cs| {
+            let mut serial = SERIAL.borrow_ref_mut(cs);
+            let Some(uart) = serial.as_mut() else { return 0 };
+            let mut n = 0;
+            while !tx.is_empty() && uart.write_ready() {
+                let (front, _) = tx.as_slices();
+                // `write` only waits when the FIFO is full; write_ready says it is not.
+                let Ok(w) = uart.write(&front[..front.len().min(64)]) else { break };
+                for _ in 0..w {
+                    tx.pop_front();
+                }
+                n += w;
+            }
+            n
+        });
+        self.tx_bytes += written as u32;
     }
 
     /// Drain whatever the UART has; returns frames handled.
     pub fn poll(&mut self, now_ms: u64) -> u32 {
         let mut buf = [0u8; 256];
         let mut handled = 0;
+        self.pump_tx();
         self.stats.uart_err = UART_ERR.load(core::sync::atomic::Ordering::Relaxed);
         self.stats.ring_full = RING_FULL.load(core::sync::atomic::Ordering::Relaxed);
         loop {
@@ -196,6 +269,11 @@ impl<'d> GatewayLink<'d> {
             Frame::Hello { role, .. } => {
                 n.hello = true;
                 n.role = Some(*role);
+            }
+            Frame::Status { role, can, plan } => {
+                n.role = Some(*role);
+                n.can = *can;
+                n.plan = *plan;
             }
             Frame::Stats { uptime_us, rid_found, dropped, .. } => {
                 n.rid_found = *rid_found;

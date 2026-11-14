@@ -8,13 +8,18 @@
 //! preamble, a MAC header, an ACK and a contention window regardless of size,
 //! and a Wi-Fi node is deaf to drones while it transmits.
 //!
-//! Two packet kinds:
+//! Three packet kinds:
 //! - [`Kind::Beacon`], gateway to broadcast, about twice a second on the
 //!   gateway channel. Nodes learn the gateway's address from it, then send
 //!   unicast, which gets a MAC-layer ACK and hardware retries (broadcast gets
 //!   neither).
 //! - [`Kind::Frames`], node to gateway: `seq` counts packets, so the gateway
 //!   can count what was lost after the radio's own retries gave up.
+//! - [`Kind::Command`], gateway to one node (unicast, MAC-acked): hub
+//!   commands (`link::Command`, COBS frames exactly as the hub wrote them,
+//!   minus the `To` that named the node). `seq` counts per node, so a node
+//!   can drop a retry it already has. Nodes built before this kind existed
+//!   do not parse it and ignore it.
 //!
 //! Nothing here is secret or authenticated: the same detections a node hears
 //! anyone nearby can hear. A forged packet could inject a fake track; see
@@ -39,6 +44,7 @@ pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER;
 pub enum Kind {
     Beacon = 1,
     Frames = 2,
+    Command = 3,
 }
 
 /// A parsed packet. `payload` is the bytes after the header.
@@ -58,6 +64,7 @@ pub fn parse(data: &[u8]) -> Option<Packet<'_>> {
     let kind = match data[3] {
         1 => Kind::Beacon,
         2 => Kind::Frames,
+        3 => Kind::Command,
         _ => return None,
     };
     let seq = u16::from_le_bytes([data[4], data[5]]);
@@ -82,6 +89,26 @@ pub fn beacon(buf: &mut [u8; HEADER + 1], seq: u16, channel: u8) -> &[u8] {
 /// The channel a beacon announces.
 pub fn beacon_channel(p: &Packet<'_>) -> Option<u8> {
     (p.kind == Kind::Beacon).then(|| p.payload.first().copied()).flatten()
+}
+
+/// A command packet for one node: header plus `frames`, one or more whole
+/// COBS command frames. `None` if `frames` is not whole frames or does not
+/// fit in `buf`.
+pub fn command<'a>(buf: &'a mut [u8], seq: u16, frames: &[u8]) -> Option<&'a [u8]> {
+    let whole = frames.last() == Some(&0);
+    let len = HEADER + frames.len();
+    if !whole || len > buf.len() || len > MAX_PACKET {
+        return None;
+    }
+    header(buf, Kind::Command, seq);
+    buf[HEADER..len].copy_from_slice(frames);
+    Some(&buf[..len])
+}
+
+/// The whole COBS frames in a command (or batch) packet's payload; a
+/// truncated tail is skipped.
+pub fn frames<'a>(p: &Packet<'a>) -> impl Iterator<Item = &'a [u8]> {
+    p.payload.split_inclusive(|&b| b == 0).filter(|f| f.last() == Some(&0))
 }
 
 /// Packs whole COBS frames into one packet.
@@ -224,6 +251,43 @@ mod tests {
         assert!(parse(b"XX\x01\x02\x00\x00").is_none());
         assert!(parse(b"RS\x02\x02\x00\x00").is_none(), "other version");
         assert!(parse(b"RS\x01\x09\x00\x00").is_none(), "unknown kind");
+    }
+
+    #[test]
+    fn command_round_trip() {
+        let mut buf = [0u8; 64];
+        let pkt = command(&mut buf, 0xBEEF, &[4, 1, 2, 3, 0, 2, 9, 0]).unwrap().to_vec();
+        let p = parse(&pkt).unwrap();
+        assert_eq!((p.kind, p.seq), (Kind::Command, 0xBEEF));
+        let f: std::vec::Vec<&[u8]> = frames(&p).collect();
+        assert_eq!(f, [&[4, 1, 2, 3, 0][..], &[2, 9, 0][..]]);
+        assert!(beacon_channel(&p).is_none(), "a node must not take it for a beacon");
+        assert!(command(&mut buf, 0, &[1, 2]).is_none(), "not a whole frame");
+        assert!(command(&mut buf, 0, &[]).is_none());
+        assert!(command(&mut [0u8; 8], 0, &[1, 2, 3, 0]).is_none(), "too big for buf");
+        // A truncated tail is not handed out.
+        let mut t = pkt.clone();
+        t.push(7);
+        let p = parse(&t).unwrap();
+        assert_eq!(frames(&p).count(), 2);
+    }
+
+    #[test]
+    fn command_carries_a_real_assignment() {
+        let mut plan = heapless::Vec::new();
+        plan.extend([(149u32, 1000u16), (6, 40)]);
+        let cmd = link::Command::Assign(link::Assignment { role: link::NodeRole::Wifi5, plan, id: 0x1234 });
+        let mut enc = [0u8; link::MAX_FRAME];
+        let wire = link::encode_command(&cmd, &mut enc).unwrap();
+        let mut buf = [0u8; MAX_PACKET];
+        let pkt = command(&mut buf, 1, wire).unwrap().to_vec();
+        let p = parse(&pkt).unwrap();
+        let mut dec = link::CommandDecoder::new();
+        let mut got = std::vec::Vec::new();
+        for f in frames(&p) {
+            dec.feed(f, |r| got.push(r));
+        }
+        assert_eq!(got, [Ok(cmd)]);
     }
 
     #[test]

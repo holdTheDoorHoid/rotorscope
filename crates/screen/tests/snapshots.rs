@@ -392,6 +392,22 @@ fn health() {
     shot("health", &ui, &st);
 }
 
+/// A hub with a coverage coordinator: each node's assigned role under it.
+#[test]
+fn health_assigned() {
+    let mut st = five_drones(true);
+    st.nodes[2].kind = NodeKind::DroneId;
+    st.assigned.extend([
+        Some(Assigned { role: "Wi-Fi 2.4", plan: 0x5a3c, applied: true }),
+        None,
+        Some(Assigned { role: "DroneID", plan: 0x0b17, applied: false }),
+    ]);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("health_assigned", &ui, &st);
+}
+
 /// A hub with an ADS-B receiver: the ADSBee as a fourth node, and the
 /// AIRCRAFT line (one low, nearest a medevac helicopter).
 fn with_aircraft() -> UiState {

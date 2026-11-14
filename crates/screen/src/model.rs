@@ -239,6 +239,8 @@ pub enum NodeKind {
     Ble,
     Fpv,
     Adsb,
+    /// DJI DroneID raw-capture node.
+    DroneId,
 }
 
 impl NodeKind {
@@ -250,6 +252,7 @@ impl NodeKind {
             NodeKind::Ble => "BT",
             NodeKind::Fpv => "FPV",
             NodeKind::Adsb => "ADS",
+            NodeKind::DroneId => "DJI",
         }
     }
     /// Health-screen label.
@@ -260,6 +263,7 @@ impl NodeKind {
             NodeKind::Ble => "Bluetooth",
             NodeKind::Fpv => "FPV 5.8",
             NodeKind::Adsb => "ADS-B",
+            NodeKind::DroneId => "DroneID",
         }
     }
 }
@@ -278,6 +282,17 @@ pub struct NodeStatus {
     pub drops: u32,
     /// Node uptime, seconds.
     pub uptime_s: u32,
+}
+
+/// What the hub's coverage coordinator asked one node to do (health screen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Assigned {
+    /// Role asked for, as a health-screen label (e.g. [`NodeKind::long`]).
+    pub role: &'static str,
+    /// Plan id asked for.
+    pub plan: u16,
+    /// The node reports running exactly this role and plan.
+    pub applied: bool,
 }
 
 /// How the unit is powered.
@@ -346,6 +361,9 @@ pub struct UiState {
     pub utc_ms: Option<u64>,
     pub gps: Gps,
     pub nodes: Vec<NodeStatus, MAX_NODES>,
+    /// Parallel to `nodes`, for hubs that assign roles: what each node was
+    /// asked to do. Empty (the default) shows nothing extra.
+    pub assigned: Vec<Option<Assigned>, MAX_NODES>,
     pub power: Power,
     pub sd: SdLog,
     /// In any order; the screen sorts.

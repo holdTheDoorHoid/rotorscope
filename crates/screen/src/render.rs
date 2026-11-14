@@ -953,7 +953,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
     }
     hline(d, 0, WIDTH, y + 11, p.grid)?;
     y += 15;
-    for n in &s.nodes {
+    for (i, n) in s.nodes.iter().enumerate() {
         let col = if n.alive { p.fg } else { p.accent };
         let c = Point::new(9, y + 6);
         if n.alive {
@@ -978,6 +978,13 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             text_right(d, "NOT RESPONDING", 314, y, F_BODY, col)?;
         }
         y += ROW_H;
+        if let Some(Some(a)) = s.assigned.get(i) {
+            b.clear();
+            let state = if a.applied { "running" } else { "sent" };
+            let _ = write!(b, "-> {} plan {:04x} {state}", a.role, a.plan);
+            text(d, &b, 18, y - 4, F_SMALL, if a.applied { p.dim } else { p.accent })?;
+            y += 9;
+        }
     }
     if s.nodes.is_empty() {
         text(d, "no radio nodes reported", 18, y, F_LABEL, p.accent)?;

@@ -27,6 +27,7 @@ selftest = []
 
 [dependencies]
 link = { path = "../../crates/link" }
+coverage = { path = "../../crates/coverage" }
 rid = { path = "../../crates/rid" }
 heapless = "0.8"
 critical-section = "1.2"

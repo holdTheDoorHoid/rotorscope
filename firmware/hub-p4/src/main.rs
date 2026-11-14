@@ -15,6 +15,7 @@
 mod app;
 mod bb;
 mod display;
+mod downlink;
 mod links;
 mod psram_test;
 mod rgb;
@@ -48,26 +49,65 @@ fn unsafe_pin28() -> esp_hal::peripherals::GPIO28<'static> {
 
 #[cfg(feature = "selftest")]
 mod selftest {
-    //! Sends a fixed sequence (Via, Hello, Via, Detection, a direct Stats)
-    //! every 100 ms from UART2 TX on GPIO28, the gateway RX pin.
+    //! Sends a fixed sequence (Via, Hello, Via, Status, Via, Detection, a
+    //! direct Stats) every 100 ms from UART2 TX on GPIO28, the gateway RX
+    //! pin, and reads the hub's commands back from the UART3 TX pad (GPIO27)
+    //! on UART2 RX, decoding them as the gateway would.
     use esp_hal::time::{Duration, Instant};
-    use esp_hal::uart::{Config, UartTx};
+    use esp_hal::uart::{Config, Uart};
     use esp_hal::Blocking;
 
     pub struct Sender {
-        tx: UartTx<'static, Blocking>,
+        uart: Uart<'static, Blocking>,
         last: Instant,
+        dec: link::CommandDecoder,
+        to: u32,
+        assign: u32,
+        bad: u32,
+        last_print: Instant,
+        last_assign: Option<(link::NodeRole, u16, usize)>,
     }
 
     impl Sender {
         pub fn new(uart: esp_hal::peripherals::UART2<'static>) -> Self {
-            let tx = UartTx::new(uart, Config::default().with_baudrate(super::links::BAUD))
+            // SAFETY: bring-up only: GPIO27 is UART3's TX pad; we only listen to it.
+            let pin27 = unsafe { esp_hal::peripherals::GPIO27::steal() };
+            let uart = Uart::new(uart, Config::default().with_baudrate(super::links::BAUD))
                 .expect("UART2")
-                .with_tx(super::unsafe_pin28());
-            Self { tx, last: Instant::now() }
+                .with_tx(super::unsafe_pin28())
+                .with_rx(pin27);
+            Self {
+                uart,
+                last: Instant::now(),
+                dec: link::CommandDecoder::new(),
+                to: 0,
+                assign: 0,
+                bad: 0,
+                last_print: Instant::now(),
+                last_assign: None,
+            }
         }
 
         pub fn tick(&mut self) {
+            let mut buf = [0u8; 128];
+            while let Ok(n @ 1..) = self.uart.read_buffered(&mut buf) {
+                let (to, assign, bad, last) = (&mut self.to, &mut self.assign, &mut self.bad, &mut self.last_assign);
+                self.dec.feed(&buf[..n], |r| match r {
+                    Ok(link::Command::To { .. }) => *to += 1,
+                    Ok(link::Command::Assign(a)) => {
+                        *assign += 1;
+                        *last = Some((a.role, a.id, a.plan.len()));
+                    }
+                    Err(_) => *bad += 1,
+                });
+            }
+            if self.last_print.elapsed() >= Duration::from_millis(5000) {
+                self.last_print = Instant::now();
+                esp_println::println!(
+                    "hub-p4: selftest loopback to={} assign={} bad={} last={:?}",
+                    self.to, self.assign, self.bad, self.last_assign
+                );
+            }
             if self.last.elapsed() < Duration::from_millis(100) {
                 return;
             }
@@ -81,6 +121,12 @@ mod selftest {
                     role: link::NodeRole::Wifi24,
                     protocol: link::PROTOCOL_VERSION,
                     firmware: heapless::String::try_from("selftest").unwrap(),
+                },
+                link::Frame::Via { node, rssi: -41 },
+                link::Frame::Status {
+                    role: link::NodeRole::Wifi24,
+                    can: link::NodeRole::Wifi24.bit() | link::NodeRole::Wifi5.bit() | link::NodeRole::DroneId.bit(),
+                    plan: 0,
                 },
                 link::Frame::Via { node, rssi: -41 },
                 link::Frame::Detection(link::Detection {
@@ -97,7 +143,7 @@ mod selftest {
             for f in &frames {
                 let mut buf = [0u8; link::MAX_FRAME];
                 if let Ok(b) = link::encode(f, &mut buf) {
-                    let _ = self.tx.write(b);
+                    let _ = self.uart.write(b);
                 }
             }
         }
@@ -164,8 +210,9 @@ fn main() -> ! {
         panel
     });
 
-    let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28());
-    println!("hub-p4: gateway link on UART3 RX GPIO28 at {} baud", links::BAUD);
+    let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28(), p.GPIO27);
+    println!("hub-p4: gateway link on UART3 RX GPIO28, TX GPIO27 at {} baud", links::BAUD);
+    let mut down = downlink::Downlink::new();
 
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
@@ -189,6 +236,7 @@ fn main() -> ! {
         let ms = app::now_ms();
         gw.poll(ms);
         app.ingest(&mut gw, ms);
+        down.tick(&mut gw, ms);
         app.touch(&mut i2c, ms);
         if let Some(panel) = panel.as_mut() {
             panel.poll();
@@ -209,8 +257,9 @@ fn main() -> ! {
                 r
             });
             println!(
-                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} nodes={} out_full={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
+                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} nodes={} out_full={} tx={} tx_full={} cmds={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
                 s.bytes, s.frames, s.corrupt, s.uart_err, s.ring_full, s.direct, gw.nodes.len(), gw.out_full,
+                gw.tx_bytes, gw.tx_full, down.commands,
                 app.tracker.tracks().len(), vs, err, app.frames_drawn, app.max_band_us, loops, max_gap_us
             );
             app.frames_drawn = 0;
