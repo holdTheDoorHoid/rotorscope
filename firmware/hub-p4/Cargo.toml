@@ -29,6 +29,10 @@ selftest = []
 link = { path = "../../crates/link" }
 rid = { path = "../../crates/rid" }
 heapless = "0.8"
+critical-section = "1.2"
+screen = { path = "../../crates/screen", features = ["tracker"] }
+tracker = { path = "../../crates/tracker" }
+embedded-graphics = "0.8"
 esp-backtrace          = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-backtrace", features = ["esp32p4", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-bootloader-esp-idf", features = ["esp32p4"] }
 esp-hal                = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-hal", features = ["esp32p4", "unstable", "log-04"] }

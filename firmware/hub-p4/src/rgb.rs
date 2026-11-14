@@ -86,11 +86,8 @@ const OUT_INT_ENA: usize = AXI_DMA + 0x140;
 const OUT_INT_CLR: usize = AXI_DMA + 0x144;
 const OUT_CONF0: usize = AXI_DMA + 0x148;
 const OUT_CONF1: usize = AXI_DMA + 0x14C;
-const OUTFIFO_STATUS: usize = AXI_DMA + 0x150;
 const OUT_LINK1: usize = AXI_DMA + 0x158;
 const OUT_LINK2: usize = AXI_DMA + 0x15C;
-const OUT_STATE: usize = AXI_DMA + 0x160;
-const OUT_DSCR: usize = AXI_DMA + 0x16C;
 const OUT_PERI_SEL: usize = AXI_DMA + 0x17C;
 const INTR_MEM_START: usize = AXI_DMA + 0x27C;
 const INTR_MEM_END: usize = AXI_DMA + 0x280;
@@ -334,6 +331,21 @@ impl Panel {
         };
     }
 
+    /// The framebuffer (800x480 RGB565, row-major). Call [`Panel::flush`]
+    /// after drawing: the DMA reads PSRAM, not the CPU cache.
+    pub fn fb_mut(&mut self) -> &mut [u16] {
+        // SAFETY: `fb` is the caller's PSRAM region of FB_BYTES, owned by us.
+        unsafe { core::slice::from_raw_parts_mut(self.fb, H_RES * V_RES) }
+    }
+
+    /// Write the CPU's cached framebuffer changes back to PSRAM.
+    pub fn flush(&self) {
+        // SAFETY: ROM cache maintenance over our own framebuffer.
+        unsafe {
+            Cache_WriteBack_Addr(CACHE_MAP_L1_DCACHE | CACHE_MAP_L2_CACHE, self.fb as u32, FB_BYTES as u32)
+        };
+    }
+
     /// Counts end-of-frame events. Call often (more than once per frame);
     /// the raw flags are sticky, so a late call only merges, never loses, one.
     pub fn poll(&mut self) {
@@ -352,11 +364,6 @@ impl Panel {
                 self.dma_err_count += 1;
             }
         }
-    }
-
-    /// (current descriptor, out_state, outfifo_status, lcd_user) for the log.
-    pub fn regs(&self) -> [u32; 4] {
-        [rd(OUT_DSCR), rd(OUT_STATE), rd(OUTFIFO_STATUS), rd(LCD_USER)]
     }
 
     pub fn descs_base() -> u32 {

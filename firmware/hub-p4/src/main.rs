@@ -12,10 +12,13 @@
 #![no_std]
 #![no_main]
 
+mod app;
 mod bb;
+mod display;
 mod links;
 mod psram_test;
 mod rgb;
+mod touch;
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -34,10 +37,6 @@ const STC8_BACKLIGHT: u8 = 0x20;
 /// GT911 touch controller (0x5D when INT is low at reset, else 0x14).
 const GT911_ADDRS: [u8; 2] = [0x5D, 0x14];
 
-fn wait(ms: u64) {
-    let t = Instant::now();
-    while t.elapsed() < Duration::from_millis(ms) {}
-}
 
 /// GPIO28 for the UART3 receiver. With `selftest` the same pad is also driven
 /// by UART2's transmitter, so the pin is handed out twice on purpose.
@@ -107,7 +106,8 @@ mod selftest {
 
 #[main]
 fn main() -> ! {
-    let p = esp_hal::init(esp_hal::Config::default());
+    // 360 MHz (the pre-v3 maximum). esp-hal defaults to 90 MHz on the P4.
+    let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
     println!("hub-p4: hello, chip revision {:?}", esp_hal::efuse::chip_revision());
     // SAFETY: read-only CACHE register (IDF 5.4.2 cache_reg.h, rev<3 map):
     // L2_CACHE_CACHESIZE_CONF, bit 10 = 256 KB.
@@ -126,7 +126,6 @@ fn main() -> ! {
     println!("hub-p4: psram ok = {}", psram.is_some());
 
     println!("hub-p4: i2c idle sda/scl high = {:?}", i2c.levels());
-    println!("hub-p4: i2c pads pull low sda/scl = {:?}", i2c.drive_test());
     for addr in 0x08u8..0x78 {
         if i2c.write(addr, &[]) {
             let what = match addr {
@@ -137,10 +136,8 @@ fn main() -> ! {
             println!("hub-p4: i2c 0x{addr:02x} {what}");
         }
     }
-    for level in [10u8, 100] {
-        println!("hub-p4: backlight {level}: ack {}", i2c.write(STC8_ADDR, &[STC8_BACKLIGHT, level]));
-        wait(1000);
-    }
+    println!("hub-p4: backlight 100: ack {}", i2c.write(STC8_ADDR, &[STC8_BACKLIGHT, 100]));
+    println!("hub-p4: touch product id {:?}", touch::Gt911::product_id(&mut i2c).map(|id| id.map(char::from)));
 
     // Step 6: RGB panel from a PSRAM framebuffer (overwrites the PSRAM test
     // pattern). Needs no CPU per frame once started.
@@ -173,54 +170,57 @@ fn main() -> ! {
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
 
+    // SAFETY: each static is taken exactly once, here, before the loop.
+    let tracker = unsafe {
+        (&raw mut TRACKER).write(core::mem::MaybeUninit::new(app::HubTracker::new(tracker::Config::default())));
+        (*(&raw mut TRACKER)).assume_init_mut()
+    };
+    let band = unsafe { &mut *(&raw mut BAND) };
+    let mut app = app::App::new(tracker, band);
+
     let mut last = Instant::now();
-    let mut last_lcd = Instant::now();
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
     let mut prev = Instant::now();
     loop {
         let now = Instant::now();
         max_gap_us = max_gap_us.max((now - prev).as_micros());
-        prev = now;
         loops += 1;
-        gw.poll();
+        let ms = app::now_ms();
+        gw.poll(ms);
+        app.ingest(&mut gw, ms);
+        app.touch(&mut i2c, ms);
         if let Some(panel) = panel.as_mut() {
             panel.poll();
-            // Own tick, so its print never stacks with the link block and
-            // stays far shorter than one frame (~24 ms).
-            if last_lcd.elapsed() >= Duration::from_secs(1) {
-                let ms = last_lcd.elapsed().as_millis().max(1);
-                last_lcd = Instant::now();
-                let [dscr, state, fifo, user] = panel.regs();
-                println!(
-                    "hub-p4: lcd vsync={} eof={} in {} ms, dma_err={:#x} x{}, dscr={:#x} state={:#x} fifo={:#x} user={:#x}, loops={} max_gap={}us",
-                    panel.vsync, panel.eof, ms, panel.dma_err, panel.dma_err_count, dscr, state, fifo, user, loops, max_gap_us
-                );
-                panel.vsync = 0;
-                panel.eof = 0;
-                panel.dma_err = 0;
-                panel.dma_err_count = 0;
-                loops = 0;
-                max_gap_us = 0;
-                prev = Instant::now();
-            }
+            app.draw(panel, &mut gw, ms, |gw| {
+                gw.poll(app::now_ms());
+            });
         }
         #[cfg(feature = "selftest")]
         selftest.tick();
-        if last.elapsed() >= Duration::from_millis(1000) && last_lcd.elapsed() >= Duration::from_millis(500) {
+        prev = Instant::now();
+        if last.elapsed() >= Duration::from_millis(1000) {
             last = Instant::now();
             let s = &gw.stats;
+            let (vs, err) = panel.as_mut().map_or((0, 0), |p| {
+                let r = (p.vsync, p.dma_err_count);
+                p.vsync = 0;
+                p.dma_err_count = 0;
+                r
+            });
             println!(
-                "hub-p4: link bytes={} frames={} corrupt={} overflow={} uart_err={} direct={} nodes={}",
-                s.bytes, s.frames, s.corrupt, s.overflow, s.uart_err, s.direct, gw.nodes.len()
+                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} nodes={} out_full={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
+                s.bytes, s.frames, s.corrupt, s.uart_err, s.ring_full, s.direct, gw.nodes.len(), gw.out_full,
+                app.tracker.tracks().len(), vs, err, app.frames_drawn, app.max_band_us, loops, max_gap_us
             );
-            for n in &gw.nodes {
-                let m = n.mac;
-                println!(
-                    "hub-p4:   node {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rssi={} frames={} detections={} hello={}",
-                    m[0], m[1], m[2], m[3], m[4], m[5], n.rssi, n.frames, n.detections, n.hello
-                );
-            }
+            app.frames_drawn = 0;
+            app.max_band_us = 0;
+            loops = 0;
+            max_gap_us = 0;
         }
     }
 }
+
+static mut TRACKER: core::mem::MaybeUninit<app::HubTracker> = core::mem::MaybeUninit::uninit();
+static mut BAND: [embedded_graphics::pixelcolor::Rgb565; screen::WIDTH as usize * screen::BAND_ROWS] =
+    [embedded_graphics::pixelcolor::Rgb565::new(0, 0, 0); screen::WIDTH as usize * screen::BAND_ROWS];

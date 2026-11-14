@@ -51,10 +51,14 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 4 | Backlight writes | PASS (ACKed); not yet confirmed by eye |
 | - | esp-hal I2C controller | FAIL: every transfer times out, nothing starts (clock enabled, XTAL source, reset clear, `int_raw` only TXFIFO_WM). Not needed yet; bit-bang instead |
 | 5 | PSRAM | PASS: 32 MiB at 80 MHz, full write/read pattern, 0 bad words (37 MB/s write, 28 MB/s read, uncached word loop). Earlier I2C trouble after PSRAM was the stack bug |
-| 6 | RGB panel (`src/rgb.rs`) | RUNNING, image NOT yet confirmed by eye: LCD_CAM + AXI-GDMA stream 42-43 frames/s (VSYNC and DMA EOF agree; 18 MHz PCLK predicts 42.54), 0 DMA errors, CPU loop unaffected. See "RGB panel" |
+| 6 | RGB panel (`src/rgb.rs`) | PASS, confirmed by eye 2026-11-14 (owner: colour bars and border look right, so colour order, direction and polarity are correct): LCD_CAM + AXI-GDMA stream 42-43 frames/s (VSYNC and DMA EOF agree; 18 MHz PCLK predicts 42.54), 0 DMA errors, CPU loop unaffected. See "RGB panel" |
 | - | Stack inside L2 cache | FOUND + FIXED (memory.x patch): the kit's RAM overlapped the pre-v3 L2 cache; PSRAM sweeps corrupted the stack. See "Stack and the L2 cache" |
 | 7 | Gateway link on UART3 (RX GPIO28, 921600) | PASS on-chip self-test: UART2 TX drives the same pad; 50 frames/s, 0 corrupt, `Via` attribution right. Not yet with a real wire |
 | 8 | C6 over SDIO | not started; see "C6 and ESP-NOW" |
+| 9 | Hub app (`src/app.rs`) | RUNNING: tracker (64 tracks) fed by the gateway link; the shared `screen` UI drawn at 2x (640x480) in 24-row bands, 4 redraws/s; UP / SELECT / DOWN touch keys in the right 160 px. Self-test frame became a track; 0 corrupt, 0 bytes lost while drawing |
+| 10 | Touch (GT911) | Chip answers (product id "911"); taps not yet tried by a person |
+| - | CPU clock | esp-hal defaults to 90 MHz on the P4; now 360 MHz (`CpuClock::max()`), 3.4x faster drawing |
+| - | Gateway UART | moved to the UART3 interrupt with an 8 KB ring (~90 ms at full rate): a screen band takes ~6.5 ms and a touch read ~3 ms, the FIFO only lasts 1.4 ms |
 
 ## PSRAM and the I2C pins (resolved: it was the stack)
 

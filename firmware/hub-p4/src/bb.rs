@@ -34,21 +34,6 @@ impl<'d> BbI2c<'d> {
         (self.sda.is_high(), self.scl.is_high())
     }
 
-    /// Drive each line low and read it back: shows whether the pads can pull
-    /// the bus down (returns sda_low_ok, scl_low_ok).
-    pub fn drive_test(&mut self) -> (bool, bool) {
-        self.sda.set_low();
-        half();
-        let sda = !self.sda.is_high();
-        self.sda.set_high();
-        self.scl.set_low();
-        half();
-        let scl = !self.scl.is_high();
-        self.scl.set_high();
-        half();
-        (sda, scl)
-    }
-
     fn scl_high(&mut self) {
         self.scl.set_high();
         let t = Instant::now();
@@ -89,6 +74,47 @@ impl<'d> BbI2c<'d> {
         self.scl.set_low();
         half();
         ack
+    }
+
+    fn read_byte(&mut self, ack: bool) -> u8 {
+        let mut b = 0u8;
+        self.sda.set_high();
+        for _ in 0..8 {
+            half();
+            self.scl_high();
+            b = b << 1 | self.sda.is_high() as u8;
+            self.scl.set_low();
+        }
+        if ack { self.sda.set_low() } else { self.sda.set_high() }
+        half();
+        self.scl_high();
+        self.scl.set_low();
+        self.sda.set_high();
+        half();
+        b
+    }
+
+    /// Write `reg` (as given, e.g. a big-endian 16-bit register address),
+    /// then repeated-start and read `buf`. False if anything was not ACKed.
+    pub fn write_read(&mut self, addr: u8, reg: &[u8], buf: &mut [u8]) -> bool {
+        self.start();
+        let mut ok = self.write_byte(addr << 1);
+        for &b in reg {
+            if !ok { break; }
+            ok = self.write_byte(b);
+        }
+        if ok {
+            self.start();
+            ok = self.write_byte(addr << 1 | 1);
+        }
+        if ok {
+            let n = buf.len();
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = self.read_byte(i + 1 < n);
+            }
+        }
+        self.stop();
+        ok
     }
 
     /// Write `data` to `addr`. Returns false if any byte was not acknowledged.
