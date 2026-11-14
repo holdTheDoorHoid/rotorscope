@@ -15,10 +15,11 @@
 mod bb;
 mod links;
 mod psram_test;
+mod rgb;
 
 use esp_backtrace as _;
 use esp_hal::{
-    gpio::Flex,
+    gpio::{Flex, Pin},
     main,
     time::{Duration, Instant},
 };
@@ -108,12 +109,17 @@ mod selftest {
 fn main() -> ! {
     let p = esp_hal::init(esp_hal::Config::default());
     println!("hub-p4: hello, chip revision {:?}", esp_hal::efuse::chip_revision());
+    // SAFETY: read-only CACHE register (IDF 5.4.2 cache_reg.h, rev<3 map):
+    // L2_CACHE_CACHESIZE_CONF, bit 10 = 256 KB.
+    let l2 = unsafe { (0x3FF1_0278 as *const u32).read_volatile() };
+    let sp: u32;
+    // SAFETY: reads the stack pointer only.
+    unsafe { core::arch::asm!("mv {0}, sp", out(reg) sp) };
+    println!("hub-p4: L2 cachesize conf {l2:#x}, sp {sp:#x} (must be below 0x4ff80000)");
+    // The stack must not be in the L2 cache's RAM (see BRINGUP.md "Stack and
+    // the L2 cache"); the memory.x fix guarantees it, this catches a regression.
+    assert!(l2 == 0x400 && sp < 0x4FF8_0000, "stack inside the L2 cache or unexpected cache split");
 
-    // Order matters on this board (found 2026-11-14): if the PSRAM driver is
-    // the first to raise LDO VO2, the board I2C on GPIO45/46 stops working
-    // (lines read low / cannot pull low). Raising VO2 to the PSRAM driver's
-    // own setting first, then configuring the I2C pins, then PSRAM, works.
-    psram_test::vo2_on();
     let mut i2c = bb::BbI2c::new(Flex::new(p.GPIO45), Flex::new(p.GPIO46));
 
     let psram = psram_test::run(p.PSRAM, esp_hal::psram::SpiRamFreq::Mhz80);
@@ -136,6 +142,31 @@ fn main() -> ! {
         wait(1000);
     }
 
+    // Step 6: RGB panel from a PSRAM framebuffer (overwrites the PSRAM test
+    // pattern). Needs no CPU per frame once started.
+    let mut panel = psram.map(|(base, _)| {
+        let pins = rgb::Pins {
+            de: p.GPIO2.degrade(),
+            pclk: p.GPIO3.degrade(),
+            hsync: p.GPIO40.degrade(),
+            vsync: p.GPIO41.degrade(),
+            data: [
+                p.GPIO8.degrade(), p.GPIO7.degrade(), p.GPIO6.degrade(), p.GPIO5.degrade(), p.GPIO4.degrade(),
+                p.GPIO14.degrade(), p.GPIO13.degrade(), p.GPIO12.degrade(), p.GPIO11.degrade(), p.GPIO10.degrade(),
+                p.GPIO9.degrade(),
+                p.GPIO19.degrade(), p.GPIO18.degrade(), p.GPIO17.degrade(), p.GPIO16.degrade(), p.GPIO15.degrade(),
+            ],
+        };
+        let t = Instant::now();
+        let panel = rgb::Panel::start(pins, base.cast());
+        println!(
+            "hub-p4: rgb started in {} ms: fb {:p}, descs {:#x}, {}x{} total {}x{}, pclk {} Hz -> {} mHz frame",
+            t.elapsed().as_millis(), base, rgb::Panel::descs_base(), rgb::H_RES, rgb::V_RES, rgb::H_TOTAL, rgb::V_TOTAL,
+            rgb::PCLK_HZ, rgb::PCLK_HZ as u64 * 1000 / (rgb::H_TOTAL * rgb::V_TOTAL) as u64
+        );
+        panel
+    });
+
     let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28());
     println!("hub-p4: gateway link on UART3 RX GPIO28 at {} baud", links::BAUD);
 
@@ -143,11 +174,40 @@ fn main() -> ! {
     let mut selftest = selftest::Sender::new(p.UART2);
 
     let mut last = Instant::now();
+    let mut last_lcd = Instant::now();
+    let mut loops = 0u32;
+    let mut max_gap_us = 0u64;
+    let mut prev = Instant::now();
     loop {
+        let now = Instant::now();
+        max_gap_us = max_gap_us.max((now - prev).as_micros());
+        prev = now;
+        loops += 1;
         gw.poll();
+        if let Some(panel) = panel.as_mut() {
+            panel.poll();
+            // Own tick, so its print never stacks with the link block and
+            // stays far shorter than one frame (~24 ms).
+            if last_lcd.elapsed() >= Duration::from_secs(1) {
+                let ms = last_lcd.elapsed().as_millis().max(1);
+                last_lcd = Instant::now();
+                let [dscr, state, fifo, user] = panel.regs();
+                println!(
+                    "hub-p4: lcd vsync={} eof={} in {} ms, dma_err={:#x} x{}, dscr={:#x} state={:#x} fifo={:#x} user={:#x}, loops={} max_gap={}us",
+                    panel.vsync, panel.eof, ms, panel.dma_err, panel.dma_err_count, dscr, state, fifo, user, loops, max_gap_us
+                );
+                panel.vsync = 0;
+                panel.eof = 0;
+                panel.dma_err = 0;
+                panel.dma_err_count = 0;
+                loops = 0;
+                max_gap_us = 0;
+                prev = Instant::now();
+            }
+        }
         #[cfg(feature = "selftest")]
         selftest.tick();
-        if last.elapsed() >= Duration::from_secs(1) {
+        if last.elapsed() >= Duration::from_millis(1000) && last_lcd.elapsed() >= Duration::from_millis(500) {
             last = Instant::now();
             let s = &gw.stats;
             println!(

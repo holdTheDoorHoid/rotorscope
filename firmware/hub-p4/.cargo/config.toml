@@ -11,6 +11,11 @@ rustflags = ["-C", "link-arg=-Tlinkall.x", "-C", "force-frame-pointers"]
 # This board's chip is v1.3. Unset, esp-hal defaults to v3.0 and the image
 # traps on the first lock.
 ESP_HAL_CONFIG_MIN_CHIP_REVISION = "103"
+# Must match the L2 cache split the 2nd-stage bootloader programs. Elecrow's
+# bootloader (the one we flash) sets 256 KB (L2_CACHE_CACHESIZE_CONF = 0x400).
+# With patches/esp-hal-p4-pre-v3/rotorscope-pre-v3-memory.patch, RAM is then
+# 0x4FF40000..0x4FF80000 and the cache 0x4FF80000..0x4FFC0000.
+ESP_HAL_CONFIG_L2_CACHE_SIZE = "256KB"
 ESP_LOG = "info"
 
 [alias]

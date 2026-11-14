@@ -7,7 +7,8 @@
 # (naoNao89/esp32p4-pre-v3-kit 0.1.3, MIT/Apache-2.0; see PROVENANCE.md there)
 # against one pinned esp-hal commit. This script clones that commit and applies
 # the patch, after checking the patch's SHA-256 against manifest.json. We do not
-# run the kit's own tool; this does the same two steps in the open.
+# run the kit's own tool; this does the same two steps in the open. Our own
+# fixes on top (rotorscope-*.patch in the same folder) are applied after it.
 #
 # Output: firmware/patches/esp-hal-p4-pre-v3/upstream/ (git-ignored).
 set -euo pipefail
@@ -20,6 +21,11 @@ got="$(sha256sum "$dir/esp32p4-pre-v3.patch" | cut -d' ' -f1)"
 up="$dir/upstream"
 if [ -d "$up/.git" ]; then
     if [ "$(git -C "$up" rev-parse HEAD)" = "$rev" ] && git -C "$up" apply --reverse --check "$dir/esp32p4-pre-v3.patch" 2>/dev/null; then
+        for p in "$dir"/rotorscope-*.patch; do
+            [ -e "$p" ] || continue
+            if git -C "$up" apply --reverse --check "$p" 2>/dev/null; then continue; fi
+            git -C "$up" apply "$p" && echo "applied $(basename "$p")"
+        done
         echo "already prepared at $rev"; exit 0
     fi
     echo "$up exists but is not the prepared tree; remove it and rerun" >&2; exit 1
@@ -29,4 +35,9 @@ git -C "$up" remote add origin https://github.com/esp-rs/esp-hal.git
 git -C "$up" fetch -q --depth 1 origin "$rev"
 git -C "$up" checkout -q FETCH_HEAD
 git -C "$up" apply "$dir/esp32p4-pre-v3.patch"
+for p in "$dir"/rotorscope-*.patch; do
+    [ -e "$p" ] || continue
+    git -C "$up" apply "$p"
+    echo "applied $(basename "$p")"
+done
 echo "prepared esp-hal $rev + pre-v3 patch in $up"

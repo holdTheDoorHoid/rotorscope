@@ -1,0 +1,20 @@
+diff --git a/esp-hal/ld/esp32p4/memory.x b/esp-hal/ld/esp32p4/memory.x
+index d430562..ee1e980 100644
+--- a/esp-hal/ld/esp32p4/memory.x
++++ b/esp-hal/ld/esp32p4/memory.x
+@@ -32,7 +32,14 @@ RESERVED_L2_CACHE = 0;
+ 
+ MEMORY
+ {
+-    RAM : ORIGIN = 0x4FF00000 + RESERVED_L2_CACHE, LENGTH = 0x4FFAE000 - RESERVED_L2_CACHE - 0x4FF00000
++    /* Rotorscope (pre-v3 silicon): on chips below v3.0 the L2 cache sits at
++       the TOP of L2MEM, 0x4FFC0000 - cache size .. 0x4FFC0000, not the
++       bottom. Same split as ESP-IDF 5.4.2 esp32p4 memory.ld.in (sram_high =
++       0x4FF40000, length 0x80000 - L2 cache size); the space below 0x4FF40000
++       holds the 2nd-stage bootloader while it loads us. The kit's layout put
++       RAM and the stack inside the cache (found 2026-11-14: PSRAM sweeps
++       overwrote the stack). */
++    RAM : ORIGIN = 0x4FF40000, LENGTH = 0x80000 - RESERVED_L2_CACHE
+ 
+     /* External flash (XIP via cache); +0x20 skips the IDF app image header. */
+     ROM : ORIGIN = 0x40000000 + 0x20, LENGTH = 0x400000 - 0x20

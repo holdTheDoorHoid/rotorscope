@@ -12,7 +12,10 @@ pub fn run(peri: esp_hal::peripherals::PSRAM<'static>, freq: SpiRamFreq) -> Opti
     let t = Instant::now();
     let psram = Psram::new(peri, PsramConfig { ram_frequency: freq, ..Default::default() });
     let (base, size) = psram.raw_parts();
-    println!("hub-p4: pmu ext_ldo after  {:08x?}", ldo_regs());
+    println!(
+        "hub-p4: psram base {:p} size {} KiB, init {} ms; ldo after {:08x?}",
+        base, size / 1024, t.elapsed().as_millis(), ldo_regs()
+    );
     if size == 0 {
         return None;
     }
@@ -62,13 +65,3 @@ pub fn ldo_regs() -> [u32; 12] {
 }
 
 
-/// Raise LDO VO2 (PMU ext_ldo index 3 = p1_0p1a, the PSRAM supply) to the
-/// exact values the PSRAM driver writes, then let it settle.
-pub fn vo2_on() {
-    // SAFETY: PMU LDO control registers; same values `Psram::new` writes.
-    unsafe {
-        ((0x5011_5000u32 + 0x1b8 + 4 * 6) as *mut u32).write_volatile(0x4020_0180);
-        ((0x5011_5000u32 + 0x1b8 + 4 * 7) as *mut u32).write_volatile(0x5700_0000);
-    }
-    esp_hal::rom::ets_delay_us(200);
-}

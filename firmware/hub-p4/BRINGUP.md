@@ -50,21 +50,82 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 3 | I2C devices | PASS: 0x2F (STC8 backlight), 0x5D (GT911) both ACK |
 | 4 | Backlight writes | PASS (ACKed); not yet confirmed by eye |
 | - | esp-hal I2C controller | FAIL: every transfer times out, nothing starts (clock enabled, XTAL source, reset clear, `int_raw` only TXFIFO_WM). Not needed yet; bit-bang instead |
-| 5 | PSRAM | PASS: 32 MiB at 80 MHz, full write/read pattern, 0 bad words (37 MB/s write, 28 MB/s read, uncached word loop). See "PSRAM and the I2C pins" |
-| 6 | RGB panel | not started (esp-hal has no P4 RGB driver; LCD_CAM to write) |
+| 5 | PSRAM | PASS: 32 MiB at 80 MHz, full write/read pattern, 0 bad words (37 MB/s write, 28 MB/s read, uncached word loop). Earlier I2C trouble after PSRAM was the stack bug |
+| 6 | RGB panel (`src/rgb.rs`) | RUNNING, image NOT yet confirmed by eye: LCD_CAM + AXI-GDMA stream 42-43 frames/s (VSYNC and DMA EOF agree; 18 MHz PCLK predicts 42.54), 0 DMA errors, CPU loop unaffected. See "RGB panel" |
+| - | Stack inside L2 cache | FOUND + FIXED (memory.x patch): the kit's RAM overlapped the pre-v3 L2 cache; PSRAM sweeps corrupted the stack. See "Stack and the L2 cache" |
 | 7 | Gateway link on UART3 (RX GPIO28, 921600) | PASS on-chip self-test: UART2 TX drives the same pad; 50 frames/s, 0 corrupt, `Via` attribution right. Not yet with a real wire |
 | 8 | C6 over SDIO | not started; see "C6 and ESP-NOW" |
 
-## PSRAM and the I2C pins
+## PSRAM and the I2C pins (resolved: it was the stack)
 
-esp-hal's P4 PSRAM driver raises LDO VO2 (PMU ext_ldo p1_0p1a, IDF unit
-mapping {0,3,1,4}) to its PSRAM setting. When that happened inside
-`Psram::new`, the bit-banged I2C on GPIO45/46 stopped working afterwards
-(the pads could not pull the bus low, or the lines read low at idle),
-whether the pins were configured before or after. Writing the same VO2 values
-ourselves first (`psram_test::vo2_on`), then configuring the I2C pins, then
-`Psram::new`, works on every boot tried. The root cause is not pinned down.
-PSRAM itself needs VO2: putting it back after init hangs the first access.
+Before the stack fix below, the bit-banged I2C on GPIO45/46 failed after
+PSRAM init (lines read low, or could not pull low), and raising LDO VO2
+ourselves first seemed to cure it. That was a red herring: the stack lived in
+the L2 cache's RAM, and the 32 MB PSRAM test sweep overwrote it. With the
+memory map fixed, the I2C works after PSRAM with no LDO step (two boots,
+2026-11-14), so the workaround is gone. VO2 (PMU ext_ldo p1_0p1a, IDF unit
+mapping {0,3,1,4}) is the PSRAM supply: lowering it after init hangs PSRAM.
+
+## RGB panel
+
+`src/rgb.rs` is a register-level port of ESP-IDF v5.4.2's RGB panel driver
+(`esp_lcd_panel_rgb.c`, stream mode, one framebuffer, no bounce buffer) with
+`lcd_ll.h` / `axi_dma_ll.h`. Register offsets come from IDF 5.4.2's
+`soc/esp32p4/register/soc/*.h`, which is the pre-v3 map (Elecrow's factory
+image was built with 5.4.2 on this chip); the esp32p4 PAC is not used.
+
+| Item | Value |
+|---|---|
+| DMA | AXI-GDMA TX channel 0, peripheral id 0 (LCD_CAM), as IDF on P4 (`SOC_GDMA_TRIG_PERIPH_LCD0_BUS = AXI`). 240 descriptors of 3200 B (2 lines) in internal RAM, circular, EOF on the last; 64 B data burst, descriptor burst on, no owner check |
+| Framebuffer | 800x480 RGB565 at PSRAM 0x4800_0000 (reuses the PSRAM test area), written through the cache, then `Cache_WriteBack_Addr` (ROM, L1D+L2) |
+| Clock | PLL_F160M, HP_SYS_CLKRST fractional divider 4 + 4/9 = 36 MHz, LCD prescale 2 = **18 MHz PCLK** (IDF's own choice of divider for 18 MHz) |
+| Timing | H 4/8/800/8 (total 820), V 4/16/480/16 (total 516) |
+| Polarity | HSYNC and VSYNC idle high (active low), DE idle low (active high), PCLK idle low, `pclk_active_neg = true` (data changes on the falling edge). Constants at the top of `rgb.rs` |
+| Pins | GPIO matrix, signals 149 PCLK, 151 DE, 152 HSYNC, 153 VSYNC, 154+n data n; data 0..15 = B0-B4 (8,7,6,5,4), G0-G5 (14..9), R0-R4 (19..15) |
+| CPU cost | none per frame (`next_frame_en`); `Panel::poll` only counts flags |
+
+Measured 2026-11-14, log once a second: `vsync=42..43 eof=42..43` per
+1000 ms (18e6 / (820 x 516) = 42.54 Hz, so PCLK is 18 MHz as configured),
+`dma_err=0x0` (descriptor error and every FIFO under/overflow bit), current
+descriptor address different on every sample, main loop ~140k iterations/s,
+longest gap between link polls ~0.26 ms outside the log prints.
+
+**Unverified: nobody has looked at the screen yet.** A person must check it.
+Expected: eight vertical bars, left to right white, yellow, cyan, green,
+magenta, red, blue, black, each 100 px wide, with a 1-pixel white frame
+around the whole panel (visible against the black bar on the right). If
+red and blue are swapped, the data pins are B/R reversed; mirrored left to
+right means the panel scans the other way; a shimmering or one-pixel-shifted
+image means PCLK edge (`PCLK_ACTIVE_NEG`); a rolling or offset image means
+HSYNC/VSYNC/DE polarity or porches. Elecrow sources also quote 16 MHz PCLK.
+
+## Stack and the L2 cache
+
+The patched esp-hal's `memory.x` puts RAM at 0x4FF4_0000..0x4FFA_E000 with
+the stack growing down from the top, which assumes the v3 L2MEM layout (L2
+cache at the low end). On pre-v3 silicon the L2 cache sits at the **top**:
+IDF 5.4.2 `esp32p4/memory.ld.in` has sram_high = 0x4FF4_0000, length
+0x80000 - L2 cache size. This unit's bootloader sets 256 KB
+(`CACHE_L2_CACHE_CACHESIZE_CONF` = 0x400), so the cache data RAM is
+0x4FF8_0000..0x4FFC_0000 and the whole default stack was inside it.
+
+Symptom: after an unrelated change moved a pointer onto the stack, the PSRAM
+test faulted (load access fault, address 0) in its read loop: sweeping 32 MB
+through the cache had overwritten the saved PSRAM base on the stack.
+Code-only working sets touch few cache ways, which is why it hid until now.
+
+Fix: our own patch on top of the kit's,
+`firmware/patches/esp-hal-p4-pre-v3/rotorscope-pre-v3-memory.patch`
+(applied by `tools/p4-prepare.sh`), sets RAM to IDF's pre-v3 split:
+0x4FF4_0000, length 0x80000 - L2 cache size, so 0x4FF4_0000..0x4FF8_0000 with
+the 256 KB cache (`ESP_HAL_CONFIG_L2_CACHE_SIZE = "256KB"` in
+`.cargo/config.toml`, matching the bootloader). Below 0x4FF4_0000 is where the
+2nd-stage bootloader runs while it loads the app; IDF leaves it out too. The
+boot log prints the cache split and sp, and `main` asserts sp < 0x4FF8_0000.
+Verified 2026-11-14: stack top 0x4FF8_0000, PSRAM test, I2C and the panel all
+pass on two boots. (The first workaround, moving the stack into `.bss` from
+`main`, is no longer needed and was removed.) This should go upstream to the
+kit; ask the owner before offering it.
 
 ## C6 and ESP-NOW
 
