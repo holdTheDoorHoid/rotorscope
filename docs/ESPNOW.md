@@ -76,13 +76,42 @@ health. Gateway TX is XIAO D6 (GPIO11), 921600 baud, like a node.
 
 Average wait per send (queue + air + ACK) was about 3.7 ms.
 
+### PHY rate (2026-11-14, same setup, test beacon on, 60 s per rate)
+
+Build-time choice: `ROTORSCOPE_ESPNOW_RATE=<rate> cargo fw24-now`. The
+gateway enables Espressif Long Range in its protocol set, so it hears every
+rate below.
+
+| Rate | Packets | Failed | Wait per send |
+|---|---|---|---|
+| 1M (default, 802.11b) | 147 | 0 | 3.3 ms |
+| 11M | 143 | 0 | 2.3 ms |
+| 24M (11g) | 146 | 0 | 1.9 ms |
+| 54M (11g) | 145 | 0 | 1.6 ms |
+| MCS7 (11n) | 159 | 0 | 1.9 ms |
+| LR 250 kbit/s | 137 | 0 | 9.3 ms |
+
+Gateway over all six runs: 1121 packets, 0 lost, 0 duplicates, 1369 frames
+decoded, 0 corrupt. At this traffic (2-3 packets a second) the fastest rate
+saves under 0.5% of the node's listening time over 1M, so rate does not matter
+for efficiency here; it matters for range. Keep 1M by default; LR is the
+candidate for long links (costs ~9 ms per packet, about 2% of listening time
+at this load). Range is not measured yet.
+
+### Two nodes (2026-11-14, c5a and c5b both ESP-NOW nodes, 60 s)
+
+Gateway tracked both separately: 86 and 74 packets, 0 lost, 0 duplicates,
+191 frames decoded, 0 corrupt.
+
 Flash: `tools/dev-board.sh firmware/gateway/target/riscv32imac-unknown-none-elf/release/gateway 60 c5c`
 and the node from `firmware/node-wifi/target-espnow/...`.
 
 ## Not done yet
 
 * Range test (walk the node away; then try the Long Range PHY).
-* A faster PHY rate (`set_peer_rate`) to shorten airtime; measure listening time won back.
-* Several nodes at once (the gateway already tracks up to 16).
-* The P4 hub reading the gateway UART (header UART3, RX GPIO28).
-* S3 builds of node-wifi with `espnow` were not compiled: the disk filled up.
+* More than two nodes, and two nodes under heavy traffic.
+* The P4 hub reading the real gateway over a wire (UART3 RX GPIO28). The
+  reader passes an on-chip self-test (`cargo fw --features selftest`); the wire
+  itself needs connecting: gateway D6 (GPIO11) to the P4 UART3-IN header RX
+  (GPIO28), and GND to GND.
+* The S3 build of node-wifi with `espnow` compiles; it has not been run.

@@ -34,6 +34,21 @@ impl<'d> BbI2c<'d> {
         (self.sda.is_high(), self.scl.is_high())
     }
 
+    /// Drive each line low and read it back: shows whether the pads can pull
+    /// the bus down (returns sda_low_ok, scl_low_ok).
+    pub fn drive_test(&mut self) -> (bool, bool) {
+        self.sda.set_low();
+        half();
+        let sda = !self.sda.is_high();
+        self.sda.set_high();
+        self.scl.set_low();
+        half();
+        let scl = !self.scl.is_high();
+        self.scl.set_high();
+        half();
+        (sda, scl)
+    }
+
     fn scl_high(&mut self) {
         self.scl.set_high();
         let t = Instant::now();

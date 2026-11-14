@@ -75,6 +75,7 @@ async fn main(spawner: Spawner) -> ! {
     // SAFETY: NUL-terminated, outlives the call; Wi-Fi is initialised.
     unsafe { sys::esp_wifi_set_country_code(code.as_ptr().cast(), false) };
     wifi.set_band_mode(esp_radio::wifi::BandMode::_2_4G).expect("2.4 GHz band");
+    let lr = enable_lr();
     let esp_now = wifi.esp_now();
     esp_now.set_channel(CHANNEL).expect("set channel");
     let version = esp_now.version().unwrap_or(0);
@@ -82,8 +83,9 @@ async fn main(spawner: Spawner) -> ! {
     // SAFETY: 6-byte buffer; Wi-Fi is initialised.
     unsafe { sys::esp_wifi_get_mac(sys::wifi_interface_t_WIFI_IF_STA, mac.as_mut_ptr()) };
     println!(
-        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"mac":"{}"}}"#,
+        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}"}}"#,
         env!("CARGO_PKG_VERSION"),
+        lr == 0,
         Mac(mac)
     );
     let (manager, sender, receiver) = esp_now.split();
@@ -93,6 +95,14 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(beacon(sender).expect("spawn beacon"));
     spawner.spawn(stats().expect("spawn stats"));
     relay(receiver, hub).await
+}
+
+/// Add Espressif Long Range to the station's 2.4 GHz protocols (keeping b/g/n),
+/// so LR packets are understood; ordinary rates are unaffected.
+fn enable_lr() -> i32 {
+    let bits = (sys::WIFI_PROTOCOL_11B | sys::WIFI_PROTOCOL_11G | sys::WIFI_PROTOCOL_11N | sys::WIFI_PROTOCOL_LR) as u8;
+    // SAFETY: Wi-Fi is initialised; plain value arguments.
+    unsafe { sys::esp_wifi_set_protocol(sys::wifi_interface_t_WIFI_IF_STA, bits) }
 }
 
 struct Mac([u8; 6]);

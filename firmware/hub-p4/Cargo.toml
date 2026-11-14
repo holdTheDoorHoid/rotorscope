@@ -19,7 +19,16 @@ bench = false
 
 [workspace]
 
+[features]
+# Bring-up only: UART2 transmits sample link frames onto the gateway RX pin
+# (GPIO28) inside the chip, so the UART3 reader is tested without any wire.
+# Leave the UART3 header unconnected while this runs.
+selftest = []
+
 [dependencies]
+link = { path = "../../crates/link" }
+rid = { path = "../../crates/rid" }
+heapless = "0.8"
 esp-backtrace          = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-backtrace", features = ["esp32p4", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-bootloader-esp-idf", features = ["esp32p4"] }
 esp-hal                = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-hal", features = ["esp32p4", "unstable", "log-04"] }

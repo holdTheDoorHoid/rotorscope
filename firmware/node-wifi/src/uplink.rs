@@ -15,7 +15,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
 use embassy_time::{Duration, Instant, Timer};
-use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
+use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo, PhyMode, RateConfig, WifiPhyRate};
 
 use crate::report::HUB_QUEUE;
 use crate::rx::TUNED_CHANNEL;
@@ -29,6 +29,37 @@ const GIVE_UP: Duration = Duration::from_secs(2);
 const GATEWAY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the task looks at the queue and the channel.
 const POLL: Duration = Duration::from_millis(5);
+
+/// PHY rate toward the gateway, chosen at build time with
+/// `ROTORSCOPE_ESPNOW_RATE` (1M, 11M, 6M, 24M, 54M, MCS7, LR250K, LR500K).
+/// Unset: the driver default, 1 Mbit/s 802.11b, the longest reach of the
+/// standard rates. Faster rates spend less time on air per packet (more time
+/// listening for drones) but need a stronger signal. LR is Espressif's
+/// proprietary long-range mode; the gateway enables it in its protocol set.
+pub const RATE: Option<&str> = option_env!("ROTORSCOPE_ESPNOW_RATE");
+
+/// Add Espressif Long Range to the station's 2.4 GHz protocols (keeping b/g/n),
+/// so LR packets are understood; ordinary rates are unaffected.
+fn enable_lr() -> i32 {
+    let bits = (crate::chip::sys::WIFI_PROTOCOL_11B | crate::chip::sys::WIFI_PROTOCOL_11G | crate::chip::sys::WIFI_PROTOCOL_11N | crate::chip::sys::WIFI_PROTOCOL_LR) as u8;
+    // SAFETY: Wi-Fi is initialised; plain value arguments.
+    unsafe { crate::chip::sys::esp_wifi_set_protocol(crate::chip::sys::wifi_interface_t_WIFI_IF_STA, bits) }
+}
+
+fn rate_config(name: &str) -> Option<RateConfig> {
+    let (phy_mode, rate) = match name {
+        "1M" => (PhyMode::_11b, WifiPhyRate::Rate1mL),
+        "11M" => (PhyMode::_11b, WifiPhyRate::Rate11mS),
+        "6M" => (PhyMode::_11g, WifiPhyRate::Rate6m),
+        "24M" => (PhyMode::_11g, WifiPhyRate::Rate24m),
+        "54M" => (PhyMode::_11g, WifiPhyRate::Rate54m),
+        "MCS7" => (PhyMode::Ht20, WifiPhyRate::RateMcs7Lgi),
+        "LR250K" => (PhyMode::Lr, WifiPhyRate::RateLora250k),
+        "LR500K" => (PhyMode::Lr, WifiPhyRate::RateLora500k),
+        _ => return None,
+    };
+    Some(RateConfig { phy_mode, rate, ersu: false, dcm: false })
+}
 
 /// A send is in flight: the hopper must not retune yet.
 static BUSY: AtomicBool = AtomicBool::new(false);
@@ -59,6 +90,10 @@ pub async fn run(mut now: EspNow) {
     let mut seq: u16 = 0;
     let mut gateway: Option<([u8; 6], u8, Instant)> = None;
     let mut last_stats = Instant::now();
+    if RATE.is_some_and(|r| r.starts_with("LR")) {
+        let e = enable_lr();
+        esp_println::println!(r#"{{"t":"uplink","lr_protocol":{}}}"#, e == 0);
+    }
     let mut pending: Option<heapless::Vec<u8, { link::MAX_FRAME }>> = None;
 
     loop {
@@ -78,9 +113,16 @@ pub async fn run(mut now: EspNow) {
                         encrypt: false,
                     });
                 }
+                let rate_ok = match RATE.map(|r| (r, rate_config(r))) {
+                    None => "default",
+                    Some((_, None)) => "unknown",
+                    Some((_, Some(cfg))) => {
+                        if now.set_peer_rate(&mac, cfg).is_ok() { "set" } else { "refused" }
+                    }
+                };
                 esp_println::println!(
-                    r#"{{"t":"uplink","gateway":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","ch":{ch}}}"#,
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    r#"{{"t":"uplink","gateway":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","ch":{ch},"rate":"{}","rate_cfg":"{rate_ok}"}}"#,
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], RATE.unwrap_or("1M")
                 );
             }
             gateway = Some((mac, ch, Instant::now()));

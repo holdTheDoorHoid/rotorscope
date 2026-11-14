@@ -50,10 +50,21 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 3 | I2C devices | PASS: 0x2F (STC8 backlight), 0x5D (GT911) both ACK |
 | 4 | Backlight writes | PASS (ACKed); not yet confirmed by eye |
 | - | esp-hal I2C controller | FAIL: every transfer times out, nothing starts (clock enabled, XTAL source, reset clear, `int_raw` only TXFIFO_WM). Not needed yet; bit-bang instead |
-| 5 | PSRAM framebuffer | not started (kit: unvalidated) |
+| 5 | PSRAM | PASS: 32 MiB at 80 MHz, full write/read pattern, 0 bad words (37 MB/s write, 28 MB/s read, uncached word loop). See "PSRAM and the I2C pins" |
 | 6 | RGB panel | not started (esp-hal has no P4 RGB driver; LCD_CAM to write) |
-| 7 | Node UARTs (UART1, UART3) | not started |
+| 7 | Gateway link on UART3 (RX GPIO28, 921600) | PASS on-chip self-test: UART2 TX drives the same pad; 50 frames/s, 0 corrupt, `Via` attribution right. Not yet with a real wire |
 | 8 | C6 over SDIO | not started; see "C6 and ESP-NOW" |
+
+## PSRAM and the I2C pins
+
+esp-hal's P4 PSRAM driver raises LDO VO2 (PMU ext_ldo p1_0p1a, IDF unit
+mapping {0,3,1,4}) to its PSRAM setting. When that happened inside
+`Psram::new`, the bit-banged I2C on GPIO45/46 stopped working afterwards
+(the pads could not pull the bus low, or the lines read low at idle),
+whether the pins were configured before or after. Writing the same VO2 values
+ourselves first (`psram_test::vo2_on`), then configuring the I2C pins, then
+`Psram::new`, works on every boot tried. The root cause is not pinned down.
+PSRAM itself needs VO2: putting it back after init hangs the first access.
 
 ## C6 and ESP-NOW
 
