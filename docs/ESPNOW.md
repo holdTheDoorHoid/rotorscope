@@ -42,6 +42,50 @@ keep their full size budget. The S3 hub accepts and ignores `Via` (relayed
 frames count against the gateway's link); the P4 hub will use it for per-node
 health. Gateway TX is XIAO D6 (GPIO11), 921600 baud, like a node.
 
+## Downlink: hub to node (protocol 4)
+
+The hub decides what every node listens to (`crates/coverage`, see its
+README) and sends each node a `link::Command::Assign`. For a relayed node it
+goes through the gateway:
+
+1. **Hub to gateway, wire.** The hub writes `Command::To { node }` then
+   `Command::Assign(..)` (postcard + COBS, like every link frame) on its
+   UART TX, 921600 baud. On the P4 that is the UART3-IN header **TX =
+   GPIO27**, wired to the gateway's **D7 = GPIO12** (its UART1 RX). The hub
+   decides every 2 s, sends a changed assignment at once and resends every
+   assignment every 5 s.
+2. **Gateway to node, air.** The gateway pairs each `To` with the `Assign`
+   after it and sends that node an `airlink` **command packet** (kind 3):
+   the usual 6-byte header, then the `Assign` frame exactly as the hub
+   encoded it. Unicast, so the radio ACKs it (the peer is added on first
+   use). One sequence number per node; a retry reuses it.
+3. **Retries.** A node only hears the gateway while it is on channel 6. So
+   the gateway sends at once, again right after it next hears from that
+   node (the node is on 6 at that moment), and at each beacon, 4 tries in
+   all, then gives up and counts a failure. A newer command for the same
+   node replaces an older one that was not delivered yet.
+
+The gateway's USB log has a `"t":"down"` line per node once a second:
+commands from the hub, packets sent, ACKed, given up, replaced, and whether
+one is still pending; the `"t":"gw"` line counts bytes and commands from the
+hub and any corrupt or orphan (no `To`) commands.
+
+Nodes built before kind 3 existed do not parse it and ignore it. **The node
+side is not built yet**: a node does not apply an assignment, and still
+reports its own built-in plan. When it is built:
+
+* Wi-Fi plans for relayed nodes already include a visit to channel 6 at
+  least once a second (a 5 GHz node has to switch band for it).
+* A relayed raw-capture node (DroneID, FPV) has frequencies in its plan,
+  not channels: it must retune briefly to channel 6 by itself whenever it
+  has something to send, and listen there long enough for the gateway's
+  reply.
+
+Downlink is new transmitting by the gateway, but only to our own nodes and
+only when the hub has something to say (a few short packets every 5 s per
+node). Like the uplink it is not authenticated: someone nearby could send a
+node a fake assignment and make it listen elsewhere. See "Trade-offs" below.
+
 ## Which nodes can use it
 
 | Node | ESP-NOW | Why |
@@ -110,8 +154,5 @@ and the node from `firmware/node-wifi/target-espnow/...`.
 
 * Range test (walk the node away; then try the Long Range PHY).
 * More than two nodes, and two nodes under heavy traffic.
-* The P4 hub reading the real gateway over a wire (UART3 RX GPIO28). The
-  reader passes an on-chip self-test (`cargo fw --features selftest`); the wire
-  itself needs connecting: gateway D6 (GPIO11) to the P4 UART3-IN header RX
-  (GPIO28), and GND to GND.
+* The node side of the downlink (applying an `Assign`), see above.
 * The S3 build of node-wifi with `espnow` compiles; it has not been run.

@@ -1,0 +1,10 @@
+[package]
+name = "coverage"
+description = "Coverage coordinator: which node listens to what, from the hub's node table"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+link.workspace = true
+heapless.workspace = true

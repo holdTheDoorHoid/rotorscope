@@ -159,13 +159,20 @@ impl App {
         screen::from_tracker::fill_from_tracker(self.tracker, &ctx, &mut self.state);
         self.state.hub_uptime_s = (now / 1000) as u32;
         self.state.nodes.clear();
+        self.state.assigned.clear();
         for n in gw.nodes.iter() {
             let kind = match n.role {
                 Some(link::NodeRole::Wifi5) => NodeKind::Wifi5,
                 Some(link::NodeRole::Ble) => NodeKind::Ble,
                 Some(link::NodeRole::Fpv) => NodeKind::Fpv,
+                Some(link::NodeRole::DroneId) => NodeKind::DroneId,
                 _ => NodeKind::Wifi24,
             };
+            let _ = self.state.assigned.push(n.assigned.map(|(role, plan)| screen::Assigned {
+                role: crate::downlink::label(role),
+                plan,
+                applied: n.applied,
+            }));
             let _ = self.state.nodes.push(NodeStatus {
                 kind,
                 alive: now.saturating_sub(n.last_ms) < NODE_ALIVE_MS,
