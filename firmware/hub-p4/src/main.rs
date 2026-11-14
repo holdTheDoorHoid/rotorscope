@@ -225,6 +225,8 @@ fn main() -> ! {
     let band = unsafe { &mut *(&raw mut BAND) };
     let mut app = app::App::new(tracker, band);
 
+    #[cfg(feature = "fakenode")]
+    let mut last_fake = Instant::now();
     let mut last = Instant::now();
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
@@ -246,6 +248,31 @@ fn main() -> ! {
         }
         #[cfg(feature = "selftest")]
         selftest.tick();
+        #[cfg(feature = "fakenode")]
+        if last_fake.elapsed() >= Duration::from_millis(1000) {
+            last_fake = Instant::now();
+            let node = [0x02, 0x52, 0x53, 0, 0, 0x01];
+            let frames = [
+                link::Frame::Via { node, rssi: -40 },
+                link::Frame::Hello {
+                    role: link::NodeRole::Wifi24,
+                    protocol: link::PROTOCOL_VERSION,
+                    firmware: heapless::String::try_from("fakenode").unwrap(),
+                },
+                link::Frame::Via { node, rssi: -40 },
+                link::Frame::Status {
+                    role: link::NodeRole::Wifi24,
+                    can: link::NodeRole::Wifi24.bit() | link::NodeRole::Wifi5.bit(),
+                    plan: 0,
+                },
+            ];
+            for f in &frames {
+                let mut buf = [0u8; link::MAX_FRAME];
+                if let Ok(b) = link::encode(f, &mut buf) {
+                    gw.inject(b);
+                }
+            }
+        }
         prev = Instant::now();
         if last.elapsed() >= Duration::from_millis(1000) {
             last = Instant::now();

@@ -24,6 +24,12 @@ bench = false
 # (GPIO28) inside the chip, so the UART3 reader is tested without any wire.
 # Leave the UART3 header unconnected while this runs.
 selftest = []
+# Bench only: once a second, a made-up ESP-NOW node (02:52:53:00:00:01, a
+# locally administered address no real board has) "reports" through the link
+# decoder with Via + Hello + Status, so the coverage coordinator assigns it and
+# the hub sends real commands to the gateway. Nothing is driven onto GPIO28,
+# so the gateway wire can stay connected.
+fakenode = []
 
 [dependencies]
 link = { path = "../../crates/link" }

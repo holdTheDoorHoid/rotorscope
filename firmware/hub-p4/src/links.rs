@@ -151,6 +151,18 @@ impl<'d> GatewayLink<'d> {
         }
     }
 
+    /// Bench only (`fakenode`): put bytes into the receive ring as if they
+    /// had arrived on the wire.
+    #[cfg(feature = "fakenode")]
+    pub fn inject(&mut self, bytes: &[u8]) {
+        critical_section::with(|cs| {
+            let mut ring = RX.borrow_ref_mut(cs);
+            for &b in bytes {
+                let _ = ring.push_back(b);
+            }
+        });
+    }
+
     /// Queue `bytes` (whole frames) for the gateway. All or nothing: false,
     /// and counted, if the queue lacks room.
     pub fn send(&mut self, bytes: &[u8]) -> bool {
