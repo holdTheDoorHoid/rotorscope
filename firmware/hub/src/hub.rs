@@ -17,8 +17,11 @@ use crate::pins::NODE_LINKS;
 use crate::{clock, gnss, links, panel};
 
 /// Track table size. PLAN.md D7: 32 required, 64 goal. 64 fits without PSRAM
-/// (see the `"track_bytes"` field of the boot line for the real cost).
-pub const MAX_TRACKS: usize = 64;
+/// (see the `"track_bytes"` field of the boot line for the real cost). The
+/// C5 hub variant holds D7's 32: with protocol 4's DJI fields (~130 B a
+/// track) and signal tables, 64 overflowed its RAM by 6 KB and 48 left the
+/// main stack under 8 KB.
+pub const MAX_TRACKS: usize = if cfg!(feature = "esp32c5") { 32 } else { 64 };
 
 /// Aircraft table size: the tracker's default with an ADSBee (feature
 /// `adsbee`), else none at all, so a hub without one pays no RAM for it.

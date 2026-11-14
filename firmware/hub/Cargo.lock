@@ -462,6 +462,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "droneid"
+version = "0.1.0"
+
+[[package]]
 name = "edge-captive"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2137,6 +2141,7 @@ dependencies = [
  "embedded-graphics",
  "heapless 0.8.0",
  "libm",
+ "link",
  "rid",
  "tracker",
 ]
@@ -2545,6 +2550,7 @@ name = "tracker"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "droneid",
  "heapless 0.8.0",
  "libm",
  "link",
@@ -2552,6 +2558,7 @@ dependencies = [
  "rid",
  "serde",
  "serde-json-core",
+ "wifidrone",
 ]
 
 [[package]]
@@ -2608,6 +2615,10 @@ version = "0.1.0"
 dependencies = [
  "flate2",
 ]
+
+[[package]]
+name = "wifidrone"
+version = "0.1.0"
 
 [[package]]
 name = "winapi-util"

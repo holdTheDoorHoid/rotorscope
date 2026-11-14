@@ -64,15 +64,7 @@ impl App {
     /// Hand queued link frames to the tracker.
     pub fn ingest(&mut self, gw: &mut GatewayLink<'_>, now: u64) {
         while let Some((node, f)) = gw.out.pop_front() {
-            match f {
-                link::Frame::Detection(det) => {
-                    self.tracker.ingest(node, &det, now);
-                }
-                link::Frame::OpenLink(s) => {
-                    self.tracker.ingest_open_link(node, &s, now);
-                }
-                _ => {}
-            }
+            self.tracker.ingest_frame(node, &f, now);
         }
         while let Some(id) = self.tracker.take_new_drone(now) {
             self.ui.new_drone(id.0, now);
@@ -166,6 +158,7 @@ impl App {
                 Some(link::NodeRole::Ble) => NodeKind::Ble,
                 Some(link::NodeRole::Fpv) => NodeKind::Fpv,
                 Some(link::NodeRole::DroneId) => NodeKind::DroneId,
+                Some(link::NodeRole::Gateway) => NodeKind::Gateway,
                 _ => NodeKind::Wifi24,
             };
             let _ = self.state.assigned.push(n.assigned.map(|(role, plan)| screen::Assigned {

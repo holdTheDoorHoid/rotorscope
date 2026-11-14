@@ -1,0 +1,8 @@
+[package]
+name = "wifidrone"
+description = "no_std maker table for Wi-Fi drones and drone controllers: MAC prefixes and network names"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -10,6 +10,9 @@ rid = { workspace = true, features = ["serde"] }
 link.workspace = true
 openlink = { workspace = true, features = ["serde"] }
 adsb.workspace = true
+wifidrone.workspace = true
+# DJI product names and the radians-to-degrees factor (no_std, no default features).
+droneid.workspace = true
 heapless.workspace = true
 serde.workspace = true
 # Pure-Rust maths (sin/cos/atan2/sqrt) for range and bearing without std.

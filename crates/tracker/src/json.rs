@@ -8,7 +8,9 @@
 use serde::Serialize;
 
 use crate::aircraft::{AircraftTrack, icao_hex, same_drone};
+use crate::dji::Source;
 use crate::openlinks::{LinkTrack, LinkTrackId, shown_id};
+use crate::signals::{Emitter, EmitterId, WifiDrone, WifiDroneId, rf_label};
 use crate::text::{FormatError, Mac};
 use crate::{Band, Context, Track, TrackId, TrackState};
 use openlink::{Direction, System};
@@ -45,6 +47,106 @@ struct Line<'a> {
     self_id: Option<&'a FixedStr<23>>,
     op_id: Option<&'a FixedStr<20>>,
     own: Option<Own>,
+    /// Where `loc` and `op` came from: `"RemoteId"`, `"DroneId"` or
+    /// `"DjiWifi"`; null when absent. Added with protocol 4.
+    loc_src: Option<Source>,
+    op_src: Option<Source>,
+    /// DJI home point (DroneID only).
+    home: Option<Home>,
+    /// What DJI's own broadcasts said; null when none was heard.
+    dji: Option<Dji<'a>>,
+}
+
+#[derive(Serialize)]
+struct Home {
+    lat: f64,
+    lon: f64,
+    age_ms: u64,
+}
+
+#[derive(Serialize)]
+struct Dji<'a> {
+    /// DJI product code and its name, when sent.
+    product: Option<u8>,
+    model: Option<&'static str>,
+    /// Whether this unit shows DroneID identity (`!hide_droneid_ids`).
+    ids_shown: bool,
+    /// O4 session key ID, 8 hex digits; null when hidden or not O4.
+    key_id: Option<heapless::String<8>>,
+    /// Encrypted (O4) records only: position and serial unreadable.
+    encrypted: bool,
+    /// The shared track for bursts that did not decode.
+    undecoded: bool,
+    ocusync: Option<Ocu>,
+    wifi: Option<DjiWifiJ<'a>>,
+}
+
+#[derive(Serialize)]
+struct Ocu {
+    n: u32,
+    rssi: i8,
+    snr: i8,
+    mhz: f64,
+    age_ms: u64,
+    node: u8,
+}
+
+#[derive(Serialize)]
+struct DjiWifiJ<'a> {
+    n: u32,
+    rssi: i8,
+    ch: u8,
+    band: Band,
+    mac: Mac<'a>,
+    age_ms: u64,
+    node: u8,
+}
+
+/// Eight lowercase hex digits.
+pub(crate) fn key_hex(k: [u8; 4]) -> heapless::String<8> {
+    crate::text::render(KeyHex(k))
+}
+
+struct KeyHex([u8; 4]);
+
+impl core::fmt::Display for KeyHex {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
+    }
+}
+
+fn dji_json<'a>(t: &'a Track, ctx: &Context) -> Option<Dji<'a>> {
+    let d = &t.dji;
+    if !d.heard() {
+        return None;
+    }
+    let now = ctx.now_ms;
+    let shown = !ctx.config.hide_droneid_ids;
+    Some(Dji {
+        product: d.product_type,
+        model: d.product_name(),
+        ids_shown: shown,
+        key_id: d.key_id.filter(|_| shown).map(key_hex),
+        encrypted: d.key_id.is_some(),
+        undecoded: d.undecoded,
+        ocusync: d.ocusync.heard().then(|| Ocu {
+            n: d.ocusync.count,
+            rssi: d.ocusync.rssi,
+            snr: d.ocusync.snr_db,
+            mhz: f64::from(d.ocusync.freq) / 10.0,
+            age_ms: now.saturating_sub(d.ocusync.last_seen_ms),
+            node: d.ocusync.node,
+        }),
+        wifi: d.wifi.heard().then(|| DjiWifiJ {
+            n: d.wifi.count,
+            rssi: d.wifi.rssi,
+            ch: d.wifi.channel,
+            band: Band::of_wifi_channel(d.wifi.channel),
+            mac: Mac(&d.wifi.mac),
+            age_ms: now.saturating_sub(d.wifi.last_seen_ms),
+            node: d.wifi.node,
+        }),
+    })
 }
 
 #[derive(Serialize)]
@@ -136,10 +238,12 @@ struct Own {
 }
 
 /// A buffer this size always holds one line (worst case: all seven slots,
-/// i.e. every transport plus 5 GHz beacon and NAN, two IDs, every field at
-/// its longest: 1729 bytes, see the test). Kept tight because the hub holds
-/// several of these in static task state without PSRAM.
-pub const MAX_LINE: usize = 1792;
+/// i.e. every transport plus 5 GHz beacon and NAN, two IDs, DJI DroneID and
+/// Wi-Fi DroneID too, every field at its longest; see the test). Kept tight
+/// because the hub holds several of these in static task state without
+/// PSRAM. (1792 before protocol 4 added the `dji` object; worst case now
+/// 2216 bytes.)
+pub const MAX_LINE: usize = 2304;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.
 pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
@@ -193,13 +297,21 @@ pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize,
         first_ms: track.first_seen_ms,
         last_ms: track.last_seen_ms,
         age_ms: now.saturating_sub(track.last_seen_ms),
-        rssi: track.latest_link().map(|(_, l)| l.rssi),
+        rssi: track.latest_rssi(),
         links: Links(track, now),
         loc,
         op,
         self_id: track.self_id.as_ref().map(|s| &s.value.description),
         op_id: track.operator_id.as_ref().map(|s| &s.value.operator_id),
         own,
+        loc_src: track.location.as_ref().map(|_| track.location_src),
+        op_src: track.system.as_ref().map(|_| track.system_src),
+        home: track.home.as_ref().map(|h| Home {
+            lat: h.value.lat,
+            lon: h.value.lon,
+            age_ms: now.saturating_sub(h.rx_ms),
+        }),
+        dji: dji_json(track, ctx),
     };
     let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
     let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
@@ -441,6 +553,116 @@ impl core::fmt::Display for Octal4 {
     }
 }
 
+// ------------------------------------------------------- RF / Wi-Fi drones --
+
+#[derive(Serialize)]
+struct RfLine {
+    t: &'static str,
+    id: EmitterId,
+    state: TrackState,
+    /// `link::RfKind` name: `"AnalogVideo"`, `"FpvCarrier"`, `"Hdzero"`,
+    /// `"LteStyle"`, `"WifiNarrow"` or `"Energy"`.
+    kind: link::RfKind,
+    label: &'static str,
+    /// Whether this kind raises the new-signal alert (never for Energy).
+    alerts: bool,
+    mhz: f64,
+    width_khz: Option<u16>,
+    snr: i8,
+    peak_snr: i8,
+    duty: u8,
+    line_hz: Option<u16>,
+    n: u32,
+    node: u8,
+    first_ms: u64,
+    last_ms: u64,
+    age_ms: u64,
+}
+
+/// A buffer this size always holds one RF line (see the test).
+pub const MAX_RF_LINE: usize = 384;
+const _: () = assert!(MAX_RF_LINE <= MAX_LINE);
+
+/// Write one RF emitter as a JSON object followed by `\n` (`"t":"rf"`).
+pub fn rf_line(e: &Emitter, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let line = RfLine {
+        t: "rf",
+        id: e.id,
+        state: ctx.emitter_state(e),
+        kind: e.kind,
+        label: rf_label(e.kind),
+        alerts: crate::signals::rf_alerts(e.kind),
+        mhz: f64::from(e.freq) / 10.0,
+        width_khz: (e.width_khz != 0).then_some(e.width_khz),
+        snr: e.snr_db,
+        peak_snr: e.peak_snr_db,
+        duty: e.duty_pct,
+        line_hz: (e.line_hz != 0).then_some(e.line_hz),
+        n: e.sightings,
+        node: e.node,
+        first_ms: e.first_seen_ms,
+        last_ms: e.last_seen_ms,
+        age_ms: ctx.now_ms.saturating_sub(e.last_seen_ms),
+    };
+    finish(&line, buf)
+}
+
+#[derive(Serialize)]
+struct WifiDroneLine<'a> {
+    t: &'static str,
+    id: WifiDroneId,
+    state: TrackState,
+    maker: &'static str,
+    maker_id: u8,
+    ssid: &'a str,
+    /// Whether this unit shows transmitter addresses (`show_link_ids`).
+    ids_shown: bool,
+    mac: Option<Mac<'a>>,
+    ch: u8,
+    band: Band,
+    rssi: i8,
+    n: u32,
+    node: u8,
+    first_ms: u64,
+    last_ms: u64,
+    age_ms: u64,
+}
+
+/// A buffer this size always holds one Wi-Fi drone line (see the test).
+pub const MAX_WIFI_DRONE_LINE: usize = 448;
+const _: () = assert!(MAX_WIFI_DRONE_LINE <= MAX_LINE);
+
+/// Write one Wi-Fi drone as a JSON object followed by `\n` (`"t":"wifidrone"`).
+pub fn wifi_drone_line(w: &WifiDrone, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let show = ctx.config.show_link_ids;
+    let line = WifiDroneLine {
+        t: "wifidrone",
+        id: w.id,
+        state: ctx.wifi_drone_state(w),
+        maker: w.maker_name(),
+        maker_id: w.maker,
+        ssid: w.ssid.as_str(),
+        ids_shown: show,
+        mac: show.then_some(Mac(&w.mac)),
+        ch: w.channel,
+        band: w.band(),
+        rssi: w.rssi,
+        n: w.sightings,
+        node: w.node,
+        first_ms: w.first_seen_ms,
+        last_ms: w.last_seen_ms,
+        age_ms: ctx.now_ms.saturating_sub(w.last_seen_ms),
+    };
+    finish(&line, buf)
+}
+
+fn finish<T: Serialize>(line: &T, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let n = serde_json_core::to_slice(line, buf).map_err(|_| FormatError::BufferTooSmall)?;
+    let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
+    *nl = b'\n';
+    Ok(n + 1)
+}
+
 // ------------------------------------------------------------------ state --
 //
 // The phone page polls `GET /api/state` about once a second and gets one
@@ -493,7 +715,8 @@ pub struct ManualPos {
 /// Health of one radio node, for the page's status strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct NodeStatus {
-    /// Serialized as `"Wifi24"`, `"Wifi5"`, `"Ble"` or `"Fpv"`.
+    /// Serialized as `"Wifi24"`, `"Wifi5"`, `"Ble"`, `"Fpv"`, `"DroneId"`
+    /// or `"Gateway"`.
     pub role: link::NodeRole,
     /// The hub has heard from the node recently (any frame, e.g. within 5 s).
     pub alive: bool,
@@ -506,6 +729,11 @@ pub struct NodeStatus {
     pub rid_per_s: u32,
     /// Frames the node dropped (queue full), total since it booted.
     pub drops: Option<u32>,
+    /// Protocol 4: roles the node can take (mask of `NodeRole::bit`), from
+    /// its Status frame; `None` before one arrives or from older nodes.
+    pub can: Option<u8>,
+    /// Protocol 4: the hub plan it has applied (0 = its built-in one).
+    pub plan: Option<u16>,
 }
 
 /// Health of the ADS-B receiver (an ADSBee on a hub UART), for the page's
@@ -594,6 +822,68 @@ pub const STATE_LINKS_TO_TRACKS: &[u8] = b"],\"tracks\":[";
 pub const STATE_TRACKS_TO_AIRCRAFT: &[u8] = b"],\"aircraft\":[";
 /// The end of the state object.
 pub const STATE_END: &[u8] = b"]}\n";
+/// [`state_full`] only: between the aircraft and the RF emitters.
+pub const STATE_AIRCRAFT_TO_RF: &[u8] = b"],\"rf\":[";
+/// [`state_full`] only: between the RF emitters and the Wi-Fi drones.
+pub const STATE_RF_TO_WIFI: &[u8] = b"],\"wifi_drones\":[";
+
+/// As [`state_max_len`], plus room for `rf` emitters and `wifi` Wi-Fi drones
+/// in [`state_full`].
+pub const fn state_full_max_len(
+    tracks: usize,
+    links: usize,
+    aircraft: usize,
+    nodes: usize,
+    rf: usize,
+    wifi: usize,
+) -> usize {
+    state_max_len(tracks, links, aircraft, nodes)
+        + STATE_AIRCRAFT_TO_RF.len()
+        + STATE_RF_TO_WIFI.len()
+        + rf * (MAX_RF_LINE + 1)
+        + wifi * (MAX_WIFI_DRONE_LINE + 1)
+}
+
+/// The protocol-4 tables [`state_full`] adds after the aircraft.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Signals<'a> {
+    pub emitters: &'a [Emitter],
+    pub wifi_drones: &'a [WifiDrone],
+}
+
+/// [`state`], then `"rf":[...]` (each as [`rf_line`]) and
+/// `"wifi_drones":[...]` (each as [`wifi_drone_line`]) after the aircraft.
+/// `state` itself is unchanged, so a hub that streams it piece by piece
+/// keeps working; a reader treats missing `rf` / `wifi_drones` as empty.
+pub fn state_full(
+    tracks: &[Track],
+    links: &[LinkTrack],
+    aircraft: &[AircraftTrack],
+    signals: &Signals,
+    ctx: &Context,
+    hub: &HubStatus,
+    buf: &mut [u8],
+) -> Result<usize, FormatError> {
+    let mut n = state(tracks, links, aircraft, ctx, hub, buf)? - STATE_END.len();
+    put(buf, &mut n, STATE_AIRCRAFT_TO_RF)?;
+    for (i, e) in signals.emitters.iter().enumerate() {
+        if i > 0 {
+            put(buf, &mut n, b",")?;
+        }
+        let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
+        n += rf_line(e, ctx, rest)? - 1;
+    }
+    put(buf, &mut n, STATE_RF_TO_WIFI)?;
+    for (i, w) in signals.wifi_drones.iter().enumerate() {
+        if i > 0 {
+            put(buf, &mut n, b",")?;
+        }
+        let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
+        n += wifi_drone_line(w, ctx, rest)? - 1;
+    }
+    put(buf, &mut n, STATE_END)?;
+    Ok(n)
+}
 
 /// Write the `/api/state` body: one JSON object followed by `\n`. Returns
 /// bytes written.

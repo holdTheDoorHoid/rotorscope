@@ -441,3 +441,162 @@ pub fn ble_service_data(counter: u8, payload: &[u8], out: &mut [u8]) -> Result<u
     w.put(payload)?;
     Ok(w.len)
 }
+
+// --- DJI legacy Wi-Fi DroneID (test transmitters and synthetic tests) -----
+
+/// Degrees to DJI's radians x 1e7 (the inverse of `dji`'s decoding).
+fn dji_rad_e7(deg: f64) -> i32 {
+    clamp(
+        round_f64(deg * core::f64::consts::PI / 180.0 * 1e7) as i64,
+        i32::MIN as i64,
+        i32::MAX as i64,
+    ) as i32
+}
+
+fn dji_header(sub: u8, out: &mut [u8], len: usize) -> Result<(), Error> {
+    if out.len() < len {
+        return Err(Error::BufferTooSmall);
+    }
+    out[..3].copy_from_slice(&crate::dji::OUI);
+    // Vendor type and the two bytes after it are not checked by the parser;
+    // 0x58 0x62 0x13 are the values public captures show.
+    out[3..6].copy_from_slice(&[0x58, 0x62, 0x13]);
+    out[6] = sub;
+    Ok(())
+}
+
+/// A DJI DroneID flight-information element body (from the OUI, as
+/// [`crate::dji::parse_element`] takes it): the inverse of that parser,
+/// including the extension when `info.ext` is set. A `None` position or
+/// home is sent as 0,0. Returns the length used.
+pub fn dji_flight_info(info: &crate::dji::FlightInfo, out: &mut [u8]) -> Result<usize, Error> {
+    let uuid = info.ext.as_ref().map_or(&[][..], |e| e.uuid.as_bytes());
+    let len = 7 + if info.ext.is_some() {
+        55 + uuid.len()
+    } else {
+        29
+    };
+    dji_header(crate::dji::FLIGHT_INFO, out, len)?;
+    let r = &mut out[7..len];
+    let pos = |p: Option<LatLon>| p.map_or((0, 0), |p| (dji_rad_e7(p.lat), dji_rad_e7(p.lon)));
+    r[0] = info.version;
+    r[1..3].copy_from_slice(&info.seq.to_le_bytes());
+    r[3..5].copy_from_slice(&info.state.to_le_bytes());
+    r[5..21].copy_from_slice(info.serial.raw());
+    let (lat, lon) = pos(info.position);
+    // Longitude first on the wire.
+    r[21..25].copy_from_slice(&lon.to_le_bytes());
+    r[25..29].copy_from_slice(&lat.to_le_bytes());
+    if let Some(e) = &info.ext {
+        let hundredths = |d: f32| (round_f32(d * 100.0) as i16).to_le_bytes();
+        r[29..31].copy_from_slice(&e.altitude.to_le_bytes());
+        r[31..33].copy_from_slice(&e.height.to_le_bytes());
+        r[33..35].copy_from_slice(&e.v_north.to_le_bytes());
+        r[35..37].copy_from_slice(&e.v_east.to_le_bytes());
+        r[37..39].copy_from_slice(&e.v_up.to_le_bytes());
+        r[39..41].copy_from_slice(&hundredths(e.pitch));
+        r[41..43].copy_from_slice(&hundredths(e.roll));
+        r[43..45].copy_from_slice(&hundredths(e.yaw));
+        let (hlat, hlon) = pos(e.home);
+        r[45..49].copy_from_slice(&hlon.to_le_bytes());
+        r[49..53].copy_from_slice(&hlat.to_le_bytes());
+        r[53] = e.product_type;
+        r[54] = uuid.len() as u8;
+        r[55..].copy_from_slice(uuid);
+    }
+    Ok(len)
+}
+
+/// A DJI DroneID flight-purpose element body (from the OUI). Returns the
+/// length used.
+pub fn dji_flight_purpose(
+    serial: &[u8],
+    drone_id: &[u8],
+    purpose: &[u8],
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    check(serial.len() <= 16 && drone_id.len() <= 10 && purpose.len() <= 255)?;
+    let len = 7 + 28 + purpose.len();
+    dji_header(crate::dji::FLIGHT_PURPOSE, out, len)?;
+    let r = &mut out[7..len];
+    r.fill(0);
+    r[..serial.len()].copy_from_slice(serial);
+    r[16] = drone_id.len() as u8;
+    r[17..17 + drone_id.len()].copy_from_slice(drone_id);
+    r[27] = purpose.len() as u8;
+    r[28..].copy_from_slice(purpose);
+    Ok(len)
+}
+
+#[cfg(test)]
+mod dji_tests {
+    use super::*;
+    use crate::dji::{FlightInfo, FlightInfoExt, Record, parse_element};
+    use crate::message::FixedStr;
+
+    #[test]
+    fn flight_info_round_trips() {
+        let info = FlightInfo {
+            version: 2,
+            seq: 513,
+            state: FlightInfo::STATE_GPS_VALID | FlightInfo::STATE_IN_AIR,
+            serial: FixedStr::new(b"TEST0SYNTH000001").unwrap(),
+            position: Some(LatLon {
+                lat: 39.95,
+                lon: -75.16,
+            }),
+            ext: Some(FlightInfoExt {
+                altitude: 120,
+                height: 80,
+                v_north: -250,
+                v_east: 400,
+                v_up: 50,
+                pitch: -1.5,
+                roll: 2.25,
+                yaw: 90.0,
+                home: Some(LatLon {
+                    lat: 39.951,
+                    lon: -75.161,
+                }),
+                product_type: 21,
+                uuid: FixedStr::new(b"abc").unwrap(),
+            }),
+        };
+        let mut buf = [0u8; 128];
+        let n = dji_flight_info(&info, &mut buf).unwrap();
+        let Some(Record::FlightInfo(got)) = parse_element(&buf[..n]) else {
+            panic!("did not parse");
+        };
+        let p = got.position.unwrap();
+        // One unit is 1e-7 rad, about 5.7e-6 degrees.
+        assert!((p.lat - 39.95).abs() < 6e-6 && (p.lon + 75.16).abs() < 6e-6);
+        assert_eq!(got.serial, info.serial);
+        let (e, w) = (got.ext.unwrap(), info.ext.unwrap());
+        assert_eq!(
+            (e.altitude, e.v_east, e.product_type, e.yaw),
+            (w.altitude, w.v_east, 21, 90.0)
+        );
+        assert_eq!(e.uuid, w.uuid);
+        // Without the extension, the 29-byte core only.
+        let short = FlightInfo { ext: None, ..info };
+        let n = dji_flight_info(&short, &mut buf).unwrap();
+        assert_eq!(n, 7 + 29);
+        assert!(matches!(parse_element(&buf[..n]), Some(Record::FlightInfo(f)) if f.ext.is_none()));
+        assert_eq!(
+            dji_flight_info(&short, &mut buf[..10]),
+            Err(Error::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn purpose_round_trips() {
+        let mut buf = [0u8; 64];
+        let n = dji_flight_purpose(b"TEST0SYNTH000001", b"ID42", b"survey", &mut buf).unwrap();
+        let Some(Record::FlightPurpose(p)) = parse_element(&buf[..n]) else {
+            panic!("did not parse");
+        };
+        assert_eq!(p.serial.as_str(), Some("TEST0SYNTH000001"));
+        assert_eq!(p.drone_id.as_str(), Some("ID42"));
+        assert_eq!(p.purpose.as_str(), Some("survey"));
+    }
+}

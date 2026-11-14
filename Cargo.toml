@@ -7,6 +7,7 @@ members = [
     "crates/gnss", "crates/screen", "crates/webui",
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap", "crates/airlink",
     "crates/coverage",
+    "crates/wifidrone",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull",
     "tools/cc26xx-flash",
 ]
@@ -23,6 +24,8 @@ link = { path = "crates/link" }
 tracker = { path = "crates/tracker" }
 openlink = { path = "crates/openlink" }
 adsb = { path = "crates/adsb" }
+wifidrone = { path = "crates/wifidrone" }
+droneid = { path = "crates/droneid", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
 heapless = { version = "0.8", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["heapless"] }

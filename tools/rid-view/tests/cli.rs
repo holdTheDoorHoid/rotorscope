@@ -159,7 +159,36 @@ fn demo_once() {
     assert!(out.status.success());
     let all = tracks(&out.stdout);
     let t: Vec<_> = all.iter().filter(|l| l["t"] == "track").collect();
-    assert_eq!(t.len(), 2);
+    // ALPHA, BRAVO; CHARLIE (DroneID + Remote ID, one track), the O4 drone,
+    // the undecoded DroneID bursts and DELTA (DJI Wi-Fi).
+    assert_eq!(t.len(), 6);
+    let charlie = t
+        .iter()
+        .find(|t| t["ids"][0]["id"] == "DEMO0CHARLIE0003")
+        .unwrap();
+    assert_eq!(charlie["dji"]["model"], "Mavic 3");
+    assert_eq!(charlie["links"][0]["tr"], "WifiBeacon");
+    assert!(charlie["dji"]["ocusync"]["n"].as_u64().unwrap() > 1);
+    assert!(
+        t.iter()
+            .any(|t| t["dji"]["key_id"] == "dec00004" && t["loc"].is_null())
+    );
+    assert!(t.iter().any(|t| t["dji"]["undecoded"] == true));
+    let delta = t
+        .iter()
+        .find(|t| t["ids"][0]["id"] == "DEMO0DELTA000004")
+        .unwrap();
+    assert_eq!(delta["loc_src"], "DjiWifi");
+    // RF emitters and the Wi-Fi drone: their own lines.
+    let rf: Vec<_> = all.iter().filter(|l| l["t"] == "rf").collect();
+    assert_eq!(rf.len(), 3, "{all:?}");
+    assert_eq!(rf[0]["kind"], "AnalogVideo");
+    assert_eq!(rf[0]["line_hz"], 15734);
+    assert_eq!(rf[2]["alerts"], false);
+    let w: Vec<_> = all.iter().filter(|l| l["t"] == "wifidrone").collect();
+    assert_eq!(w.len(), 1);
+    assert_eq!(w[0]["maker"], "DJI Tello");
+    assert!(w[0]["mac"].is_null());
     // No --own-pos: geometry is null (P4), not invented.
     assert!(t.iter().all(|t| t["own"].is_null()));
     // The demo FPV link is listed apart from the drones, its ID hidden.
@@ -175,7 +204,7 @@ fn demo_once() {
     assert_eq!(a[0]["call"], "DEMOHELI");
     assert_eq!(a[0]["kind"], "Rotorcraft");
     assert!(a[2]["lat"].is_null(), "the third has no position");
-    assert_eq!(all.len(), 6);
+    assert_eq!(all.len(), 14);
 
     // Opting in shows the link ID.
     let out = Command::new(BIN)
@@ -197,6 +226,57 @@ fn demo_once() {
 
 /// A node's `"t":"open"` lines become one open link, kept apart from drones,
 /// logged to CSV with the identifier left out.
+/// Protocol-4 frames from a node as `{"t":"frame","frame":{...}}` lines:
+/// decoded with the link crate's own types and printed in the table.
+#[test]
+fn frame_lines_from_a_node() {
+    let lines = [
+        r#"{"t":"frame","frame":{"Status":{"role":"DroneId","can":16,"plan":5}}}"#,
+        r#"{"t":"frame","frame":{"DroneId":{"freq":57565,"rssi":-80,"snr_db":6,"uptime_us":1,"record":{"Encrypted":{"key_id":[1,2,3,4]}}}}}"#,
+        r#"{"t":"frame","frame":{"DroneId":{"freq":24145,"rssi":-90,"snr_db":2,"uptime_us":2,"record":"Detected"}}}"#,
+        r#"{"t":"frame","frame":{"Rf":{"kind":"AnalogVideo","freq":58060,"width_khz":8000,"snr_db":20,"duty_pct":100,"line_hz":15734,"uptime_us":3}}}"#,
+        r#"{"t":"frame","frame":{"WifiDrone":{"maker":2,"mac":[144,3,183,1,2,3],"ssid":"Bebop2_123456","channel":6,"rssi":-61,"uptime_us":4}}}"#,
+        r#"{"t":"frame","frame":{"Rf":{"kind":"NoSuchKind"}}}"#,
+    ]
+    .join("\n");
+    let mut child = Command::new(BIN)
+        .args(["--once", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("O4 01020304 5756.5"), "{text}");
+    assert!(text.contains("DroneID? 2414.5"), "{text}");
+    assert!(text.contains("RADIO SIGNALS"), "{text}");
+    assert!(
+        text.contains("Analog video") && text.contains("5806.0") && text.contains("15734"),
+        "{text}"
+    );
+    assert!(
+        text.contains("WI-FI DRONES") && text.contains("Parrot") && text.contains("Bebop2_123456"),
+        "{text}"
+    );
+    assert!(text.contains("hidden"), "addresses hidden: {text}");
+    assert!(text.contains("role DroneId, can 0x10, plan 5"), "{text}");
+    assert!(
+        text.contains("other frames: 5") && text.contains("unparsed: 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("new RF signal: Analog video 5806.0 MHz"),
+        "{text}"
+    );
+}
+
 #[test]
 fn open_link_lines_from_a_node() {
     let dir = std::env::temp_dir().join(format!("rid-view-open-{}", std::process::id()));
@@ -377,16 +457,22 @@ fn cot_over_udp() {
             .unwrap()
             .to_string();
         seen.insert(uid);
-        if seen.len() == 6 {
+        if seen.len() == 9 {
             break;
         }
     }
     // The two demo aircraft with a position; the third has none to plot.
+    // CHARLIE once (DroneID and Remote ID are one track), DELTA without a
+    // pilot (the Wi-Fi element has no pilot position); the O4 and
+    // undecoded DroneID tracks have no position, so no event.
     let want: std::collections::BTreeSet<String> = [
         "drone-DEMO-ALPHA-0001",
         "pilot-DEMO-ALPHA-0001",
         "drone-DEMO-BRAVO-0002",
         "pilot-DEMO-BRAVO-0002",
+        "drone-DEMO0CHARLIE0003",
+        "pilot-DEMO0CHARLIE0003",
+        "drone-DEMO0DELTA000004",
         "ICAO-DE0001",
         "ICAO-DE0002",
     ]
@@ -505,9 +591,9 @@ fn http_serves_page_and_state() {
     assert_eq!(get(addr, "/nope").0, 404);
     assert_eq!(post(addr, "/api/state", "{}").0, 405);
 
-    // The state: both demo drones, both demo nodes, our position.
+    // The state: the demo drones (six with DroneID), the demo nodes, our position.
     let v = state_until(addr, |v| {
-        v["tracks"].as_array().is_some_and(|t| t.len() == 2)
+        v["tracks"].as_array().is_some_and(|t| t.len() == 6)
     });
     assert_eq!(v["t"], "state");
     assert_eq!(v["v"], 1);
@@ -521,7 +607,23 @@ fn http_serves_page_and_state() {
         .iter()
         .map(|n| n["role"].clone())
         .collect();
-    assert_eq!(roles, [json!("Wifi24"), json!("Ble"), json!("Wifi5")]);
+    assert_eq!(
+        roles,
+        [
+            json!("Wifi24"),
+            json!("Ble"),
+            json!("Wifi5"),
+            json!("DroneId"),
+            json!("Fpv")
+        ]
+    );
+    // Status frames reached the node health.
+    assert_eq!(v["nodes"][3]["plan"], 2);
+    let v3 = state_until(addr, |v| {
+        v["rf"].as_array().is_some_and(|r| r.len() == 3)
+            && v["wifi_drones"].as_array().is_some_and(|w| w.len() == 1)
+    });
+    assert_eq!(v3["wifi_drones"][0]["ssid"], "TELLO-DE0005");
     let v = state_until(addr, |v| {
         v["open_links"].as_array().is_some_and(|l| l.len() == 1)
     });
@@ -539,6 +641,7 @@ fn http_serves_page_and_state() {
             .as_array()
             .unwrap()
             .iter()
+            .filter(|t| !t["loc"].is_null())
             .all(|t| t["t"] == "track" && t["own"]["dist_m"].is_number())
     );
 

@@ -339,8 +339,27 @@ function idOf(t) {
   if (ids.length) return ids[0].id;
   // Not identified yet: the transmitter address.
   const l = (t.links || []).slice().sort((a, b) => a.age_ms - b.age_ms)[0];
-  return l ? 'MAC ' + l.mac : 'unknown';
+  if (l) return 'MAC ' + l.mac;
+  // DJI DroneID with no readable (or shown) identity.
+  const d = t.dji;
+  if (d) {
+    const mhz = d.ocusync ? ' ' + d.ocusync.mhz.toFixed(1) + ' MHz' : '';
+    if (d.encrypted) return (d.key_id ? 'O4 ' + d.key_id : 'O4 drone') + mhz;
+    if (d.undecoded) return 'DroneID burst' + mhz;
+    if (d.wifi) return 'DJI Wi-Fi ' + d.wifi.mac;
+    return 'DJI' + mhz;
+  }
+  return 'unknown';
 }
+// Every way a drone was heard, as names: Remote ID radios, then DJI's own.
+function radiosOf(t) {
+  const r = (t.links || []).map(radioName);
+  const d = t.dji;
+  if (d && d.ocusync) r.push(d.encrypted ? 'DJI DroneID (O4)' : 'DJI DroneID');
+  if (d && d.wifi) r.push('DJI Wi-Fi');
+  return r;
+}
+const SRC = {RemoteId: 'Remote ID', DroneId: 'DJI DroneID', DjiWifi: 'DJI Wi-Fi'};
 function rank(type) { const i = ID_RANK.indexOf(type); return i < 0 ? 9 : i; }
 
 const UA = {HelicopterOrMultirotor: 'Multirotor', Aeroplane: 'Fixed-wing', HybridLift: 'VTOL',
@@ -362,7 +381,8 @@ function radioName(l) {
     default: return String(l.tr);
   }
 }
-const ROLE = {Wifi24: ['2.4', 'Wi-Fi 2.4 GHz'], Wifi5: ['5G', 'Wi-Fi 5 GHz'], Ble: ['BT', 'Bluetooth'], Fpv: ['FPV', 'FPV video']};
+const ROLE = {Wifi24: ['2.4', 'Wi-Fi 2.4 GHz'], Wifi5: ['5G', 'Wi-Fi 5 GHz'], Ble: ['BT', 'Bluetooth'], Fpv: ['FPV', 'FPV video'],
+  DroneId: ['DID', 'DJI DroneID'], Gateway: ['GW', 'ESP-NOW gateway']};
 const role = r => ROLE[r] || [String(r), String(r)];
 
 // Hub time -> local clock text. Uses the hub's GPS time when it has one.
@@ -433,8 +453,22 @@ function checkNew() {
     alerts.unshift({id: t.id, at: Date.now()});
     ring();
   }
+  // Radio signals and Wi-Fi drones: a NEW tag and the sound, no banner.
+  // Plain energy (alerts: false) never rings.
+  const sigs = [...(st.rf || []).filter(e => e.alerts).map(e => ['rf' + e.id, e]),
+                ...(st.wifi_drones || []).map(w => ['w' + w.id, w])];
+  for (const [k, x] of sigs) {
+    if (known.has(k) || x.state === 'stale') continue;
+    known.add(k);
+    if (!primed) continue;
+    sigNew.set(k, Date.now());
+    ring();
+  }
+  const sigKeys = new Set(sigs.map(([k]) => k));
   primed = true;
-  for (const id of known) if (!findTrack(id)) { known.delete(id); newAt.delete(id); }
+  for (const id of known) {
+    if (typeof id === 'string' ? !sigKeys.has(id) : !findTrack(id)) { known.delete(id); newAt.delete(id); sigNew.delete(id); }
+  }
 }
 
 // Sound needs an AudioContext started from a tap; vibration needs the page
@@ -657,12 +691,14 @@ function renderList() {
       `<div class="r1"><span class="num">#${t.id}</span><span class="id mono">${esc(idOf(t))}</span>${tags}</div>` +
       `<div class="r2">${where}</div>` +
       `<div class="r2"><span>Height ${fmtAlt(h)}</span><span>Speed ${fmtSpd(l.speed)}</span>` +
-      `<span class="mut">${esc(uaName(t.ua))}</span></div>` +
-      `<div class="r3">${(t.links || []).map(x => `<span class="rad">${esc(radioName(x))}</span>`).join('')}` +
+      `<span class="mut">${esc((t.dji && t.dji.model) || uaName(t.ua))}</span></div>` +
+      `<div class="r3">${radiosOf(t).map(x => `<span class="rad">${esc(x)}</span>`).join('')}` +
       `<span>heard ${ago(t.age_ms)}</span>${t.rssi != null ? `<span>${t.rssi} dBm</span>` : ''}</div>` +
       `</button>`);
   }
   o.push(...linkCards());
+  o.push(...rfCards());
+  o.push(...wifiDroneCards());
   o.push(...aircraftCards());
   setHTML('v-list', o.join(''));
 }
@@ -686,6 +722,51 @@ function linkCards() {
   }
   o.push('<div class="mut" style="font-size:14px">A digital video or telemetry link is on the air nearby; its position is unknown.' +
     (all.some(l => !l.ids_shown) ? ' Identifiers are hidden by the hub.' : '') + '</div>');
+  return o;
+}
+
+/* RF emitters from a raw-capture node (analog video, HDZero, LTE-style
+   links...): no position, only listed. "Energy" is unclassified and never
+   alerts; the hub says which kinds do (`alerts`). */
+const sigNew = new Map();
+const isSigNew = k => sigNew.has(k) && Date.now() - sigNew.get(k) < NEW_FOR_MS;
+function rfCards() {
+  const all = ((st && st.rf) || []).slice().sort((a, b) =>
+    ((a.state === 'stale') - (b.state === 'stale')) || (b.snr - a.snr));
+  if (!all.length) return [];
+  const o = ['<h2>Radio signals</h2>'];
+  for (const e of all) {
+    const stale = e.state === 'stale', nw = isSigNew('rf' + e.id) && !stale;
+    const what = e.line_hz ? `video lines ${(e.line_hz / 1000).toFixed(2)} kHz` : `on ${e.duty}% of the time`;
+    o.push(`<div class="trk${stale ? ' stale' : ''}${nw ? ' new' : ''}">` +
+      `<div class="r1"><span class="id">${esc(e.label)}</span>` +
+      (nw ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') + `</div>` +
+      `<div class="r2"><span class="big">${e.mhz.toFixed(1)} MHz</span><span>+${e.snr} dB</span></div>` +
+      `<div class="r3"><span>${esc(what)}</span>` + (e.width_khz ? `<span>${(e.width_khz / 1000).toFixed(1)} MHz wide</span>` : '') +
+      `<span>heard ${ago(e.age_ms)}</span></div></div>`);
+  }
+  o.push('<div class="mut" style="font-size:14px">A transmitter of this kind is on the air nearby; its position is unknown. ' +
+    'Level is above the noise floor, not distance.</div>');
+  return o;
+}
+
+/* Wi-Fi networks that look like a drone or its controller, by maker. The
+   address is null unless the hub shows identifiers. */
+function wifiDroneCards() {
+  const all = ((st && st.wifi_drones) || []).slice().sort((a, b) =>
+    ((a.state === 'stale') - (b.state === 'stale')) || (b.rssi - a.rssi));
+  if (!all.length) return [];
+  const o = ['<h2>Wi-Fi drones</h2>'];
+  for (const w of all) {
+    const stale = w.state === 'stale', nw = isSigNew('w' + w.id) && !stale;
+    o.push(`<div class="trk${stale ? ' stale' : ''}${nw ? ' new' : ''}">` +
+      `<div class="r1"><span class="id">${esc(w.maker)}</span>` +
+      (nw ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') + `</div>` +
+      `<div class="r2"><span class="mono">${esc(w.ssid)}</span></div>` +
+      `<div class="r3"><span>ch ${w.ch}${w.band === '5' ? ' (5 GHz)' : ''}</span><span>${w.rssi} dBm</span>` +
+      `<span>heard ${ago(w.age_ms)}</span>` + (w.mac ? `<span class="mono">${esc(w.mac)}</span>` : '') + `</div></div>`);
+  }
+  o.push('<div class="mut" style="font-size:14px">Recognised by network name and address prefix; names can be changed, so treat as a hint.</div>');
   return o;
 }
 
@@ -765,6 +846,7 @@ function renderDetail() {
       row('Altitude', `${fmtAlt(l.alt_geo)} GPS &middot; ${fmtAlt(l.alt_baro)} baro`) +
       row('Speed', `${fmtSpd(l.speed)} &middot; climb ${fmtVs(l.vspeed)}`) +
       row('Heading', l.dir == null ? '?' : bearing(l.dir)) +
+      (t.loc_src && t.loc_src !== 'RemoteId' ? row('From', esc(SRC[t.loc_src] || t.loc_src)) : '') +
       row('Status', esc(l.status)) +
       row('Accuracy', `&plusmn;${l.hacc_m == null ? '?' : fmtAlt(l.hacc_m)} across, &plusmn;${l.vacc_m == null ? '?' : fmtAlt(l.vacc_m)} up`) +
       row('Updated', ago(l.age_ms)) + `</dl>`);
@@ -777,10 +859,28 @@ function renderDetail() {
     o.push(`<dl>` +
       row('Position', pos ? `<span class="mono">${pos}</span>` : 'not sent') +
       (op ? row('Kind', esc({Takeoff: 'Takeoff point', LiveGnss: 'Live (operator GPS)', Fixed: 'Fixed location'}[op.src] || op.src)) +
-            row('Altitude', fmtAlt(op.alt)) + row('Updated', ago(op.age_ms)) : '') +
+            row('Altitude', fmtAlt(op.alt)) + row('Updated', ago(op.age_ms)) +
+            (t.op_src && t.op_src !== 'RemoteId' ? row('From', esc(SRC[t.op_src] || t.op_src)) : '') : '') +
       row('Operator ID', t.op_id == null ? 'not sent' : `<span class="mono">${esc(t.op_id)}</span>`) + `</dl>`);
     if (pos) o.push(`<div class="row">${copyBtn(pos, 'coordinates')}${mapsLink(op.lat, op.lon, 'Operator of ' + idOf(t))}</div>`);
   } else o.push(`<p class="mut">No operator information received yet.</p>`);
+
+  if (t.home) {
+    const pos = coord(t.home.lat, t.home.lon);
+    o.push(`<h3>Home point (DJI)</h3><dl>` + row('Position', `<span class="mono">${pos}</span>`) +
+      row('Updated', ago(t.home.age_ms)) + `</dl>`);
+    o.push(`<div class="row">${copyBtn(pos, 'coordinates')}${mapsLink(t.home.lat, t.home.lon, 'Home of ' + idOf(t))}</div>`);
+  }
+  const dj = t.dji;
+  if (dj) {
+    o.push(`<h3>DJI DroneID</h3><dl>` +
+      row('Model', dj.model ? esc(dj.model) : dj.product != null ? 'code ' + dj.product : 'not sent') +
+      (dj.encrypted ? row('Kind', 'O4, encrypted: presence only, never decrypted') : '') +
+      (dj.undecoded ? row('Kind', 'bursts that did not decode (any DJI drone nearby)') : '') +
+      (dj.key_id ? row('Session key ID', `<span class="mono">${esc(dj.key_id)}</span>`) : '') +
+      (dj.ocusync ? row('Burst', `${dj.ocusync.mhz.toFixed(1)} MHz &middot; SNR ${dj.ocusync.snr} dB`) : '') +
+      (!dj.ids_shown ? row('Identity', 'hidden by the hub') : '') + `</dl>`);
+  }
 
   o.push(`<h3>Self-ID text (written by the operator)</h3>`);
   o.push(t.self_id == null ? `<p class="mut">none</p>` : `<div class="quote">${esc(t.self_id)}</div>`);
@@ -797,6 +897,14 @@ function renderDetail() {
   for (const x of t.links || []) {
     o.push(`<tr><td>${esc(radioName(x))}</td><td>${x.rssi} dBm</td><td>${x.n}</td><td>${ago(x.age_ms)}</td>` +
       `<td>${x.ch}</td><td class="mono">${esc(x.mac)}</td></tr>`);
+  }
+  if (dj && dj.ocusync) {
+    const x = dj.ocusync;
+    o.push(`<tr><td>DJI DroneID</td><td>${x.rssi} dBm</td><td>${x.n}</td><td>${ago(x.age_ms)}</td><td>${x.mhz.toFixed(1)}</td><td></td></tr>`);
+  }
+  if (dj && dj.wifi) {
+    const x = dj.wifi;
+    o.push(`<tr><td>DJI Wi-Fi</td><td>${x.rssi} dBm</td><td>${x.n}</td><td>${ago(x.age_ms)}</td><td>${x.ch}</td><td class="mono">${esc(x.mac)}</td></tr>`);
   }
   o.push(`</table></div>`);
   setHTML('sheet-body', o.join(''));
@@ -883,7 +991,10 @@ function renderHub() {
   for (const n of st.nodes || []) {
     o.push(`<tr><td>${esc(role(n.role)[1])}</td>` +
       `<td>${n.alive ? '&#10003; OK' : '<strong>&#10005; silent</strong>'}<br><span class="mut">${n.age_ms == null ? 'never heard' : 'heard ' + ago(n.age_ms)}</span></td>` +
-      `<td>${n.rid_per_s} Remote ID/s<br><span class="mut">${n.seen_per_s ?? '?'} frames/s &middot; ${n.drops ?? '?'} dropped</span></td></tr>`);
+      `<td>${n.rid_per_s} Remote ID/s<br><span class="mut">${n.seen_per_s ?? '?'} frames/s &middot; ${n.drops ?? '?'} dropped</span>` +
+      (n.plan != null ? `<br><span class="mut">${n.plan ? 'hub plan ' + n.plan : 'built-in plan'}` +
+        (n.can != null ? ' &middot; can: ' + esc(Object.keys(ROLE).filter((r, i) => n.can & (1 << i)).map(r => ROLE[r][0]).join(' ')) : '') +
+        `</span>` : '') + `</td></tr>`);
   }
   if (!(st.nodes || []).length) o.push(`<tr><td colspan="3">No receivers attached.</td></tr>`);
   const ad = st.adsb;

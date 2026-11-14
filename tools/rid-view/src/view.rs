@@ -32,6 +32,11 @@ pub struct NodeInfo {
     pub rid_lines: u64,
     /// Open FPV link sightings from this input.
     pub open_lines: u64,
+    /// Protocol-4 frames (`"t":"frame"` lines or demo frames).
+    pub frame_lines: u64,
+    /// From the node's Status frame: roles it can take (mask) and the plan
+    /// it applied.
+    pub status: Option<(u8, u16)>,
     pub bad_lines: u64,
     /// For the phone page's node health (--http).
     pub role: Option<link::NodeRole>,
@@ -132,7 +137,7 @@ fn fit(s: &str, n: usize) -> String {
     }
 }
 
-fn display_id(t: &Track) -> String {
+fn display_id(t: &Track, hide_dji: bool) -> String {
     match t.primary_id() {
         Some(id) => match id.id.as_str() {
             Some(s) if id.id.is_clean_text() => s.to_string(),
@@ -153,7 +158,20 @@ fn display_id(t: &Track) -> String {
                     m[0], m[1], m[2], m[3], m[4], m[5]
                 )
             })
-            .unwrap_or_default(),
+            .unwrap_or_else(|| dji_label(t, hide_dji)),
+    }
+}
+
+/// A name for a DJI DroneID track with no shown ID.
+fn dji_label(t: &Track, hidden: bool) -> String {
+    let d = &t.dji;
+    let mhz = d.freq_mhz().map_or(String::new(), |f| format!(" {f:.1}"));
+    match d.key_id {
+        Some(k) if !hidden => format!("O4 {:02x}{:02x}{:02x}{:02x}{mhz}", k[0], k[1], k[2], k[3]),
+        Some(_) => format!("O4{mhz}"),
+        None if d.undecoded => format!("DroneID?{mhz}"),
+        None if hidden && d.serial.is_some() => format!("DJI (ID hidden){mhz}"),
+        None => format!("DJI{mhz}"),
     }
 }
 
@@ -205,6 +223,12 @@ impl View {
             let _ = write!(line, "  rid lines: {}", info.rid_lines);
             if info.open_lines > 0 {
                 let _ = write!(line, ", open links: {}", info.open_lines);
+            }
+            if info.frame_lines > 0 {
+                let _ = write!(line, ", other frames: {}", info.frame_lines);
+            }
+            if let (Some(r), Some((can, plan))) = (info.role, info.status) {
+                let _ = write!(line, "  role {r:?}, can {can:#04x}, plan {plan}");
             }
             if info.bad_lines > 0 {
                 let _ = write!(line, ", unparsed: {}", info.bad_lines);
@@ -263,7 +287,13 @@ impl View {
             let _ = writeln!(s, "  (no drones yet){eol}");
         }
         for (t, g) in rows {
-            let heard: Vec<&str> = t.transports().map(short_transport).collect();
+            let mut heard: Vec<&str> = t.transports().map(short_transport).collect();
+            if t.dji.ocusync.heard() {
+                heard.push(if t.dji.key_id.is_some() { "O4" } else { "DJ" });
+            }
+            if t.dji.wifi.heard() {
+                heard.push("DW");
+            }
             let loc = t.location.as_ref().map(|l| &l.value);
             let new = self
                 .announced
@@ -295,11 +325,10 @@ impl View {
                 s,
                 "{pre}{} {:<22} {:<7} {:<11} {:>5} {:>6} {:>8} {:>8} {:>6} {:>6}  {:<16} {}{post}{eol}",
                 if new { '*' } else { ' ' },
-                fit(&display_id(t), 22),
+                fit(&display_id(t, ctx.config.hide_droneid_ids), 22),
                 short_ua(t.ua_type),
                 heard.join("+"),
-                t.latest_link()
-                    .map_or("-".into(), |(_, l)| l.rssi.to_string()),
+                t.latest_rssi().map_or("-".into(), |r| r.to_string()),
                 age(ctx.now_ms.saturating_sub(t.last_seen_ms)),
                 g.drone.map_or("-".into(), |d| dist(d.distance_m)),
                 g.drone.map_or("-".into(), |d| format!(
@@ -307,7 +336,8 @@ impl View {
                     d.bearing_deg,
                     compass(d.bearing_deg)
                 )),
-                loc.and_then(|l| l.altitude_geodetic)
+                // DJI DroneID sends a barometric altitude only.
+                loc.and_then(|l| l.altitude_geodetic.or(l.altitude_pressure))
                     .map_or("-".into(), |a| format!("{a:.0}m")),
                 loc.and_then(|l| l.speed_horizontal)
                     .map_or("-".into(), |v| format!("{v:.1}")),
@@ -316,6 +346,7 @@ impl View {
             );
         }
         self.render_links(&mut s, tr, ctx, eol);
+        self.render_signals(&mut s, tr, ctx, eol);
         self.render_aircraft(&mut s, tr, ctx, eol);
         if !self.log.is_empty() {
             let _ = writeln!(s, "{eol}");
@@ -386,6 +417,107 @@ impl View {
                 l.packets(),
                 age(ctx.now_ms.saturating_sub(l.last_seen_ms)),
             );
+        }
+    }
+}
+
+impl View {
+    /// RF emitters and Wi-Fi drones, below the open links. Nothing when
+    /// there are none.
+    fn render_signals(&self, s: &mut String, tr: &Tracker, ctx: &Context, eol: &str) {
+        if !tr.emitters().is_empty() {
+            let _ = writeln!(s, "{eol}");
+            let _ = writeln!(s, "  RADIO SIGNALS (raw capture; no position){eol}");
+            let _ = writeln!(
+                s,
+                "  {:<15} {:>9} {:>6} {:>5} {:>8} {:>7} {:>6}{eol}",
+                "KIND", "MHZ", "LEVEL", "DUTY", "LINE HZ", "WIDTH", "AGE",
+            );
+            let mut v: Vec<&tracker::Emitter> = tr.emitters().iter().collect();
+            v.sort_by_key(|e| {
+                (
+                    ctx.emitter_state(e) == TrackState::Stale,
+                    std::cmp::Reverse(e.snr_db),
+                )
+            });
+            for e in v {
+                let (pre, post) = if ctx.emitter_state(e) == TrackState::Stale {
+                    (self.style(DIM), self.style(RESET))
+                } else {
+                    ("", "")
+                };
+                let _ = writeln!(
+                    s,
+                    "{pre}  {:<15} {:>9.1} {:>6} {:>4}% {:>8} {:>7} {:>6}{post}{eol}",
+                    tracker::signals::rf_label(e.kind),
+                    e.freq_mhz(),
+                    format!("+{}dB", e.snr_db),
+                    e.duty_pct,
+                    if e.line_hz == 0 {
+                        "-".into()
+                    } else {
+                        e.line_hz.to_string()
+                    },
+                    if e.width_khz == 0 {
+                        "-".into()
+                    } else {
+                        format!("{:.1}M", f64::from(e.width_khz) / 1000.0)
+                    },
+                    age(ctx.now_ms.saturating_sub(e.last_seen_ms)),
+                );
+            }
+        }
+        if !tr.wifi_drones().is_empty() {
+            let ids = if ctx.config.show_link_ids {
+                "addresses shown"
+            } else {
+                "addresses hidden; --show-link-ids to show"
+            };
+            let _ = writeln!(s, "{eol}");
+            let _ = writeln!(s, "  WI-FI DRONES ({ids}){eol}");
+            let _ = writeln!(
+                s,
+                "  {:<12} {:<32} {:>4} {:>5} {:<17} {:>6}{eol}",
+                "MAKER", "NETWORK", "CH", "RSSI", "ADDRESS", "AGE",
+            );
+            let mut v: Vec<&tracker::WifiDrone> = tr.wifi_drones().iter().collect();
+            v.sort_by_key(|w| {
+                (
+                    ctx.wifi_drone_state(w) == TrackState::Stale,
+                    std::cmp::Reverse(w.rssi),
+                )
+            });
+            for w in v {
+                let (pre, post) = if ctx.wifi_drone_state(w) == TrackState::Stale {
+                    (self.style(DIM), self.style(RESET))
+                } else {
+                    ("", "")
+                };
+                let mac = if ctx.config.show_link_ids {
+                    let m = w.mac;
+                    format!(
+                        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                        m[0], m[1], m[2], m[3], m[4], m[5]
+                    )
+                } else {
+                    "hidden".into()
+                };
+                let ssid: String = w
+                    .ssid
+                    .chars()
+                    .map(|c| if c.is_control() { '?' } else { c })
+                    .collect();
+                let _ = writeln!(
+                    s,
+                    "{pre}  {:<12} {:<32} {:>4} {:>5} {:<17} {:>6}{post}{eol}",
+                    fit(w.maker_name(), 12),
+                    fit(&ssid, 32),
+                    w.channel,
+                    w.rssi,
+                    mac,
+                    age(ctx.now_ms.saturating_sub(w.last_seen_ms)),
+                );
+            }
         }
     }
 }

@@ -483,6 +483,11 @@ pub fn short_id(dv: &DroneView, n: usize) -> Buf {
     }
     if id.is_empty() {
         let _ = b.push_str("?");
+    } else if dv.id_kind == IdKind::Presence {
+        // "O4 01020304 5756.5", "DroneID 2414.5": the start says what it is.
+        for c in id.chars().take(n) {
+            let _ = b.push(c);
+        }
     } else if id.chars().count() <= n {
         let _ = b.push_str(id);
     } else {

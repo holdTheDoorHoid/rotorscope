@@ -1,0 +1,457 @@
+//! DJI's own broadcasts, folded into drone tracks.
+//!
+//! - **OcuSync DroneID** ([`link::DroneIdSighting`]), decoded on a
+//!   raw-capture node. Raw units as `crates/droneid` documents them
+//!   (`payload::FlightInfo`): positions in radians x 1e7, altitude and
+//!   height in feet (the NDSS receiver's reading), velocities in cm/s, yaw
+//!   in hundredths of a degree. Scaled here exactly as `droneid` does.
+//! - **Legacy Wi-Fi DroneID**, the vendor element `rid::dji` decodes
+//!   (Spark, Mavic Air, Mini SE...). Its extension fields are "believed"
+//!   metres and cm/s (see `rid::dji::FlightInfoExt`).
+//!
+//! # Identity
+//! A plaintext record carries the aircraft serial number. DJI aircraft use
+//! the same serial in their Remote ID Basic ID, so the serial is stored as
+//! a [`crate::UasId`] of type `SerialNumber` and the ordinary Remote ID
+//! merge puts both on one track, whichever arrives first. With
+//! [`crate::Config::hide_droneid_ids`] the serial is kept only in
+//! [`DjiInfo::serial`] (never output) and still matches.
+//!
+//! An O4 record is encrypted: only its 4-byte session key ID is readable.
+//! It links the records of one flight, so it keys a presence-only track. A
+//! burst that matched DroneID but did not decode carries nothing at all, so
+//! every such burst joins one shared presence-only track.
+//!
+//! # Positions
+//! A drone heard on both Remote ID and DroneID sends its position twice.
+//! Remote ID's is preferred (it has a WGS-84 altitude and accuracy
+//! figures): a DroneID position replaces it only when it is older than
+//! [`RID_PREFERRED_MS`]. [`crate::Track::location_src`] says which one is
+//! shown. DJI altitude is barometric, so it goes into `altitude_pressure`,
+//! never `altitude_geodetic`.
+
+use heapless::Vec;
+use libm::{atan2, hypot};
+use link::{DroneIdRecord, DroneIdSighting};
+use rid::message::{
+    Category, ClassificationType, DescType, FixedStr, HeightType, HorizontalAccuracy, IdType,
+    LatLon, Location, OperatorLocationType, SelfId, SpeedAccuracy, Status, System, UaClass, UaType,
+    VerticalAccuracy,
+};
+
+use crate::{Stamped, Track, TrackId, Tracker, UasId};
+
+/// A Remote ID position younger than this is not replaced by a DroneID one.
+pub const RID_PREFERRED_MS: u64 = 3_000;
+
+/// Where a track's position (or operator position) came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub enum Source {
+    #[default]
+    RemoteId,
+    /// OcuSync DroneID burst.
+    DroneId,
+    /// DJI legacy Wi-Fi DroneID element.
+    DjiWifi,
+}
+
+/// Reception of one DJI broadcast family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DjiLink {
+    /// Records heard. Zero means never.
+    pub count: u32,
+    pub last_seen_ms: u64,
+    pub rssi: i8,
+    /// OcuSync only: signal to noise of the latest burst, dB.
+    pub snr_db: i8,
+    /// OcuSync only: burst centre, 100 kHz units (5756.5 MHz = 57565).
+    pub freq: u32,
+    /// Wi-Fi only: channel and transmitter address.
+    pub channel: u8,
+    pub mac: [u8; 6],
+    pub node: u8,
+}
+
+impl DjiLink {
+    pub fn heard(&self) -> bool {
+        self.count > 0
+    }
+
+    fn newer(&mut self, other: &DjiLink) {
+        let count = self.count.saturating_add(other.count);
+        if other.heard() && (!self.heard() || other.last_seen_ms > self.last_seen_ms) {
+            *self = *other;
+        }
+        self.count = count;
+    }
+}
+
+/// What DJI's own broadcasts said about a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DjiInfo {
+    /// The decoded serial number, kept for matching even when
+    /// [`crate::Config::hide_droneid_ids`] keeps it out of `uas_ids`.
+    /// **Never output from here**: formatters show `uas_ids` only.
+    pub serial: Option<FixedStr<20>>,
+    /// DJI product code (`droneid::payload::product_name`).
+    pub product_type: Option<u8>,
+    /// O4 session key ID. Formatters hide it with `hide_droneid_ids`.
+    pub key_id: Option<[u8; 4]>,
+    /// The shared track for DroneID bursts that did not decode.
+    pub undecoded: bool,
+    pub ocusync: DjiLink,
+    pub wifi: DjiLink,
+}
+
+impl DjiInfo {
+    /// Any DJI broadcast heard.
+    pub fn heard(&self) -> bool {
+        self.ocusync.heard() || self.wifi.heard()
+    }
+
+    /// The model name for [`DjiInfo::product_type`], when known.
+    pub fn product_name(&self) -> Option<&'static str> {
+        self.product_type.and_then(droneid::payload::product_name)
+    }
+
+    /// Burst frequency in MHz, when an OcuSync burst was heard.
+    pub fn freq_mhz(&self) -> Option<f64> {
+        self.ocusync
+            .heard()
+            .then(|| f64::from(self.ocusync.freq) / 10.0)
+    }
+
+    pub(crate) fn absorb(&mut self, other: &DjiInfo) {
+        self.serial = self.serial.or(other.serial);
+        self.product_type = self.product_type.or(other.product_type);
+        self.key_id = self.key_id.or(other.key_id);
+        self.undecoded &= other.undecoded;
+        self.ocusync.newer(&other.ocusync);
+        self.wifi.newer(&other.wifi);
+    }
+}
+
+/// Feet per metre, as `droneid::payload` uses it.
+const FEET_PER_M: f64 = 3.281;
+
+/// DJI coordinates (radians x 1e7) to a position; `None` for 0,0 (privacy
+/// mode or no fix) or out of range. Same factor as
+/// `droneid::payload::rad_e7_to_deg`.
+pub fn rad_e7_position(lat_raw: i32, lon_raw: i32) -> Option<LatLon> {
+    if lat_raw == 0 && lon_raw == 0 {
+        return None;
+    }
+    let p = LatLon {
+        lat: droneid::payload::rad_e7_to_deg(lat_raw),
+        lon: droneid::payload::rad_e7_to_deg(lon_raw),
+    };
+    ((-90.0..=90.0).contains(&p.lat) && (-180.0..=180.0).contains(&p.lon)).then_some(p)
+}
+
+/// Ground speed (m/s), track (deg true) and vertical speed (m/s) from DJI's
+/// north/east/up velocities in cm/s. No track below 0.3 m/s: the direction
+/// of a hovering drone is noise.
+fn motion(v_north: i16, v_east: i16, v_up: i16) -> (f32, Option<f32>, f32) {
+    let (n, e) = (f64::from(v_north) / 100.0, f64::from(v_east) / 100.0);
+    let speed = hypot(n, e);
+    let track = (speed >= 0.3).then(|| {
+        let d = atan2(e, n).to_degrees();
+        (if d < 0.0 { d + 360.0 } else { d }) as f32 % 360.0
+    });
+    (speed as f32, track, (f64::from(v_up) / 100.0) as f32)
+}
+
+/// A serial as an ID: printable ASCII, NULs trimmed, not empty.
+fn serial_id(raw: &[u8]) -> Option<FixedStr<20>> {
+    let f: FixedStr<20> = FixedStr::new(raw.get(..raw.len().min(20))?).ok()?;
+    (f.is_clean_text() && !f.as_bytes().is_empty()).then_some(f)
+}
+
+/// The parts of one DJI record that land on a track.
+struct Fix {
+    position: Option<LatLon>,
+    alt_m: Option<f32>,
+    height_m: Option<f32>,
+    motion: Option<(f32, Option<f32>, f32)>,
+    pilot: Option<LatLon>,
+    home: Option<LatLon>,
+}
+
+fn location(f: &Fix) -> Location {
+    let (speed, track, vspeed) = match f.motion {
+        Some((s, t, v)) => (Some(s), t, Some(v)),
+        None => (None, None, None),
+    };
+    Location {
+        status: Status::Undeclared,
+        height_type: HeightType::AboveTakeoff,
+        direction: track,
+        speed_horizontal: speed,
+        speed_vertical: vspeed,
+        position: f.position,
+        altitude_pressure: f.alt_m,
+        altitude_geodetic: None,
+        height: f.height_m,
+        horizontal_accuracy: HorizontalAccuracy::Unknown,
+        vertical_accuracy: VerticalAccuracy::Unknown,
+        baro_accuracy: VerticalAccuracy::Unknown,
+        speed_accuracy: SpeedAccuracy::Unknown,
+        timestamp: None,
+        timestamp_accuracy: None,
+    }
+}
+
+fn pilot_system(p: LatLon) -> System {
+    System {
+        // DJI sends the phone's (the app's) GNSS position.
+        operator_location_type: OperatorLocationType::LiveGnss,
+        classification_type: ClassificationType::Undeclared,
+        operator_position: Some(p),
+        area_count: 1,
+        area_radius: 0,
+        area_ceiling: None,
+        area_floor: None,
+        category: Category::Undeclared,
+        class: UaClass::Undeclared,
+        operator_altitude: None,
+        timestamp: None,
+    }
+}
+
+impl Track {
+    /// Apply a DJI position, unless a fresh Remote ID one should win.
+    fn apply_dji(&mut self, f: &Fix, src: crate::Source, now: u64) {
+        let rid_fresh = |src_was: crate::Source, rx: Option<u64>| {
+            src_was == crate::Source::RemoteId
+                && rx.is_some_and(|t| now.saturating_sub(t) < RID_PREFERRED_MS)
+        };
+        if (f.position.is_some() || f.alt_m.is_some())
+            && !rid_fresh(self.location_src, self.location.as_ref().map(|l| l.rx_ms))
+        {
+            self.location = Some(Stamped {
+                value: location(f),
+                rx_ms: now,
+            });
+            self.location_src = src;
+        }
+        if let Some(p) = f.pilot
+            && !rid_fresh(self.system_src, self.system.as_ref().map(|s| s.rx_ms))
+        {
+            self.system = Some(Stamped {
+                value: pilot_system(p),
+                rx_ms: now,
+            });
+            self.system_src = src;
+        }
+        if let Some(h) = f.home {
+            self.home = Some(Stamped {
+                value: h,
+                rx_ms: now,
+            });
+        }
+        if self.ua_type.is_none_or(|t| t == UaType::None) {
+            // Every DJI DroneID product is a multirotor.
+            self.ua_type = Some(UaType::HelicopterOrMultirotor);
+        }
+    }
+
+    fn observe_dji(link: &mut DjiLink, node: u8, now: u64) {
+        link.count = link.count.saturating_add(1);
+        link.last_seen_ms = now;
+        link.node = node;
+    }
+}
+
+impl<const N: usize, const A: usize> Tracker<N, A> {
+    /// The track for a DJI serial: one that has it (as a Remote ID or DJI
+    /// ID), else a new one. Every other track with it is merged in.
+    fn dji_track_by_serial(&mut self, serial: FixedStr<20>, now: u64) -> usize {
+        let id = UasId {
+            id_type: IdType::SerialNumber,
+            id: serial,
+        };
+        let mut by_id: Vec<usize, N> = Vec::new();
+        for (i, t) in self.tracks.iter().enumerate() {
+            if t.has_id(&id) {
+                let _ = by_id.push(i);
+            }
+        }
+        let primary = by_id
+            .iter()
+            .copied()
+            .min_by_key(|&i| (self.tracks[i].first_seen_ms, self.tracks[i].id));
+        let i = match primary {
+            Some(p) => self.merge_into(p, by_id.iter().copied(), &[id]),
+            None => self.create(now),
+        };
+        let t = &mut self.tracks[i];
+        t.dji.serial = Some(serial);
+        if !self.config.hide_droneid_ids && !t.uas_ids.contains(&id) {
+            t.add_id(id);
+        }
+        i
+    }
+
+    fn dji_track_where(&mut self, now: u64, f: impl Fn(&Track) -> bool) -> usize {
+        match self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| f(t))
+            .max_by_key(|(_, t)| t.last_seen_ms)
+        {
+            Some((i, _)) => i,
+            None => self.create(now),
+        }
+    }
+
+    /// Feed one OcuSync DroneID sighting from `node` (see [`crate::dji`]).
+    /// Always returns the track it updated.
+    pub fn ingest_droneid(&mut self, node: u8, s: &DroneIdSighting, now_ms: u64) -> TrackId {
+        self.expire(now_ms);
+        let i = match &s.record {
+            DroneIdRecord::Flight { serial, .. } => match serial_id(serial) {
+                Some(sn) => self.dji_track_by_serial(sn, now_ms),
+                // A record with an unreadable serial: no identity to key on.
+                None => self.dji_track_where(now_ms, |t| t.dji.undecoded),
+            },
+            DroneIdRecord::Encrypted { key_id } => {
+                let k = *key_id;
+                let i = self.dji_track_where(now_ms, |t| t.dji.key_id == Some(k));
+                self.tracks[i].dji.key_id = Some(k);
+                i
+            }
+            DroneIdRecord::Detected => self.dji_track_where(now_ms, |t| t.dji.undecoded),
+        };
+        let t = &mut self.tracks[i];
+        if t.uas_ids.is_empty() && t.dji.serial.is_none() && t.dji.key_id.is_none() {
+            t.dji.undecoded = true;
+        }
+        let l = &mut t.dji.ocusync;
+        Track::observe_dji(l, node, now_ms);
+        l.rssi = s.rssi;
+        l.snr_db = s.snr_db;
+        l.freq = s.freq;
+        if node < 8 {
+            t.nodes |= 1 << node;
+        }
+        t.last_seen_ms = t.last_seen_ms.max(now_ms);
+        if let DroneIdRecord::Flight {
+            lat_raw,
+            lon_raw,
+            altitude_raw,
+            height_raw,
+            v_north,
+            v_east,
+            v_up,
+            pilot_lat_raw,
+            pilot_lon_raw,
+            home_lat_raw,
+            home_lon_raw,
+            product_type,
+            ..
+        } = s.record
+        {
+            let fix = Fix {
+                position: rad_e7_position(lat_raw, lon_raw),
+                alt_m: Some((f64::from(altitude_raw) / FEET_PER_M) as f32),
+                height_m: Some((f64::from(height_raw) / FEET_PER_M) as f32),
+                motion: Some(motion(v_north, v_east, v_up)),
+                pilot: rad_e7_position(pilot_lat_raw, pilot_lon_raw),
+                home: rad_e7_position(home_lat_raw, home_lon_raw),
+            };
+            t.apply_dji(&fix, crate::Source::DroneId, now_ms);
+            if product_type != 0 {
+                t.dji.product_type = Some(product_type);
+            }
+        }
+        t.id
+    }
+
+    /// Feed one DJI legacy Wi-Fi DroneID element (as a Wi-Fi node sends it
+    /// in [`link::Frame::DjiWifi`]: the vendor element body from the OUI,
+    /// or the whole element with its ID and length bytes). `None` when the
+    /// element is not DJI's, or says nothing that can be tied to a drone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_dji_wifi(
+        &mut self,
+        node: u8,
+        channel: u8,
+        rssi: i8,
+        mac: [u8; 6],
+        element: &[u8],
+        now_ms: u64,
+    ) -> Option<TrackId> {
+        use rid::dji::{OUI, Record, parse_element};
+        let body = match element {
+            [221, _, rest @ ..] if rest.starts_with(&OUI) => rest,
+            _ => element,
+        };
+        let record = parse_element(body)?;
+        self.expire(now_ms);
+        let by_mac = |t: &Track| t.dji.wifi.heard() && t.dji.wifi.mac == mac;
+        let (i, fix, product, purpose) = match &record {
+            Record::FlightInfo(f) => {
+                let i = match serial_id(f.serial.as_bytes()) {
+                    Some(sn) => self.dji_track_by_serial(sn, now_ms),
+                    None => self.dji_track_where(now_ms, by_mac),
+                };
+                let fix = Fix {
+                    position: f.position,
+                    alt_m: f.ext.as_ref().map(|e| f32::from(e.altitude)),
+                    height_m: f.ext.as_ref().map(|e| f32::from(e.height)),
+                    motion: f.ext.as_ref().map(|e| motion(e.v_north, e.v_east, e.v_up)),
+                    // The Wi-Fi record has no pilot position.
+                    pilot: None,
+                    home: f.ext.as_ref().and_then(|e| e.home),
+                };
+                let product = f.ext.as_ref().map(|e| e.product_type).filter(|&p| p != 0);
+                (i, Some(fix), product, None)
+            }
+            Record::FlightPurpose(p) => {
+                let i = match serial_id(p.serial.as_bytes()) {
+                    Some(sn) => self.dji_track_by_serial(sn, now_ms),
+                    None => self.dji_track_where(now_ms, by_mac),
+                };
+                let text = p.purpose.0;
+                let desc = FixedStr::<23>::new(&text[..text.len().min(23)]).ok();
+                (i, None, None, desc)
+            }
+            Record::Unknown { .. } => {
+                // Count it against a drone already known by this address.
+                let i = self.tracks.iter().position(by_mac)?;
+                (i, None, None, None)
+            }
+        };
+        let hide = self.config.hide_droneid_ids;
+        let t = &mut self.tracks[i];
+        let l = &mut t.dji.wifi;
+        Track::observe_dji(l, node, now_ms);
+        l.rssi = rssi;
+        l.channel = channel;
+        l.mac = mac;
+        if node < 8 {
+            t.nodes |= 1 << node;
+        }
+        t.last_seen_ms = t.last_seen_ms.max(now_ms);
+        if let Some(fix) = fix {
+            t.apply_dji(&fix, crate::Source::DjiWifi, now_ms);
+        }
+        if let Some(p) = product {
+            t.dji.product_type = Some(p);
+        }
+        if let Some(d) = purpose
+            && !hide
+            && !d.as_bytes().is_empty()
+        {
+            t.self_id = Some(Stamped {
+                value: SelfId {
+                    desc_type: DescType::Text,
+                    description: d,
+                },
+                rx_ms: now_ms,
+            });
+        }
+        Some(t.id)
+    }
+}

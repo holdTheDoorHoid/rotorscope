@@ -258,7 +258,7 @@ impl<'d> GatewayLink<'d> {
         }
         let Some((mac, rssi)) = via.take() else {
             stats.direct += 1;
-            if matches!(f, Frame::Detection(_) | Frame::OpenLink(_)) && out.push_back((0, f)).is_err() {
+            if is_data(&f) && out.push_back((0, f)).is_err() {
                 *out_full += 1;
             }
             return;
@@ -294,8 +294,21 @@ impl<'d> GatewayLink<'d> {
             }
             _ => {}
         }
-        if matches!(f, Frame::Detection(_) | Frame::OpenLink(_)) && out.push_back((i as u8 + 1, f)).is_err() {
+        if is_data(&f) && out.push_back((i as u8 + 1, f)).is_err() {
             *out_full += 1;
         }
     }
+}
+
+/// Frames that carry detections for the tracker (not link bookkeeping).
+fn is_data(f: &Frame) -> bool {
+    matches!(
+        f,
+        Frame::Detection(_)
+            | Frame::OpenLink(_)
+            | Frame::DroneId(_)
+            | Frame::Rf(_)
+            | Frame::DjiWifi { .. }
+            | Frame::WifiDrone(_)
+    )
 }

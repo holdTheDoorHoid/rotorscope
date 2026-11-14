@@ -885,6 +885,7 @@ dependencies = [
  "serde_json",
  "tracker",
  "webui",
+ "wifidrone",
  "zbus",
 ]
 
@@ -936,6 +937,7 @@ dependencies = [
  "embedded-graphics",
  "heapless 0.8.0",
  "libm",
+ "link",
  "png",
  "rid",
  "screen",
@@ -1194,6 +1196,7 @@ name = "tracker"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "droneid",
  "heapless 0.8.0",
  "libm",
  "link",
@@ -1202,6 +1205,7 @@ dependencies = [
  "serde",
  "serde-json-core",
  "serde_json",
+ "wifidrone",
 ]
 
 [[package]]
@@ -1291,6 +1295,10 @@ version = "0.1.0"
 dependencies = [
  "flate2",
 ]
+
+[[package]]
+name = "wifidrone"
+version = "0.1.0"
 
 [[package]]
 name = "windows-link"

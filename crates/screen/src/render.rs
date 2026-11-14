@@ -45,6 +45,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
             Page::Radar if s.gps.has_position() => radar(ui, s, p, d)?,
             Page::Radar => no_fix_home(ui, s, p, d)?,
             Page::List => list_page(ui, s, p, d)?,
+            Page::Signals => signals(s, p, d)?,
             Page::Health => health(s, p, d)?,
             Page::Settings => settings(ui, p, d)?,
         },
@@ -749,6 +750,8 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
             p.stale,
             2,
         )?;
+    } else if !dv.model.is_empty() {
+        text_right(d, &dv.model, WIDTH - 4, y0, F_SMALL, p.dim)?;
     } else {
         text_right(d, dv.ua.label(), WIDTH - 4, y0, F_SMALL, p.dim)?;
     }
@@ -923,6 +926,141 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
         p.dim,
     )
     .map(drop)
+}
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+/// RF emitters, then Wi-Fi drones: two short tables, newest data only.
+/// Neither has a position, so this page has no cursor.
+fn signals<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
+    const RH: i32 = 14;
+    let mut y = BAR_H + 4;
+    let hint_y = HEIGHT - 12;
+    let mut b: String<40> = String::new();
+    text(d, "SIGNALS", 4, y, F_BAR, p.fg)?;
+    let _ = write!(
+        b,
+        "{} RF, {} Wi-Fi drones",
+        s.total_emitters.max(s.emitters.len() as u16),
+        s.total_wifi_drones.max(s.wifi_drones.len() as u16)
+    );
+    text_right(d, &b, WIDTH - 4, y + 2, F_SMALL, p.dim)?;
+    y += 18;
+
+    // RF: kind, frequency, level, duty or line rate, age.
+    for (x, h, right) in [
+        (4, "RF", false),
+        (150, "MHz", true),
+        (196, "LEVEL", true),
+        (252, "DUTY", true),
+        (314, "AGE", true),
+    ] {
+        if right {
+            text_right(d, h, x, y, F_SMALL, p.dim)?;
+        } else {
+            text(d, h, x, y, F_SMALL, p.dim)?;
+        }
+    }
+    hline(d, 0, WIDTH, y + 11, p.grid)?;
+    y += 14;
+    // Leave room for the Wi-Fi table: header plus at least two rows.
+    let rf_rows = ((hint_y - y - 14 - 2 * RH - 4) / RH).max(1) as usize;
+    if s.emitters.is_empty() {
+        text(d, "none heard", 18, y, F_LABEL, p.dim)?;
+        y += RH;
+    }
+    for e in s.emitters.iter().take(rf_rows) {
+        let col = if e.stale { p.stale } else { p.fg };
+        text(d, e.kind.label(), 4, y, F_LABEL, col)?;
+        b.clear();
+        let _ = write!(b, "{:.1}", e.freq_mhz);
+        text_right(d, &b, 150, y, F_LABEL, col)?;
+        b.clear();
+        let _ = write!(b, "+{}dB", e.snr_db.max(0));
+        text_right(d, &b, 196, y, F_LABEL, col)?;
+        b.clear();
+        let _ = if e.line_hz != 0 {
+            write!(b, "{:.1}k", f32::from(e.line_hz) / 1000.0)
+        } else {
+            write!(b, "{}%", e.duty_pct)
+        };
+        text_right(d, &b, 252, y, F_LABEL, col)?;
+        text_right(
+            d,
+            &age(s.now_ms.saturating_sub(e.last_seen_ms)),
+            314,
+            y,
+            F_LABEL,
+            col,
+        )?;
+        y += RH;
+    }
+    let more = usize::from(s.total_emitters).max(s.emitters.len());
+    let more = more.saturating_sub(rf_rows.min(s.emitters.len()));
+    if more > 0 {
+        b.clear();
+        let _ = write!(b, "+{more} more");
+        text_right(d, &b, WIDTH - 4, y, F_SMALL, p.dim)?;
+        y += 11;
+    }
+
+    y += 3;
+    for (x, h, right) in [
+        (4, "WI-FI DRONE", false),
+        (110, "NETWORK", false),
+        (252, "CH", true),
+        (282, "dBm", true),
+        (314, "AGE", true),
+    ] {
+        if right {
+            text_right(d, h, x, y, F_SMALL, p.dim)?;
+        } else {
+            text(d, h, x, y, F_SMALL, p.dim)?;
+        }
+    }
+    hline(d, 0, WIDTH, y + 11, p.grid)?;
+    y += 14;
+    if s.wifi_drones.is_empty() {
+        text(d, "none heard", 18, y, F_LABEL, p.dim)?;
+    }
+    let mut shown = 0;
+    for w in &s.wifi_drones {
+        if y + RH > hint_y {
+            break;
+        }
+        let col = if w.stale { p.stale } else { p.fg };
+        text(d, &w.maker, 4, y, F_LABEL, col)?;
+        // 20 characters of the network name fit before the channel.
+        let ssid = w.ssid.get(..w.ssid.len().min(19)).unwrap_or("");
+        text(d, ssid, 110, y, F_LABEL, col)?;
+        b.clear();
+        let _ = write!(b, "{}", w.channel);
+        text_right(d, &b, 252, y, F_LABEL, col)?;
+        b.clear();
+        let _ = write!(b, "{}", w.rssi);
+        text_right(d, &b, 282, y, F_LABEL, col)?;
+        text_right(
+            d,
+            &age(s.now_ms.saturating_sub(w.last_seen_ms)),
+            314,
+            y,
+            F_LABEL,
+            col,
+        )?;
+        y += RH;
+        shown += 1;
+    }
+    let more = usize::from(s.total_wifi_drones)
+        .max(s.wifi_drones.len())
+        .saturating_sub(shown);
+    if more > 0 {
+        b.clear();
+        let _ = write!(b, "+{more} more");
+        text_right(d, &b, WIDTH - 4, hint_y, F_SMALL, p.dim)?;
+    }
+    text(d, "UP/DN: pages", 4, hint_y, F_SMALL, p.dim).map(drop)
 }
 
 // ---------------------------------------------------------------------------

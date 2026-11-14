@@ -21,17 +21,26 @@ pub enum Button {
 pub enum Page {
     Radar,
     List,
+    /// RF emitters and Wi-Fi drones (no position, so not on the radar).
+    Signals,
     Health,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 4] = [Page::Radar, Page::List, Page::Health, Page::Settings];
+    pub const ALL: [Page; 5] = [
+        Page::Radar,
+        Page::List,
+        Page::Signals,
+        Page::Health,
+        Page::Settings,
+    ];
 
     pub const fn title(self) -> &'static str {
         match self {
             Page::Radar => "RADAR",
             Page::List => "DRONE LIST",
+            Page::Signals => "SIGNALS",
             Page::Health => "HEALTH",
             Page::Settings => "SETTINGS",
         }
@@ -41,8 +50,9 @@ impl Page {
         match self {
             Page::Radar => 0,
             Page::List => 1,
-            Page::Health => 2,
-            Page::Settings => 3,
+            Page::Signals => 2,
+            Page::Health => 3,
+            Page::Settings => 4,
         }
     }
 
@@ -271,7 +281,7 @@ impl Ui {
                         self.settings_row = 0;
                         self.mode = Mode::Edit;
                     }
-                    Page::Health => {}
+                    Page::Health | Page::Signals => {}
                 },
                 Button::Back => {
                     self.page = Page::Radar;

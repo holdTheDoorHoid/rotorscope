@@ -32,6 +32,13 @@ pub enum Event {
         sighting: link::OpenLinkSighting,
         at_ms: u64,
     },
+    /// From the demo: any other hub-format frame (DroneID, RF, DJI Wi-Fi,
+    /// Wi-Fi drone, Status).
+    Frame {
+        node: u8,
+        frame: Box<link::Frame>,
+        at_ms: u64,
+    },
     /// The source ended (EOF or error).
     End {
         node: u8,

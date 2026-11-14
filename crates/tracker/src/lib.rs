@@ -32,6 +32,22 @@
 //! [`Tracker::aircraft`], module [`aircraft`]. Its capacity is the second
 //! const generic of [`Tracker`] (0 on a hub built without ADS-B).
 //!
+//! # DJI DroneID
+//! DJI's own broadcasts become ordinary drone tracks ([`Tracker::ingest_droneid`],
+//! [`Tracker::ingest_dji_wifi`], module [`dji`]): the OcuSync DroneID burst
+//! from a raw-capture node and the legacy Wi-Fi DroneID element from a Wi-Fi
+//! node. A plaintext record carries the serial number, which on DJI aircraft
+//! is the same as their Remote ID serial, so both end up on one track. An
+//! encrypted (O4) record gives a presence-only track keyed by its session
+//! key ID; a burst that did not decode joins one presence-only track.
+//!
+//! # Other signals
+//! Raw-capture RF emitters (analog video, HDZero, LTE-style links...) and
+//! Wi-Fi drones recognised by network name and address prefix are two more
+//! tables ([`Tracker::ingest_rf`], [`Tracker::ingest_wifi_drone`], module
+//! [`signals`]), with no position. Node `Status` frames are kept per node
+//! for the health view ([`Tracker::nodes`]).
+//!
 //! # Time
 //! All `*_ms` times are hub monotonic milliseconds (uptime), supplied by the
 //! caller. Wall-clock UTC is only needed by the CoT and CSV formatters and is
@@ -41,9 +57,11 @@
 pub mod aircraft;
 pub mod cot;
 pub mod csv;
+pub mod dji;
 pub mod geo;
 pub mod json;
 pub mod openlinks;
+pub mod signals;
 mod text;
 
 use heapless::Vec;
@@ -53,8 +71,10 @@ use rid::message::{
 };
 
 pub use aircraft::{AircraftGeometry, AircraftKey, AircraftTrack};
+pub use dji::{DjiInfo, DjiLink, Source};
 pub use geo::RangeBearing;
 pub use openlinks::{LinkTrack, LinkTrackId};
+pub use signals::{Emitter, EmitterId, NodeInfo, SignalKey, WifiDrone, WifiDroneId};
 pub use text::FormatError;
 
 /// Basic IDs kept per track: F3411 allows a UA to send up to two (one per
@@ -229,6 +249,14 @@ pub struct Config {
     /// the unit opts in. Drone Remote ID is unaffected (it is broadcast to be
     /// read).
     pub show_link_ids: bool,
+    /// Keep identity decoded from DJI's DroneID (OcuSync bursts and the
+    /// legacy Wi-Fi element) out of every output: the serial number, the
+    /// O4 session key ID and the flight-purpose text. **Off by default**
+    /// (owner decision: DroneID plaintext is shown). Positions are still
+    /// shown. A serial the drone also broadcasts in Remote ID is shown
+    /// regardless, since Remote ID is meant to be read. Applied as records
+    /// arrive, so turning it on does not scrub tracks already held.
+    pub hide_droneid_ids: bool,
 }
 
 impl Default for Config {
@@ -239,6 +267,7 @@ impl Default for Config {
             announce_grace_ms: 1_000,
             own_fix_max_age_ms: 10_000,
             show_link_ids: false,
+            hide_droneid_ids: false,
         }
     }
 }
@@ -347,6 +376,14 @@ pub struct Track {
     pub last_seen_ms: u64,
     /// Messages in this drone's frames that failed to decode.
     pub decode_errors: u32,
+    /// Where `location` came from.
+    pub location_src: Source,
+    /// Where `system` (the operator position) came from.
+    pub system_src: Source,
+    /// Home point, from DJI DroneID only (Remote ID has none).
+    pub home: Option<Stamped<rid::message::LatLon>>,
+    /// What DJI's own broadcasts said (default when never heard).
+    pub dji: DjiInfo,
     announced: bool,
 }
 
@@ -365,6 +402,10 @@ impl Track {
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
             decode_errors: 0,
+            location_src: Source::RemoteId,
+            system_src: Source::RemoteId,
+            home: None,
+            dji: DjiInfo::default(),
             announced: false,
         }
     }
@@ -444,8 +485,41 @@ impl Track {
         })
     }
 
+    /// Whether the track carries this ID, counting a DJI serial kept out of
+    /// `uas_ids` by [`Config::hide_droneid_ids`].
     fn has_id(&self, id: &UasId) -> bool {
         self.uas_ids.contains(id)
+            || (id.id_type == IdType::SerialNumber && self.dji.serial == Some(id.id))
+    }
+
+    /// Latest RSSI from any way this drone was heard (Remote ID slots and
+    /// DJI's own broadcasts).
+    pub fn latest_rssi(&self) -> Option<i8> {
+        let rid = self.latest_slot().map(|(_, l)| (l.last_seen_ms, l.rssi));
+        let dji = [&self.dji.ocusync, &self.dji.wifi]
+            .into_iter()
+            .filter(|l| l.heard())
+            .map(|l| (l.last_seen_ms, l.rssi));
+        rid.into_iter()
+            .chain(dji)
+            .max_by_key(|(t, _)| *t)
+            .map(|(_, r)| r)
+    }
+
+    /// One name per way this drone was heard: the [`Slot::name`]s, then
+    /// `DroneId` (or `DroneIdO4` for encrypted records) and `DjiWifi`.
+    pub fn source_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let ocu = self
+            .dji
+            .ocusync
+            .heard()
+            .then_some(if self.dji.key_id.is_some() {
+                "DroneIdO4"
+            } else {
+                "DroneId"
+            });
+        let wifi = self.dji.wifi.heard().then_some("DjiWifi");
+        self.slots().map(|(s, _)| s.name()).chain(ocu).chain(wifi)
     }
 
     /// The most recent MAC this track used on `t`'s medium (either band),
@@ -497,8 +571,14 @@ impl Track {
                     self.ua_type = Some(b.ua_type);
                 }
             }
-            Message::Location(l) => put(&mut self.location, l, rx_ms),
-            Message::System(s) => put(&mut self.system, s, rx_ms),
+            Message::Location(l) => {
+                put(&mut self.location, l, rx_ms);
+                self.location_src = Source::RemoteId;
+            }
+            Message::System(s) => {
+                put(&mut self.system, s, rx_ms);
+                self.system_src = Source::RemoteId;
+            }
             Message::SelfId(s) => put(&mut self.self_id, s, rx_ms),
             Message::OperatorId(o) => put(&mut self.operator_id, o, rx_ms),
             // Signatures are not verified on the hub; nothing to show yet.
@@ -524,8 +604,24 @@ impl Track {
         if self.ua_type.is_none_or(|t| t == UaType::None) {
             self.ua_type = other.ua_type.or(self.ua_type);
         }
+        if other
+            .location
+            .as_ref()
+            .is_some_and(|b| self.location.as_ref().is_none_or(|a| b.rx_ms > a.rx_ms))
+        {
+            self.location_src = other.location_src;
+        }
+        if other
+            .system
+            .as_ref()
+            .is_some_and(|b| self.system.as_ref().is_none_or(|a| b.rx_ms > a.rx_ms))
+        {
+            self.system_src = other.system_src;
+        }
         newer(&mut self.location, other.location);
         newer(&mut self.system, other.system);
+        newer(&mut self.home, other.home);
+        self.dji.absorb(&other.dji);
         newer(&mut self.self_id, other.self_id);
         newer(&mut self.operator_id, other.operator_id);
         for (mine, theirs) in self.links.iter_mut().zip(other.links) {
@@ -669,6 +765,12 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     links: openlinks::LinkTable,
     /// ADS-B aircraft, a separate table keyed by ICAO address.
     aircraft: aircraft::AircraftTable<A>,
+    /// Raw-capture RF emitters.
+    emitters: signals::EmitterTable,
+    /// Wi-Fi drones by maker table.
+    wifi_drones: signals::WifiDroneTable,
+    /// Per-node role and plan, from Hello and Status frames.
+    nodes: signals::NodeTable,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -686,6 +788,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             tracks: Vec::new(),
             links: openlinks::LinkTable::new(),
             aircraft: aircraft::AircraftTable::new(),
+            emitters: signals::EmitterTable::new(),
+            wifi_drones: signals::WifiDroneTable::new(),
+            nodes: signals::NodeTable::new(),
             next_id: 1,
             own: None,
             config,
@@ -898,7 +1003,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         primary
     }
 
-    fn create(&mut self, now_ms: u64) -> usize {
+    pub(crate) fn create(&mut self, now_ms: u64) -> usize {
         if self.tracks.is_full() {
             self.evict(now_ms);
         }
@@ -988,6 +1093,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     pub fn expire(&mut self, now_ms: u64) -> usize {
         self.links.expire(now_ms, &self.config);
         self.aircraft.expire(now_ms);
+        self.emitters.expire(now_ms, &self.config);
+        self.wifi_drones.expire(now_ms, &self.config);
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         self.tracks
@@ -1015,3 +1122,5 @@ mod tests;
 mod tests_aircraft;
 #[cfg(test)]
 mod tests_openlinks;
+#[cfg(test)]
+mod tests_signals;

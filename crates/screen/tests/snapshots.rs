@@ -152,7 +152,7 @@ fn drone(
     rssi: i8,
 ) -> DroneView {
     let mut r = Radios::default();
-    let mut per = [None; 5];
+    let mut per = [None; 6];
     for x in radios {
         r.insert(*x);
         per[x.index()] = Some(rssi - x.index() as i8 * 3);
@@ -387,7 +387,7 @@ fn health() {
         battery_pct: Some(100),
     };
     let mut ui = Ui::default();
-    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
     ui.tick(NOW + 5_000);
     shot("health", &ui, &st);
 }
@@ -439,9 +439,117 @@ fn with_aircraft() -> UiState {
 fn health_aircraft() {
     let st = with_aircraft();
     let mut ui = Ui::default();
-    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
     ui.tick(NOW + 5_000);
     shot("health_aircraft", &ui, &st);
+}
+
+/// Protocol 4: a DroneID node and a gateway, a DJI drone heard on DroneID
+/// only (model, no Remote ID), an O4 presence track, RF emitters and Wi-Fi
+/// drones on the SIGNALS page.
+fn with_signals() -> UiState {
+    let mut st = base(true);
+    st.nodes.truncate(2);
+    for kind in [NodeKind::DroneId, NodeKind::Gateway] {
+        st.nodes
+            .push(NodeStatus {
+                kind,
+                alive: true,
+                frames_per_s: 0,
+                rid_found: 0,
+                drops: 0,
+                uptime_s: 600,
+            })
+            .unwrap();
+    }
+    let mut d = drone(
+        1,
+        "TEST0SYNTH000001",
+        640.0,
+        80.0,
+        95.0,
+        0,
+        &[Radio::DroneId],
+        -71,
+    );
+    d.model = s("Mavic 3");
+    d.operator = Some(Polar {
+        distance_m: 20.0,
+        bearing_deg: 10.0,
+    });
+    st.drones.push(d).unwrap();
+    let mut o4 = DroneView {
+        key: 2,
+        id: s("O4 01020304 5756.5"),
+        id_kind: IdKind::Presence,
+        first_seen_ms: NOW - 9_000,
+        last_seen_ms: NOW - 1_000,
+        ..DroneView::default()
+    };
+    o4.radios.insert(Radio::DroneId);
+    o4.rssi[Radio::DroneId.index()] = Some(-84);
+    st.drones.push(o4).unwrap();
+    st.total_drones = 2;
+    for (key, kind, mhz, snr, duty, line) in [
+        (1, EmitterKind::AnalogVideo, 5806.0, 24, 100, 15_734),
+        (2, EmitterKind::Hdzero, 5732.0, 18, 100, 0),
+        (3, EmitterKind::LteStyle, 5770.0, 11, 40, 0),
+        (4, EmitterKind::Energy, 2437.0, 6, 12, 0),
+    ] {
+        st.emitters
+            .push(EmitterView {
+                key,
+                kind,
+                freq_mhz: mhz,
+                snr_db: snr,
+                duty_pct: duty,
+                line_hz: line,
+                stale: key == 4,
+                last_seen_ms: NOW - u64::from(key) * 2_000,
+            })
+            .unwrap();
+    }
+    st.total_emitters = 6;
+    for (key, maker, ssid, ch, rssi) in [
+        (1, "DJI Tello", "TELLO-5A1B2C", 6, -52),
+        (2, "Parrot", "Bebop2_123456", 149, -70),
+        (3, "Toy drone", "WIFI-UFO-1a2b3c-and-a-long-tail", 1, -83),
+    ] {
+        st.wifi_drones
+            .push(WifiDroneView {
+                key,
+                maker: s(maker),
+                ssid: s(ssid),
+                channel: ch,
+                rssi,
+                stale: false,
+                last_seen_ms: NOW - u64::from(key) * 1_000,
+            })
+            .unwrap();
+    }
+    st.total_wifi_drones = 3;
+    st
+}
+
+#[test]
+fn signals() {
+    let st = with_signals();
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    assert_eq!(ui.page(), Page::Signals);
+    ui.tick(NOW + 5_000);
+    shot("signals", &ui, &st);
+    shot("signals_empty", &ui, &base(true));
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("list_droneid", &ui, &st);
+    press(&mut ui, &st, &[Button::Select, Button::Select]);
+    shot("detail_droneid", &ui, &st);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("health_roles", &ui, &st);
 }
 
 #[test]
