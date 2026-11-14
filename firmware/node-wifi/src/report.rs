@@ -10,7 +10,9 @@ use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+#[cfg(not(feature = "espnow"))]
 use esp_hal::Async;
+#[cfg(not(feature = "espnow"))]
 use esp_hal::uart::UartTx;
 use heapless::Vec;
 use rid::{MAX_PACK, RawMessage, Transport};
@@ -27,7 +29,7 @@ pub const JSON_BYTES: usize = 6 * 1024;
 
 /// Hub frames waiting for the UART. Kept short: if the hub link stalls we would
 /// rather lose stats than block the drain task.
-static HUB_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8, { link::MAX_FRAME }>, 8> = Channel::new();
+pub(crate) static HUB_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8, { link::MAX_FRAME }>, 8> = Channel::new();
 /// Hub frames that could not be queued or encoded.
 pub static HUB_DROPPED: AtomicU32 = AtomicU32::new(0);
 
@@ -308,6 +310,7 @@ fn to_hub(frame: &link::Frame) {
 }
 
 /// Owns the hub UART and writes queued frames out.
+#[cfg(not(feature = "espnow"))]
 #[embassy_executor::task]
 pub async fn hub_writer(mut uart: UartTx<'static, Async>) {
     loop {

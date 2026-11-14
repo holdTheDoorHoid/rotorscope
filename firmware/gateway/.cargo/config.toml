@@ -1,0 +1,6 @@
+[alias]
+fw = "build --release"
+
+[build]
+target    = "riscv32imac-unknown-none-elf"
+rustflags = ["-C", "force-frame-pointers", "-C", "link-arg=-Tlinkall.x"]

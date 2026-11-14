@@ -199,6 +199,9 @@ impl Hub {
                 }
                 Frame::Detection(_) => st.detections = st.detections.wrapping_add(1),
                 Frame::OpenLink(_) => st.open_sightings = st.open_sightings.wrapping_add(1),
+                // ESP-NOW gateway marker. This hub has no per-node view of a
+                // gateway link yet: relayed frames count against the gateway's link.
+                Frame::Via { .. } => {}
             }
         }
         match frame {
@@ -210,7 +213,7 @@ impl Hub {
             Frame::OpenLink(s) => {
                 self.tracker.borrow_mut().ingest_open_link(node, &s, now);
             }
-            Frame::Hello { .. } | Frame::Stats { .. } => {}
+            Frame::Hello { .. } | Frame::Stats { .. } | Frame::Via { .. } => {}
         }
         // The screen shows tracks and node health: rebuild its view soon.
         crate::screen::mark_dirty();

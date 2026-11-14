@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 /// - 2: adds [`Frame::OpenLink`]. Appended as the last variant, so v1 frames
 ///   encode exactly as before; a v1 hub counts a v2 `OpenLink` as corrupt and
 ///   carries on.
-pub const PROTOCOL_VERSION: u8 = 2;
+/// - 3: adds [`Frame::Via`], written by an ESP-NOW gateway (appended likewise;
+///   older hubs count it as corrupt and still read the relayed frame).
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Largest encoded frame, COBS overhead included. Size buffers with this.
 pub const MAX_FRAME: usize = 320;
@@ -88,8 +90,15 @@ pub enum Frame {
         /// BLE node splits legacy / extended / Long Range). Empty otherwise.
         by_transport: Vec<(Transport, u32), 5>,
     },
-    /// Protocol 2. Keep it last: postcard tags variants by index.
+    /// Protocol 2.
     OpenLink(OpenLinkSighting),
+    /// Protocol 3, from an ESP-NOW gateway only: the next frame on this link
+    /// was relayed from the node with this station address, heard at this
+    /// RSSI. One gateway link carries many nodes, so it precedes every relayed
+    /// frame; a hub attributes exactly one following frame to `node`. A marker
+    /// rather than a wrapper, so relayed frames keep their `MAX_FRAME` budget.
+    /// Keep new variants last: postcard tags variants by index.
+    Via { node: [u8; 6], rssi: i8 },
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -196,7 +205,7 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 7] {
+    fn samples() -> [Frame; 8] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -223,6 +232,7 @@ mod tests {
             },
             Frame::OpenLink(sighting(0xFF)),
             Frame::OpenLink(sighting(0x00)),
+            Frame::Via { node: [0xFF; 6], rssi: i8::MIN },
         ]
     }
 

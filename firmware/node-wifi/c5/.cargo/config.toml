@@ -5,6 +5,9 @@ fw = "build --release --features esp32c5"
 # Node A on a C5 (2.4 GHz). Separate target dir so the 5 GHz ELF is never overwritten:
 #   -> ../target-band24/riscv32imac-unknown-none-elf/release/node-wifi
 fw24 = "build --release --features esp32c5,band24 --target-dir ../target-band24"
+# Same, reporting over ESP-NOW to the gateway instead of the UART:
+#   -> ../target-espnow/riscv32imac-unknown-none-elf/release/node-wifi
+fw24-now = "build --release --features esp32c5,band24,espnow --target-dir ../target-espnow"
 
 [build]
 target = "riscv32imac-unknown-none-elf"

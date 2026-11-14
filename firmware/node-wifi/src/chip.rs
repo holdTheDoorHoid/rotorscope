@@ -64,11 +64,13 @@ mod imp {
     /// ESP32-S3. These are UART0's default pins, so the ROM bootloader's boot
     /// banner also appears here for a moment after reset; the hub's COBS
     /// decoder discards it as a garbled frame.
+    #[allow(unused_macros, reason = "unused with the espnow feature")]
     macro_rules! hub_tx_pin {
         ($p:ident) => {
             $p.GPIO43
         };
     }
+    #[allow(unused_imports, reason = "unused with the espnow feature")]
     pub(crate) use hub_tx_pin;
 }
 
@@ -134,11 +136,13 @@ mod imp {
 
     /// Hub link: UART1 on the C5's UART0 default TX pin (labelled TX on a XIAO
     /// ESP32-C5). Check against your board's pinout before wiring.
+    #[allow(unused_macros, reason = "unused with the espnow feature")]
     macro_rules! hub_tx_pin {
         ($p:ident) => {
             $p.GPIO11
         };
     }
+    #[allow(unused_imports, reason = "unused with the espnow feature")]
     pub(crate) use hub_tx_pin;
 }
 
@@ -153,6 +157,7 @@ pub const OPEN_LINKS: bool = true;
 
 /// Hub UART speed. 921600 leaves ample headroom: a full 9-message Detection is
 /// ~250 bytes, under 3 ms on the wire.
+#[cfg_attr(feature = "espnow", allow(dead_code, reason = "no UART with espnow"))]
 pub const HUB_BAUD: u32 = 921_600;
 
 /// The radio settings esp-radio 1.0.0-beta.1 does not cover by itself.

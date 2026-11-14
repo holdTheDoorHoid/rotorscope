@@ -44,10 +44,15 @@ esp32c5 = [
 # With esp32c5: listen on 2.4 GHz (channels 6/1/11, role Wifi24) instead of
 # 5 GHz, so a C5 can be Node A. Build with `cargo fw24` from c5/.
 band24 = []
+# Send hub frames over ESP-NOW to a gateway (firmware/gateway) instead of the
+# UART. Makes the node transmit; see docs/ESPNOW.md. 2.4 GHz builds only (the
+# gateway is on 2.4 GHz channel 6): S3, or C5 with band24 (`cargo fw24-now`).
+espnow = ["esp-radio/esp-now", "dep:airlink"]
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }
 link = { path = "../../crates/link" }
+airlink = { path = "../../crates/airlink", optional = true }
 # Open FPV / telemetry link classifier (wfb-ng, OpenHD, RubyFPV, DroneBridge).
 openlink = { path = "../../crates/openlink", features = ["serde"] }
 

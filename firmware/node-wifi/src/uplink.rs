@@ -1,0 +1,160 @@
+//! ESP-NOW uplink (feature `espnow`): hub frames to a gateway instead of the UART.
+//!
+//! Frames from `report::HUB_QUEUE` are packed into `airlink` batches and sent
+//! unicast to the gateway, whose address is learned from its beacons. A batch
+//! goes out when it is full or [`HOLD`] old, and only while the hopper is on
+//! the gateway's channel; the hopper waits for a send in flight to finish
+//! before it retunes ([`wait_idle`]), so a send is never cut off mid-air.
+//! Unicast gets the radio's ACK and retries; a batch that still fails stays
+//! queued and is retried, and is dropped only after [`GIVE_UP`].
+//!
+//! Latency budget: up to HOLD for batching plus up to the 100 ms the 2.4 GHz
+//! plan spends off channel 6, so a detection reaches the gateway in well
+//! under a quarter of a second.
+
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+
+use embassy_time::{Duration, Instant, Timer};
+use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
+
+use crate::report::HUB_QUEUE;
+use crate::rx::TUNED_CHANNEL;
+
+/// Batch window. Longer packs more frames per packet (less airtime overhead)
+/// but delays every detection by up to this much.
+const HOLD: Duration = Duration::from_millis(50);
+/// Retry a failed batch for this long, then drop it.
+const GIVE_UP: Duration = Duration::from_secs(2);
+/// Forget a gateway not heard from for this long (stop sending).
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often the task looks at the queue and the channel.
+const POLL: Duration = Duration::from_millis(5);
+
+/// A send is in flight: the hopper must not retune yet.
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+pub static PACKETS: AtomicU32 = AtomicU32::new(0);
+pub static FRAMES: AtomicU32 = AtomicU32::new(0);
+pub static BYTES: AtomicU32 = AtomicU32::new(0);
+/// Sends the radio reported as not delivered (no ACK after its retries).
+pub static FAILED: AtomicU32 = AtomicU32::new(0);
+/// Batches dropped after GIVE_UP (or for want of a gateway).
+pub static DROPPED_BATCHES: AtomicU32 = AtomicU32::new(0);
+pub static BEACONS: AtomicU32 = AtomicU32::new(0);
+/// Microseconds spent waiting for sends to complete (radio busy transmitting).
+pub static SEND_US: AtomicU32 = AtomicU32::new(0);
+
+/// Called by the hopper before each retune.
+pub async fn wait_idle() {
+    let t = Instant::now();
+    while BUSY.load(Relaxed) && t.elapsed() < Duration::from_millis(30) {
+        Timer::after(Duration::from_millis(1)).await;
+    }
+}
+
+#[embassy_executor::task]
+pub async fn run(mut now: EspNow) {
+    let mut batch = airlink::Batch::new();
+    let mut batch_since = Instant::now();
+    let mut seq: u16 = 0;
+    let mut gateway: Option<([u8; 6], u8, Instant)> = None;
+    let mut last_stats = Instant::now();
+    let mut pending: Option<heapless::Vec<u8, { link::MAX_FRAME }>> = None;
+
+    loop {
+        // Beacons: learn (or refresh) the gateway.
+        while let Some(got) = now.receive() {
+            let Some(pkt) = airlink::parse(got.data()) else { continue };
+            let Some(ch) = airlink::beacon_channel(&pkt) else { continue };
+            BEACONS.fetch_add(1, Relaxed);
+            let mac = got.info.src_address;
+            if gateway.is_none_or(|(m, _, _)| m != mac) {
+                if !now.peer_exists(&mac) {
+                    let _ = now.add_peer(PeerInfo {
+                        interface: EspNowWifiInterface::Station,
+                        peer_address: mac,
+                        lmk: None,
+                        channel: None,
+                        encrypt: false,
+                    });
+                }
+                esp_println::println!(
+                    r#"{{"t":"uplink","gateway":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","ch":{ch}}}"#,
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                );
+            }
+            gateway = Some((mac, ch, Instant::now()));
+        }
+        if gateway.is_some_and(|(_, _, t)| t.elapsed() > GATEWAY_TIMEOUT) {
+            gateway = None;
+        }
+
+        // Fill the batch: first a frame left over from last time, then the queue.
+        loop {
+            let frame = match pending.take() {
+                Some(f) => f,
+                None => match HUB_QUEUE.try_receive() {
+                    Ok(f) => f,
+                    Err(_) => break,
+                },
+            };
+            if batch.is_empty() {
+                batch_since = Instant::now();
+            }
+            if !batch.push(&frame) {
+                // Full: this frame starts the next batch, after a send.
+                pending = Some(frame);
+                break;
+            }
+        }
+
+        let due = !batch.is_empty() && (pending.is_some() || batch_since.elapsed() >= HOLD);
+        if due {
+            match gateway {
+                Some((mac, ch, _)) if TUNED_CHANNEL.load(Relaxed) == ch => {
+                    BUSY.store(true, Relaxed);
+                    let t0 = Instant::now();
+                    let frames = batch.frames();
+                    let len = batch.payload_len();
+                    let r = now.send_async(&mac, batch.packet(seq)).await;
+                    BUSY.store(false, Relaxed);
+                    SEND_US.fetch_add(t0.elapsed().as_micros() as u32, Relaxed);
+                    if r.is_ok() {
+                        // Only on success: a retry of a batch whose ACK was lost
+                        // reuses the number, so the gateway drops the duplicate.
+                        seq = seq.wrapping_add(1);
+                        PACKETS.fetch_add(1, Relaxed);
+                        FRAMES.fetch_add(u32::from(frames), Relaxed);
+                        BYTES.fetch_add(len as u32, Relaxed);
+                        batch.clear();
+                    } else {
+                        FAILED.fetch_add(1, Relaxed);
+                    }
+                }
+                _ => {}
+            }
+            if !batch.is_empty() && batch_since.elapsed() > GIVE_UP {
+                DROPPED_BATCHES.fetch_add(1, Relaxed);
+                batch.clear();
+                // The gateway may have had it after all; never reuse its number.
+                seq = seq.wrapping_add(1);
+            }
+        }
+
+        if last_stats.elapsed() >= Duration::from_secs(1) {
+            last_stats = Instant::now();
+            esp_println::println!(
+                r#"{{"t":"uplink","gw":{},"beacons":{},"pkts":{},"frames":{},"bytes":{},"failed":{},"dropped":{},"send_us":{}}}"#,
+                gateway.is_some(),
+                BEACONS.load(Relaxed),
+                PACKETS.load(Relaxed),
+                FRAMES.load(Relaxed),
+                BYTES.load(Relaxed),
+                FAILED.load(Relaxed),
+                DROPPED_BATCHES.load(Relaxed),
+                SEND_US.load(Relaxed)
+            );
+        }
+        Timer::after(POLL).await;
+    }
+}

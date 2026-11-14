@@ -138,3 +138,9 @@ Built and unit-tested only. Nothing has been checked against a real transmitter:
 ## Bench tests
 
 Two-board tests that flash and judge this firmware: `tools/bench/run.py --list` (see `docs/BENCH.md`).
+
+## ESP-NOW uplink (experimental)
+
+`cargo fw24-now` (from `c5/`) builds the 2.4 GHz C5 node with the `espnow`
+feature: hub frames go over ESP-NOW to `firmware/gateway` instead of the UART.
+The node then transmits. See `docs/ESPNOW.md`.

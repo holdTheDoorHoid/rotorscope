@@ -7,7 +7,8 @@
 //! as the channel hopper. Data frames are classified in the callback by the
 //! `openlink` crate (open FPV / telemetry links) and only counted there;
 //! `open_links` reports each stream at most once a second. Receive-only:
-//! nothing here transmits on the air.
+//! nothing here transmits on the air, except with the `espnow` feature, where
+//! `uplink` sends hub frames to an ESP-NOW gateway instead of the UART.
 #![no_std]
 #![no_main]
 #![deny(
@@ -19,6 +20,8 @@
 mod chip;
 mod report;
 mod rx;
+#[cfg(feature = "espnow")]
+mod uplink;
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -27,6 +30,7 @@ use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
+#[cfg(not(feature = "espnow"))]
 use esp_hal::uart::{Config as UartConfig, UartTx};
 use esp_radio::wifi::{SecondaryChannel, WifiController};
 use rid::wifi::{BEACON_OUI, BEACON_OUI_TYPE, NAN_DEST};
@@ -66,11 +70,14 @@ async fn main(spawner: Spawner) -> ! {
 
     report::hello_json();
 
-    let hub_uart = UartTx::new(peripherals.UART1, UartConfig::default().with_baudrate(chip::HUB_BAUD))
-        .expect("hub UART config")
-        .with_tx(chip::hub_tx_pin!(peripherals))
-        .into_async();
-    spawner.spawn(report::hub_writer(hub_uart).expect("spawn hub_writer"));
+    #[cfg(not(feature = "espnow"))]
+    {
+        let hub_uart = UartTx::new(peripherals.UART1, UartConfig::default().with_baudrate(chip::HUB_BAUD))
+            .expect("hub UART config")
+            .with_tx(chip::hub_tx_pin!(peripherals))
+            .into_async();
+        spawner.spawn(report::hub_writer(hub_uart).expect("spawn hub_writer"));
+    }
 
     let mut wifi = WifiController::new(peripherals.WIFI, Default::default()).expect("Wi-Fi init");
     if let Err(what) = chip::configure_radio(&mut wifi) {
@@ -84,6 +91,8 @@ async fn main(spawner: Spawner) -> ! {
     sniffer.set_receive_cb(rx::on_frame);
     sniffer.set_promiscuous_mode(true).expect("promiscuous mode");
 
+    #[cfg(feature = "espnow")]
+    spawner.spawn(uplink::run(wifi.esp_now()).expect("spawn uplink"));
     spawner.spawn(drain().expect("spawn drain"));
     spawner.spawn(stats().expect("spawn stats"));
     if chip::OPEN_LINKS {
@@ -103,6 +112,8 @@ async fn hop_forever(wifi: &mut WifiController<'_>) -> ! {
     loop {
         for (i, hop) in chip::PLAN.iter().enumerate() {
             let ch = hop.channel();
+            #[cfg(feature = "espnow")]
+            uplink::wait_idle().await;
             match wifi.set_channel(ch, SecondaryChannel::None) {
                 Ok(()) => rx::TUNED_CHANNEL.store(ch, Relaxed),
                 Err(e) => {
