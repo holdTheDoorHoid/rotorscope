@@ -56,7 +56,7 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 7 | Gateway link on UART3 (RX GPIO28, 921600) | PASS on-chip self-test: UART2 TX drives the same pad; 50 frames/s, 0 corrupt, `Via` attribution right. Not yet with a real wire |
 | 8 | C6 over SDIO | not started; see "C6 and ESP-NOW" |
 | 9 | Hub app (`src/app.rs`) | RUNNING: tracker (64 tracks) fed by the gateway link; the shared `screen` UI drawn at 2x (640x480) in 24-row bands, 4 redraws/s; UP / SELECT / DOWN touch keys in the right 160 px. Self-test frame became a track; 0 corrupt, 0 bytes lost while drawing |
-| 10 | Touch (GT911) | Chip answers (product id "911"); taps not yet tried by a person |
+| 10 | Touch (GT911) | PASS 2026-11-14: 46 taps by the owner logged; coordinates match the panel (keys at x 697-759, rows at y 66-126 / 229-276 / 378-439; left-side taps at x 297-404), so no axis swap or mirror. No crash |
 | - | CPU clock | esp-hal defaults to 90 MHz on the P4; now 360 MHz (`CpuClock::max()`), 3.4x faster drawing |
 | - | Gateway UART | moved to the UART3 interrupt with an 8 KB ring (~90 ms at full rate): a screen band takes ~6.5 ms and a touch read ~3 ms, the FIFO only lasts 1.4 ms |
 
