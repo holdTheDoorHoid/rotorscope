@@ -6,6 +6,10 @@
 //! - ESP32-C5: the same, with Wi-Fi on 5 GHz channel 149 by default
 //!   (country "US" set explicitly) and a console command to drop to 2.4 GHz.
 //!
+//! Also, off until a console key turns one on: fake frames shaped like the
+//! open digital FPV links (wfb-ng/OpenIPC, OpenHD, RubyFPV, DroneBridge),
+//! built by `openlink::build` with obviously fake IDs. Never DJI DroneID.
+//!
 //! Conduct (see README.md): obviously fake identity, minimum TX power,
 //! simulated position, bench use only.
 #![no_std]
@@ -80,13 +84,17 @@ const BLE_ADDR: [u8; 6] = [CHIP_BYTE, 0x00, 0x44, 0x49, 0x52, 0xC2];
 /// associated; esp_wifi_80211_tx accepts beacons and action frames while
 /// unconnected, on whatever channel the radio is parked on.
 const USE_STA_INTERFACE: bool = true;
+/// The S3's only channel (the C5 takes its channel from `control`).
+#[cfg(not(feature = "esp32c5"))]
 const WIFI_CH_24: u8 = 6;
+/// Fake open-link frames per second while one is on. Real video links send
+/// hundreds; 20 is plenty for a hopping listener (it spends 50 ms on 161 and
+/// 165 every 800 ms) and keeps air time negligible.
+const OPEN_HZ: u32 = 20;
 /// Send core-c's NAN synchronisation beacon just before each NAN action
 /// frame, as opendroneid-core-c's transmitter does. Some NAN receivers need
 /// it to treat the action frame as part of a cluster; sniffers do not care.
 const SEND_NAN_SYNC_BEACON: bool = true;
-#[cfg(feature = "esp32c5")]
-const WIFI_CH_5: u8 = 149;
 
 // --- BLE --------------------------------------------------------------------
 
@@ -164,7 +172,7 @@ async fn main(spawner: Spawner) -> ! {
         .build();
 
     println!(
-        r#"{{"t":"boot","fw":"rid-beacon","chip":"{}","uas_id":"{}","operator_id":"{}","self_id":"{}","ssid":"{}","wifi_src":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","ble_addr":"{}","wifi_tx_qdbm":{},"ble_tx_dbm":-15,"centre":[{:.7},{:.7}],"radius_m":{},"period_s":{},"cmds":"w n l e c a x b ?"}}"#,
+        r#"{{"t":"boot","fw":"rid-beacon","chip":"{}","uas_id":"{}","operator_id":"{}","self_id":"{}","ssid":"{}","wifi_src":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","ble_addr":"{}","wifi_tx_qdbm":{},"ble_tx_dbm":-15,"centre":[{:.7},{:.7}],"radius_m":{},"period_s":{},"open_ids":{{"wfb_link_id":"{:06x}","ruby_vehicle_id":"{:08x}","dronebridge_comm_id":"{:02x}"}},"cmds":"w n l e c a x b f o r d 6 7 8 9 ?"}}"#,
         if cfg!(feature = "esp32c5") {
             "esp32c5"
         } else {
@@ -186,6 +194,9 @@ async fn main(spawner: Spawner) -> ! {
         centre.lon,
         flight::RADIUS_M,
         flight::PERIOD_S,
+        openlink::build::FAKE_WFB_LINK_ID,
+        openlink::build::FAKE_RUBY_VEHICLE_ID,
+        openlink::build::FAKE_DRONEBRIDGE_COMM_ID,
     );
 
     spawner.spawn(wifi_task(wifi, sniffer, centre).unwrap());
@@ -217,15 +228,15 @@ async fn main(spawner: Spawner) -> ! {
 // ---------------------------------------------------------------------------
 // Wi-Fi: beacon and NAN through raw 802.11 TX.
 
-/// Park the radio on the band/channel the console asked for.
-fn tune(wifi: &mut WifiController<'static>, five: bool) -> u8 {
+/// Park the radio on the channel the console asked for.
+fn tune(wifi: &mut WifiController<'static>, ch: u8) -> u8 {
     #[cfg(feature = "esp32c5")]
     {
         use esp_radio::wifi::BandMode;
-        let (band, ch) = if five {
-            (BandMode::_5G, WIFI_CH_5)
+        let band = if ch > 14 {
+            BandMode::_5G
         } else {
-            (BandMode::_2_4G, WIFI_CH_24)
+            BandMode::_2_4G
         };
         if let Err(e) = wifi.set_band_mode(band) {
             error!("set_band_mode: {e:?}");
@@ -242,7 +253,7 @@ fn tune(wifi: &mut WifiController<'static>, five: bool) -> u8 {
     }
     #[cfg(not(feature = "esp32c5"))]
     {
-        let _ = five;
+        let _ = ch;
         if let Err(e) = wifi.set_channel(WIFI_CH_24, SecondaryChannel::None) {
             error!("set_channel({WIFI_CH_24}): {e:?}");
         }
@@ -262,28 +273,36 @@ async fn wifi_task(mut wifi: WifiController<'static>, mut sniffer: Sniffer, cent
     if let Err(e) = wifi.set_power_saving(PowerSaveMode::Minimum) {
         error!("set_power_saving: {e:?}");
     }
-    let mut five = control::band_5g();
-    let mut channel = tune(&mut wifi, five);
+    let mut channel = tune(&mut wifi, control::channel());
     info!("Wi-Fi raw TX on channel {channel}");
 
     let beacon_hz = beacon_hz();
     info!("Wi-Fi beacon rate {beacon_hz} Hz, NAN 1 Hz");
     let mut counters = [0u8; 2]; // F3411 message counters: beacon, NAN
     let mut frame = [0u8; rid_tx::FRAME_MAX];
-    // 100 ms slots. Beacons go in slots 0, 10/hz, ...; NAN in slot 5, so at
-    // the default 1 Hz the two are half a second apart and never queue
-    // behind each other.
-    let mut ticker = Ticker::every(Duration::from_millis(100));
-    let mut slot = 0u32;
+    let mut open_seq = 0u32;
+    // 50 ms ticks, 20 a second. Remote ID uses the even ticks as ten 100 ms
+    // slots: beacons in slots 0, 10/hz, ...; NAN in slot 5, so at the default
+    // 1 Hz the two are half a second apart and never queue behind each
+    // other. A fake open link, when on, sends on every tick.
+    let mut ticker = Ticker::every(Duration::from_millis(1000 / OPEN_HZ as u64));
+    let mut tick = 0u32;
     loop {
         ticker.next().await;
-        let this = slot;
-        slot = (slot + 1) % 10;
-        if control::band_5g() != five {
-            five = control::band_5g();
-            channel = tune(&mut wifi, five);
+        let this_tick = tick;
+        tick = (tick + 1) % 20;
+        if control::channel() != channel {
+            channel = tune(&mut wifi, control::channel());
             info!("Wi-Fi retuned to channel {channel}");
         }
+        if let Some((system, _)) = control::open() {
+            open_send(&mut sniffer, system, open_seq, &mut frame);
+            open_seq = open_seq.wrapping_add(1);
+        }
+        if !this_tick.is_multiple_of(2) {
+            continue;
+        }
+        let this = this_tick / 2;
         let beacon_due = this.is_multiple_of(10 / beacon_hz);
         let nan_due = this == 5;
         for kind in [Tx::WifiBeacon, Tx::WifiNan] {
@@ -301,6 +320,31 @@ async fn wifi_task(mut wifi: WifiController<'static>, mut sniffer: Sniffer, cent
                     &mut counters,
                     &mut frame,
                 );
+            }
+        }
+    }
+}
+
+/// Build and transmit one fake open-FPV frame (`openlink::build`).
+fn open_send(
+    sniffer: &mut Sniffer,
+    system: openlink::System,
+    seq: u32,
+    frame: &mut [u8; rid_tx::FRAME_MAX],
+) {
+    let Some(len) = openlink::build::fake_frame(system, seq, frame) else {
+        control::open_failed();
+        return;
+    };
+    // use_internal_seq_num = false: the builder wrote the sequence field,
+    // and for DroneBridge those two bytes are payload, not a header.
+    match sniffer.send_raw_frame(USE_STA_INTERFACE, &frame[..len], false) {
+        Ok(()) => control::open_sent(),
+        Err(e) => {
+            control::open_failed();
+            let n = control::open_failed_total();
+            if n == 1 || n.is_multiple_of(100) {
+                error!("open-link raw TX failed ({n} so far): {e:?}");
             }
         }
     }
@@ -703,8 +747,14 @@ async fn console_task(mut rx: UsbSerialJtagRx<'static, Blocking>) {
                     r#"{{"t":"cmd","band":"{}"}}"#,
                     if five { "5" } else { "2.4" }
                 ),
+                Reply::Open(sys) => println!(
+                    r#"{{"t":"cmd","open":"{}","ch":{}}}"#,
+                    sys.unwrap_or("off"),
+                    control::channel()
+                ),
+                Reply::Channel(ch) => println!(r#"{{"t":"cmd","ch":{ch}}}"#),
                 Reply::Help => println!(
-                    r#"{{"t":"help","w":"wifi beacon","n":"wifi nan","l":"ble4 legacy","e":"ble5 extended 1M","c":"ble5 long range (coded)","a":"all on","x":"all off","b":"c5 only: toggle 5 GHz ch149 / 2.4 GHz ch6","flags":"{}"}}"#,
+                    r#"{{"t":"help","w":"wifi beacon","n":"wifi nan","l":"ble4 legacy","e":"ble5 extended 1M","c":"ble5 long range (coded)","a":"all remote id on","x":"all off (remote id and fake fpv)","b":"c5 only: toggle 5 GHz ch149 / 2.4 GHz ch6","f":"fake wfb-ng/openipc","o":"fake openhd","r":"fake rubyfpv","d":"fake dronebridge","6":"wifi ch 6","7":"c5 only: wifi ch 149","8":"c5 only: wifi ch 161","9":"c5 only: wifi ch 165","flags":"{}"}}"#,
                     flags_str(&control::flags())
                 ),
             }
@@ -720,6 +770,7 @@ fn flags_str(f: &[u8; 5]) -> &str {
 async fn summary_task(centre: Centre) {
     let mut last = [0u32; 5];
     let mut last_fail = 0u32;
+    let mut last_open = 0u32;
     let mut ticker = Ticker::every(Duration::from_secs(1));
     loop {
         ticker.next().await;
@@ -729,20 +780,24 @@ async fn summary_task(centre: Centre) {
             now[i] = control::sent_total(t);
             fail += control::failed_total(t);
         }
+        fail += control::open_failed_total();
+        let open_now = control::open_sent_total();
         let d = |i: usize| now[i].wrapping_sub(last[i]);
         let t = uptime_s();
         let fix = flight::at(&centre, t);
         let five = control::band_5g();
         println!(
-            r#"{{"t":"tx","up":{},"band":"{}","ch":{},"beacon":{},"nan":{},"ble4":{},"ble5":{},"ble_lr":{},"fail":{},"on":"{}","lat":{:.7},"lon":{:.7},"hdg":{:.0}}}"#,
+            r#"{{"t":"tx","up":{},"band":"{}","ch":{},"beacon":{},"nan":{},"ble4":{},"ble5":{},"ble_lr":{},"open_sys":"{}","open":{},"fail":{},"on":"{}","lat":{:.7},"lon":{:.7},"hdg":{:.0}}}"#,
             t as u32,
             if five { "5" } else { "2.4" },
-            if five { 149 } else { WIFI_CH_24 },
+            control::channel(),
             d(0),
             d(1),
             d(2),
             d(3),
             d(4),
+            control::open().map_or("off", |(_, n)| n),
+            open_now.wrapping_sub(last_open),
             fail.wrapping_sub(last_fail),
             flags_str(&control::flags()),
             fix.lat,
@@ -751,5 +806,6 @@ async fn summary_task(centre: Centre) {
         );
         last = now;
         last_fail = fail;
+        last_open = open_now;
     }
 }

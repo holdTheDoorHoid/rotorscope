@@ -11,6 +11,10 @@ Bare-metal Rust: `esp-hal` 1.2, `esp-radio` 1.0.0-beta.1, `trouble-host` 0.8, em
 All Remote ID bytes come from the shared `rid` crate (`rid::encode`), the same crate the
 receivers decode with. The firmware has no encoder of its own.
 
+It can also send **fake open digital FPV link frames** (wfb-ng/OpenIPC, OpenHD, RubyFPV,
+DroneBridge), off until a console key turns one on. Those bytes come from `openlink::build`, the
+same crate `node-wifi` classifies with. See "Fake open FPV links" below.
+
 ## Conduct (non-negotiable)
 
 This is a **bench** transmitter. Metres, not kilometres.
@@ -41,6 +45,14 @@ This is a **bench** transmitter. Metres, not kilometres.
     Philadelphia City Hall (39.9526, −75.1652).
   - There is no GPS or clock. The Location timestamp is uptime, counted as seconds after the
     hour. The System timestamp is "unknown".
+- **Fake open FPV links: header shape only, obviously fake IDs, off at boot.**
+  - Approved by the owner 2026-11-14 for bench testing, on the same terms as the Remote ID modes.
+  - IDs all start `7E57` ("TEST"): wfb-ng link ID `7e57ed` (not the real default `7505d6`),
+    RubyFPV vehicle ID `7e570001`, DroneBridge comm ID `7e`, OpenHD nonce high byte `7e` (a real
+    OpenHD nonce never reaches it). The body is the text `ROTORSCOPE BENCH TEST - NOT A REAL LINK`.
+  - Defined once, in `crates/openlink/src/build.rs`. Do not change them to a real link's values.
+  - **Never DJI.** This firmware must not send DJI DroneID of any kind: not OcuSync DroneID, not
+    the DJI Wi-Fi vendor element (OUI `26:37:12`).
 - **Indoors, on the bench, only while testing.** Press `x` on the console to silence every
   transport without a reset.
 
@@ -61,7 +73,30 @@ defaulted off with the `DEFAULT_*` consts in `src/control.rs`.
 - S3: 2.4 GHz channel 6.
 - C5: 5 GHz channel 149 by default. Country **"US" is set explicitly**, because a recent esp-hal
   change moves the default to "01", which rejects 149. Console `b` toggles the C5 between
-  149 and 2.4 GHz channel 6, and NAN follows the same channel.
+  149 and 2.4 GHz channel 6; keys `6` `7` `8` `9` pick channel 6, 149, 161 or 165. Every Wi-Fi
+  transmission (beacon, NAN, fake open link) uses the same channel.
+
+## Fake open FPV links
+
+One at a time, off at boot, Wi-Fi only, at the same 2 dBm. While one is on it sends **20 frames a
+second** on the current channel (real video links send hundreds). `x` turns it off with
+everything else; typing its key again turns it off alone. `a` (all on) does not turn it on.
+
+| Key | System | Frame (built by `openlink::build::fake_frame`) | Fake ID |
+|---|---|---|---|
+| `f` | wfb-ng / OpenIPC | data `08 01`, A1 broadcast, A2 = A3 = `57:42:7e:57:ed:00` (port 0, video down), packet type 1 | link ID `7e57ed` |
+| `o` | OpenHD | data `08 01`, A2 = `01:<nonce>:02`, A3 = `01:7e:00:00:00:02` (air side, port 2) | none in clear |
+| `r` | RubyFPV | data `08 01`, A1 = `ff:..` (downlink port 0x0F), A2 = A3 = `13:12:34:56:78:90`, unencrypted packet header | vehicle ID `7e570001` |
+| `d` | DroneBridge | `08 00 00 00`, direction 3 (to ground), port 2 (telemetry), length 48, no MAC header | comm ID `7e` |
+
+Frames go out through `esp_wifi_80211_tx` with the driver's sequence numbering **off**: the
+builder writes those bytes, and in a DroneBridge frame they are payload.
+
+**What this cannot imitate.** The ESP32 raw-TX API (`esp_wifi_80211_tx`, rate set by
+`esp_wifi_config_80211_tx`) chooses only the PHY mode and rate. It has no switch for **LDPC** or
+**STBC**, which wfb-ng uses by default for video. Our frames are plain BCC-coded OFDM at the
+driver's default raw rate. So a PASS here proves the header classifier and the receive path,
+not that a C5 decodes wfb-ng's default LDPC/STBC video. That needs real OpenIPC hardware.
 
 **How Wi-Fi is sent.** Wi-Fi uses raw 802.11 TX (`Sniffer::send_raw_frame`, which is
 `esp_wifi_80211_tx`) on the station interface.
@@ -110,8 +145,9 @@ tools/dev-board.sh firmware/rid-beacon/target/xtensa-esp32s3-none-elf/release/ri
 
 **Output.**
 - One JSON line per second:
-  `{"t":"tx","up":5,"band":"2.4","ch":6,"beacon":1,"nan":1,"ble4":5,"ble5":1,"ble_lr":1,"fail":0,"on":"WNLEC","lat":…,"lon":…,"hdg":122}`
-  - The transport fields count transmissions in the last second.
+  `{"t":"tx","up":5,"band":"2.4","ch":6,"beacon":1,"nan":1,"ble4":5,"ble5":1,"ble_lr":1,"open_sys":"off","open":0,"fail":0,"on":"WNLEC","lat":…,"lon":…,"hdg":122}`
+  - The transport fields count transmissions in the last second. `open_sys` is the fake open
+    link that is on (`wfb-ng`, `openhd`, `rubyfpv`, `dronebridge` or `off`), `open` its frames.
   - In `on`, an upper-case letter means the transport is enabled, lower-case means disabled,
     and `-` means the controller refused it at boot.
 - At boot:
@@ -131,14 +167,16 @@ tools/dev-board.sh firmware/rid-beacon/target/xtensa-esp32s3-none-elf/release/ri
 | `e` | toggle BLE 5 extended (1M) |
 | `c` | toggle BLE 5 Long Range (coded) |
 | `a` | all on |
-| `x` | all off (silence) |
+| `x` | all off (silence), fake open links included |
 | `b` | C5 only: toggle 5 GHz ch 149 ↔ 2.4 GHz ch 6 |
+| `f` / `o` / `r` / `d` | fake wfb-ng / OpenHD / RubyFPV / DroneBridge link on (one at a time) or off |
+| `6` | Wi-Fi channel 6 (2.4 GHz) |
+| `7` / `8` / `9` | C5 only: Wi-Fi channel 149 / 161 / 165 |
 | `?` / `h` | help (JSON) |
 
 Each command echoes a `{"t":"cmd",…}` line.
 - To send keys, use any serial terminal on the board's USB port.
-- `tools/dev-board.sh` only reads, so it cannot send commands. The toggles are therefore not
-  yet hardware-tested.
+- `tools/dev-board.sh --send KEYS` types keys after the reset; the bench runner uses it.
 
 ## Verified on hardware (ESP32-S3 rev 0.2, 2026-11-09)
 
@@ -171,7 +209,9 @@ Each command echoes a `{"t":"cmd",…}` line.
   accepted by the controller.
 - NAN was not checked from the laptop either. That needs a monitor-mode sniffer or `node-wifi`.
 
-**C5:** build-only so far. No hardware is on the bench yet.
+**C5:** see `docs/BENCH.md` for the Remote ID results. Fake open FPV links (2026-11-14): all four
+systems, on channels 6, 149, 161 and 165, heard by a C5 `node-wifi` (16/16 PASS, 0 failed sends,
+about −44 to −38 dBm at a metre).
 
 ## Limits and workarounds found
 

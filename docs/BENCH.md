@@ -26,6 +26,7 @@ If you move a board to a different USB port nothing changes, because it is found
 | Same, 5 GHz Wi-Fi, and C5 Bluetooth | `tools/bench/run.py --group c5` | `c5a`, `c5b` | `c5a` | `c5b` |
 | Mixed chips (C5 sends, S3 listens; S3 sends, C5 listens) | `tools/bench/run.py --group cross` | `s3`, `c5a`, `c5b` | see `--list` | |
 | A C5 as the 2.4 GHz Wi-Fi node (`node-wifi` built `cargo fw24`) | `tools/bench/run.py c5-to-c5-wifi24-beacon c5-to-c5-wifi24-nan s3-to-c5-wifi24-beacon s3-to-c5-wifi24-nan` | `c5a`, `c5b`, `s3` | `c5a` or `s3` | `c5b` |
+| Fake open FPV links (wfb-ng, OpenHD, RubyFPV, DroneBridge) on ch 149, 161, 165 and 6 | `tools/bench/run.py --group openlink` | `c5a`, `c5b` | `c5b` | `c5a` |
 | Node to hub over wires | `tools/bench/run.py --group hub` | see "Hub wiring" | node | hub (`s3`) |
 
 One test at a time: `tools/bench/run.py --list` shows every test name, then for example
@@ -54,6 +55,32 @@ The exit code is 0 only if everything passed.
 First results (2026-11-12): all five `--group c5` tests and all eight `--group cross` tests PASS,
 including Bluetooth Long Range in both directions and 5 GHz NAN. A C5 built as the 2.4 GHz Wi-Fi
 node passes all four of its tests (beacon and NAN, from a C5 and from the S3). A C5 drops off USB for about a second as its app starts; the tools wait for it.
+
+## Open FPV links (2026-11-14)
+
+`--group openlink` is 16 tests: each of the four systems on each of channels 149, 161, 165 and 6.
+The beacon (`c5b`) types `x`, a channel key and the system's key (for example `x9f` = channel 165,
+fake wfb-ng). The listener (`c5a`) runs `node-wifi`: the 5 GHz build for 149/161/165, the 2.4 GHz
+build (`cargo fw24`) for channel 6. PASS = at least 3 `"t":"open"` lines with that system, its
+fake ID and that channel. The fake frames and IDs are described in `firmware/rid-beacon/README.md`.
+
+**Result: 16 of 16 PASS** on the first full run (`bench-logs/20261114-181014`), boards about a
+metre apart, beacon at 2 dBm, 0 failed sends.
+
+| Channel | Systems | Reports (each test) | RSSI | Frames counted in 30 s |
+|---|---|---|---|---|
+| 149 | all four | 26-27 | −43 to −41 dBm | ~430 (149 is the listener's home channel) |
+| 161 | all four | 26 | −43 to −42 dBm | ~35 (listener visits for 50 ms in 800) |
+| 165 | all four | 24-27 | −45 to −44 dBm | ~34 |
+| 6 | all four | 25-26 | −41 to −38 dBm | ~420 |
+
+The two open questions from PLAN 11a:
+- **Does the C5 receive channel 165 in normal Wi-Fi mode? Yes.** All four systems passed there,
+  with frames received at the same rate as on 161.
+- **Does it receive wfb-ng's default LDPC/STBC-coded frames? Still open.** Our transmitter cannot
+  send them: the ESP32 raw-TX API sets only the PHY mode and rate, with no LDPC or STBC switch. So
+  these tests send plain coded frames. Answering this needs real wfb-ng/OpenIPC hardware with its
+  default video settings.
 
 ## Hub wiring (two boards)
 

@@ -7,10 +7,12 @@ license.workspace = true
 
 [features]
 serde = ["dep:serde"]
+# Fake frames for the bench beacon (`build` module). Transmit-side only.
+build = []
 
 [dependencies]
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = "1"
-openlink = { path = ".", features = ["serde"] }
+openlink = { path = ".", features = ["serde", "build"] }

@@ -195,3 +195,96 @@ def judge_hub(text: str, link: int, min_frames: int) -> Verdict:
     else:
         why = f"no bytes at all on hub link {link}: check the TX-to-RX wire and the shared ground"
     return Verdict(False, why, frames, min_frames, ev)
+
+
+# ------------------------------------------------------------ open FPV links --
+#
+# rid-beacon's fake open-FPV frames (firmware/rid-beacon, keys f/o/r/d; bytes from
+# crates/openlink/src/build.rs). node-wifi reports each stream at most once a second:
+#   {"t":"open","sys":"WfbNg","id":8279021,"port":0,"dir":"AirToGround","ch":165,"rssi":-40,
+#    "mac":"57:42:7e:57:ed:00","up_us":..,"n":42}
+
+# Beacon short name (its console key and "open_sys" field) -> openlink::System variant.
+OPEN_SYSTEMS = {"wfb-ng": "WfbNg", "openhd": "OpenHd", "rubyfpv": "RubyFpv", "dronebridge": "DroneBridge"}
+OPEN_KEYS = {"wfb-ng": "f", "openhd": "o", "rubyfpv": "r", "dronebridge": "d"}
+# Channel -> rid-beacon console digit.
+CHANNEL_KEYS = {6: "6", 149: "7", 161: "8", 165: "9"}
+# The fake identifiers (openlink::build::fake_id). OpenHD sends none in the clear.
+OPEN_FAKE_ID = {"WfbNg": 0x7E57ED, "OpenHd": None, "RubyFpv": 0x7E570001, "DroneBridge": 0x7E}
+
+
+def judge_open(text: str, system: str, channel: int, min_hits: int) -> Verdict:
+    """PASS = at least `min_hits` "open" lines from the listener with the wanted system
+    (`OPEN_SYSTEMS` short name), on the wanted channel, carrying the fake identifier."""
+    sysv = OPEN_SYSTEMS[system]
+    want_id = OPEN_FAKE_ID[sysv]
+    objs = parse_lines(text)
+    hello = any(o.get("t") == "hello" for o in objs)
+    stats = [o for o in objs if o.get("t") == "stats"]
+    opens = [o for o in objs if o.get("t") == "open"]
+    mine = [o for o in opens if o.get("sys") == sysv and o.get("id") == want_id]
+    good = [o for o in mine if int(o.get("ch", 0) or 0) == channel]
+    rssi = [o["rssi"] for o in good if isinstance(o.get("rssi"), (int, float))]
+    ev = {
+        "lines": len(objs), "hello": hello, "stats_lines": len(stats), "open_lines": len(opens),
+        "open_mine": len(mine), "hits": len(good),
+        "channels": sorted({int(o.get("ch", 0) or 0) for o in good}),
+        "macs": sorted({str(o.get("mac")) for o in good}),
+        "rssi_min": min(rssi) if rssi else None, "rssi_max": max(rssi) if rssi else None,
+        "open_frames": max((int(o.get("n", 0) or 0) for o in good), default=0),
+        "other_channels": sorted({int(o.get("ch", 0) or 0) for o in mine if o not in good}),
+        "foreign": Counter(f"{o.get('sys')}:{o.get('id')}" for o in opens if o not in mine),
+    }
+    ev["foreign"] = dict(ev["foreign"])
+    if len(good) >= min_hits:
+        return Verdict(True, f"{len(good)} reports of {sysv} id {want_id} on ch {channel} "
+                       f"({ev['open_frames']} frames)", len(good), min_hits, ev)
+    if not objs:
+        why = "listener printed nothing parseable (not flashed, wrong port, or board in the bootloader)"
+    elif not hello:
+        why = "listener never printed its hello line (did not boot, or the capture missed the reset)"
+    elif mine:
+        why = f"heard the fake {sysv} but on ch {ev['other_channels']}, not {channel}: {len(good)}/{min_hits}"
+    elif opens:
+        why = f"heard open links {ev['foreign']}, none the fake {sysv} (someone else's link?)"
+    elif not stats:
+        why = "listener booted but printed no stats lines (hung?)"
+    else:
+        data = max((int(o.get("data", 0) or 0) for o in stats), default=0)
+        why = f"listener is alive ({data} data frames seen) but heard no {sysv}: 0/{min_hits}"
+    return Verdict(False, why, len(good), min_hits, ev)
+
+
+def open_ready(text: str, system: str, channel: int) -> bool:
+    """rid-beacon is sending only the wanted fake link, on the wanted channel."""
+    tx = [o for o in parse_lines(text) if o.get("t") == "tx"]
+    if not tx:
+        return False
+    last = tx[-1]
+    rid_on = [c for c in str(last.get("on", "")) if c.isupper()]
+    return (last.get("open_sys") == system and int(last.get("ch", 0) or 0) == channel
+            and int(last.get("open", 0) or 0) > 0 and not rid_on)
+
+
+def judge_open_beacon(text: str, system: str, channel: int) -> dict:
+    """Context for a FAIL (never decides PASS): was the beacon sending the fake link?"""
+    objs = parse_lines(text)
+    tx = [o for o in objs if o.get("t") == "tx"]
+    on = [o for o in tx if o.get("open_sys") == system]
+    sent = sum(int(o.get("open", 0) or 0) for o in on)
+    fails = sum(int(o.get("fail", 0) or 0) for o in on)
+    note = []
+    if not objs:
+        note.append("transmitter printed nothing")
+    elif not tx:
+        note.append("transmitter printed no tx lines")
+    elif not on:
+        note.append(f"transmitter never had {system} on (last open_sys={tx[-1].get('open_sys')!r})")
+    elif sent == 0:
+        note.append(f"transmitter had {system} on but sent 0 frames")
+    if on and int(on[-1].get("ch", 0) or 0) != channel:
+        note.append(f"transmitter was on ch {on[-1].get('ch')}, wanted {channel}")
+    if fails:
+        note.append(f"transmitter reports {fails} failed sends")
+    return {"tx_lines": len(tx), "sent": sent, "failed": fails,
+            "ch": on[-1].get("ch") if on else None, "notes": note}

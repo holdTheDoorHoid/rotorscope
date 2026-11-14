@@ -63,10 +63,10 @@ channel 165 (5825) is still to be checked.
 
 | System | Where | What we can get | Node | Status | How we test it |
 |---|---|---|---|---|---|
-| wfb-ng / OpenIPC | 5 GHz Wi-Fi, default ch 165 (5825), often 161 | System, link ID (opt-in) | Wi-Fi 5 / 2.4 | **Built** (`crates/openlink`), never heard on air | Fake frames from a test beacon, or OpenIPC hardware |
-| OpenHD | 5745 (ch 149) default | System, air or ground side | Wi-Fi 5 | **Built**, not on air | same |
-| RubyFPV | 5 GHz Wi-Fi | System, vehicle ID (opt-in) | Wi-Fi 5 | **Built**, not on air | same |
-| DroneBridge | 2.4 / 5 GHz Wi-Fi | System | Wi-Fi | **Built**, not on air | same |
+| wfb-ng / OpenIPC | 5 GHz Wi-Fi, default ch 165 (5825), often 161 | System, link ID (opt-in) | Wi-Fi 5 / 2.4 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14); real LDPC/STBC video untested | `tools/bench/run.py --group openlink`; OpenIPC hardware for LDPC/STBC |
+| OpenHD | 5745 (ch 149) default | System, air or ground side | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) | `--group openlink`; real hardware |
+| RubyFPV | 5 GHz Wi-Fi | System, vehicle ID (opt-in) | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) | `--group openlink`; real hardware |
+| DroneBridge | 2.4 / 5 GHz Wi-Fi | System | Wi-Fi | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) | `--group openlink`; real hardware |
 | HDZero | R1–R8 (5658–5917, 37 MHz apart), E1 5705, F1 5740, F2 5760, F4 5800, low band 5362–5621 | "HDZero on channel X" by the grid and 27/17 MHz width | Fingerprint; RX5808 above 5820 | **Not built** | HDZero VTX ($40–70); it transmits without pairing |
 | Walksnail Avatar | same 8-channel plan as DJI (inferred), 20/40 MHz | "LTE-style video link" | Fingerprint | **Not built** | needs a kit |
 
