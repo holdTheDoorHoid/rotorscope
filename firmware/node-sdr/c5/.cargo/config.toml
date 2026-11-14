@@ -4,6 +4,9 @@
 [alias]
 fw      = "build --release"
 fw-lite = "build --release --no-default-features"
+# With the ESP-NOW hub uplink (transmits on 2.4 GHz channel 6 between captures):
+#   -> ../target-espnow/riscv32imac-unknown-none-elf/release/node-sdr
+fw-now  = "build --release --features espnow --target-dir ../target-espnow"
 
 [build]
 target = "riscv32imac-unknown-none-elf"

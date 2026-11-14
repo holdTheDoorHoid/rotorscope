@@ -16,6 +16,10 @@
 #   --send KEYS        after the reset, type these characters on the board's console
 #                      (rid-beacon's one-key commands, e.g. "xw"). Default delay 8 s.
 #   --send-after SECS  how long after the reset to start typing (default 8)
+#   --run CMD          instead of resetting and reading: run CMD (bash -c) with the lock
+#                      held and BOARD_PORT set to the board's port, for at most [seconds].
+#                      No reset. For host tools that talk to the board themselves
+#                      (e.g. tools/droneid-hil). Combine with an <elf> to flash first.
 #   --dry-run          print what would happen; touch no hardware, take no lock
 #
 # Boards are addressed by their USB by-id path (it contains the MAC), never by
@@ -144,17 +148,19 @@ PY
 esac
 
 # ---- option parsing -----------------------------------------------------------
-send=""; send_after=8; dry=0; hold=""
+send=""; send_after=8; dry=0; hold=""; run=""
 while [[ ${1:-} == --* && ${1:-} != --log ]]; do
   case $1 in
     --send) send=${2:?--send needs KEYS}; shift 2 ;;
     --send-after) send_after=${2:?}; shift 2 ;;
     --dry-run) dry=1; shift ;;
     --hold) hold=${2:?--hold needs seconds}; shift 2 ;;
+    --run) run=${2:?--run needs a command}; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
 if [[ -n $hold ]]; then elf=""; secs=$hold; board=${1:-s3}
+elif [[ -n $run && ( $# -lt 1 || ${1:-} =~ ^[0-9]+$ ) ]]; then elf=""; secs=${1:-15}; board=${2:-s3}
 elif [[ ${1:-} == --log ]]; then elf=""; shift; secs=${1:-15}; board=${2:-s3}
 else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]  (or --register / --list)}; shift; secs=${1:-15}; board=${2:-s3}; fi
 port=${BOARDS[$board]:-}
@@ -188,6 +194,11 @@ printf 'pid=%s since=%s cmd=%s %s\n' "$$" "$(date +%T)" "$(basename "${elf:-log}
 if [[ -n $hold ]]; then echo "holding $board for ${hold}s"; sleep "$hold"; exit 0; fi
 if [[ -n $elf ]]; then
   espflash flash --chip "$chip" --port "$port" --non-interactive "$elf" 2>&1 | tail -3
+fi
+if [[ -n $run ]]; then
+  for _ in $(seq 50); do [[ -e $port ]] && break; sleep 0.2; done
+  BOARD_PORT=$port timeout "$secs" bash -c "$run"
+  exit $?
 fi
 python3 -I - "$port" "$secs" "$send" "$send_after" <<'PY'
 import os, sys, time, termios, serial

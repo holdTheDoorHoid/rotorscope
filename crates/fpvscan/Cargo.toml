@@ -1,0 +1,12 @@
+[package]
+name = "fpvscan"
+description = "no_std, fixed-point analog FPV / RF scanner DSP for the raw-capture ESP32-C5: channel table, per-dwell level meter, FM line-rate check, cyclic-prefix fingerprints"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+droneid = { path = "../droneid", default-features = false }
+
+[dev-dependencies]
+rawcap = { path = "../rawcap" }

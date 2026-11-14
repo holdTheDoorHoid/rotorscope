@@ -1,0 +1,11 @@
+[package]
+name = "droneid-hil"
+description = "Laptop tool: feed recorded DJI DroneID bursts into a node-sdr board's live capture path over USB (hardware in the loop) and count what the chip detects and decodes"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+droneid = { path = "../../crates/droneid", features = ["std"] }
+rawcap = { path = "../../crates/rawcap" }

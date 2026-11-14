@@ -6,8 +6,8 @@ members = [
     "crates/rid", "crates/link", "crates/tracker", "crates/odid-ref",
     "crates/gnss", "crates/screen", "crates/webui",
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap", "crates/airlink",
-    "crates/coverage",
-    "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull",
+    "crates/coverage", "crates/fpvscan",
+    "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull", "tools/droneid-hil",
     "tools/cc26xx-flash",
 ]
 

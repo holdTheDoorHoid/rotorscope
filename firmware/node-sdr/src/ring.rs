@@ -70,6 +70,16 @@ pub fn bytes() -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(RING_ADDR as *const u8, RING_BYTES) }
 }
 
+/// The ring, writable, for the hardware-in-the-loop feed (`hil run`), which
+/// fills it with recorded samples while the ring is stopped.
+///
+/// # Safety
+/// The ring must be stopped (no DMA into it) and no `bytes()` slice may be
+/// read concurrently; the capture loop is single-threaded.
+pub unsafe fn bytes_mut() -> &'static mut [u8] {
+    unsafe { core::slice::from_raw_parts_mut(RING_ADDR as *mut u8, RING_BYTES) }
+}
+
 /// Bytes delivered since [`start`], and whether the walker saw a full lap.
 pub fn produced() -> (u64, bool) {
     critical_section::with(|cs| {
