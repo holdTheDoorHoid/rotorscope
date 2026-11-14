@@ -19,6 +19,10 @@ pub type HubTracker = Tracker<MAX_TRACKS, 0>;
 const NODE_ALIVE_MS: u64 = 5_000;
 /// Redraw at most this often (and at once after a key).
 const FRAME_MS: u64 = 250;
+/// Holding SELECT this long is Back.
+const HOLD_MS: u64 = 700;
+/// No touch report for this long while SELECT is held counts as released.
+const RELEASE_GAP_MS: u64 = 250;
 const BAND_PX: usize = screen::WIDTH as usize * screen::BAND_ROWS;
 
 pub fn now_ms() -> u64 {
@@ -33,6 +37,9 @@ pub struct App {
     band: &'static mut [Rgb565; BAND_PX],
     last_frame: u64,
     lit: Option<(screen::Button, u64)>,
+    /// SELECT is down since this time; true once it has fired Back.
+    sel_down: Option<(u64, bool)>,
+    last_touch: u64,
     pub frames_drawn: u32,
     pub max_band_us: u64,
 }
@@ -47,6 +54,8 @@ impl App {
             band,
             last_frame: 0,
             lit: None,
+            sel_down: None,
+            last_touch: 0,
             frames_drawn: 0,
             max_band_us: 0,
         }
@@ -71,17 +80,50 @@ impl App {
     }
 
     /// Poll touch; a press on a key is a button event.
+    ///
+    /// UP and DOWN act at once. SELECT waits: released before [`HOLD_MS`] it
+    /// is Select; still held at [`HOLD_MS`] it is Back (once), like the long
+    /// press on the S3 hub's button.
     pub fn touch(&mut self, i2c: &mut BbI2c<'_>, now: u64) {
-        let Some(t) = self.touch.poll(i2c) else { return };
-        if !t.pressed {
-            return;
+        if let Some(t) = self.touch.poll(i2c) {
+            self.last_touch = now;
+            if t.pressed {
+                esp_println::println!("hub-p4: touch x={} y={}", t.x, t.y);
+                match display::key_at(t.x, t.y) {
+                    Some(screen::Button::Select) => {
+                        self.sel_down = Some((now, false));
+                        self.light(screen::Button::Select, now);
+                    }
+                    Some(b) => self.press(b, now),
+                    None => {}
+                }
+            }
         }
-        esp_println::println!("hub-p4: touch x={} y={}", t.x, t.y);
-        if let Some(b) = display::key_at(t.x, t.y) {
-            self.ui.button(b, &self.state);
-            self.lit = Some((b, now));
-            self.last_frame = 0; // redraw now
+        let Some((start, fired)) = self.sel_down else { return };
+        // Released: the chip says so, or (if that report was missed) it has
+        // sent nothing for a while; it reports continuously while touched.
+        let released = !self.touch.is_down() || now.saturating_sub(self.last_touch) > RELEASE_GAP_MS;
+        if released {
+            self.sel_down = None;
+            if !fired {
+                self.press(screen::Button::Select, now);
+            }
+        } else if !fired && now.saturating_sub(start) >= HOLD_MS {
+            self.sel_down = Some((start, true));
+            self.press(screen::Button::Back, now);
         }
+    }
+
+    fn press(&mut self, b: screen::Button, now: u64) {
+        self.ui.button(b, &self.state);
+        self.light(b, now);
+    }
+
+    fn light(&mut self, b: screen::Button, now: u64) {
+        // Back lights the SELECT key: it is the key being held.
+        let key = if b == screen::Button::Back { screen::Button::Select } else { b };
+        self.lit = Some((key, now));
+        self.last_frame = 0; // redraw now
     }
 
     /// Redraw if due. Calls `between` after each band so the caller can

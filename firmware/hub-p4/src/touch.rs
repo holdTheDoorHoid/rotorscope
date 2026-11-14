@@ -32,6 +32,12 @@ impl Gt911 {
         i2c.write_read(ADDR, &PRODUCT_ID, &mut id).then_some(id)
     }
 
+    /// True while a finger is on the panel (cleared when the chip reports
+    /// zero points, which it does once on release).
+    pub fn is_down(&self) -> bool {
+        self.down
+    }
+
     /// Read the first touch point if the chip has new data.
     pub fn poll(&mut self, i2c: &mut BbI2c<'_>) -> Option<Touch> {
         let mut st = [0u8; 1];

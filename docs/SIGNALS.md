@@ -95,5 +95,5 @@ decoded (2020 DOJ/FAA/FCC/DHS advisory).
 
 | Signal | Where | Status | How we test it |
 |---|---|---|---|
-| ADS-B | 1090 | **Built** (ADSBee parser, separate aircraft table), never run against the ADSBee | Plug in the ADSBee: real aircraft overhead |
+| ADS-B | 1090 | **On air** on the laptop (2026-11-14: 77 lines, 0 bad, 6 aircraft); not yet wired to the P4 hub | real aircraft overhead |
 | UAT | 978 | same | same (rare in the air near Philly) |
