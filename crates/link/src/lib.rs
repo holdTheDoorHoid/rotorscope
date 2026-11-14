@@ -20,17 +20,147 @@ use serde::{Deserialize, Serialize};
 ///   carries on.
 /// - 3: adds [`Frame::Via`], written by an ESP-NOW gateway (appended likewise;
 ///   older hubs count it as corrupt and still read the relayed frame).
-pub const PROTOCOL_VERSION: u8 = 3;
+/// - 4: adds [`Frame::Status`], [`Frame::DroneId`], [`Frame::Rf`],
+///   [`Frame::DjiWifi`], [`Frame::WifiDrone`] (node to hub) and the hub-to-node
+///   [`Command`] stream; [`NodeRole`] gains `DroneId` and `Gateway`.
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Largest encoded frame, COBS overhead included. Size buffers with this.
 pub const MAX_FRAME: usize = 320;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeRole {
+    /// 2.4 GHz Wi-Fi listener: Remote ID, DJI legacy DroneID, open FPV links, Wi-Fi drones.
     Wifi24,
+    /// 5 GHz Wi-Fi listener, same frames.
     Wifi5,
+    /// Bluetooth Remote ID (legacy, extended, Long Range).
     Ble,
+    /// Raw-capture scanner for analog FPV video and RF fingerprints (HDZero,
+    /// LTE-style links), reporting [`Frame::Rf`].
     Fpv,
+    /// Protocol 4. Raw-capture DJI OcuSync DroneID receiver ([`Frame::DroneId`]).
+    DroneId,
+    /// Protocol 4. An ESP-NOW gateway: relays other nodes, listens to nothing itself.
+    Gateway,
+}
+
+impl NodeRole {
+    /// Bit for this role in [`Frame::Status`]'s `can` mask.
+    pub const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+/// Protocol 4. What a node should listen to, sent by the hub ([`Command::Assign`]).
+/// The node applies it at once if its running image has `role`, otherwise it
+/// switches image (a reboot of a few seconds) and applies it after boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assignment {
+    pub role: NodeRole,
+    /// Wi-Fi roles: channel numbers with dwell in ms, visited in order and
+    /// repeated. Raw-capture roles: centre frequencies in units of 100 kHz
+    /// (5756.5 MHz = 57565) with dwell in ms. Empty = the role's built-in plan.
+    pub plan: Vec<(u32, u16), 24>,
+    /// Changes whenever the hub changes the plan, echoed in [`Frame::Status`]
+    /// so the hub knows the node has applied it.
+    pub id: u16,
+}
+
+/// Protocol 4. Hub-to-node messages, framed exactly like [`Frame`] (postcard +
+/// COBS) on the reverse direction of a wired link or through an ESP-NOW
+/// gateway. Keep new variants last.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Command {
+    /// Listen as described. Idempotent: resent every few seconds.
+    Assign(Assignment),
+    /// Gateway only: the next command is for the node with this station
+    /// address (the reverse of [`Frame::Via`]).
+    To { node: [u8; 6] },
+}
+
+/// Protocol 4. One DJI OcuSync DroneID burst, decoded on the node. Raw units
+/// as sent by the drone (see `crates/droneid` `FlightInfo`); the hub scales.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DroneIdSighting {
+    /// Burst centre, 100 kHz units (5756.5 MHz = 57565).
+    pub freq: u32,
+    pub rssi: i8,
+    pub snr_db: i8,
+    pub uptime_us: u64,
+    pub record: DroneIdRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DroneIdRecord {
+    /// OcuSync 2/3 plaintext flight record.
+    Flight {
+        serial: [u8; 16],
+        lat_raw: i32,
+        lon_raw: i32,
+        altitude_raw: i16,
+        height_raw: i16,
+        v_north: i16,
+        v_east: i16,
+        v_up: i16,
+        yaw_raw: i16,
+        pilot_lat_raw: i32,
+        pilot_lon_raw: i32,
+        home_lat_raw: i32,
+        home_lon_raw: i32,
+        product_type: u8,
+    },
+    /// O4 encrypted record: the session key ID only, never decrypted.
+    Encrypted { key_id: [u8; 4] },
+    /// A burst matched the DroneID reference pattern but did not decode
+    /// (weak, clipped or an unknown layout): presence only.
+    Detected,
+}
+
+/// Protocol 4. What a raw-capture scanner recognised on one frequency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RfKind {
+    /// Analog FM video: the 15.6/15.7 kHz line rate was found.
+    AnalogVideo,
+    /// Strong carrier on an analog FPV channel, line rate not (yet) confirmed.
+    FpvCarrier,
+    /// HDZero: continuous, 17 or 27 MHz wide, on its 37 MHz grid.
+    Hdzero,
+    /// LTE-style OFDM (15 kHz spacing): DJI, Walksnail, Autel, Herelink.
+    LteStyle,
+    /// Wi-Fi OFDM at half or quarter clock (Skydio narrow modes).
+    WifiNarrow,
+    /// Unclassified energy above the floor.
+    Energy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RfSighting {
+    pub kind: RfKind,
+    /// Centre, 100 kHz units.
+    pub freq: u32,
+    /// Occupied width, kHz (0 if unknown).
+    pub width_khz: u16,
+    /// Level above the noise floor, dB.
+    pub snr_db: i8,
+    /// Fraction of the dwell the signal was on, percent.
+    pub duty_pct: u8,
+    /// Measured line rate for analog video, Hz (0 if none).
+    pub line_hz: u16,
+    pub uptime_us: u64,
+}
+
+/// Protocol 4. A Wi-Fi network that looks like a drone (maker address prefix
+/// or network name), from a Wi-Fi node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WifiDroneSighting {
+    /// Index into the hub's maker table (`crates/wifidrone`).
+    pub maker: u8,
+    pub mac: [u8; 6],
+    pub ssid: heapless::String<32>,
+    pub channel: u8,
+    pub rssi: i8,
+    pub uptime_us: u64,
 }
 
 /// One Remote ID reception: everything one frame or advertisement carried.
@@ -99,12 +229,36 @@ pub enum Frame {
     /// rather than a wrapper, so relayed frames keep their `MAX_FRAME` budget.
     /// Keep new variants last: postcard tags variants by index.
     Via { node: [u8; 6], rssi: i8 },
+    /// Protocol 4: what the node can do and what it is doing, sent with every
+    /// Hello and whenever it changes. `can` is a mask of [`NodeRole::bit`].
+    /// `plan` is the [`Assignment::id`] it applied (0 = its built-in plan).
+    Status { role: NodeRole, can: u8, plan: u16 },
+    /// Protocol 4.
+    DroneId(DroneIdSighting),
+    /// Protocol 4.
+    Rf(RfSighting),
+    /// Protocol 4: a DJI legacy Wi-Fi DroneID vendor element (OUI 26:37:12),
+    /// raw; the hub decodes it with `rid::dji`.
+    DjiWifi {
+        channel: u8,
+        rssi: i8,
+        mac: [u8; 6],
+        uptime_us: u64,
+        element: Vec<u8, 255>,
+    },
+    /// Protocol 4.
+    WifiDrone(WifiDroneSighting),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
 /// the trailing zero delimiter. Returns the used part of `buf`; send it as is.
 pub fn encode<'a>(frame: &Frame, buf: &'a mut [u8]) -> Result<&'a mut [u8], postcard::Error> {
     postcard::to_slice_cobs(frame, buf)
+}
+
+/// Serialize a hub-to-node [`Command`] the same way as [`encode`].
+pub fn encode_command<'a>(cmd: &Command, buf: &'a mut [u8]) -> Result<&'a mut [u8], postcard::Error> {
+    postcard::to_slice_cobs(cmd, buf)
 }
 
 /// Why a chunk of the byte stream did not become a [`Frame`].
@@ -120,29 +274,36 @@ pub enum LinkError {
 /// Streaming decoder for the byte stream from one UART: feed it whatever
 /// arrived, it hands back each complete frame. Fixed `MAX_FRAME` buffer, no
 /// allocation. Zero bytes between frames (resync padding) are ignored.
-pub struct Decoder {
+pub type Decoder = StreamDecoder<Frame>;
+
+/// Decoder for the hub-to-node [`Command`] stream.
+pub type CommandDecoder = StreamDecoder<Command>;
+
+pub struct StreamDecoder<T> {
     acc: postcard::accumulator::CobsAccumulator<MAX_FRAME>,
     /// True while the accumulator holds part of a frame.
     pending: bool,
+    _t: core::marker::PhantomData<T>,
 }
 
-impl Default for Decoder {
+impl<T: for<'de> Deserialize<'de>> Default for StreamDecoder<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Decoder {
+impl<T: for<'de> Deserialize<'de>> StreamDecoder<T> {
     pub const fn new() -> Self {
         Self {
             acc: postcard::accumulator::CobsAccumulator::new(),
             pending: false,
+            _t: core::marker::PhantomData,
         }
     }
 
     /// Consume `input`, calling `on_frame` once per complete frame or error,
     /// in stream order. Partial frames are kept for the next call.
-    pub fn feed(&mut self, mut input: &[u8], mut on_frame: impl FnMut(Result<Frame, LinkError>)) {
+    pub fn feed(&mut self, mut input: &[u8], mut on_frame: impl FnMut(Result<T, LinkError>)) {
         use postcard::accumulator::FeedResult;
         loop {
             if !self.pending {
@@ -152,7 +313,7 @@ impl Decoder {
             if input.is_empty() {
                 return;
             }
-            let (result, rest) = match self.acc.feed::<Frame>(input) {
+            let (result, rest) = match self.acc.feed::<T>(input) {
                 FeedResult::Consumed => {
                     self.pending = true;
                     return;
@@ -205,7 +366,7 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 8] {
+    fn samples() -> [Frame; 15] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -233,7 +394,98 @@ mod tests {
             Frame::OpenLink(sighting(0xFF)),
             Frame::OpenLink(sighting(0x00)),
             Frame::Via { node: [0xFF; 6], rssi: i8::MIN },
+            Frame::Status { role: NodeRole::Gateway, can: u8::MAX, plan: u16::MAX },
+            Frame::DroneId(DroneIdSighting {
+                freq: u32::MAX,
+                rssi: i8::MIN,
+                snr_db: i8::MIN,
+                uptime_us: u64::MAX,
+                record: DroneIdRecord::Flight {
+                    serial: [0xFF; 16],
+                    lat_raw: i32::MIN,
+                    lon_raw: i32::MIN,
+                    altitude_raw: i16::MIN,
+                    height_raw: i16::MIN,
+                    v_north: i16::MIN,
+                    v_east: i16::MIN,
+                    v_up: i16::MIN,
+                    yaw_raw: i16::MIN,
+                    pilot_lat_raw: i32::MIN,
+                    pilot_lon_raw: i32::MIN,
+                    home_lat_raw: i32::MIN,
+                    home_lon_raw: i32::MIN,
+                    product_type: u8::MAX,
+                },
+            }),
+            Frame::DroneId(DroneIdSighting {
+                freq: 57565,
+                rssi: -70,
+                snr_db: 12,
+                uptime_us: 1,
+                record: DroneIdRecord::Encrypted { key_id: [1, 2, 3, 4] },
+            }),
+            Frame::Rf(RfSighting {
+                kind: RfKind::AnalogVideo,
+                freq: u32::MAX,
+                width_khz: u16::MAX,
+                snr_db: i8::MIN,
+                duty_pct: u8::MAX,
+                line_hz: u16::MAX,
+                uptime_us: u64::MAX,
+            }),
+            Frame::DjiWifi {
+                channel: u8::MAX,
+                rssi: i8::MIN,
+                mac: [0xFF; 6],
+                uptime_us: u64::MAX,
+                element: [0xFF; 255].into_iter().collect(),
+            },
+            Frame::WifiDrone(WifiDroneSighting {
+                maker: u8::MAX,
+                mac: [0xFF; 6],
+                ssid: heapless::String::try_from("TELLO-ABCDEFGHIJKLMNOPQRSTUVWXYZ").unwrap(),
+                channel: u8::MAX,
+                rssi: i8::MIN,
+                uptime_us: u64::MAX,
+            }),
+            Frame::Status { role: NodeRole::Wifi24, can: 0, plan: 0 },
         ]
+    }
+
+    fn commands() -> [Command; 3] {
+        let mut plan = Vec::new();
+        while plan.push((u32::MAX, u16::MAX)).is_ok() {}
+        [
+            Command::Assign(Assignment { role: NodeRole::DroneId, plan, id: u16::MAX }),
+            Command::Assign(Assignment { role: NodeRole::Wifi24, plan: Vec::new(), id: 1 }),
+            Command::To { node: [0xFF; 6] },
+        ]
+    }
+
+    #[test]
+    fn commands_round_trip_and_fit() {
+        let mut dec = CommandDecoder::new();
+        for c in commands() {
+            let mut buf = [0u8; MAX_FRAME];
+            let wire = encode_command(&c, &mut buf).unwrap();
+            std::println!("command {} bytes", wire.len());
+            let mut got = None;
+            dec.feed(wire, |r| got = Some(r));
+            assert_eq!(got, Some(Ok(c)));
+        }
+    }
+
+    /// Protocol 1-3 tags did not move.
+    #[test]
+    fn protocol_4_appends_only() {
+        let mut buf = [0u8; MAX_FRAME];
+        let tags: std::vec::Vec<u8> = samples()
+            .iter()
+            .map(|f| postcard::to_slice(f, &mut buf).unwrap()[0])
+            .collect();
+        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5]);
+        assert_eq!(NodeRole::Fpv as u8, 3);
+        assert_eq!(NodeRole::Gateway.bit(), 1 << 5);
     }
 
     #[test]

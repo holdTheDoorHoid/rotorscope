@@ -202,6 +202,8 @@ impl Hub {
                 // ESP-NOW gateway marker. This hub has no per-node view of a
                 // gateway link yet: relayed frames count against the gateway's link.
                 Frame::Via { .. } => {}
+                // Protocol 4 frames: the S3 hub does not handle them yet.
+                _ => {}
             }
         }
         match frame {
@@ -213,7 +215,7 @@ impl Hub {
             Frame::OpenLink(s) => {
                 self.tracker.borrow_mut().ingest_open_link(node, &s, now);
             }
-            Frame::Hello { .. } | Frame::Stats { .. } | Frame::Via { .. } => {}
+            _ => {}
         }
         // The screen shows tracks and node health: rebuild its view soon.
         crate::screen::mark_dirty();
