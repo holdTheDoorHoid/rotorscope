@@ -13,6 +13,13 @@
 //! "ch":161,"rssi":-60,"mac":"57:42:..","up_us":..,"n":1234}` (`id` null when
 //! the system sends none; `n` the node's running frame count for that stream).
 //!
+//! Protocol-4 frames that have no line format of their own (DJI DroneID,
+//! raw-capture RF sightings, DJI Wi-Fi elements, Wi-Fi drones, node Status)
+//! come as `{"t":"frame","frame":{...}}`, where `frame` is a `link::Frame`
+//! in serde's JSON form, e.g. `{"Rf":{"kind":"AnalogVideo","freq":58060,
+//! ...}}`. The `link` crate's own types read it, so the field names cannot
+//! drift from the wire protocol.
+//!
 //! The `rid` types serialize but do not deserialize, so this module rebuilds
 //! `Message`s from JSON itself. Enum names are not duplicated here: each is
 //! matched by serializing every code with `rid` and comparing, so a name the
@@ -32,6 +39,9 @@ pub enum Line {
     Rid(RidLine),
     /// An open FPV link sighting, already in the hub's wire form.
     Open(link::OpenLinkSighting),
+    /// Any hub-format frame (`"t":"frame"`), boxed: a DjiWifi frame holds
+    /// a 255-byte element.
+    Frame(Box<link::Frame>),
     Hello(Value),
     Stats(Value),
     /// Any other `t` (log, err, boot, cmd...): ignored by the table.
@@ -61,6 +71,10 @@ pub fn line(text: &str) -> Line {
     match v.get("t").and_then(Value::as_str) {
         Some("rid") => rid_line(&v).map_or(Line::Bad, Line::Rid),
         Some("open") => open_line(&v).map_or(Line::Bad, Line::Open),
+        Some("frame") => v
+            .get("frame")
+            .and_then(|f| serde_json::from_value::<link::Frame>(f.clone()).ok())
+            .map_or(Line::Bad, |f| Line::Frame(Box::new(f))),
         Some("hello") => Line::Hello(v),
         Some("stats") => Line::Stats(v),
         _ => Line::Other,

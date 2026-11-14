@@ -60,10 +60,17 @@ pub const MAX_EVENT: usize = 2048;
 pub const OPERATOR_TYPE: &str = "b-m-p-s-m";
 
 /// The part after `drone-` / `pilot-`: the primary UAS ID, or the latest MAC
-/// (without colons) for a track that has not sent a Basic ID yet.
+/// (without colons) for a track that has not sent a Basic ID yet, or
+/// `dji-t<track id>` for a DJI DroneID track with neither (an O4 or
+/// undecoded presence track, or a hidden serial).
 pub fn uid_base(track: &Track) -> heapless::String<48> {
     match track.primary_id() {
         Some(id) => render(IdText(&id.id)),
+        None if track.latest_link().is_none() => {
+            let mut out = heapless::String::new();
+            let _ = write!(out, "dji-t{}", track.id.0);
+            out
+        }
         None => {
             let mac = track.latest_link().map(|(_, l)| l.mac).unwrap_or_default();
             let mut out = heapless::String::new();
@@ -158,6 +165,14 @@ pub fn drone_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize
 fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
     if let Some((_, link)) = track.latest_link() {
         write!(w, "MAC: {}, RSSI: {}dBm", Mac(&link.mac), link.rssi)?;
+    } else if let Some(r) = track.latest_rssi() {
+        write!(w, "RSSI: {r}dBm")?;
+    }
+    if let Some(m) = track.dji.product_name() {
+        write!(w, "; DJI Model: {}", Xml(m))?;
+    }
+    if let Some(f) = track.dji.freq_mhz() {
+        write!(w, "; DroneID: {f:.1} MHz")?;
     }
     if let Some(id) = track.primary_id() {
         write!(w, "; ID Type: {:?}", id.id_type)?;
@@ -193,12 +208,13 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
         write!(w, "; Description: {}", Xml(&text))?;
     }
     w.write_str("; Transport: ")?;
-    // One name per slot, so a 5 GHz frame reads `WifiBeacon5G`.
-    for (i, (s, _)) in track.slots().enumerate() {
+    // One name per slot, so a 5 GHz frame reads `WifiBeacon5G`; then the
+    // DJI sources (`DroneId`, `DroneIdO4`, `DjiWifi`).
+    for (i, name) in track.source_names().enumerate() {
         if i > 0 {
             w.write_char('+')?;
         }
-        w.write_str(s.name())?;
+        w.write_str(name)?;
     }
     if let Some(g) = ctx.geometry(track).drone {
         write!(

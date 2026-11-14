@@ -15,13 +15,27 @@
 //! emitter category, `transports` `Adsb1090` or `Uat978`, `drone_lat`/
 //! `drone_lon`/`drone_alt_m` the aircraft's position and geometric altitude,
 //! and the last column, `baro_alt_m`, its pressure altitude. (For drones
-//! `baro_alt_m` is the Remote ID pressure altitude.)
+//! `baro_alt_m` is the Remote ID pressure altitude, or DJI's barometric
+//! altitude for a position from DroneID.)
+//!
+//! DJI DroneID tracks are drone rows; `transports` adds `DroneId`,
+//! `DroneIdO4` or `DjiWifi`.
+//!
+//! RF emitters ([`rf_row`]): `track` is `R<n>`, `uas_id` the frequency in
+//! MHz with `id_type` `FreqMHz`, `ua_type` the kind (`AnalogVideo`, ...),
+//! `transports` `Rf`, and `rssi_dbm` holds the level **above the noise
+//! floor** in dB, not an absolute level.
+//!
+//! Wi-Fi drones ([`wifi_drone_row`]): `track` is `W<n>`, `uas_id` the
+//! network name with `id_type` `Ssid`, `ua_type` the maker, `transports`
+//! `WifiDrone` (`WifiDrone5G` on 5 GHz). The address is not logged.
 
 use core::fmt::Write;
 
 use crate::aircraft::{AircraftTrack, IcaoHex};
 use crate::json::round_bearing;
 use crate::openlinks::{LinkTrack, shown_id};
+use crate::signals::{Emitter, WifiDrone};
 use crate::text::{Buf, CsvField, FormatError, IdText, IsoTime, render};
 use crate::{Band, Context, Track};
 
@@ -91,11 +105,11 @@ pub fn row(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, Format
         w.write_char(',')?;
         // `|` keeps the transport list in one field without quoting. One
         // name per slot, so 5 GHz shows as `WifiBeacon5G` / `WifiNan5G`.
-        for (i, (s, _)) in track.slots().enumerate() {
+        for (i, name) in track.source_names().enumerate() {
             if i > 0 {
                 w.write_char('|')?;
             }
-            w.write_str(s.name())?;
+            w.write_str(name)?;
         }
         write!(
             w,
@@ -108,8 +122,8 @@ pub fn row(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, Format
             Opt(op.map(|p| p.lat), 7),
             Opt(op.map(|p| p.lon), 7),
         )?;
-        if let Some((_, l)) = track.latest_link() {
-            write!(w, "{}", l.rssi)?;
+        if let Some(r) = track.latest_rssi() {
+            write!(w, "{r}")?;
         }
         writeln!(
             w,
@@ -227,6 +241,54 @@ pub fn aircraft_row(
             Opt(g.range.map(|r| round_bearing(r.bearing_deg)), 1),
             Opt(ft(a.baro_alt_ft), 1),
         )
+    })();
+    w.finish()
+}
+
+/// The front columns every row shares: UTC, hub time, track, own position.
+fn front(w: &mut Buf<'_>, ctx: &Context, track: core::fmt::Arguments<'_>) -> core::fmt::Result {
+    let own = ctx.own;
+    if let Some(utc) = ctx.utc_ms {
+        write!(w, "{}", IsoTime(utc))?;
+    }
+    write!(
+        w,
+        ",{},{},{},{},{},",
+        ctx.now_ms,
+        track,
+        Opt(own.map(|o| o.lat), 7),
+        Opt(own.map(|o| o.lon), 7),
+        Opt(own.and_then(|o| o.alt_m), 1),
+    )
+}
+
+/// Write one row for an RF emitter (see the module docs), `\n`-terminated.
+pub fn rf_row(e: &Emitter, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let mut w = Buf::new(buf);
+    let _ = (|| -> core::fmt::Result {
+        front(&mut w, ctx, format_args!("R{}", e.id.0))?;
+        write!(w, "{:.1},FreqMHz,{:?},Rf", e.freq_mhz(), e.kind)?;
+        // No position, speed or operator: seven empty fields.
+        write!(w, ",,,,,,,,{}", e.snr_db)?;
+        w.write_str(",,,,,\n")
+    })();
+    w.finish()
+}
+
+/// Write one row for a Wi-Fi drone (see the module docs), `\n`-terminated.
+pub fn wifi_drone_row(d: &WifiDrone, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let mut w = Buf::new(buf);
+    let _ = (|| -> core::fmt::Result {
+        front(&mut w, ctx, format_args!("W{}", d.id.0))?;
+        write!(
+            w,
+            "{},Ssid,{},WifiDrone{}",
+            CsvField(d.ssid.as_str()),
+            CsvField(d.maker_name()),
+            if d.band() == Band::Ghz5 { "5G" } else { "" }
+        )?;
+        write!(w, ",,,,,,,,{}", d.rssi)?;
+        w.write_str(",,,,,\n")
     })();
     w.finish()
 }

@@ -584,7 +584,8 @@ fn json_golden() {
         r#""speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"#,
         r#""op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"#,
         r#""self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","#,
-        r#""own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0}}"#,
+        r#""own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0},"#,
+        r#""loc_src":"RemoteId","op_src":"RemoteId","home":null,"dji":null}"#,
         "\n"
     );
     assert_eq!(got, want);
@@ -596,7 +597,7 @@ fn json_golden() {
     let mut ctx2 = ctx;
     ctx2.own = None;
     let n = json::track_line(&tr.tracks()[0], &ctx2, &mut buf).unwrap();
-    assert!(s(&buf, n).ends_with(",\"own\":null}\n"), "{}", s(&buf, n));
+    assert!(s(&buf, n).contains(",\"own\":null,"), "{}", s(&buf, n));
     // Too small a buffer is an error, not a truncated line.
     assert_eq!(
         json::track_line(&tr.tracks()[0], &ctx, &mut buf[..100]),
@@ -761,6 +762,35 @@ fn json_worst_case_fits() {
     }
     assert_eq!(tr.len(), 1);
     assert_eq!(tr.tracks()[0].slots().count(), SLOTS.len());
+    // And DJI's own broadcasts, every field at its widest.
+    let wide = dji::DjiLink {
+        count: u32::MAX,
+        last_seen_ms: 0,
+        rssi: -128,
+        snr_db: -128,
+        freq: u32::MAX,
+        channel: u8::MAX,
+        mac: [0xff; 6],
+        node: u8::MAX,
+    };
+    let t = &mut tr.tracks[0];
+    t.dji = dji::DjiInfo {
+        serial: None,
+        product_type: Some(69),
+        key_id: Some([0xff; 4]),
+        undecoded: false,
+        ocusync: wide,
+        wifi: wide,
+    };
+    t.home = Some(Stamped {
+        value: LatLon {
+            lat: -89.123_456_789_012_3,
+            lon: -179.123_456_789_012_3,
+        },
+        rx_ms: 0,
+    });
+    t.location_src = Source::DjiWifi;
+    t.system_src = Source::DjiWifi;
     tr.set_own_position(
         89.999_999_9,
         179.999_999_9,
@@ -789,6 +819,8 @@ fn nodes() -> [json::NodeStatus; 2] {
             seen_per_s: Some(412),
             rid_per_s: 1,
             drops: Some(0),
+            can: None,
+            plan: None,
         },
         json::NodeStatus {
             role: link::NodeRole::Ble,
@@ -797,6 +829,8 @@ fn nodes() -> [json::NodeStatus; 2] {
             seen_per_s: None,
             rid_per_s: 0,
             drops: None,
+            can: None,
+            plan: None,
         },
     ]
 }
@@ -835,8 +869,8 @@ fn state_golden() {
             r#"{{"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"#,
             r#""own":{{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100}},"#,
             r#""manual":null,"gps":{{"state":"3d","sats":9}},"rec":true,"#,
-            r#""nodes":[{{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0}},"#,
-            r#"{{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}}],"#,
+            r#""nodes":[{{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0,"can":null,"plan":null}},"#,
+            r#"{{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null,"can":null,"plan":null}}],"#,
             r#""adsb":null,"open_links":[],"tracks":[{}],"aircraft":[]}}"#,
             "\n"
         ),
@@ -978,6 +1012,8 @@ fn state_head_and_nodes_fit_their_bounds() {
         seen_per_s: Some(u32::MAX),
         rid_per_s: u32::MAX,
         drops: Some(u32::MAX),
+        can: Some(u8::MAX),
+        plan: Some(u16::MAX),
     };
     let hub = |nodes| json::HubStatus {
         own_source: json::OwnSource::Manual,

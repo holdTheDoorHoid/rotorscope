@@ -15,7 +15,7 @@ pub const MAX_DRONES: usize = 32;
 /// 2.4 GHz, Wi-Fi 5 GHz and BLE today, FPV and ADS-B later.
 pub const MAX_NODES: usize = 5;
 
-/// One of the five ways a drone can be heard. The letter is what the list
+/// One of the six ways a drone can be heard. The letter is what the list
 /// and detail screens print, so it never depends on colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Radio {
@@ -29,16 +29,20 @@ pub enum Radio {
     BleLongRange,
     /// Wi-Fi beacon or NAN on 5 GHz.
     Wifi5,
+    /// DJI's OcuSync DroneID burst (any band, plaintext or O4).
+    DroneId,
 }
 
 impl Radio {
-    /// Display order of the letters: W N B L 5.
-    pub const ALL: [Radio; 5] = [
+    /// Display order of the letters: W N B L 5 D. (DJI's legacy Wi-Fi
+    /// DroneID is a 2.4 GHz beacon and shows as W.)
+    pub const ALL: [Radio; 6] = [
         Radio::WifiBeacon,
         Radio::WifiNan,
         Radio::Ble,
         Radio::BleLongRange,
         Radio::Wifi5,
+        Radio::DroneId,
     ];
 
     pub const fn letter(self) -> char {
@@ -48,6 +52,7 @@ impl Radio {
             Radio::Ble => 'B',
             Radio::BleLongRange => 'L',
             Radio::Wifi5 => '5',
+            Radio::DroneId => 'D',
         }
     }
 
@@ -58,6 +63,7 @@ impl Radio {
             Radio::Ble => 2,
             Radio::BleLongRange => 3,
             Radio::Wifi5 => 4,
+            Radio::DroneId => 5,
         }
     }
 }
@@ -92,6 +98,10 @@ pub enum IdKind {
     Session,
     /// No Basic ID heard yet: the text is the transmitter address.
     Mac,
+    /// DJI DroneID with no readable identity (encrypted O4, a burst that did
+    /// not decode, or identity hidden by the unit's settings): the text says
+    /// which and on what frequency.
+    Presence,
     #[default]
     Unknown,
 }
@@ -104,6 +114,7 @@ impl IdKind {
             IdKind::Utm => "UTM ID",
             IdKind::Session => "Session ID",
             IdKind::Mac => "No ID yet (radio address)",
+            IdKind::Presence => "DJI DroneID, no ID",
             IdKind::Unknown => "ID type unknown",
         }
     }
@@ -187,7 +198,9 @@ pub struct DroneView {
     /// Radios this drone has been heard on.
     pub radios: Radios,
     /// Latest RSSI per radio, dBm, indexed by [`Radio::index`].
-    pub rssi: [Option<i8>; 5],
+    pub rssi: [Option<i8>; 6],
+    /// Model name from DJI DroneID ("Mavic 3"); empty when unknown.
+    pub model: String<20>,
     /// Self-ID description (free text from the operator).
     pub self_id: String<23>,
     pub operator_id: String<20>,
@@ -239,6 +252,10 @@ pub enum NodeKind {
     Ble,
     Fpv,
     Adsb,
+    /// A raw-capture node decoding DJI DroneID bursts.
+    DroneId,
+    /// An ESP-NOW gateway relaying other nodes.
+    Gateway,
 }
 
 impl NodeKind {
@@ -250,6 +267,8 @@ impl NodeKind {
             NodeKind::Ble => "BT",
             NodeKind::Fpv => "FPV",
             NodeKind::Adsb => "ADS",
+            NodeKind::DroneId => "DID",
+            NodeKind::Gateway => "GW",
         }
     }
     /// Health-screen label.
@@ -260,6 +279,8 @@ impl NodeKind {
             NodeKind::Ble => "Bluetooth",
             NodeKind::Fpv => "FPV 5.8",
             NodeKind::Adsb => "ADS-B",
+            NodeKind::DroneId => "DroneID",
+            NodeKind::Gateway => "Gateway",
         }
     }
 }
@@ -336,6 +357,63 @@ pub struct AircraftSummary {
     pub nearest: Option<NearestAircraft>,
 }
 
+/// RF emitters and Wi-Fi drones the screen is given per frame (each).
+pub const MAX_SIGNALS: usize = 8;
+
+/// What a raw-capture node recognised (mirrors `link::RfKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmitterKind {
+    AnalogVideo,
+    FpvCarrier,
+    Hdzero,
+    LteStyle,
+    WifiNarrow,
+    #[default]
+    Energy,
+}
+
+impl EmitterKind {
+    /// Signals-page label, eleven characters at most.
+    pub const fn label(self) -> &'static str {
+        match self {
+            EmitterKind::AnalogVideo => "Analog vid",
+            EmitterKind::FpvCarrier => "FPV carr.",
+            EmitterKind::Hdzero => "HDZero",
+            EmitterKind::LteStyle => "LTE-style",
+            EmitterKind::WifiNarrow => "Narrow WiFi",
+            EmitterKind::Energy => "Energy",
+        }
+    }
+}
+
+/// One RF emitter (a kind on one frequency), no position.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EmitterView {
+    pub key: u32,
+    pub kind: EmitterKind,
+    pub freq_mhz: f32,
+    /// Level above the noise floor, dB.
+    pub snr_db: i8,
+    pub duty_pct: u8,
+    /// Analog line rate, Hz (0 if none measured).
+    pub line_hz: u16,
+    pub stale: bool,
+    pub last_seen_ms: u64,
+}
+
+/// One Wi-Fi network that looks like a drone or its controller.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WifiDroneView {
+    pub key: u32,
+    pub maker: String<16>,
+    /// Network name, printable ASCII only ('?' for anything else).
+    pub ssid: String<32>,
+    pub channel: u8,
+    pub rssi: i8,
+    pub stale: bool,
+    pub last_seen_ms: u64,
+}
+
 /// Everything one frame shows. The hub owns one (e.g. in a `static`) and
 /// refills it each frame; nothing in it is retained by the screen.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -355,6 +433,13 @@ pub struct UiState {
     pub hub_uptime_s: u32,
     /// `None` when the hub has no ADS-B receiver built in (no line shown).
     pub aircraft: Option<AircraftSummary>,
+    /// RF emitters, active first then by level (the hub's choice of
+    /// [`MAX_SIGNALS`]), and how many the hub holds.
+    pub emitters: Vec<EmitterView, MAX_SIGNALS>,
+    pub total_emitters: u16,
+    /// Wi-Fi drones, active first then strongest, and how many in all.
+    pub wifi_drones: Vec<WifiDroneView, MAX_SIGNALS>,
+    pub total_wifi_drones: u16,
 }
 
 impl UiState {

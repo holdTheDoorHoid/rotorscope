@@ -204,6 +204,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "droneid"
+version = "0.1.0"
+
+[[package]]
 name = "embassy-embedded-hal"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1200,6 +1204,7 @@ dependencies = [
  "embedded-graphics",
  "heapless 0.8.0",
  "libm",
+ "link",
  "rid",
  "tracker",
 ]
@@ -1415,6 +1420,7 @@ name = "tracker"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "droneid",
  "heapless 0.8.0",
  "libm",
  "link",
@@ -1422,6 +1428,7 @@ dependencies = [
  "rid",
  "serde",
  "serde-json-core",
+ "wifidrone",
 ]
 
 [[package]]
@@ -1465,6 +1472,10 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
+
+[[package]]
+name = "wifidrone"
+version = "0.1.0"
 
 [[package]]
 name = "winapi-util"

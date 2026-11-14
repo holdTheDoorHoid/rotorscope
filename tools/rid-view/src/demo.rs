@@ -22,6 +22,15 @@
 //!   transponder replies (altitude, no position). None of them may become
 //!   a drone or raise an alert. Their callsigns (DEMOHELI, DEMOJET) and
 //!   addresses (DE0001-DE0003) are obviously synthetic.
+//! - One of each protocol-4 frame ([`signal_step`]), as hub-format
+//!   `link::Frame`s: CHARLIE, a DJI drone heard on OcuSync DroneID by the
+//!   DroneID node and on Remote ID by the Wi-Fi node with the same serial
+//!   (the tracker must make it one track); an encrypted O4 drone (presence
+//!   by session key ID); DroneID bursts that did not decode; DELTA, an older
+//!   Wi-Fi DJI sending the legacy DroneID element (built with
+//!   `rid::encode::dji_flight_info`); analog video, HDZero and plain energy
+//!   from the FPV scanner; a Tello's Wi-Fi network; and Status frames. Every
+//!   serial (`DEMO0...`) and key ID is made up.
 
 use std::f64::consts::PI;
 use std::sync::mpsc::Sender;
@@ -99,6 +108,40 @@ const BRAVO: Drone = Drone {
     },
     operator_ne: (600.0, -900.0),
 };
+
+/// A DJI drone heard on OcuSync DroneID and Remote ID (same serial).
+const CHARLIE: Drone = Drone {
+    serial: "DEMO0CHARLIE0003",
+    ua_type: UaType::HelicopterOrMultirotor,
+    self_id: "",
+    operator_id: "",
+    orbit: Orbit {
+        radius_m: 500.0,
+        period_s: 90.0,
+        sense: 1.0,
+        alt_m: 90.0,
+    },
+    operator_ne: (120.0, 200.0),
+};
+/// An older Wi-Fi DJI (a Spark) sending the legacy Wi-Fi DroneID element.
+const DELTA: Drone = Drone {
+    serial: "DEMO0DELTA000004",
+    ua_type: UaType::HelicopterOrMultirotor,
+    self_id: "",
+    operator_id: "",
+    orbit: Orbit {
+        radius_m: 150.0,
+        period_s: 40.0,
+        sense: -1.0,
+        alt_m: 40.0,
+    },
+    operator_ne: (0.0, 0.0),
+};
+const CHARLIE_WIFI: [u8; 6] = [0x02, 0xde, 0x00, 0x00, 0xc3, 0x01];
+const DELTA_WIFI: [u8; 6] = [0x60, 0x60, 0x1f, 0xde, 0x00, 0x04];
+const TELLO_WIFI: [u8; 6] = [0x02, 0xde, 0x00, 0x00, 0x05, 0x01];
+/// The O4 drone's session key ID: made up.
+const O4_KEY: [u8; 4] = [0xde, 0xc0, 0x00, 0x04];
 
 const ALPHA_WIFI: [u8; 6] = [0x02, 0xde, 0x00, 0x00, 0xa1, 0x01];
 const ALPHA_BLE: [u8; 6] = [0xc2, 0xde, 0x00, 0x00, 0xa1, 0x02];
@@ -237,6 +280,201 @@ fn step(center: (f64, f64), t_ms: u64) -> Vec<(u8, link::Detection)> {
                 t_ms,
                 &b[..4],
             ),
+        ));
+    }
+    out
+}
+
+/// Degrees to DJI's radians x 1e7.
+fn rad_e7(deg: f64) -> i32 {
+    (deg.to_radians() * 1e7).round() as i32
+}
+
+/// Offsets from the demo's first node: 0 Wi-Fi 2.4, 3 DroneID, 4 FPV scanner.
+pub const DRONEID_NODE: u8 = 3;
+pub const FPV_NODE: u8 = 4;
+
+/// The protocol-4 frames due at simulated time `t_ms`, with the node
+/// offset that sends each.
+pub fn signal_step(center: (f64, f64), t_ms: u64) -> Vec<(u8, link::Frame)> {
+    use link::{DroneIdRecord, DroneIdSighting, Frame, NodeRole, RfKind, RfSighting};
+    let n = t_ms / STEP_MS;
+    let wobble = 3.0 * (t_ms as f64 / 1900.0).sin();
+    let mut out = Vec::new();
+    // Status, as nodes send it with every Hello (every 5 s here).
+    if n.is_multiple_of(20) {
+        let c5 = NodeRole::Wifi24.bit()
+            | NodeRole::Wifi5.bit()
+            | NodeRole::DroneId.bit()
+            | NodeRole::Fpv.bit();
+        for (node, role, plan) in [
+            (0, NodeRole::Wifi24, 0),
+            (DRONEID_NODE, NodeRole::DroneId, 2),
+            (FPV_NODE, NodeRole::Fpv, 3),
+        ] {
+            out.push((
+                node,
+                Frame::Status {
+                    role,
+                    can: c5,
+                    plan,
+                },
+            ));
+        }
+    }
+    // OcuSync bursts every ~640 ms (here every third step), hopping.
+    if n.is_multiple_of(3) {
+        const HOPS: [u32; 3] = [24145, 57565, 57765];
+        let hop = HOPS[(n / 3 % 3) as usize];
+        let t = t_ms as f64 / 1000.0;
+        let (pos, dir, speed) = CHARLIE.orbit.at(center, t);
+        let (vn, ve) = (
+            speed as f64 * (dir as f64).to_radians().cos() * 100.0,
+            speed as f64 * (dir as f64).to_radians().sin() * 100.0,
+        );
+        let pilot = (
+            center.0 + CHARLIE.operator_ne.0 / 111_320.0,
+            center.1 + CHARLIE.operator_ne.1 / (111_320.0 * center.0.to_radians().cos()),
+        );
+        let mut serial = [0u8; 16];
+        serial.copy_from_slice(CHARLIE.serial.as_bytes());
+        out.push((
+            DRONEID_NODE,
+            Frame::DroneId(DroneIdSighting {
+                freq: hop,
+                rssi: (-74.0 + wobble).round() as i8,
+                snr_db: 15,
+                uptime_us: t_ms * 1000,
+                record: DroneIdRecord::Flight {
+                    serial,
+                    lat_raw: rad_e7(pos.lat),
+                    lon_raw: rad_e7(pos.lon),
+                    // Feet, as DJI sends it.
+                    altitude_raw: (CHARLIE.orbit.alt_m * 3.281) as i16,
+                    height_raw: ((CHARLIE.orbit.alt_m - 15.0) * 3.281) as i16,
+                    v_north: vn.round() as i16,
+                    v_east: ve.round() as i16,
+                    v_up: 0,
+                    yaw_raw: (dir * 100.0) as i16,
+                    pilot_lat_raw: rad_e7(pilot.0),
+                    pilot_lon_raw: rad_e7(pilot.1),
+                    home_lat_raw: rad_e7(pilot.0),
+                    home_lon_raw: rad_e7(pilot.1),
+                    product_type: 68,
+                },
+            }),
+        ));
+        out.push((
+            DRONEID_NODE,
+            Frame::DroneId(DroneIdSighting {
+                freq: 57765,
+                rssi: (-86.0 - wobble).round() as i8,
+                snr_db: 7,
+                uptime_us: t_ms * 1000,
+                record: DroneIdRecord::Encrypted { key_id: O4_KEY },
+            }),
+        ));
+    }
+    // A weak burst that did not decode, now and then.
+    if n % 16 == 5 {
+        out.push((
+            DRONEID_NODE,
+            Frame::DroneId(DroneIdSighting {
+                freq: 24295,
+                rssi: -93,
+                snr_db: 2,
+                uptime_us: t_ms * 1000,
+                record: DroneIdRecord::Detected,
+            }),
+        ));
+    }
+    if n.is_multiple_of(4) {
+        // CHARLIE's Remote ID on Wi-Fi: the same serial as its DroneID.
+        let msgs = CHARLIE.messages(center, t_ms);
+        out.push((
+            0,
+            link::Frame::Detection(detection(
+                Transport::WifiBeacon,
+                CHARLIE_WIFI,
+                -66.0 + wobble,
+                n as u8,
+                t_ms,
+                &msgs[..3],
+            )),
+        ));
+
+        // DELTA's legacy Wi-Fi DroneID beacon.
+        let (pos, dir, speed) = DELTA.orbit.at(center, t_ms as f64 / 1000.0);
+        let info = rid::dji::FlightInfo {
+            version: 2,
+            seq: n as u16,
+            state: rid::dji::FlightInfo::STATE_SERIAL_VALID
+                | rid::dji::FlightInfo::STATE_PRIVACY_DISABLED
+                | rid::dji::FlightInfo::STATE_GPS_VALID,
+            serial: FixedStr::new(DELTA.serial.as_bytes()).unwrap(),
+            position: Some(pos),
+            ext: Some(rid::dji::FlightInfoExt {
+                altitude: DELTA.orbit.alt_m as i16,
+                height: DELTA.orbit.alt_m as i16 - 10,
+                v_north: (f64::from(speed) * f64::from(dir).to_radians().cos() * 100.0) as i16,
+                v_east: (f64::from(speed) * f64::from(dir).to_radians().sin() * 100.0) as i16,
+                v_up: 0,
+                pitch: 0.0,
+                roll: 0.0,
+                yaw: dir,
+                home: Some(LatLon {
+                    lat: center.0,
+                    lon: center.1,
+                }),
+                product_type: 21,
+                uuid: FixedStr::default(),
+            }),
+        };
+        let mut body = [0u8; 128];
+        let len = rid::encode::dji_flight_info(&info, &mut body).expect("fits");
+        out.push((
+            0,
+            Frame::DjiWifi {
+                channel: 6,
+                rssi: (-61.0 - wobble).round() as i8,
+                mac: DELTA_WIFI,
+                uptime_us: t_ms * 1000,
+                element: heapless::Vec::from_slice(&body[..len]).expect("fits"),
+            },
+        ));
+
+        // The FPV scanner: analog video (line rate confirmed), HDZero, energy.
+        for (kind, freq, width, snr, duty, line) in [
+            (RfKind::AnalogVideo, 58060, 8_000, 22, 100, 15_734),
+            (RfKind::Hdzero, 57320, 27_000, 16, 100, 0),
+            (RfKind::Energy, 24370, 20_000, 6, 30, 0),
+        ] {
+            out.push((
+                FPV_NODE,
+                Frame::Rf(RfSighting {
+                    kind,
+                    freq,
+                    width_khz: width,
+                    snr_db: (f64::from(snr) + wobble).round() as i8,
+                    duty_pct: duty,
+                    line_hz: line,
+                    uptime_us: t_ms * 1000,
+                }),
+            ));
+        }
+
+        // A Tello's own Wi-Fi network, classified on the node.
+        let ssid = "TELLO-DE0005";
+        out.push((
+            0,
+            Frame::WifiDrone(link::WifiDroneSighting {
+                maker: wifidrone::classify(&TELLO_WIFI, ssid.as_bytes()).expect("a Tello"),
+                mac: TELLO_WIFI,
+                ssid: heapless::String::try_from(ssid).unwrap(),
+                channel: 6,
+                rssi: (-70.0 + wobble).round() as i8,
+                uptime_us: t_ms * 1000,
+            }),
         ));
     }
     out
@@ -454,6 +692,18 @@ pub fn spawn(
             if gone {
                 return;
             }
+            for (node, frame) in signal_step(center, t_ms) {
+                if tx
+                    .send(Event::Frame {
+                        node: node_base + node,
+                        frame: Box::new(frame),
+                        at_ms,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
             for sighting in link_step(t_ms) {
                 if tx
                     .send(Event::OpenLink {
@@ -554,6 +804,69 @@ mod tests {
         assert!(g.low_nearby);
         assert!(!ctx.aircraft_geometry(&tr.aircraft()[1]).low_nearby);
         assert!(tr.aircraft()[2].position.is_none());
+    }
+
+    /// One of each protocol-4 frame lands where it belongs: CHARLIE's
+    /// DroneID and Remote ID make one track, the O4 drone, the undecoded
+    /// bursts and DELTA one each; three emitters; one Wi-Fi drone; Status
+    /// for three nodes. Plain energy never alerts.
+    #[test]
+    fn demo_signals_land_in_their_tables() {
+        let center = (39.952_583, -75.165_222);
+        let mut tr: tracker::Tracker = tracker::Tracker::default();
+        let mut signals = Vec::new();
+        let mut t = 0;
+        while t <= 10_000 {
+            for (node, f) in signal_step(center, t) {
+                tr.ingest_frame(node, &f, t);
+            }
+            while let Some(k) = tr.take_new_signal(t) {
+                signals.push(k);
+            }
+            t += STEP_MS;
+        }
+        let by_serial = |s: &str| {
+            tr.tracks()
+                .iter()
+                .find(|t| t.primary_id().and_then(|i| i.id.as_str()) == Some(s))
+                .unwrap()
+        };
+        let charlie = by_serial(CHARLIE.serial);
+        assert!(charlie.dji.ocusync.heard() && charlie.slots().count() == 1);
+        assert_eq!(charlie.dji.product_name(), Some("Mavic 3"));
+        let d = tracker::geo::range_bearing(
+            center.0,
+            center.1,
+            charlie
+                .location
+                .as_ref()
+                .unwrap()
+                .value
+                .position
+                .unwrap()
+                .lat,
+            charlie
+                .location
+                .as_ref()
+                .unwrap()
+                .value
+                .position
+                .unwrap()
+                .lon,
+        );
+        assert!((d.distance_m - 500.0).abs() < 5.0, "{}", d.distance_m);
+        let delta = by_serial(DELTA.serial);
+        assert!(delta.dji.wifi.heard());
+        assert_eq!(delta.dji.product_name(), Some("Spark"));
+        assert!(tr.tracks().iter().any(|t| t.dji.key_id == Some(O4_KEY)));
+        assert!(tr.tracks().iter().any(|t| t.dji.undecoded));
+        assert_eq!(tr.len(), 4);
+        assert_eq!(tr.emitters().len(), 3);
+        assert_eq!(tr.wifi_drones().len(), 1);
+        assert_eq!(tr.wifi_drones()[0].maker_name(), "DJI Tello");
+        assert_eq!(tr.nodes().len(), 3);
+        // Video, HDZero and the Tello alert; the energy does not.
+        assert_eq!(signals.len(), 3);
     }
 
     #[test]

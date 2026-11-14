@@ -98,6 +98,8 @@ fn up_down_flip_pages_and_wrap() {
     ui.button(Button::Down, &s);
     assert_eq!(ui.page(), Page::List);
     ui.button(Button::Down, &s);
+    assert_eq!(ui.page(), Page::Signals);
+    ui.button(Button::Down, &s);
     assert_eq!(ui.page(), Page::Health);
     ui.button(Button::Down, &s);
     assert_eq!(ui.page(), Page::Settings);
@@ -171,10 +173,14 @@ fn select_with_no_drones_does_nothing() {
 }
 
 #[test]
-fn health_select_is_inert_and_settings_edit() {
+fn signals_and_health_select_is_inert_and_settings_edit() {
     let s = three();
     let mut ui = Ui::default();
     ui.button(Button::Down, &s);
+    ui.button(Button::Down, &s);
+    assert_eq!(ui.page(), Page::Signals);
+    ui.button(Button::Select, &s);
+    assert_eq!(ui.mode(), Mode::Browse);
     ui.button(Button::Down, &s);
     assert_eq!(ui.page(), Page::Health);
     ui.button(Button::Select, &s);

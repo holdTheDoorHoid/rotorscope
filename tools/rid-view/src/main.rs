@@ -5,9 +5,12 @@
 //! laptop shows is what the hub would show. See `--help`. Open FPV links
 //! the Wi-Fi node recognises (wfb-ng, OpenHD, RubyFPV, DroneBridge) are
 //! listed below the drones, with their identifiers hidden unless
-//! `--show-link-ids` is given (the hub's policy too). Crewed aircraft from
-//! an ADSBee (`--adsbee`) are listed last, apart from drones, and never
-//! alert.
+//! `--show-link-ids` is given (the hub's policy too). DJI DroneID records
+//! (OcuSync bursts and the legacy Wi-Fi element) join the drone table,
+//! merged with Remote ID by serial; raw-capture RF emitters and Wi-Fi drones
+//! get their own tables (node lines `{"t":"frame",...}`, see `parse`).
+//! Crewed aircraft from an ADSBee (`--adsbee`) are listed last, apart from
+//! drones, and never alert.
 
 mod ble;
 #[cfg(all(feature = "ble", target_os = "linux"))]
@@ -85,12 +88,22 @@ OPTIONS:
                              seconds. With --once, the default is 10.
     --demo                   Add two simulated drones circling --own-pos
                              (or Philadelphia City Hall), a simulated
-                             wfb-ng FPV link and three simulated aircraft
-                             (ADS-B). No hardware needed.
+                             wfb-ng FPV link, three simulated aircraft
+                             (ADS-B), and one of each protocol-4 signal: a
+                             DJI drone on OcuSync DroneID (also in Remote
+                             ID), an encrypted O4 drone, a DJI Wi-Fi
+                             DroneID beacon, analog video and HDZero
+                             emitters, plain RF energy, a Wi-Fi drone and
+                             node Status frames. No hardware needed.
     --show-link-ids          Show open FPV links' identifiers (wfb-ng link
                              ID, RubyFPV vehicle ID, DroneBridge comm ID) and
-                             their transmitter addresses. Off by default:
-                             they identify someone's equipment.
+                             their transmitter addresses, and Wi-Fi drones'
+                             addresses. Off by default: they identify
+                             someone's equipment.
+    --hide-droneid-ids       Keep identity decoded from DJI DroneID (serial,
+                             O4 session key ID, flight purpose) out of every
+                             output. Positions are still shown, and a serial
+                             also sent in Remote ID still is.
     --once                   Read inputs to the end, print the table once and
                              exit (for files; with --demo, simulates
                              --demo-secs seconds instantly).
@@ -116,6 +129,7 @@ struct Options {
     realtime: bool,
     http: Option<String>,
     show_link_ids: bool,
+    hide_droneid_ids: bool,
     adsbee: Option<String>,
     ble: Vec<String>,
     sniffle: Vec<String>,
@@ -136,6 +150,7 @@ fn parse_args() -> Result<Options, String> {
         realtime: false,
         http: None,
         show_link_ids: false,
+        hide_droneid_ids: false,
         adsbee: None,
         ble: Vec::new(),
         sniffle: Vec::new(),
@@ -177,6 +192,7 @@ fn parse_args() -> Result<Options, String> {
             "--realtime" => o.realtime = true,
             "--http" => o.http = Some(value("--http")?),
             "--show-link-ids" => o.show_link_ids = true,
+            "--hide-droneid-ids" => o.hide_droneid_ids = true,
             "--adsbee" => o.adsbee = Some(value("--adsbee")?),
             "--ble" => o.ble.push(value("--ble")?),
             "--sniffle" => o.sniffle.push(value("--sniffle")?),
@@ -260,6 +276,8 @@ fn role_from_hello(v: &serde_json::Value) -> Option<NodeRole> {
         "wifi5" => Some(NodeRole::Wifi5),
         "ble" => Some(NodeRole::Ble),
         "fpv" => Some(NodeRole::Fpv),
+        "droneid" => Some(NodeRole::DroneId),
+        "gateway" => Some(NodeRole::Gateway),
         _ => None,
     }
 }
@@ -311,6 +329,20 @@ fn adsb_status(view: &View, now: u64) -> Option<AdsbStatus> {
         errors: a.errors.min(u64::from(u32::MAX)) as u32,
     })
 }
+/// Keep what a frame says about its node: role and plan from Hello and
+/// Status. (The tracker keeps them too; the view needs them per input.)
+fn note_frame(info: &mut view::NodeInfo, f: &link::Frame) {
+    match f {
+        link::Frame::Hello { role, .. } => info.role = Some(*role),
+        link::Frame::Status { role, can, plan } => {
+            info.role = Some(*role);
+            info.status = Some((*can, *plan));
+        }
+        link::Frame::Stats { dropped, .. } => info.drops = Some(*dropped),
+        _ => {}
+    }
+}
+
 /// Window for the Remote ID rate.
 const RATE_WINDOW_MS: u64 = 5_000;
 
@@ -334,6 +366,7 @@ fn node_statuses(view: &mut View, now: u64) -> Vec<NodeStatus> {
                 n.rid_times.pop_front();
             }
             let age = n.last_ms.map(|l| now.saturating_sub(l));
+            let status = n.status;
             Some(NodeStatus {
                 role: n.role?,
                 alive: n.ended.is_none() && age.is_some_and(|a| a <= NODE_ALIVE_MS),
@@ -342,6 +375,8 @@ fn node_statuses(view: &mut View, now: u64) -> Vec<NodeStatus> {
                 rid_per_s: ((n.rid_times.len() as u64 * 1000 + RATE_WINDOW_MS / 2) / RATE_WINDOW_MS)
                     as u32,
                 drops: n.drops,
+                can: status.map(|s| s.0),
+                plan: status.map(|s| s.1),
             })
         })
         .collect()
@@ -382,6 +417,8 @@ struct Outputs {
     logged: HashMap<TrackId, u64>,
     logged_links: HashMap<LinkTrackId, u64>,
     logged_aircraft: HashMap<AircraftKey, u64>,
+    logged_rf: HashMap<tracker::EmitterId, u64>,
+    logged_wifi: HashMap<tracker::WifiDroneId, u64>,
     cot: Option<Cot>,
     cot_error_shown: bool,
 }
@@ -425,7 +462,36 @@ impl Outputs {
                 }
                 self.logged_aircraft.insert(a.key, a.last_seen_ms);
             }
+            for e in tr.emitters() {
+                if self
+                    .logged_rf
+                    .get(&e.id)
+                    .is_some_and(|&t| t >= e.last_seen_ms)
+                {
+                    continue;
+                }
+                if let Ok(n) = csv::rf_row(e, ctx, &mut buf) {
+                    let _ = f.write_all(&buf[..n]);
+                }
+                self.logged_rf.insert(e.id, e.last_seen_ms);
+            }
+            for w in tr.wifi_drones() {
+                if self
+                    .logged_wifi
+                    .get(&w.id)
+                    .is_some_and(|&t| t >= w.last_seen_ms)
+                {
+                    continue;
+                }
+                if let Ok(n) = csv::wifi_drone_row(w, ctx, &mut buf) {
+                    let _ = f.write_all(&buf[..n]);
+                }
+                self.logged_wifi.insert(w.id, w.last_seen_ms);
+            }
             let _ = f.flush();
+            self.logged_rf.retain(|id, _| tr.get_emitter(*id).is_some());
+            self.logged_wifi
+                .retain(|id, _| tr.get_wifi_drone(*id).is_some());
             self.logged_aircraft
                 .retain(|k, _| tr.get_aircraft(*k).is_some());
             self.logged.retain(|id, _| tr.get(*id).is_some());
@@ -473,6 +539,16 @@ impl Outputs {
             }
             for l in tr.open_links() {
                 if let Ok(n) = json::link_line(l, ctx, &mut buf) {
+                    let _ = out.write_all(&buf[..n]);
+                }
+            }
+            for e in tr.emitters() {
+                if let Ok(n) = json::rf_line(e, ctx, &mut buf) {
+                    let _ = out.write_all(&buf[..n]);
+                }
+            }
+            for w in tr.wifi_drones() {
+                if let Ok(n) = json::wifi_drone_line(w, ctx, &mut buf) {
                     let _ = out.write_all(&buf[..n]);
                 }
             }
@@ -587,6 +663,8 @@ fn run(o: Options) -> Result<(), String> {
             (base, "demo Wi-Fi", NodeRole::Wifi24),
             (base + 1, "demo BLE", NodeRole::Ble),
             (base + 2, "demo Wi-Fi 5 GHz", NodeRole::Wifi5),
+            (base + 3, "demo DroneID", NodeRole::DroneId),
+            (base + 4, "demo FPV scanner", NodeRole::Fpv),
         ] {
             let info = view.nodes.entry(n).or_default();
             info.source = what.into();
@@ -605,6 +683,8 @@ fn run(o: Options) -> Result<(), String> {
         logged: HashMap::new(),
         logged_links: HashMap::new(),
         logged_aircraft: HashMap::new(),
+        logged_rf: HashMap::new(),
+        logged_wifi: HashMap::new(),
         cot: o.cot.as_deref().map(Cot::open).transpose()?,
         cot_error_shown: false,
     };
@@ -643,6 +723,7 @@ fn run(o: Options) -> Result<(), String> {
 
     let mut tr: Tracker = Tracker::new(Config {
         show_link_ids: o.show_link_ids,
+        hide_droneid_ids: o.hide_droneid_ids,
         ..Config::default()
     });
     // Tracker time: the newest event stamp; while live it also advances with
@@ -691,6 +772,14 @@ fn run(o: Options) -> Result<(), String> {
                             }
                             tr.ingest_open_link(node, &s, now);
                         }
+                        Line::Frame(f) => {
+                            info.frame_lines += 1;
+                            note_frame(info, &f);
+                            if matches!(*f, link::Frame::Detection(_)) {
+                                note_rid(info, at_ms);
+                            }
+                            tr.ingest_frame(node, &f, now);
+                        }
                         Line::Hello(v) => {
                             info.role = role_from_hello(&v).or(info.role);
                             info.hello = Some(summarize(&v, &["t"]));
@@ -720,6 +809,14 @@ fn run(o: Options) -> Result<(), String> {
                     info.last_ms = Some(at_ms);
                     info.open_lines += 1;
                     tr.ingest_open_link(node, &sighting, now);
+                }
+                Event::Frame { node, frame, at_ms } => {
+                    now = now.max(at_ms);
+                    let info = view.nodes.entry(node).or_default();
+                    info.last_ms = Some(at_ms);
+                    info.frame_lines += 1;
+                    note_frame(info, &frame);
+                    tr.ingest_frame(node, &frame, now);
                 }
                 Event::End { node, why } => {
                     live_sources -= 1;
@@ -786,6 +883,23 @@ fn run(o: Options) -> Result<(), String> {
             }
         }
         view.announced.retain(|id, _| tr.get(*id).is_some());
+        while let Some(k) = tr.take_new_signal(now) {
+            let what = match k {
+                tracker::SignalKey::Emitter(id) => tr.get_emitter(id).map(|e| {
+                    format!(
+                        "new RF signal: {} {:.1} MHz",
+                        tracker::signals::rf_label(e.kind),
+                        e.freq_mhz()
+                    )
+                }),
+                tracker::SignalKey::WifiDrone(id) => tr
+                    .get_wifi_drone(id)
+                    .map(|w| format!("new Wi-Fi drone: {} {}", w.maker_name(), w.ssid)),
+            };
+            if let Some(w) = what {
+                view.note(&hhmmss(utc_now()), w);
+            }
+        }
 
         if now >= last_tick + 1000 {
             last_tick = now;
@@ -814,17 +928,24 @@ fn run(o: Options) -> Result<(), String> {
             };
             let mut buf = vec![
                 0u8;
-                json::state_max_len(
+                json::state_full_max_len(
                     tr.len(),
                     tr.open_links().len(),
                     tr.aircraft().len(),
-                    nodes.len()
+                    nodes.len(),
+                    tr.emitters().len(),
+                    tr.wifi_drones().len(),
                 )
             ];
-            if let Ok(n) = json::state(
+            let signals = json::Signals {
+                emitters: tr.emitters(),
+                wifi_drones: tr.wifi_drones(),
+            };
+            if let Ok(n) = json::state_full(
                 tr.tracks(),
                 tr.open_links(),
                 tr.aircraft(),
+                &signals,
                 &ctx,
                 &hub,
                 &mut buf,

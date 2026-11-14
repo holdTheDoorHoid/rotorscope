@@ -51,6 +51,8 @@ fn node_statuses(hub: &Hub, now: u64) -> heapless::Vec<NodeStatus, NODE_LINKS> {
                 seen_per_s: s.seen_per_s.map(|r| if alive { r } else { 0 }),
                 rid_per_s: if alive { s.rid_per_s_hub } else { 0 },
                 drops: Some(hub.link_drops(i)),
+                can: None,
+                plan: None,
             })
         })
         .collect()

@@ -160,3 +160,128 @@ fn fills_from_a_tracker() {
     assert_eq!(st.gps.fix, Fix::None);
     assert!(st.drones.iter().all(|d| d.drone.is_none()));
 }
+
+/// Protocol 4: DroneID tracks, RF emitters and Wi-Fi drones reach the
+/// screen model.
+#[test]
+fn fills_droneid_and_signals() {
+    use link::{DroneIdRecord, DroneIdSighting, RfKind, RfSighting, WifiDroneSighting};
+    let mut tr: Tracker = Tracker::default();
+    let rad = |d: f64| (d.to_radians() * 1e7).round() as i32;
+    let mut serial = [0u8; 16];
+    serial.copy_from_slice(b"TEST0SYNTH000001");
+    tr.ingest_droneid(
+        2,
+        &DroneIdSighting {
+            freq: 57565,
+            rssi: -70,
+            snr_db: 12,
+            uptime_us: 0,
+            record: DroneIdRecord::Flight {
+                serial,
+                lat_raw: rad(INDEPENDENCE.0),
+                lon_raw: rad(INDEPENDENCE.1),
+                altitude_raw: 328,
+                height_raw: 164,
+                v_north: 0,
+                v_east: 0,
+                v_up: 0,
+                yaw_raw: 0,
+                pilot_lat_raw: 0,
+                pilot_lon_raw: 0,
+                home_lat_raw: 0,
+                home_lon_raw: 0,
+                product_type: 68,
+            },
+        },
+        1_000,
+    );
+    tr.ingest_droneid(
+        2,
+        &DroneIdSighting {
+            freq: 24145,
+            rssi: -85,
+            snr_db: 5,
+            uptime_us: 0,
+            record: DroneIdRecord::Encrypted {
+                key_id: [1, 2, 3, 4],
+            },
+        },
+        1_000,
+    );
+    for (kind, f, snr) in [
+        (RfKind::Energy, 24370, 30),
+        (RfKind::AnalogVideo, 58060, 20),
+    ] {
+        let s = RfSighting {
+            kind,
+            freq: f,
+            width_khz: 0,
+            snr_db: snr,
+            duty_pct: 90,
+            line_hz: 0,
+            uptime_us: 0,
+        };
+        tr.ingest_rf(3, &s, 1_000);
+    }
+    tr.ingest_wifi_drone(
+        0,
+        &WifiDroneSighting {
+            maker: 1,
+            mac: [0, 1, 2, 3, 4, 5],
+            ssid: heapless::String::try_from("TELLO-\u{e9}5A1B2").unwrap(),
+            channel: 6,
+            rssi: -60,
+            uptime_us: 0,
+        },
+        1_000,
+    );
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, None, 1_000);
+    let mut st = UiState::default();
+    fill_from_tracker(&tr, &tr.context(1_500, None), &mut st);
+
+    let dji = st
+        .drones
+        .iter()
+        .find(|d| d.id_kind == IdKind::Serial)
+        .unwrap();
+    assert_eq!(dji.id.as_str(), "TEST0SYNTH000001");
+    assert_eq!(dji.model.as_str(), "Mavic 3");
+    assert!(dji.radios.contains(Radio::DroneId));
+    assert_eq!(dji.rssi[Radio::DroneId.index()], Some(-70));
+    assert!(dji.drone.is_some());
+    let o4 = st
+        .drones
+        .iter()
+        .find(|d| d.id_kind == IdKind::Presence)
+        .unwrap();
+    assert_eq!(o4.id.as_str(), "O4 01020304");
+    assert_eq!(st.total_emitters, 2);
+    // Strongest first: the energy, then the video.
+    assert_eq!(st.emitters[0].kind, EmitterKind::Energy);
+    assert_eq!(st.emitters[1].kind, EmitterKind::AnalogVideo);
+    assert_eq!(st.emitters[1].freq_mhz, 5806.0);
+    assert_eq!(st.wifi_drones[0].maker.as_str(), "DJI Tello");
+    assert_eq!(st.wifi_drones[0].ssid.as_str(), "TELLO-?5A1B2");
+
+    // Identity hidden: the O4 key is not shown either.
+    let mut tr2: Tracker = Tracker::new(tracker::Config {
+        hide_droneid_ids: true,
+        ..Default::default()
+    });
+    tr2.ingest_droneid(
+        2,
+        &DroneIdSighting {
+            freq: 24145,
+            rssi: -85,
+            snr_db: 5,
+            uptime_us: 0,
+            record: DroneIdRecord::Encrypted {
+                key_id: [1, 2, 3, 4],
+            },
+        },
+        1_000,
+    );
+    fill_from_tracker(&tr2, &tr2.context(1_500, None), &mut st);
+    assert_eq!(st.drones[0].id.as_str(), "O4 2414.5");
+}

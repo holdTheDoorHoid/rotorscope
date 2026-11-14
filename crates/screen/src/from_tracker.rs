@@ -5,6 +5,7 @@
 use core::fmt::Write;
 
 use heapless::{String, Vec};
+use link::RfKind;
 use rid::Transport;
 use rid::message::{FixedStr, HeightType, IdType, UaType};
 use tracker::{Band, Context, Track, TrackState, Tracker, geo};
@@ -54,6 +55,87 @@ pub fn fill_from_tracker<const N: usize, const A: usize>(
     state.drones.clear();
     for &(_, i) in keyed.iter().take(MAX_DRONES) {
         let _ = state.drones.push(view(&tracks[i], ctx));
+    }
+    fill_signals(tracker.emitters(), tracker.wifi_drones(), ctx, state);
+}
+
+/// Replace `state.emitters` and `state.wifi_drones` (and their totals):
+/// active before stale, then strongest. Called by [`fill_from_tracker`].
+pub fn fill_signals(
+    emitters: &[tracker::Emitter],
+    wifi: &[tracker::WifiDrone],
+    ctx: &Context,
+    state: &mut UiState,
+) {
+    let clamp = |n: usize| n.min(usize::from(u16::MAX)) as u16;
+    state.total_emitters = clamp(emitters.len());
+    state.total_wifi_drones = clamp(wifi.len());
+
+    let mut order: Vec<(bool, i16, usize), { tracker::signals::MAX_EMITTERS }> = emitters
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            (
+                ctx.emitter_state(e) == TrackState::Stale,
+                -i16::from(e.snr_db),
+                i,
+            )
+        })
+        .collect();
+    order.sort_unstable();
+    state.emitters.clear();
+    for &(stale, _, i) in order.iter().take(MAX_SIGNALS) {
+        let e = &emitters[i];
+        let _ = state.emitters.push(EmitterView {
+            key: e.id.0,
+            kind: match e.kind {
+                RfKind::AnalogVideo => EmitterKind::AnalogVideo,
+                RfKind::FpvCarrier => EmitterKind::FpvCarrier,
+                RfKind::Hdzero => EmitterKind::Hdzero,
+                RfKind::LteStyle => EmitterKind::LteStyle,
+                RfKind::WifiNarrow => EmitterKind::WifiNarrow,
+                RfKind::Energy => EmitterKind::Energy,
+            },
+            freq_mhz: e.freq_mhz() as f32,
+            snr_db: e.snr_db,
+            duty_pct: e.duty_pct,
+            line_hz: e.line_hz,
+            stale,
+            last_seen_ms: e.last_seen_ms,
+        });
+    }
+
+    let mut order: Vec<(bool, i16, usize), { tracker::signals::MAX_WIFI_DRONES }> = wifi
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            (
+                ctx.wifi_drone_state(w) == TrackState::Stale,
+                -i16::from(w.rssi),
+                i,
+            )
+        })
+        .collect();
+    order.sort_unstable();
+    state.wifi_drones.clear();
+    for &(stale, _, i) in order.iter().take(MAX_SIGNALS) {
+        let w = &wifi[i];
+        let mut v = WifiDroneView {
+            key: w.id.0,
+            channel: w.channel,
+            rssi: w.rssi,
+            stale,
+            last_seen_ms: w.last_seen_ms,
+            ..WifiDroneView::default()
+        };
+        let _ = v.maker.push_str(w.maker_name());
+        for c in w.ssid.chars() {
+            let c = if (' '..='~').contains(&c) { c } else { '?' };
+            if v.ssid.push(c).is_err() {
+                break;
+            }
+        }
+        let _ = state.wifi_drones.push(v);
     }
 }
 
@@ -152,15 +234,37 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
             };
             put_text_or_hex(&mut v.id, &u.id);
         }
-        None => {
-            v.id_kind = IdKind::Mac;
-            if let Some((_, l)) = t.latest_link() {
+        None => match t.latest_link() {
+            Some((_, l)) => {
+                v.id_kind = IdKind::Mac;
                 for (n, b) in l.mac.iter().enumerate() {
                     let sep = if n == 0 { "" } else { ":" };
                     let _ = write!(v.id, "{sep}{b:02x}");
                 }
             }
-        }
+            // DJI DroneID with no readable (or shown) identity.
+            None => {
+                v.id_kind = IdKind::Presence;
+                let what = match t.dji.key_id {
+                    Some(k) if !ctx.config.hide_droneid_ids => {
+                        let _ = write!(v.id, "O4 {:02x}{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3]);
+                        None
+                    }
+                    Some(_) => Some("O4"),
+                    None if t.dji.undecoded => Some("DroneID"),
+                    None => Some("DJI"),
+                };
+                if let Some(w) = what {
+                    let _ = v.id.push_str(w);
+                    if let Some(f) = t.dji.freq_mhz() {
+                        let _ = write!(v.id, " {f:.1}");
+                    }
+                }
+            }
+        },
+    }
+    if let Some(m) = t.dji.product_name() {
+        let _ = v.model.push_str(m);
     }
     if let Some(s) = &t.self_id {
         put_text(&mut v.self_id, &s.value.description);
@@ -172,7 +276,7 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
     // Radios: one letter per tracker slot. The tracker keeps 5 GHz beacon
     // and NAN in their own slots, so a drone heard on both bands shows both
     // "W" and "5", each with its own signal.
-    let mut latest = [0u64; 5];
+    let mut latest = [0u64; 6];
     for (slot, l) in t.slots() {
         let r = match (slot.transport, slot.band) {
             (Transport::WifiBeacon | Transport::WifiNan, Band::Ghz5) => Radio::Wifi5,
@@ -183,6 +287,22 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
         };
         v.radios.insert(r);
         let i = r.index();
+        if v.rssi[i].is_none() || l.last_seen_ms >= latest[i] {
+            v.rssi[i] = Some(l.rssi);
+            latest[i] = l.last_seen_ms;
+        }
+    }
+    // DJI: the OcuSync burst is its own letter; the legacy Wi-Fi element
+    // is a 2.4 GHz beacon, so it counts as W.
+    for (r, l) in [
+        (Radio::DroneId, &t.dji.ocusync),
+        (Radio::WifiBeacon, &t.dji.wifi),
+    ] {
+        let i = r.index();
+        if !l.heard() {
+            continue;
+        }
+        v.radios.insert(r);
         if v.rssi[i].is_none() || l.last_seen_ms >= latest[i] {
             v.rssi[i] = Some(l.rssi);
             latest[i] = l.last_seen_ms;

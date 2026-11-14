@@ -18,6 +18,8 @@ tracker.workspace = true
 # The ADSBee's CSBee text (--adsbee); `encode` builds the --demo aircraft.
 adsb = { workspace = true, features = ["encode"] }
 link.workspace = true
+# The demo classifies its Wi-Fi drone the way a node does.
+wifidrone.workspace = true
 # Open FPV link types (the node's "open" lines).
 openlink = { workspace = true, features = ["serde"] }
 # The phone page, for --http.
