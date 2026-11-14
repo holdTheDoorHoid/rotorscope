@@ -1,0 +1,32 @@
+# Rotorscope hub on the Elecrow CrowPanel Advanced 5" (ESP32-P4, silicon v1.3).
+#
+# Bare-metal Rust on esp-hal, but NOT the crates.io esp-hal: upstream supports
+# P4 silicon v3.0+ only. Every esp-* crate here is the pinned esp-hal commit
+# plus the community pre-v3 patch, prepared by tools/p4-prepare.sh. Run that
+# once before building. See README.md.
+[package]
+name         = "hub-p4"
+version      = "0.1.0"
+edition      = "2024"
+license      = "GPL-3.0-or-later"
+publish      = false
+
+[[bin]]
+name  = "hub-p4"
+path  = "src/main.rs"
+test  = false
+bench = false
+
+[workspace]
+
+[dependencies]
+esp-backtrace          = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-backtrace", features = ["esp32p4", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-bootloader-esp-idf", features = ["esp32p4"] }
+esp-hal                = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-hal", features = ["esp32p4", "unstable", "log-04"] }
+esp-println            = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-println", features = ["esp32p4", "log-04"] }
+
+[profile.release]
+debug         = true
+opt-level     = "s"
+lto           = "fat"
+codegen-units = 1

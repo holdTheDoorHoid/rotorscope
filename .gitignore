@@ -12,3 +12,4 @@ testdata/
 tools/boards.local
 bench-logs/
 __pycache__/
+firmware/patches/esp-hal-p4-pre-v3/upstream/
