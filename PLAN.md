@@ -462,8 +462,39 @@ never sent anywhere automatically.
 5. **Crewed aircraft (ADS-B):** below the 91.119 minimum safe altitudes (1000 ft over congested
    areas, 500 ft elsewhere) away from airports, using the same elevation tiles. Lower priority; many
    legitimate exceptions (helicopters, approach paths).
-6. Later: night operations without anti-collision lighting can't be seen by radio; flying over
-   people and beyond visual line of sight can't be judged from radio data. Out of scope.
+6. **Beyond visual line of sight (107.31, 44809(a)(7)), inferred.** Standard Remote ID carries the
+   operator's position and its type (live GNSS, takeoff point, or fixed). The rule has no distance
+   in it, so this is graded, not a yes/no:
+   - drone-to-operator distance against how far a drone of that size can be seen (a small drone is
+     hard to see beyond roughly 400–800 m; thresholds are settings, defaults to be justified from
+     published visibility studies);
+   - **terrain in the way:** the elevation tiles say whether a hill blocks the straight line between
+     the operator and the drone (buildings are not in the data, so a city flag stays softer);
+   - confidence is lower when the operator position is only the takeoff point (broadcast modules
+     often send that) or is missing.
+7. **Night and twilight (107.29), inferred.** Sun elevation from the hub's GPS time and position:
+   night is between the end of evening civil twilight (sun 6° below the horizon) and the start of
+   morning civil twilight. Night flight is **legal** with anti-collision lighting visible for 3
+   statute miles (and, for Part 107, the updated training), which radio can't see. So night alone
+   is only the lowest level; it raises other flags' levels instead (e.g. far from the operator at
+   night). Sun position is computed on the device; no data download.
+8. Out of scope: flying over people (no data on people), lighting itself.
+
+**Alert levels.** Each flag has a level that rises as evidence builds up, so a single noisy reading
+never shouts:
+
+| Level | Meaning | Example |
+|---|---|---|
+| 0 Note | context, not a deviation | flying at night; inside Class D (often authorized) |
+| 1 Watch | one rule possibly exceeded, briefly or within error margins | 420 ft above ground for 3 s; 600 m from operator |
+| 2 Warning | clearly exceeded, sustained | over 450 ft above ground for 30 s; above the facility-map ceiling |
+| 3 Alert | strong, combined evidence | over 600 ft above ground and 1.5 km from the operator at night; inside a TFR or prohibited area |
+
+Confidence rises with: how far over the limit (beyond the reported accuracy class), how long and how
+often, two independent sources agreeing (Remote ID and DJI DroneID for the same serial), and combined
+factors (night raises distance flags one level). Thresholds live in one settings table, documented
+with the rule each one comes from, so the owner can tune them. Only the levels change what the screen
+and phone show; the log keeps every flag with its raw numbers.
 
 **Data:** a host tool (`tools/airspace-pack`) downloads the public FAA and USGS datasets, cuts a
 region (e.g. 100 km around the owner), simplifies shapes, and writes a compact versioned pack to the
