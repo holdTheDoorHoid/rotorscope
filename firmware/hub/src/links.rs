@@ -6,6 +6,12 @@
 //! it unread long enough to overflow. Up here they preempt all of that. They
 //! do the minimum: bytes -> `link::Decoder` -> whole frames into `FRAMES`.
 //! The tracker work happens in `ingest` on the thread-mode executor.
+//!
+//! A link may carry many nodes: an ESP-NOW gateway, or a P4 hub feeding this
+//! board as its web head (`hub-p4/WEBHEAD.md`), puts a `Frame::Via` before
+//! each relayed frame. The reader pairs each `Via` with the frame after it
+//! (and forgets it on any stream error, so a lost frame cannot hand its
+//! node's name to the next one); `Hub::on_link_frame` keeps those nodes apart.
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -19,10 +25,15 @@ use link::{Decoder, Frame, LinkError};
 use crate::hub::{Hub, now_ms};
 use crate::pins::{NODE_BAUD, NODE_LINKS};
 
-/// Frames waiting for the tracker. A full Detection is ~260 bytes, so 24
-/// slots is ~6 KB: about a quarter of a second of all three nodes at full
-/// tilt, far more than `ingest` ever falls behind by.
-pub static FRAMES: Channel<CriticalSectionRawMutex, (u8, Frame), 24> = Channel::new();
+/// The node a relayed frame came from: its station address and the RSSI
+/// the relay heard it at (`Frame::Via`).
+pub type Via = Option<([u8; 6], i8)>;
+
+/// Frames waiting for the tracker: (link, relayed-from, frame). A full
+/// Detection is ~260 bytes, so 24 slots is ~6 KB: about a quarter of a
+/// second of all three nodes at full tilt, far more than `ingest` ever
+/// falls behind by.
+pub static FRAMES: Channel<CriticalSectionRawMutex, (u8, Via, Frame), 24> = Channel::new();
 
 /// Per-link counters, readable from anywhere.
 pub struct LinkStats {
@@ -87,6 +98,7 @@ pub async fn reader(index: u8, uart: AnyUart<'static>, pin: AnyPin<'static>) {
         }
     };
     let mut decoder = Decoder::new();
+    let mut via: Via = None;
     let mut buf = [0u8; 128];
     loop {
         let n = match rx.read_async(&mut buf).await {
@@ -95,22 +107,29 @@ pub async fn reader(index: u8, uart: AnyUart<'static>, pin: AnyPin<'static>) {
                 // The driver already reset the FIFO; whatever frame was in
                 // flight is lost and the decoder resyncs at the next zero.
                 stats.uart_err.fetch_add(1, Relaxed);
+                via = None;
                 continue;
             }
         };
         stats.bytes.fetch_add(n as u32, Relaxed);
         decoder.feed(&buf[..n], |r| match r {
+            Ok(Frame::Via { node, rssi }) => {
+                stats.frames.fetch_add(1, Relaxed);
+                via = Some((node, rssi));
+            }
             Ok(frame) => {
                 stats.frames.fetch_add(1, Relaxed);
-                if FRAMES.try_send((index, frame)).is_err() {
+                if FRAMES.try_send((index, via.take(), frame)).is_err() {
                     stats.queue_full.fetch_add(1, Relaxed);
                 }
             }
             Err(LinkError::Corrupt) => {
                 stats.corrupt.fetch_add(1, Relaxed);
+                via = None;
             }
             Err(LinkError::Overflow) => {
                 stats.overflow.fetch_add(1, Relaxed);
+                via = None;
             }
         });
     }
@@ -120,7 +139,7 @@ pub async fn reader(index: u8, uart: AnyUart<'static>, pin: AnyPin<'static>) {
 #[embassy_executor::task]
 pub async fn ingest(hub: &'static Hub) {
     loop {
-        let (node, frame) = FRAMES.receive().await;
-        hub.on_frame(node, frame, now_ms());
+        let (link, via, frame) = FRAMES.receive().await;
+        hub.on_link_frame(link, via, frame, now_ms());
     }
 }

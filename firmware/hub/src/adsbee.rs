@@ -27,8 +27,9 @@ use tracker::json::AdsbStatus;
 
 use crate::hub::Hub;
 
-/// Built with an ADSBee input.
-pub const ENABLED: bool = cfg!(feature = "adsbee");
+/// Built with an aircraft table: an ADSBee on this board's UART (feature
+/// `adsbee`), or a P4 hub forwarding its ADSBee's lines (feature `webhead`).
+pub const ENABLED: bool = cfg!(any(feature = "adsbee", feature = "webhead"));
 /// The ADSBee reports once a second; quiet for this long means it is gone.
 pub const ALIVE_MS: u64 = 3_000;
 
@@ -124,6 +125,28 @@ mod imp {
 pub use imp::REPORTS;
 #[cfg(feature = "adsbee")]
 pub use imp::{ingest, reader};
+
+/// One CSBee line forwarded by an upstream hub (`link::Frame::Csbee`, web
+/// head): the same parser and the same counters as a line from the UART.
+/// Ignored without an aircraft table.
+pub fn on_forwarded_line(hub: &Hub, line: &[u8], now: u64) {
+    if !ENABLED {
+        return;
+    }
+    BYTES.fetch_add(line.len() as u32, Relaxed);
+    match adsb::parse(line) {
+        Ok(r) => {
+            LINES.fetch_add(1, Relaxed);
+            hub.on_adsb(&r, now);
+        }
+        Err(adsb::Error::NotCsbee) => {
+            OTHER.fetch_add(1, Relaxed);
+        }
+        Err(_) => {
+            ERRORS.fetch_add(1, Relaxed);
+        }
+    }
+}
 
 /// The ADSBee's health for `/api/state`; `None` when not built in.
 pub fn status(hub: &Hub, now: u64) -> Option<AdsbStatus> {

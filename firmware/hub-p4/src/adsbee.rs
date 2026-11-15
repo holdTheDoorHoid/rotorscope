@@ -19,6 +19,7 @@ use tracker::json::AdsbStatus;
 
 use crate::app::HubTracker;
 use crate::uartring::adsb_rx;
+use crate::webhead::Feed;
 
 /// The ADSBee reports once a second; quiet for this long means it is gone.
 pub const ALIVE_MS: u64 = 3_000;
@@ -36,19 +37,32 @@ pub struct Adsbee {
 }
 
 impl Adsbee {
-    pub fn tick(&mut self, tracker: &mut HubTracker, now: u64) {
+    /// Take what UART4 received. Each report also goes to the web head
+    /// (`feed`), as the CSBee line it came from.
+    #[cfg_attr(feature = "webheadloop", allow(dead_code))]
+    pub fn tick(&mut self, tracker: &mut HubTracker, now: u64, mut feed: Option<&mut Feed>) {
         let mut buf = [0u8; 256];
         loop {
             let n = adsb_rx::take(&mut buf);
             if n == 0 {
                 break;
             }
+            self.feed(&buf[..n], tracker, now, feed.as_deref_mut());
+        }
+    }
+
+    /// CSBee bytes, from UART4 or (bench) from a test.
+    pub fn feed(&mut self, bytes: &[u8], tracker: &mut HubTracker, now: u64, mut feed: Option<&mut Feed>) {
+        {
             let (lines, errors, other, last, stats) =
                 (&mut self.lines, &mut self.errors, &mut self.other, &mut self.last_ms, &mut self.stats);
-            self.split.feed(&buf[..n], |r| match r {
+            self.split.feed(bytes, |r| match r {
                 Ok(report) => {
                     *lines += 1;
                     *last = Some(now);
+                    if let Some(f) = feed.as_deref_mut() {
+                        f.adsb(&report);
+                    }
                     match report {
                         adsb::Report::Aircraft(a) => {
                             tracker.ingest_aircraft(&a, now);

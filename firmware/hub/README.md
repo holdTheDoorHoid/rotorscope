@@ -44,6 +44,13 @@ Flash and watch through the shared lock. Never call espflash directly:
 tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 60
 ```
 
+As the P4 hub's **web head** (hotspot, phone page, CoT and station mode for the P4, which has no
+radio): `cargo fw --features webhead`, with P4 GPIO31 wired to node A RX (GPIO4) plus ground. See
+`firmware/hub-p4/WEBHEAD.md`. Every build understands a relayed link (an ESP-NOW gateway or a P4
+hub): `Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone node list), the
+P4's GPS (`HubFix`) becomes the own position and UTC when this board has no GPS of its own, and
+protocol 4 frames reach the tracker; `webhead` adds the aircraft table for forwarded ADS-B lines.
+
 Other features: `ili9341` (an ILI9341 panel instead of the default ST7789), `gps-uart` (GPS on
 UART2 instead of I2C; costs node link 2), `adsbee` (an ADSBee 1090 on UART2; costs node link 2;
 see "ADS-B" below), and `show-link-ids` (below). A rebuild with nothing changed takes well under a second:
@@ -286,6 +293,7 @@ start with `{` (bootloader text, panics).
 | `link` | Every second, one per open FPV link (`tracker::json::link_line`) |
 | `hub` | Every second: tracks, own position, per-link counters, heap, CoT/HTTP counts, timings (below), and `gps`, `sd`, `screen`, `batt`, `buzz` ("What each status means") |
 | `gps`, `sd` | GPS found or lost, configured; SD card found, recording, lost |
+| `relayed` | Every second, one per node behind a relay (gateway or P4 hub): address, link, RSSI, role, rates, drops |
 | `new` | A drone seen for the first time (the buzzer's twin) |
 | `state_check` | Streamed `/api/state` vs `json::state` |
 | `sta` | Station up, down or failed |

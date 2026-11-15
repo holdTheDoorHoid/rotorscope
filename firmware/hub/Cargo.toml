@@ -65,6 +65,12 @@ show-link-ids = []
 # only, and it costs node link 2 (the 5 GHz node): the S3 has three UARTs.
 # Excludes `gps-uart`, which wants the same UART.
 adsbee = []
+# Web head for the P4 hub (firmware/hub-p4/WEBHEAD.md): this board serves the
+# hotspot, phone page, CoT and station mode, fed by the P4 over node link 0
+# (one wire to the RX pin of node A). The frames (relayed nodes, GPS, UTC,
+# ADS-B) are understood by every build; this feature only adds the aircraft
+# table for the P4's forwarded ADS-B (an `adsbee` build has it anyway).
+webhead = []
 
 [dependencies]
 rid     = { path = "../../crates/rid", features = ["serde"] }
