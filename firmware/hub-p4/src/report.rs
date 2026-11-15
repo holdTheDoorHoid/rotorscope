@@ -152,6 +152,16 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     w.opt(a.frames_per_s);
     let _ = write!(w.0, ",\"table\":");
     w.opt(a.aircraft);
+    #[cfg(feature = "modes")]
+    {
+        let m = &adsbee.raw.table.stats;
+        let _ = write!(
+            w.0,
+            ",\"modes\":{{\"frames\":{},\"used\":{},\"bad_crc\":{},\"fixed\":[{},{}],\"unconfirmed\":{},\"pos\":[{},{}],\"pos_refused\":{},\"tisb\":{},\"adsr\":{},\"aircraft\":{}}}",
+            m.frames, m.used, m.bad_crc, m.fixed_1, m.fixed_2, m.unconfirmed, m.positions_global, m.positions_local,
+            m.positions_refused, m.tis_b, m.ads_r, adsbee.raw.table.len()
+        );
+    }
     let s = &gw.stats;
     let _ = writeln!(
         w.0,

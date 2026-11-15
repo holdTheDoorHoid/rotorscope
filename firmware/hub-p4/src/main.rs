@@ -20,6 +20,8 @@ pub(crate) use println;
 
 #[cfg(all(feature = "selftest", feature = "gpsloop"))]
 compile_error!("`selftest` and `gpsloop` both use UART2; build one at a time");
+#[cfg(all(feature = "modesloop", any(feature = "gpsloop", feature = "webheadloop")))]
+compile_error!("`modesloop` drives the ADSBee pad from UART4, which `gpsloop` and `webheadloop` use too; build one at a time");
 #[cfg(all(feature = "webheadloop", any(feature = "selftest", feature = "gpsloop")))]
 compile_error!("`webheadloop` needs the web-head feed on UART2, which `selftest` and `gpsloop` take");
 
@@ -36,6 +38,8 @@ mod faa;
 mod gps;
 #[cfg(feature = "gpsloop")]
 mod gpsloop;
+#[cfg(feature = "modesloop")]
+mod modesloop;
 mod links;
 mod psram_test;
 mod report;
@@ -270,7 +274,7 @@ fn main() -> ! {
         // SAFETY: bench only; GPIO31 is driven by UART2 TX and read here on purpose.
         .with_rx(unsafe { esp_hal::peripherals::GPIO31::steal() });
     // Loop-back test: UART4 also drives its own RX pad.
-    #[cfg(feature = "gpsloop")]
+    #[cfg(any(feature = "gpsloop", feature = "modesloop"))]
     // SAFETY: bench only; GPIO30 is shared with UART4 RX on purpose.
     let adsb_uart = adsb_uart.with_tx(unsafe { esp_hal::peripherals::GPIO30::steal() });
     uartring::adsb_rx::install(adsb_uart);
@@ -278,6 +282,8 @@ fn main() -> ! {
     println!("hub-p4: gps on UART1 RX GPIO48 TX GPIO47 (hunting {:?} baud), PPS GPIO29; adsbee on UART4 RX GPIO30 at {}", gps::BAUDS, adsb::DEFAULT_BAUD);
     #[cfg(feature = "gpsloop")]
     let mut gpsloop = gpsloop::Loop::new(p.UART2);
+    #[cfg(feature = "modesloop")]
+    let mut modesloop = modesloop::Loop::new();
     // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
     let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
     // Phase 12: the airspace pack goes to PSRAM above the framebuffer.
@@ -363,6 +369,8 @@ fn main() -> ! {
         sdlog.tick(app.tracker, faa, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         #[cfg(feature = "gpsloop")]
         gpsloop.tick();
+        #[cfg(feature = "modesloop")]
+        modesloop.tick();
         #[cfg(feature = "benchlog")]
         bench.tick(app.tracker, &gw, ms);
         #[cfg(feature = "selftest")]
@@ -584,6 +592,26 @@ fn print_gps_adsb(app: &app::App, gps: &gps::Gps, adsbee: &adsbee::Adsbee, now: 
         uartring::adsb_rx::UART_ERR.load(Relaxed), uartring::adsb_rx::RING_FULL.load(Relaxed),
         app.tracker.aircraft().len(), app.tracker.active_aircraft_count(now), a.aircraft, a.frames_per_s
     );
+    #[cfg(feature = "modes")]
+    {
+        let s = &adsbee.raw.table.stats;
+        let b = &adsbee.raw.beast.stats;
+        println!(
+            "hub-p4: modes beast_frames={} broken={} skipped={} used={} bad_crc={} fixed1={} fixed2={} fix2_refused={} unconfirmed={} pos_global={} pos_local={} pos_refused={} zone_mismatch={} tisb={} adsr={} bds={:?} table={} df={:?}",
+            b.frames, b.broken, b.skipped, s.used, s.bad_crc, s.fixed_1, s.fixed_2, s.fix_2_refused, s.unconfirmed,
+            s.positions_global, s.positions_local, s.positions_refused, s.cpr_zone_mismatch, s.tis_b, s.ads_r, s.bds,
+            adsbee.raw.table.len(), s.by_df
+        );
+        // The aircraft with a position, as the decoder has them.
+        for p in adsbee.raw.table.planes() {
+            if let Some((lat, lon)) = p.position() {
+                println!(
+                    "hub-p4: modes ac {:06X} {} alt={:?} pos={:.5},{:.5} global={}",
+                    p.icao, p.callsign().as_ref().map_or("-", |c| c.as_str()), p.baro_altitude_ft(), lat, lon, p.position_global()
+                );
+            }
+        }
+    }
 }
 
 static mut TRACKER: core::mem::MaybeUninit<app::HubTracker> = core::mem::MaybeUninit::uninit();

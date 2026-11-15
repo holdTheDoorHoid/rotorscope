@@ -590,6 +590,13 @@ Goal: decode crewed-aircraft location signals ourselves instead of trusting the 
 and add the light-aircraft/glider systems (FLARM and its open relatives) that ADS-B misses.
 
 **14a. Mode S / ADS-B decoder in Rust (`crates/modes`), no new hardware.**
+**BUILT 2026-11-15 (branch `modes`):** `crates/modes` (47 host tests, published example
+frames from the 1090 MHz Riddle and pyModeS), `tools/modes-live`, P4 feature `modes` (off by
+default) and `modesloop`. Live on the laptop against the ADSBee's own decode (15 min): callsign,
+squawk and category 100%, altitude 99.7%, position 98.1%; every disagreement checked was the
+ADSBee's CSBee value being stale. P4 loop-back with recorded frames matches the host decode.
+Not yet: the real ADSBee wired to the P4. Details in docs/ADSBEE.md. 14b/14c/14d research:
+docs/AIRCRAFT-SIGNALS.md (UAT first; FLARM content only under licence, presence by default).
 - Feed: the ADSBee's raw frame output (raw hex or Beast binary, whichever its firmware offers)
   instead of its CSBee summary. Our code then does everything above the radio: CRC-24 parity and
   address recovery, 1-2 bit error correction on DF17/18, CPR global and local position, velocity,

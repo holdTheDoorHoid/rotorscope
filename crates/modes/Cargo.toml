@@ -1,0 +1,16 @@
+[package]
+name = "modes"
+description = "no_std Mode S / ADS-B (1090 MHz) decoder: CRC-24, error correction, CPR, extended squitter, Comm-B, Beast input, aircraft table"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The table's output is the same aircraft record the CSBee parser produces,
+# so the hub's tracker, screen, logs and web-head feed take it unchanged.
+adsb.workspace = true
+# Pure-Rust maths (floor, atan2, sqrt, cos, log10) without std.
+libm = "0.2"
+
+[dev-dependencies]
+adsb = { workspace = true, features = ["encode"] }
