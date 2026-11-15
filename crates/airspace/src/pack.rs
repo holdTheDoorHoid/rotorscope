@@ -319,6 +319,22 @@ pub struct Pack<'a> {
     n_sources: usize,
     n_sections: usize,
     header_len: usize,
+    /// Optional bounding-box index ([`Pack::with_index`]).
+    index: Option<&'a [AreaRef]>,
+}
+
+/// One entry of an area index: where the record is and its bounding box.
+/// A hub keeps the index in fast RAM ([`Pack::build_index`]) so a lookup
+/// reads only the records whose box contains the point, not every header
+/// (the pack itself may sit in slow external RAM).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AreaRef {
+    pub off: u32,
+    pub lat_min: i32,
+    pub lat_max: i32,
+    pub lon_min: i32,
+    pub lon_max: i32,
+    pub kind: u8,
 }
 
 const MAX_NAME: usize = 64;
@@ -363,6 +379,7 @@ impl<'a> Pack<'a> {
             n_sources: usize::from(u16_at(data, 28)),
             n_sections: usize::from(u16_at(data, 30)),
             header_len,
+            index: None,
         };
         if p.sections_off() + p.n_sections * SECTION_LEN > total {
             return Err(PackError::Bounds);
@@ -456,9 +473,61 @@ impl<'a> Pack<'a> {
         }
     }
 
+    /// Fill `out` with every area's offset and box (known kinds only).
+    /// Returns how many, or `None` if `out` is too small.
+    pub fn build_index(&self, out: &mut [AreaRef]) -> Option<usize> {
+        let Some(s) = self.section(Section::Areas).filter(|s| s.len() >= 4) else {
+            return Some(0);
+        };
+        let mut o = 4;
+        let mut n = 0;
+        for _ in 0..u32_at(s, 0) {
+            let end = area_end(s, o)?;
+            if AreaKind::from_u8(s[o]).is_some() {
+                *out.get_mut(n)? = AreaRef {
+                    off: o as u32,
+                    lat_min: i32_at(s, o + 20),
+                    lat_max: i32_at(s, o + 24),
+                    lon_min: i32_at(s, o + 28),
+                    lon_max: i32_at(s, o + 32),
+                    kind: s[o],
+                };
+                n += 1;
+            }
+            o = end;
+        }
+        Some(n)
+    }
+
+    /// This pack, answering [`Pack::areas_at`] from `index` (made by
+    /// [`Pack::build_index`] for this same pack).
+    pub fn with_index(mut self, index: &'a [AreaRef]) -> Self {
+        self.index = Some(index);
+        self
+    }
+
     /// Areas whose shape contains the position (any altitude, any time).
-    pub fn areas_at(&self, lat: f64, lon: f64) -> impl Iterator<Item = Area<'a>> {
-        self.areas().filter(move |a| a.contains(lat, lon))
+    pub fn areas_at(&self, lat: f64, lon: f64) -> impl Iterator<Item = Area<'a>> + use<'a, '_> {
+        let (la, lo) = ((lat * 1e7) as i32, (lon * 1e7) as i32);
+        let s = self.section(Section::Areas).unwrap_or(&[]);
+        let indexed = self
+            .index
+            .into_iter()
+            .flatten()
+            .filter(move |r| {
+                la >= r.lat_min && la <= r.lat_max && lo >= r.lon_min && lo <= r.lon_max
+            })
+            .filter_map(move |r| {
+                let kind = AreaKind::from_u8(r.kind)?;
+                Some(area_at(s, r.off as usize, kind))
+            });
+        let scanned = self
+            .index
+            .is_none()
+            .then(|| self.areas())
+            .into_iter()
+            .flatten();
+        indexed.chain(scanned).filter(move |a| a.contains(lat, lon))
     }
 
     pub fn terrain(&self) -> Option<Grid<'a>> {

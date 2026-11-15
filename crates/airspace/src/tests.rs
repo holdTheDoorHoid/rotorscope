@@ -220,6 +220,15 @@ fn pack_round_trip_and_lookups() {
     let e = a[0].edge_distance_m(39.93, -75.2);
     assert!((e - 2224.0).abs() < 20.0, "{e}");
     assert_eq!(p.areas_at(39.7, -75.2).count(), 0, "outside");
+    // The same answers through a bounding-box index.
+    let mut idx = [AreaRef::default(); 4];
+    let n = p.build_index(&mut idx).unwrap();
+    assert_eq!(n, 2);
+    let pi = p.with_index(&idx[..n]);
+    assert_eq!(pi.areas_at(39.93, -75.2).count(), 1);
+    assert_eq!(pi.areas_at(39.9, -75.2).count(), 0);
+    assert_eq!(pi.areas_at(40.0, -75.0).count(), 1);
+    assert!(p.build_index(&mut idx[..1]).is_none(), "too small");
     // Altitude band: surface floor, 7000 ft MSL ceiling.
     assert_eq!(a[0].contains_alt(100.0, None), Some(true));
     assert_eq!(a[0].contains_alt(7001.0 * M_PER_FT, None), Some(false));

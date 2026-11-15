@@ -58,7 +58,7 @@ pub mod write;
 
 pub use format::{AltRef, AreaKind, Section};
 pub use geom::{FT_PER_M, M_PER_FT, distance_m, point_in_rings};
-pub use pack::{Airport, Area, Grid, Los, Pack, PackError, Source, crc32};
+pub use pack::{Airport, Area, AreaRef, Grid, Los, Pack, PackError, Source, crc32};
 
 #[cfg(test)]
 mod tests;

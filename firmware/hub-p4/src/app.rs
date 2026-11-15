@@ -43,6 +43,8 @@ pub struct Ext {
     pub sd: screen::SdLog,
     /// The ADSBee's health and uptime.
     pub adsb: Option<(tracker::json::AdsbStatus, u32)>,
+    /// The FLAGS page (Phase 12).
+    pub flags: Option<screen::FlagsView>,
 }
 /// A relayed node not heard for this long shows as down.
 const NODE_ALIVE_MS: u64 = 5_000;
@@ -235,6 +237,7 @@ impl App {
         self.state.gps = ext.gps;
         screen::from_tracker::fill_from_tracker(self.tracker, &ctx, &mut self.state);
         self.state.sd = ext.sd;
+        self.state.flags = ext.flags.clone();
         // No battery sense on this board (the BAT connector's voltage is not
         // wired to a GPIO): report USB power, as a bench S3 does.
         self.state.power = screen::Power::Usb { battery_pct: None };

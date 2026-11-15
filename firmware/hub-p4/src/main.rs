@@ -32,6 +32,7 @@ mod civil;
 mod console;
 mod display;
 mod downlink;
+mod faa;
 mod gps;
 #[cfg(feature = "gpsloop")]
 mod gpsloop;
@@ -279,6 +280,12 @@ fn main() -> ! {
     let mut gpsloop = gpsloop::Loop::new(p.UART2);
     // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
     let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
+    // Phase 12: the airspace pack goes to PSRAM above the framebuffer.
+    // SAFETY: taken exactly once, here (a static: the engine is ~27 KB).
+    let faa = unsafe {
+        (&raw mut FAA).write(core::mem::MaybeUninit::new(faa::Faa::new(psram)));
+        (*(&raw mut FAA)).assume_init_mut()
+    };
 
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
@@ -323,16 +330,17 @@ fn main() -> ! {
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
-        command(&mut app, &gps, ms);
+        command(&mut app, &gps, faa, ms);
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
             app.housekeeping(&gps, ms);
+            faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
             let max_age = app.tracker.config().own_fix_max_age_ms;
             if let Some(f) = gw.feed.as_mut() {
                 f.tick(&gps, max_age, frames, lost, ms);
             }
-            report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, ms);
+            report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, faa, ms);
         }
         app.touch(&mut i2c, ms);
         let utc = gps.utc_ms(ms);
@@ -344,13 +352,14 @@ fn main() -> ! {
                 utc_ms: utc,
                 sd: sdlog.ui_state(),
                 adsb: Some((adsbee.status(ms), adsbee.stats.map_or(0, |s| s.uptime_s))),
+                flags: Some(faa.view(app.tracker)),
             };
             app.draw(panel, &mut gw, &ext, ms, |gw| {
                 gw.poll(app::now_ms());
                 console::pump();
             });
         }
-        sdlog.tick(app.tracker, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
+        sdlog.tick(app.tracker, faa, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         #[cfg(feature = "gpsloop")]
         gpsloop.tick();
         #[cfg(feature = "benchlog")]
@@ -369,6 +378,11 @@ fn main() -> ! {
             basic[2..16].copy_from_slice(b"RSTEST-SD-0001");
             let mut msgs = heapless::Vec::new();
             let _ = msgs.push(basic);
+            for m in fake_flight(app::now_ms()) {
+                if let Ok(raw) = rid::encode::message(&m) {
+                    let _ = msgs.push(raw);
+                }
+            }
             let frames = [
                 link::Frame::Via { node, rssi: -45 },
                 link::Frame::Detection(link::Detection {
@@ -467,7 +481,7 @@ fn gps_view(app: &app::App, gps: &gps::Gps, now: u64) -> screen::Gps {
 }
 
 /// One console command byte, if any (see `console.rs`).
-fn command(app: &mut app::App, gps: &gps::Gps, now: u64) {
+fn command(app: &mut app::App, gps: &gps::Gps, faa: &faa::Faa, now: u64) {
     let Some(c) = console::read_command() else { return };
     match c {
         b'p' => {
@@ -489,10 +503,61 @@ fn command(app: &mut app::App, gps: &gps::Gps, now: u64) {
             app.redraw_now();
             println!("hub-p4: cmd manual own position cleared");
         }
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, h=help. JSON lines start with '{{'."),
+        b'b' => faa.bench(),
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, h=help. JSON lines start with '{{'."),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }
+}
+
+/// `fakedrone`: the made-up drone flies over PHL's runways, inside the
+/// Class B surface area and a 0 ft facility-map cell, with its operator
+/// 1.2 km north (live GNSS). For the first 40 s of each 80 s it is 160 m
+/// (525 ft) above the ground, then 280 m (920 ft). Altitudes are WGS-84:
+/// ground there is ~2 m above the geoid, and the geoid ~33 m below the
+/// ellipsoid. Expected flags (PLAN.md Phase 12 done-when): Class B note,
+/// facility map Warning, height Watch ("check for structures", urban cell)
+/// then Warning, distance from operator Watch then Warning.
+#[cfg(feature = "fakedrone")]
+fn fake_flight(now: u64) -> [rid::message::Message; 2] {
+    use rid::message::*;
+    let agl = if (now / 1000) % 80 < 40 { 160.0 } else { 280.0 };
+    let (lat, lon) = (39.8721, -75.2407);
+    [
+        Message::Location(Location {
+            status: Status::Airborne,
+            height_type: HeightType::AboveTakeoff,
+            direction: Some(90.0),
+            speed_horizontal: Some(2.0),
+            speed_vertical: Some(0.0),
+            position: Some(LatLon { lat, lon }),
+            altitude_pressure: None,
+            altitude_geodetic: Some(2.2 - 32.9 + agl),
+            height: Some(agl),
+            horizontal_accuracy: HorizontalAccuracy::M3,
+            vertical_accuracy: VerticalAccuracy::M3,
+            baro_accuracy: VerticalAccuracy::M3,
+            speed_accuracy: SpeedAccuracy::Mps1,
+            timestamp: None,
+            timestamp_accuracy: None,
+        }),
+        Message::System(System {
+            operator_location_type: OperatorLocationType::LiveGnss,
+            classification_type: ClassificationType::Undeclared,
+            operator_position: Some(LatLon {
+                lat: lat + 0.0108,
+                lon,
+            }),
+            area_count: 1,
+            area_radius: 0,
+            area_ceiling: None,
+            area_floor: None,
+            category: Category::Undeclared,
+            class: UaClass::Undeclared,
+            operator_altitude: None,
+            timestamp: None,
+        }),
+    ]
 }
 
 /// GPS and ADS-B status for the log, every 5 s.
@@ -521,5 +586,6 @@ fn print_gps_adsb(app: &app::App, gps: &gps::Gps, adsbee: &adsbee::Adsbee, now: 
 }
 
 static mut TRACKER: core::mem::MaybeUninit<app::HubTracker> = core::mem::MaybeUninit::uninit();
+static mut FAA: core::mem::MaybeUninit<faa::Faa> = core::mem::MaybeUninit::uninit();
 static mut BAND: [embedded_graphics::pixelcolor::Rgb565; screen::WIDTH as usize * screen::BAND_ROWS] =
     [embedded_graphics::pixelcolor::Rgb565::new(0, 0, 0); screen::WIDTH as usize * screen::BAND_ROWS];

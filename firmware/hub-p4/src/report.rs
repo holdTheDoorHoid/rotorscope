@@ -31,7 +31,7 @@ impl W<'_> {
     }
 }
 
-pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Logger, now: u64) {
+pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Logger, faa: &crate::faa::Faa, now: u64) {
     let utc = gps.utc_ms(now);
     while let Some(id) = app.new_drones.pop_front() {
         let mut b = LineBuf::new();
@@ -60,6 +60,14 @@ pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd:
         if let Ok(n) = json::aircraft_line(a, app.tracker.tracks(), &ctx, &mut line)
             && !console::json(&line[..n])
         {
+            return;
+        }
+    }
+    // Phase 12: one {"t":"flags"} line per flagged drone or aircraft (only
+    // whole lines: one that does not fit the buffer is skipped).
+    for e in faa.engine.entries().iter().filter(|e| !e.flags.is_empty()) {
+        let mut s: heapless::String<3072> = heapless::String::new();
+        if faarules::text::write_json(&mut s, e, faa.pack()).is_ok() && !console::json(s.as_bytes()) {
             return;
         }
     }
