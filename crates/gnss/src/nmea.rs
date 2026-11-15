@@ -1,10 +1,11 @@
-//! NMEA 0183 GGA + RMC handling (any talker ID).
+//! NMEA 0183 GGA + RMC handling (any talker ID), plus GSA/GSV into the sky view.
 //!
 //! GGA and RMC arrive as separate sentences of the same epoch. They are paired by their
 //! UTC time-of-day field and merged into one [`Fix`]. If the partner never arrives, the lone
 //! sentence is flushed as a `Fix` when the first sentence of the next epoch shows up.
 
 use crate::fix::{Fix, FixType, Source, UtcTime};
+use crate::sky::SkyView;
 
 /// XOR of every byte between `$` and `*`.
 pub(crate) fn xor_checksum(body: &[u8]) -> u8 {
@@ -185,7 +186,8 @@ struct Rmc {
     date: Option<(u16, u8, u8)>,
 }
 
-const MAX_FIELDS: usize = 20;
+/// GSV with four satellites and a signal ID has 21 fields.
+const MAX_FIELDS: usize = 24;
 
 fn split<'a>(body: &'a [u8], out: &mut [&'a [u8]; MAX_FIELDS]) -> usize {
     let mut n = 0;
@@ -260,11 +262,13 @@ pub(crate) struct Pending {
     key: u32,
     gga: Option<Gga>,
     rmc: Option<Rmc>,
+    /// Satellites per constellation and band, from GSV and GSA.
+    pub(crate) sky: SkyView,
 }
 
 impl Pending {
     pub(crate) const fn new() -> Self {
-        Pending { key: 0, gga: None, rmc: None }
+        Pending { key: 0, gga: None, rmc: None, sky: SkyView::new() }
     }
 
     /// Feed a checksum-verified sentence body. Returns a fix when an epoch completes (or a
@@ -277,6 +281,17 @@ impl Pending {
         // Talker (2 letters, any) + type. Proprietary $P... sentences are ignored.
         if head.len() != 5 || !head[..2].iter().all(u8::is_ascii_uppercase) || head[0] == b'P' {
             return None;
+        }
+        match &head[2..] {
+            b"GSV" => {
+                self.sky.gsv(f);
+                return None;
+            }
+            b"GSA" => {
+                self.sky.gsa(f);
+                return None;
+            }
+            _ => {}
         }
         let is_gga = &head[2..] == b"GGA";
         let is_rmc = &head[2..] == b"RMC";
@@ -310,9 +325,20 @@ impl Pending {
     }
 
     fn take(&mut self) -> Fix {
-        let fix = merge(self.gga.as_ref(), self.rmc.as_ref());
+        let mut fix = merge(self.gga.as_ref(), self.rmc.as_ref());
+        // GSA's fix mode (1 none, 2 2D, 3 3D) is the only 2D/3D flag NMEA has: a receiver
+        // that says 2D still prints an altitude in GGA (the one it assumed).
+        if fix.fix == FixType::ThreeD && self.sky.mode() == Some(2) {
+            fix.fix = FixType::TwoD;
+            fix.alt_msl_m = None;
+            fix.alt_ellipsoid_m = None;
+        }
+        if fix.position_valid {
+            fix.pdop = self.sky.gsa_pdop;
+        }
         self.gga = None;
         self.rmc = None;
+        self.sky.next_epoch();
         fix
     }
 }

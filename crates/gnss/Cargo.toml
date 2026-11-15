@@ -1,6 +1,6 @@
 [package]
 name = "gnss"
-description = "no_std, no-alloc u-blox MAX-M10S driver core: UBX NAV-PVT + NMEA GGA/RMC parser and CFG-VALSET builders"
+description = "no_std, no-alloc GNSS driver core: u-blox MAX-M10S (UBX NAV-PVT, CFG-VALSET) and Quectel LC29H(AA) (NMEA GGA/RMC/GSA/GSV, PAIR/PQTM); module auto-detect"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

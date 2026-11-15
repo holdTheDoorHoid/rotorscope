@@ -12,18 +12,35 @@
 #![no_std]
 #![no_main]
 
+/// Log a line on the console without blocking the loop (see `console.rs`).
+macro_rules! println {
+    ($($arg:tt)*) => { $crate::console::print_fmt(format_args!($($arg)*)) };
+}
+pub(crate) use println;
+
+#[cfg(all(feature = "selftest", feature = "gpsloop"))]
+compile_error!("`selftest` and `gpsloop` both use UART2; build one at a time");
+
+mod adsbee;
 mod app;
 #[cfg(feature = "benchlog")]
 mod bench;
 mod bb;
+mod civil;
+mod console;
 mod display;
 mod downlink;
+mod gps;
+#[cfg(feature = "gpsloop")]
+mod gpsloop;
 mod links;
 mod psram_test;
+mod report;
 mod rgb;
 mod sd;
 mod sdbb;
 mod touch;
+mod uartring;
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -31,8 +48,6 @@ use esp_hal::{
     main,
     time::{Duration, Instant},
 };
-use esp_println::println;
-
 esp_bootloader_esp_idf::esp_app_desc!();
 
 /// STC8 helper MCU on the board I2C (SDA GPIO45, SCL GPIO46): register 0x20
@@ -107,7 +122,7 @@ mod selftest {
             }
             if self.last_print.elapsed() >= Duration::from_millis(5000) {
                 self.last_print = Instant::now();
-                esp_println::println!(
+                crate::println!(
                     "hub-p4: selftest loopback to={} assign={} bad={} last={:?}",
                     self.to, self.assign, self.bad, self.last_assign
                 );
@@ -158,6 +173,8 @@ mod selftest {
 fn main() -> ! {
     // 360 MHz (the pre-v3 maximum). esp-hal defaults to 90 MHz on the P4.
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
+    // Console first: from here on log lines never block the loop.
+    console::init(p.UART0, p.GPIO37, p.GPIO38);
     println!("hub-p4: hello, chip revision {:?}", esp_hal::efuse::chip_revision());
     // SAFETY: read-only CACHE register (IDF 5.4.2 cache_reg.h, rev<3 map):
     // L2_CACHE_CACHESIZE_CONF, bit 10 = 256 KB.
@@ -217,6 +234,29 @@ fn main() -> ! {
     let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28(), p.GPIO27);
     println!("hub-p4: gateway link on UART3 RX GPIO28, TX GPIO27 at {} baud", links::BAUD);
     let mut down = downlink::Downlink::new();
+
+    // GPS on UART1 (header RX GPIO48 / TX GPIO47), PPS on GPIO29; ADSBee on
+    // UART4 RX GPIO30. See gps.rs, adsbee.rs and PARITY.md.
+    let gps_uart = esp_hal::uart::Uart::new(p.UART1, uartring::gps_rx::config(gps::BAUDS[0]))
+        .expect("UART1")
+        .with_rx(p.GPIO48)
+        .with_tx(p.GPIO47);
+    uartring::gps_rx::install(gps_uart);
+    let mut io = esp_hal::gpio::Io::new(p.IO_MUX);
+    gps::pps_init(&mut io, Flex::new(p.GPIO29));
+    let mut gps = gps::Gps::new();
+    let adsb_uart = esp_hal::uart::Uart::new(p.UART4, uartring::adsb_rx::config(adsb::DEFAULT_BAUD))
+        .expect("UART4")
+        .with_rx(p.GPIO30);
+    // Loop-back test: UART4 also drives its own RX pad.
+    #[cfg(feature = "gpsloop")]
+    // SAFETY: bench only; GPIO30 is shared with UART4 RX on purpose.
+    let adsb_uart = adsb_uart.with_tx(unsafe { esp_hal::peripherals::GPIO30::steal() });
+    uartring::adsb_rx::install(adsb_uart);
+    let mut adsbee = adsbee::Adsbee::default();
+    println!("hub-p4: gps on UART1 RX GPIO48 TX GPIO47 (hunting {:?} baud), PPS GPIO29; adsbee on UART4 RX GPIO30 at {}", gps::BAUDS, adsb::DEFAULT_BAUD);
+    #[cfg(feature = "gpsloop")]
+    let mut gpsloop = gpsloop::Loop::new(p.UART2);
     // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
     let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
 
@@ -225,7 +265,12 @@ fn main() -> ! {
 
     // SAFETY: each static is taken exactly once, here, before the loop.
     let tracker = unsafe {
-        (&raw mut TRACKER).write(core::mem::MaybeUninit::new(app::HubTracker::new(tracker::Config::default())));
+        (&raw mut TRACKER).write(core::mem::MaybeUninit::new(app::HubTracker::new(tracker::Config {
+            // Project policy: open-link identifiers stay hidden unless built
+            // with `--features show-link-ids` (as the S3 hub).
+            show_link_ids: cfg!(feature = "show-link-ids"),
+            ..tracker::Config::default()
+        })));
         (*(&raw mut TRACKER)).assume_init_mut()
     };
     let band = unsafe { &mut *(&raw mut BAND) };
@@ -238,6 +283,7 @@ fn main() -> ! {
     #[cfg(feature = "benchlog")]
     let mut bench = bench::Bench::default();
     let mut last = Instant::now();
+    let mut last_report = 0u64;
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
     let mut prev = Instant::now();
@@ -246,17 +292,37 @@ fn main() -> ! {
         max_gap_us = max_gap_us.max((now - prev).as_micros());
         loops += 1;
         let ms = app::now_ms();
+        console::pump();
         gw.poll(ms);
         app.ingest(&mut gw, ms);
         down.tick(&mut gw, ms);
+        gps.tick(ms);
+        adsbee.tick(app.tracker, ms);
+        command(&mut app, &gps, ms);
+        if ms.saturating_sub(last_report) >= 1000 {
+            last_report = ms;
+            app.housekeeping(&gps, ms);
+            report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, ms);
+        }
         app.touch(&mut i2c, ms);
+        let utc = gps.utc_ms(ms);
+        sd::set_clock(utc, ms);
         if let Some(panel) = panel.as_mut() {
             panel.poll();
-            app.draw(panel, &mut gw, ms, |gw| {
+            let ext = app::Ext {
+                gps: gps_view(&app, &gps, ms),
+                utc_ms: utc,
+                sd: sdlog.ui_state(),
+                adsb: Some((adsbee.status(ms), adsbee.stats.map_or(0, |s| s.uptime_s))),
+            };
+            app.draw(panel, &mut gw, &ext, ms, |gw| {
                 gw.poll(app::now_ms());
+                console::pump();
             });
         }
-        sdlog.tick(app.tracker, ms);
+        sdlog.tick(app.tracker, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
+        #[cfg(feature = "gpsloop")]
+        gpsloop.tick();
         #[cfg(feature = "benchlog")]
         bench.tick(app.tracker, &gw, ms);
         #[cfg(feature = "selftest")]
@@ -333,12 +399,87 @@ fn main() -> ! {
                 gw.tx_bytes, gw.tx_full, down.commands,
                 app.tracker.tracks().len(), vs, err, app.frames_drawn, app.max_band_us, loops, max_gap_us
             );
+            if ms / 1000 % 5 == 0 {
+                print_gps_adsb(&app, &gps, &adsbee, ms);
+            }
+            #[cfg(feature = "gpsloop")]
+            println!("hub-p4: gpsloop emulator cmds={} bad={}", gpsloop.cmds, gpsloop.bad);
             app.frames_drawn = 0;
             app.max_band_us = 0;
             loops = 0;
             max_gap_us = 0;
         }
     }
+}
+
+/// What the status bar says about position (as the S3 hub's `gps_view`).
+fn gps_view(app: &app::App, gps: &gps::Gps, now: u64) -> screen::Gps {
+    use screen::Fix;
+    use tracker::json::GpsState;
+    let fix = match app.own_pos(gps, now).map(|p| p.source) {
+        Some(app::OwnSource::Gps) => match gps.status.state {
+            GpsState::Fix2d => Fix::Fix2D,
+            _ => Fix::Fix3D,
+        },
+        Some(app::OwnSource::Manual) => Fix::Manual,
+        None if gps.status.state == GpsState::Absent => Fix::Absent,
+        None => Fix::None,
+    };
+    screen::Gps { fix, sats: gps.status.sats.unwrap_or(0) }
+}
+
+/// One console command byte, if any (see `console.rs`).
+fn command(app: &mut app::App, gps: &gps::Gps, now: u64) {
+    let Some(c) = console::read_command() else { return };
+    match c {
+        b'p' => {
+            // The S3 hub's test point (300 m south of its demo circle).
+            app.manual = Some(app::OwnPos {
+                lat: 39.9526 - 300.0 / 111_195.0,
+                lon: -75.1652,
+                alt: Some(15.0),
+                source: app::OwnSource::Manual,
+                at_ms: now,
+            });
+            app.housekeeping(gps, now);
+            app.redraw_now();
+            println!("hub-p4: cmd own position set to the test point (manual)");
+        }
+        b'c' => {
+            app.manual = None;
+            app.housekeeping(gps, now);
+            app.redraw_now();
+            println!("hub-p4: cmd manual own position cleared");
+        }
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, h=help. JSON lines start with '{{'."),
+        b'\r' | b'\n' | b' ' => {}
+        _ => println!("hub-p4: cmd unknown (h for help)"),
+    }
+}
+
+/// GPS and ADS-B status for the log, every 5 s.
+fn print_gps_adsb(app: &app::App, gps: &gps::Gps, adsbee: &adsbee::Adsbee, now: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let st = gps.stats();
+    let sky = gps.sky();
+    let pps_age = gps::pps_last_us().map(|t| (Instant::now().duration_since_epoch().as_micros().saturating_sub(t)) / 1000);
+    let own = app.own_pos(gps, now);
+    println!(
+        "hub-p4: gps {:?} {:?} module={} ver={} baud={} cfg={}{} frames={} csum_err={} rx={} uart_err={} | sky in_view={} used={} dual_band={} | pps n={} age={:?}ms | utc={:?} pps_anchor={} | own={:?}",
+        gps.phase, gps.status.state, gps.module.map_or("-", |m| m.name()), gps.version, gps.baud(), gps.cfg.name(),
+        if gps.cfg_failed_step.is_empty() { "" } else { gps.cfg_failed_step }, st.frames_ok, st.checksum_errors,
+        uartring::gps_rx::BYTES.load(Relaxed), uartring::gps_rx::UART_ERR.load(Relaxed),
+        sky.total_in_view(), sky.total_used(), sky.dual_band(), gps::PPS_COUNT.load(Relaxed), pps_age,
+        gps.utc_ms(now), gps.time.is_some_and(|t| t.pps),
+        own.map(|p| (p.lat, p.lon, p.alt, p.source == app::OwnSource::Gps))
+    );
+    let a = adsbee.status(now);
+    println!(
+        "hub-p4: adsbee alive={} bytes={} lines={} errors={} other={} uart_err={} ring_full={} aircraft={} (active {}) table={:?} valid_ps={:?}",
+        a.alive, adsbee.bytes(), adsbee.lines, adsbee.errors, adsbee.other,
+        uartring::adsb_rx::UART_ERR.load(Relaxed), uartring::adsb_rx::RING_FULL.load(Relaxed),
+        app.tracker.aircraft().len(), app.tracker.active_aircraft_count(now), a.aircraft, a.frames_per_s
+    );
 }
 
 static mut TRACKER: core::mem::MaybeUninit<app::HubTracker> = core::mem::MaybeUninit::uninit();

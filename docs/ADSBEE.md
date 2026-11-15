@@ -74,6 +74,13 @@ node), so node C is not read in this build.
 
 Power the ADSBee from its own USB (or the hub's 5 V, if your carrier has it).
 
+**On the P4 hub** (CrowPanel ESP32-P4) no feature is needed and no node link
+is lost: the ADSBee's TX goes to **GPIO30** (a pin of the wireless-module
+socket, free while no radio module is fitted; UART4 RX) plus GND. Status is
+in the console's `{"t":"hub"}` line (`"adsb":{...}`) and the 5-second
+`hub-p4: adsbee` log line. Built and loop-back tested only, not yet with a
+real ADSBee (see `firmware/hub-p4/PARITY.md`).
+
 **ADSBee setup** over its USB console, as in step 1:
 
 ```sh

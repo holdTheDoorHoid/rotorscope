@@ -17,7 +17,8 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 | Touch | GT911, I2C 0x5D, INT 42, RST 36 |
 | Board I2C | SDA 45, SCL 46 (touch, STC8, PH2.0 header) |
 | UART0 | GPIO37 TX / 38 RX via the CH340 USB-C port (flash + log) |
-| UART1 header | 47 TX / 48 RX (shares the wireless-module socket SPI; DIP switch) |
+| UART1 header | 47 TX / 48 RX (shares the wireless-module socket SPI; DIP switch). **GPS** (2026-11-15) |
+| Wireless-module socket | GPIO26 CLK, 47/48 (shared with UART1), 29-32 (SX1262 BUSY/NSS/IRQ/NRST, nRF24 IRQ/CE/CS). With no module fitted: **GPIO29 = GPS PPS, GPIO30 = ADSBee TX in** (2026-11-15) |
 | UART3 header | 27 TX / 28 RX (XH2.54, also a 5 V input) |
 | Radio | ESP32-C6 on SDIO slot 1 (CMD 54, CLK 53, D0-D3 52/51/50/49), factory esp-hosted firmware; no UART/boot pads |
 | Factory image | Backed up: `~/Desktop/rotorscope-backups/elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
@@ -62,6 +63,9 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 13 | Downlink: hub -> wire (P4 UART3 TX GPIO27 -> gateway c5c D7/GPIO12) -> ESP-NOW command packet -> node | PASS 2026-11-14 (branch `coverage`): wire present. Coverage coordinator ran every 2 s over the relayed node table and sent `To` + `Assign` (changes at once, all every 5 s). Gateway read 1439 bytes / 32 commands from the hub, 0 corrupt, 0 orphans. Two real ESP-NOW nodes (c5a, c5b, Wi-Fi 2.4 firmware without Status, so 2.4 only): one parked on 6, the other sweeping 1-13 with a 6 visit; 21 commands, **21 ACKed first try, 0 failed**. A made-up node injected in the P4 (`--features fakenode`, can 2.4 + 5 GHz) was given Wi-Fi 5 (18 hops incl. 6 visits); no board has its address, so 4 tries each then "failed", as designed. P4 meanwhile: 0 corrupt, 0 ring overflow, max band 6.8 ms, ~35 fps. Nodes do not apply assignments yet (node side not built), so "applied" stays 0 |
 | 14 | microSD log (bit-banged SD native 1-bit, CLK 43 / CMD 44 / D0 39), owner's card | PASS 2026-11-14 (branch `p4-sd`): card initialises as SDHC, 3728 MiB (7,635,968 blocks), CSD v2, manufacturer 0x6f, product "CBADS", FAT32 (partition type 0x0b). Created `ROTORSCP\` and one `LOGnnnnn.CSV` per boot; nothing else on the card touched. With `--features fakedrone` (made-up Remote ID drone, 1 row/s) and the real gateway link live (2-3 nodes): 14 of 14 flush read-backs OK (bytes and line counts match), and the next boot counted the previous file back (9556 bytes, 105 lines). Bus clock ~0.94 MHz (~115 kB/s, limited by the GPIO register path). Cost to the loop: one block ~5.5 ms, the longest normal step (flush) 18.3 ms, a flush with read-back up to 37 ms; mount at boot 93-166 ms once. Throughout: 0 corrupt, 0 UART errors, 0 ring_full, 0 dropped rows, 0 card errors; loops/s and max_gap (~6.7-7.0 ms, the screen band) same as before SD. No-card path host-tested only (owner's card stayed in) |
 | - | CPU clock | esp-hal defaults to 90 MHz on the P4; now 360 MHz (`CpuClock::max()`), 3.4x faster drawing |
+| 15 | GPS + ADS-B loop-back, LC29H(AA) emulated (`--features gpsloop`, branch `p4-parity`) | PASS 2026-11-15: UART2 played the GPS on the UART1 pads (GPIO48/47) at 115200, PPS pulsed on GPIO29 from inside the chip, UART4 sent CSBee onto its own RX pad (GPIO30). Hub found it at 115200, detected `lc29h` by `$PQTMVERNO`, 7 config steps ACKed, 3D fix, 14 in view / 14 used, dual band; 55 PPS edges in 59 s, UTC anchored to PPS; own position in the tracker (test aircraft at 1401 m, 37.6 deg); ADS-B 116 lines, 0 errors; 0 checksum / UART errors; gateway 2 nodes, 0 corrupt meanwhile |
+| 16 | Same, u-blox MAX-M10S emulated as shipped (`--features gpsloop-m10`) | PASS 2026-11-15: nothing valid at 115200, NMEA at 9600; detected `max-m10s` by MON-VER, 4 VALSETs ACKed, baud step to 115200 followed, NAV-PVT 3D fixes, PPS anchor; SD file named from GPS time (`11160000.CSV`, the emulator's 2026-11-16 00:00). 2 UART errors = the 9600 bytes heard at 115200 during the hunt |
+| 17 | Normal build from `p4-parity`, nothing on UART1/GPIO29/GPIO30 | PASS 2026-11-15, 45 s: GPS hunts 115200/9600/38400 and reports `absent` (0 bytes, 0 UART errors: pull-ups hold the idle lines), ADSBee not alive (0 bytes), SD `LOG00023.CSV`, gateway 2 nodes, 0 corrupt, 0 UART errors, 0 ring overflow, ~600 loops/s, max gap < 0.8 ms, max band 7.1 ms |
 | - | Gateway UART | moved to the UART3 interrupt with an 8 KB ring (~90 ms at full rate): a screen band takes ~6.5 ms and a touch read ~3 ms, the FIFO only lasts 1.4 ms |
 
 ## PSRAM and the I2C pins (resolved: it was the stack)
@@ -156,9 +160,27 @@ bus protocol is bit-banged:
 |---|---|
 | `crates/sdnative` | The protocol over a `Pins` trait: CRC7 commands, R1/R1b/R2/R3/R6/R7, init (CMD0, CMD8, ACMD41 with HCS, CMD2, CMD3, CMD9, CMD7, ACMD6 1-bit, CMD16 for SDSC), single + multi-block read/write with CRC16, CRC status token, busy on DAT0. A write returns once the block is accepted; `is_busy()` (8 clocks) lets the loop skip while the card programs. Host tests: `cargo test -p sdnative` (CRC vectors from the spec, CSD/CID decode, and the driver against a clock-edge card simulator: init SDHC/SDSC v1/v2, empty slot, never-ready, single/multi read/write, data starting inside the response, bad CRC, rejected write, card pulled out) |
 | `src/sdbb.rs` | The pins (esp-hal `Flex`, pull-ups on CMD/DAT0), calibrated half-period spins: <= 400 kHz identifying, <= 10 MHz after; the `embedded-sdmmc` `BlockDevice` |
-| `src/sd.rs` | The S3 hub's CSV log (`tracker::csv`): `ROTORSCP\LOGnnnnn.CSV`, one file per boot, rows once a second for every active drone, open link, RF emitter and Wi-Fi drone. One step per loop pass: a probe, an ACMD41, the mount, one block-aligned chunk (<= 512 B) or one flush (every 5 s). Nothing while the card is busy. Read-back line count after each flush while the file is <= 2 KB, and of the previous boot's file at mount |
+| `src/sd.rs` | The S3 hub's CSV log (`tracker::csv`): `ROTORSCP\LOGnnnnn.CSV` (or `MMDDhhmm.CSV` with GPS time, since 2026-11-15), one file per boot, rows once a second for every active drone, open link, RF emitter, Wi-Fi drone and ADS-B aircraft. One step per loop pass: a probe, an ACMD41, the mount, one block-aligned chunk (<= 512 B) or one flush (every 5 s). Nothing while the card is busy. Read-back line count after each flush while the file is <= 2 KB, and of the previous boot's file at mount |
 
 Never formats, never deletes, never writes outside its folder; exFAT (or any
 non-FAT16/32 card) is reported and left alone (`embedded-sdmmc` reads FAT16/32
 only). No card: a ~1 ms probe every 3 s. Bench: `--features fakedrone`
 injects a made-up Remote ID drone once a second so the log has rows.
+
+## GPS, ADS-B and the console (2026-11-15, branch `p4-parity`)
+
+What the S3 hub does and the P4 now does too, and what it cannot yet, is in
+`PARITY.md`. Summary of the hardware side:
+
+| Piece | What |
+|---|---|
+| `src/gps.rs` | GPS on **UART1** (header: hub RX GPIO48, hub TX GPIO47; DIP switch 1 on UART1), PPS on **GPIO29** (socket pin, rising-edge GPIO interrupt). Hunts 115200 / 9600 / 38400, detects u-blox MAX-M10S (UBX MON-VER) or Quectel LC29H (`$PQTMVERNO`), configures it for this boot only, publishes fix, UTC (PPS-anchored) and the sky view. **Untested with a real module** |
+| `src/adsbee.rs` | ADSBee CSBee on **UART4 RX GPIO30** (socket pin), 115200. **Untested with the real ADSBee** (not wired to the P4) |
+| `src/uartring.rs` | UART1/UART4 receive by interrupt into RAM rings (2 KB / 4 KB), like the gateway link |
+| `src/console.rs` | UART0 (the CH340 USB-C port) taken over from esp-println: log lines and JSON lines go through a 16 KB ring drained without waiting; JSON lines dropped whole when full. Commands `p` / `c` / `h` |
+| `src/report.rs` | 1 Hz JSON lines: `new`, `hub`, `track`, `link`, `aircraft` |
+| `src/gpsloop.rs` | `--features gpsloop` / `gpsloop-m10`: the on-chip loop-back (steps 15, 16). Leave the UART1 header and GPIO29/30 unconnected while it runs |
+
+Socket pin numbers are from Elecrow's wiki (SX1262 BUSY = 29, NSS = 30):
+check which socket hole is which with a meter before wiring, and keep any
+radio module out of the socket while GPS PPS / ADSBee use it.

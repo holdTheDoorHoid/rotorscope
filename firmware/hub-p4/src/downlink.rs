@@ -8,7 +8,6 @@
 //! that does not ACK after a few tries).
 
 use coverage::{Coordinator, NodeInfo};
-use esp_println::println;
 use link::{Command, NodeRole};
 
 use crate::links::{GatewayLink, MAX_RELAYED};

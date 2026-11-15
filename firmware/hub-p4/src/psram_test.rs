@@ -3,7 +3,6 @@
 
 use esp_hal::psram::{Psram, PsramConfig, SpiRamFreq};
 use esp_hal::time::Instant;
-use esp_println::println;
 
 /// Returns the PSRAM (base, size) when the whole chip passed.
 pub fn run(peri: esp_hal::peripherals::PSRAM<'static>, freq: SpiRamFreq) -> Option<(*mut u32, usize)> {
