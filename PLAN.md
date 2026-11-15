@@ -509,6 +509,73 @@ a CoT remark, and a per-flight summary (worst flag, max height above ground, tim
 the right flags against the public data, the pack fits on the SD card and lookups take under a few
 milliseconds on the P4.
 
+### Phase 13: Uploading detections, with evidence-grade integrity (added 2026-11-15)
+Goal: the unit uploads drone (and aircraft) detections to a web server, either one on the local
+network or a hosted/cloud one, and every record can be shown later to be exactly what the device
+received, when, and with an unbroken chain of custody, so it stands up as evidence. Whether a
+court admits it is the court's call; the aim is to make authentication (US Federal Rules of
+Evidence 901, and 902(13)/(14), self-authentication by a certified process and hash verification)
+straightforward and the method open to challenge. Get a lawyer's review before relying on it.
+
+**1. Device identity that can't be copied.**
+- Each hub gets its own signing key, generated on the chip and held by the hardware signing unit
+  (the P4's ECDSA peripheral with its key in eFuse; the S3/C5 digital-signature peripheral), so
+  the key is never readable by software or from the flash. Public key + a fingerprint are printed
+  at setup and registered with the server.
+- Secure boot and flash encryption so nobody can swap in firmware that forges records. Every
+  record carries the firmware's hash. **Burning eFuses is permanent:** do it only on kit units,
+  only with the owner's explicit go-ahead per unit, never on the bench boards.
+
+**2. A tamper-evident evidence log, separate from the convenience CSV.**
+- Append-only binary log on the SD card. Each record holds: the **raw received bytes** (the Remote
+  ID or DroneID message exactly as heard, so anyone can re-decode it), our decode, node ID, band,
+  channel, signal strength, the hub's own GPS position and fix quality, time and its source (GPS+PPS,
+  GPS, or free-running clock), firmware hash, and a sequence number.
+- **Hash chain:** each record includes the SHA-256 of the previous one, so deleting, reordering or
+  editing any record breaks every later link.
+- **Signed checkpoints** every minute and at shutdown: the device signs (chain head, record count,
+  time). A gap in sequence numbers or a missing checkpoint is itself recorded and visible.
+- Everything that could matter is logged into the same chain: boot, settings changes, clock
+  corrections, GPS loss or jumps (possible spoofing), firmware updates, SD card insert/remove,
+  node joins/leaves, pack (airspace data) version, and operator notes.
+
+**3. Time you can defend.** GPS time locked to PPS, with the fix quality in every record; a
+free-running clock is marked as such. When online, the chain head is also timestamped by an outside
+party (an RFC 3161 time-stamp authority, and/or OpenTimestamps), proving the records existed by
+then and weren't written later.
+
+**4. Upload.**
+- Offline-first: records queue on the SD card and upload whenever a network exists (the web head's
+  station mode, or a laptop). Nothing is lost while offline; the chain proves completeness.
+- TLS to the server, with the device authenticating by its hardware key (mutual TLS or signed
+  requests), so the server knows which unit sent what.
+- The server is our own Rust program (same code for a local box or the cloud). It verifies every
+  signature and chain link on arrival, rejects or flags breaks, and stores records **write-once**
+  (append-only storage; object-lock in the cloud). It keeps its own access audit log: who viewed,
+  exported or annotated what, and when.
+- A map and list view of drone locations, and an export button.
+
+**5. Chain of custody and exports.**
+- An **evidence export bundle**: the records, the checkpoints, the device's public key and
+  registration, firmware hash and version, the outside timestamps, the server's audit trail for
+  those records, and a SHA-256 of the whole bundle.
+- An **open-source verifier** (command-line, Rust) that anyone, including the other side's expert,
+  can run to check every signature, link and timestamp and re-decode the raw messages
+  independently of our code.
+- A custody record: who held the unit and the SD card, when, signed handovers; and a printable
+  summary sheet for a declaration (the 902(13)/(14) route).
+- A **method document**: how detection works, its known error rates (from our bench and field
+  tests), the limits ("a detection shows a broadcast was received, not who was flying"), and the
+  versions used. Reliability arguments (Daubert) rest on this.
+
+**6. Privacy and conduct.** Remote ID includes the pilot's location: personal data. Retention
+limits as a setting, access control on the server, and the legal line from Phase 9 still applies
+(broadcast data only; no decoding of link contents). Uploads are off until the owner turns them on.
+
+**Done when:** a detection made on the bench travels device → server; the verifier passes on the
+export; editing, deleting or reordering any record in the log, the upload or the bundle makes the
+verifier fail and say where; and a cold-start with no GPS is visibly marked in the records.
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
