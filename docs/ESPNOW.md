@@ -93,7 +93,7 @@ node a fake assignment and make it listen elsewhere. See "Trade-offs" below.
 | Wi-Fi 2.4 GHz (S3, or C5 `cargo fw24-now`) | yes, built and tested | already dwells on ch 6 |
 | Wi-Fi 5 GHz (C5) | not yet | would have to leave 5 GHz to reach ch 6: lost listening time |
 | BLE | not yet | needs Wi-Fi + BLE coexistence on the C5, which esp-radio beta.1 stubs |
-| Raw capture (node-sdr) | no | the whole radio is the capture front end |
+| Raw capture (node-sdr, `cargo fw-now`) | yes, built and tested (2026-11-14, c5b) | pauses capture for a short window, retunes to ch 6, sends, re-locks receive-only; applies `Assign` (firmware/node-sdr/README.md "Hub link") |
 
 ## Trade-offs to know
 
@@ -154,5 +154,5 @@ and the node from `firmware/node-wifi/target-espnow/...`.
 
 * Range test (walk the node away; then try the Long Range PHY).
 * More than two nodes, and two nodes under heavy traffic.
-* The node side of the downlink (applying an `Assign`), see above.
+* The node side of the downlink (applying an `Assign`) for Wi-Fi and BLE nodes; node-sdr applies it (DroneID and FPV plans).
 * The S3 build of node-wifi with `espnow` compiles; it has not been run.

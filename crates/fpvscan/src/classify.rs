@@ -13,7 +13,7 @@ pub struct Dwell {
 }
 
 /// The scanner's verdict. `link::RfKind` has every kind but `Quiet` and
-/// `Wifi`, which the firmware never reports to the hub (Wi-Fi is not a
+/// `Wifi`; the firmware reports neither, nor `Energy` (see [`Kind::reported`]) (Wi-Fi is not a
 /// drone signal, and calling every access point a sighting would bury the
 /// real ones).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,9 +51,12 @@ impl Kind {
         }
     }
 
-    /// Whether the firmware sends this kind to the hub.
+    /// Whether the firmware sends this kind to the hub. Not `Energy` either:
+    /// loud, bursty and unrecognised on 5.8 GHz is nearly always Wi-Fi whose
+    /// frame missed the analysed capture (2026-11-14 bench: every `energy`
+    /// verdict was on a busy Wi-Fi channel).
     pub const fn reported(self) -> bool {
-        !matches!(self, Kind::Quiet | Kind::Wifi)
+        !matches!(self, Kind::Quiet | Kind::Wifi | Kind::Energy)
     }
 }
 

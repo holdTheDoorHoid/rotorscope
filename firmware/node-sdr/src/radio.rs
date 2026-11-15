@@ -48,8 +48,10 @@ fn droneid_freq_ok(f: u32) -> bool {
 }
 
 /// FPV retunes within this distance of the last DC calibration reuse it (a
-/// calibration costs ~22 ms on 5 GHz, a whole dwell is 60 ms).
-const FPV_DCAL_MHZ: u16 = 40;
+/// calibration costs ~22 ms on 5 GHz, a whole dwell is 60 ms). 40 MHz was
+/// too far (2026-11-14, c5b): the residual DC offset raised the probe level
+/// of L2/L4 by ~10 dB and their (flat, DC-free) noise passed for HDZero.
+const FPV_DCAL_MHZ: u16 = 8;
 
 /// Decoder input: 16,384 samples at 20 MS/s (819 µs), in the upper half of
 /// SRAM block 1, the same 64 KiB the dump engine writes snapshots into.
@@ -165,6 +167,8 @@ pub struct Radio {
     hop_until_us: u64,
     /// false: parked on `s.mhz` (a console `freq`), the plan is not walked.
     pub hopping: bool,
+    /// A console `role` holds the job against hub assignments until `role auto`.
+    pub pinned: bool,
     /// What is being listened to now, 100 kHz units (burst or channel centre).
     pub cur_freq: u32,
     pub events: HVec<Event, 8>,
@@ -236,6 +240,7 @@ impl Radio {
             hop_idx: DRONEID_PLAN.len() - 1,
             hop_until_us: 0,
             hopping: true,
+            pinned: false,
             cur_freq: s.mhz as u32 * 10 + 5,
             events: HVec::new(),
             meter: fpvscan::Meter::new(),
@@ -384,14 +389,31 @@ impl Radio {
             }
             let off = (self.next_block % RING_BYTES as u64) as usize;
             let mut p = 0u32;
+            let fpv = self.role == NodeRole::Fpv;
+            let (mut si, mut sq) = (0i32, 0i32);
             for &b in &bytes[off..off + cfg.probe as usize] {
                 p += POWER[b as usize] as u32;
+                if fpv {
+                    let (i, q) = rawcap::iq::unpack(b);
+                    si += 2 * i as i32 + 1;
+                    sq += 2 * q as i32 + 1;
+                }
             }
+            // FPV levels without the probe's DC: a receiver DC residual
+            // counts in the raw power and made flat noise read 10-16 dB
+            // "loud" on some LOs (2026-11-14). POWER is in (2n+1)^2 units,
+            // so the DC power of the probe is (si^2 + sq^2) / n.
+            let p_ac = if fpv {
+                let dc = ((si * si + sq * sq) as u32) / cfg.probe;
+                p.saturating_sub(dc).max(cfg.probe)
+            } else {
+                p
+            };
             // The probe may have been overwritten while summed: re-check.
             let (now, _) = ring::produced();
             if window_ok(self.next_block, self.next_block + cfg.probe as u64, now, NODE_BYTES) {
                 if self.role == NodeRole::Fpv {
-                    self.meter.feed(p);
+                    self.meter.feed(p_ac);
                     // One capture per dwell is enough; later rises only count.
                     let r = self.trig.feed(self.next_block, p);
                     if !self.fpv_cap && self.pending.is_none() {
@@ -1293,7 +1315,7 @@ impl Radio {
             }
             println!("{}}}", line.as_str());
         }
-        if let Some(k) = rf_kind(kind) {
+        if let Some(k) = rf_kind(kind).filter(|_| kind.reported()) {
             let s = RfSighting {
                 kind: k,
                 freq: self.cur_freq,

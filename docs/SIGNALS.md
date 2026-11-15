@@ -32,7 +32,7 @@ channel 165 (5825) is still to be checked.
 | Signal | Where | What it is | Node | Status | How we test it |
 |---|---|---|---|---|---|
 | DJI legacy Wi-Fi DroneID (Spark, Mavic Air, Mini SE and other Wi-Fi DJIs) | 2.4 GHz Wi-Fi beacons, any channel | Vendor element, OUI `26:37:12`: serial, drone and pilot position | Wi-Fi 2.4 | **Built** (decoder in `rid::dji`), **not wired** into the node or hub | Recorded captures; a real Wi-Fi DJI. We never transmit it |
-| OcuSync DroneID burst (OcuSync 2, 3, 3+) | 2399.5, 2414.5, 2429.5, 2444.5, 2459.5 / 5756.5, 5776.5, 5796.5 | 9 MHz LTE-style burst, about 0.6 ms, every ~640 ms, only while the motors run. Plaintext: serial, drone, pilot and home position | DroneID (raw capture) | **Built**: captures and decodes on the C5; both public recordings decode. **No link frame**, so it can't reach the hub yet | Recordings played into the C5's decoder (no radio); a real DJI with props off, or a field visit |
+| OcuSync DroneID burst (OcuSync 2, 3, 3+) | 2399.5, 2414.5, 2429.5, 2444.5, 2459.5 / 5756.5, 5776.5, 5796.5 | 9 MHz LTE-style burst, about 0.6 ms, every ~640 ms, only while the motors run. Plaintext: serial, drone, pilot and home position | DroneID (raw capture) | **Built**: captures and decodes on the C5; the public recordings, fed through the C5's own capture path over USB, decode 13/13 on the chip (2026-11-14). Sent to the hub as `Frame::DroneId` over ESP-NOW | `tools/droneid-hil` (recordings into the chip, no radio); a real DJI with props off, or a field visit |
 | O4 / O4+ DroneID (Mini 4 Pro, Air 3, Avata 2, Neo, Flip, Mavic 4) | hops 2414.5, 2429.5, 2444.5, 5756.5, 5776.5, 5796.5, 5816.5 | Same burst, encrypted | DroneID | **Built**: detect only, with a session ID. Never decrypted, by design | A real O4 drone |
 | OcuSync / O4 video downlink | 2400–2483; 5725–5850; O4 also 5170–5250 | OFDM, 10/20/40 MHz (O4 up to 60) | Fingerprint (raw capture) | **Not built** (PLAN 11b) | Public RFUAV recordings, then a real drone |
 | DJI controller uplink | same bands | narrow hops, 0.4–5 MHz wide, 0.5–5 ms bursts | Fingerprint | **Not built** | as above |
@@ -42,17 +42,17 @@ channel 165 (5825) is still to be checked.
 
 | Band | Channels 1–8 | Status |
 |---|---|---|
-| A (Boscam A) | 5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725 | **Not built** |
-| B (Boscam B) | 5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866 | **Not built** |
-| E (Boscam E) | 5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945 | **Not built** |
-| F (Fatshark / IRC) | 5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880 | **Not built** |
-| R (Raceband) | 5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917 | **Not built** |
-| L (Low band) | 5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621 | **Not built** |
+| A (Boscam A) | 5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725 | **Built** (detection only, `crates/fpvscan`): channels up to 5810 MHz; never heard a real transmitter |
+| B (Boscam B) | 5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866 | **Built** (detection only, `crates/fpvscan`): channels up to 5810 MHz; never heard a real transmitter |
+| E (Boscam E) | 5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945 | **Built** (detection only, `crates/fpvscan`): channels up to 5810 MHz; never heard a real transmitter |
+| F (Fatshark / IRC) | 5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880 | **Built** (detection only, `crates/fpvscan`): channels up to 5810 MHz; never heard a real transmitter |
+| R (Raceband) | 5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917 | **Built** (detection only, `crates/fpvscan`): channels up to 5810 MHz; never heard a real transmitter |
+| L (Low band) | 5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621 | **Built** (detection only, `crates/fpvscan`): channels up to 5810 MHz; never heard a real transmitter |
 
 - **How:** a C5 in raw-capture mode steps across the channels and measures the energy on each. It then
   confirms real video by the 15.6/15.7 kHz line rate in the FM-demodulated signal, so Wi-Fi isn't
   mistaken for a video transmitter.
-- **Reach:** a C5 reaches about 32 of the 48 channels. Anything above about 5820 MHz needs an RX5808
+- **Reach:** a C5 reaches 31 of the 47 distinct channels (carriers 5181–5810 MHz; list in firmware/node-sdr/README.md). Anything above about 5820 MHz needs an RX5808
   module (about $6). That covers the top of bands A, B, E, F and R.
 - **Also exist:** analog video at 1.2–1.3 GHz (**Can't**), and 2.4 GHz analog video (a C5 can reach
   it; not built).

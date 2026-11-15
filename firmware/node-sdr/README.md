@@ -108,7 +108,8 @@ same fields) sets role and plan. Idempotent: the same role and plan id change no
 2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 700 ms each (the LO sits on the whole MHz below,
 +0.5 MHz off the DC spike); FPV every reachable channel, 60 ms each. Entries outside the C5's reach
 are dropped. Roles this image cannot do (Wi-Fi, BLE) are refused and the node keeps its job;
-switching images is the multi-image layout's business. Console: `role droneid|fpv`, `hop on|off`
+switching images is the multi-image layout's business. Console: `role droneid|fpv` (holds that job
+against hub assignments until `role auto`, for bench work), `hop on|off`
 (`freq` parks the node), `plan`, `assign <role> <id> [f:ms ...]`, `fpv verbose on|off`, `uplink [now]`.
 
 ### FPV / RF scanner
@@ -116,10 +117,13 @@ switching images is the multi-image layout's business. Console: `role droneid|fp
 Each dwell: every trigger probe goes into a level meter (half-dB histogram); the noise floor is
 the quietest channel's 10th percentile across the sweep (a video transmitter never pauses, so its
 own channel cannot show the floor). The trigger runs ungated and the first rise freezes one window
-(else the newest window is taken at the end), decimated to 20 MS/s. A channel loud by 8 dB or more
-is analysed (`crates/fpvscan`): FM line rate (AnalogVideo), cyclic prefix at 66.7 µs (LteStyle),
+(else the newest window is taken at the end), decimated to 20 MS/s. The receiver DC offset is
+re-measured whenever the LO moves more than 8 MHz from the last measurement: a residual offset
+inflates the probe level (the meter sees raw 4-bit samples) and made flat noise look like a loud,
+wide, continuous signal at 37 MHz from the last calibration. A channel loud by 8 dB or more
+is analysed (`crates/fpvscan`, scratch in internal RAM: about 13.6 KiB of heap): FM line rate (AnalogVideo), cyclic prefix at 66.7 µs (LteStyle),
 3.2 / 12.8 µs (Wi-Fi: printed, never sent to the hub), 6.4 µs (WifiNarrow), wide flat continuous
-on the HDZero grid (Hdzero), else continuous = FpvCarrier, bursty = Energy. Console: one `fpv` line
+on the HDZero grid (Hdzero), else continuous = FpvCarrier, bursty = Energy (printed, not sent: on 5.8 GHz it is nearly always Wi-Fi that missed the capture). Console: one `fpv` line
 per non-quiet channel, a `sweep` line per sweep.
 
 Reach: carriers 5181–5810 MHz (LO 5180–5800, a channel above 5801 sits up to +10 MHz in the
@@ -143,7 +147,15 @@ batch, and the MAC-level ACKs of the gateway's command packets. Nothing else, an
 capture. A batch is retried in 3 windows, then dropped and counted. `{"t":"uplink"}` lines count
 windows, sent, acked, failed, frames, beacons, command packets and window time.
 
-Measured on c5b (gateway c5c, 2026-11-14): see BRINGUP-RESULTS.md "Hub link, FPV scan, HIL".
+Measured on c5b (gateway c5c, 2026-11-14): about 49 ms per window once the gateway is known
+(0.4–0.5 s the first time, while it waits for a beacon), plus ~25 ms to re-lock (DC calibration);
+one window per ~5 s, so about 1.5 % of capture time. See BRINGUP-RESULTS.md "Hub link, FPV scan, HIL".
+
+**Stack.** The capture loop runs as its own embassy task (`capture_loop`) so its state is static:
+the main stack (block 2) also carries the decoder and ends right above SRAM block 1. With the loop
+inline in `main`, main's future took 20 KiB and the decoder overflowed ~12 KiB into the capture bank
+(found by the HIL test). The `link` line reports `stack_free` (never-touched stack, painted at boot):
+about 6.9 KiB after decodes.
 
 ### Hardware in the loop (DroneID without a drone)
 

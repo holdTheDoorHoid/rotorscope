@@ -2,7 +2,9 @@
 //! commands), and the hardware-in-the-loop sample feed.
 //!
 //! ```text
-//! role droneid|fpv          switch job, built-in plan
+//! role droneid|fpv          switch job, built-in plan; held against hub
+//!                           assignments until `role auto`
+//! role auto                 follow the hub's assignments again
 //! hop on|off                walk the plan / stay parked (`freq` parks)
 //! plan                      print the plan
 //! assign droneid|fpv <id> [<f100k>:<ms> ...]
@@ -50,7 +52,8 @@ pub enum Cmd {
 }
 
 pub enum Local {
-    Role(NodeRole),
+    /// `None` = `role auto`.
+    Role(Option<NodeRole>),
     Hop(bool),
     Plan,
     FpvVerbose(bool),
@@ -80,7 +83,10 @@ fn role(s: Option<&str>) -> Result<NodeRole, &'static str> {
 pub fn parse(line: &str) -> Result<Option<Cmd>, &'static str> {
     let mut w = line.split_ascii_whitespace();
     let local = match w.next() {
-        Some("role") => Local::Role(role(w.next())?),
+        Some("role") => {
+            let r = w.next();
+            if r == Some("auto") { Local::Role(None) } else { Local::Role(Some(role(r)?)) }
+        }
         Some("hop") => Local::Hop(on_off(w.next())?),
         Some("plan") => Local::Plan,
         Some("fpv") => match w.next() {

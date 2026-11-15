@@ -46,6 +46,11 @@ const GROUPS: usize = NFFT / GROUP;
 /// roll off above about +-9.4 MHz.
 const G_USE: core::ops::Range<usize> = 2..GROUPS - 2;
 const GROUP_KHZ: u32 = crate::FS / 1000 / GROUPS as u32;
+/// The two groups either side of DC: a few codes of receiver DC residual
+/// (or a 4-bit window's bias) can outshine a whole bursty capture there and
+/// shrink the measured width to one group (seen on air, 2026-11-14), so they
+/// are left out of the peak and width.
+const G_DC: core::ops::RangeInclusive<usize> = GROUPS / 2 - 1..=GROUPS / 2;
 
 /// All working memory (about 26 KiB).
 pub struct Scratch {
@@ -237,7 +242,7 @@ pub fn analyse(x: &[C16], s: &mut Scratch) -> Analysis {
     a.cp_lte = cp_metric(x, 1333, 40);
     (a.line, a.line_hz) = line_rate(x, s);
     if spectrum(x, s) {
-        let peak = s.psd[G_USE].iter().copied().max().unwrap_or(0);
+        let peak = G_USE.filter(|g| !G_DC.contains(g)).map(|g| s.psd[g]).max().unwrap_or(0);
         let thr = peak / 10;
         let (mut n, mut sum, mut sum_db, mut wsum, mut wf) = (0u32, 0u64, 0i64, 0u64, 0i64);
         for g in G_USE {
@@ -245,13 +250,16 @@ pub fn analyse(x: &[C16], s: &mut Scratch) -> Analysis {
             let f_khz = (g as i64 * GROUP_KHZ as i64) - 10_000 + GROUP_KHZ as i64 / 2;
             wsum += p >> 16;
             wf += (p >> 16) as i64 * f_khz;
-            if p >= thr && p > 0 {
+            if p >= thr && p > 0 && !G_DC.contains(&g) {
                 n += 1;
                 sum += p >> 8;
                 sum_db += db_x10(p) as i64;
             }
         }
-        a.width_khz = (n * GROUP_KHZ).min(u16::MAX as u32) as u16;
+        // A signal spanning DC covers the two left-out groups too.
+        let spans_dc = s.psd[*G_DC.start() - 1] >= thr && s.psd[*G_DC.end() + 1] >= thr;
+        let wide = n + if spans_dc { 2 } else { 0 };
+        a.width_khz = (wide * GROUP_KHZ).min(u16::MAX as u32) as u16;
         if n > 0 {
             let arith = db_x10((sum / n as u64).max(1) << 8) as i64;
             a.flat_x10 = (arith - sum_db / n as i64).clamp(0, u16::MAX as i64) as u16;

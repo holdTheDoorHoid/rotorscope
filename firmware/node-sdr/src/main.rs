@@ -183,26 +183,20 @@ async fn main(spawner: Spawner) -> ! {
 
     // FPV analysis scratch and the HIL staging buffer, after the receiver.
     {
+        // The FPV scratch goes in internal RAM (heap): in PSRAM one
+        // analysis took 100 ms (2026-11-14), the ring stopped all that time.
         let sc = core::mem::size_of::<fpvscan::Scratch>();
-        let align = core::mem::align_of::<fpvscan::Scratch>();
-        let at = psram_used.next_multiple_of(align.max(64));
-        if !psram_ptr.is_null() && at + sc + console::STAGE_LEN <= psram_size {
-            // SAFETY: an unused, aligned PSRAM range, 'static. Scratch is all
-            // integers, so zeroed bytes are a valid value.
-            let scratch = unsafe {
-                let p = psram_ptr.add(at) as *mut fpvscan::Scratch;
-                core::ptr::write_bytes(p, 0, 1);
-                &mut *p
-            };
-            radio.set_fpv_scratch(scratch);
-            let stage = at + sc.next_multiple_of(64);
+        radio.set_fpv_scratch(alloc::boxed::Box::leak(new_scratch()));
+        let at = psram_used.next_multiple_of(64);
+        if !psram_ptr.is_null() && at + console::STAGE_LEN <= psram_size {
+            let stage = at;
             // SAFETY: the next unused PSRAM range; only the console writes it
             // (before `hil run`), only the capture loop reads it (during).
             unsafe { console::set_stage(psram_ptr.add(stage)) };
             psram_used = stage + console::STAGE_LEN;
             println!(r#"{{"t":"psram","fpv_scratch":{sc},"hil_stage":{},"used":{psram_used}}}"#, console::STAGE_LEN);
         } else {
-            println!(r#"{{"t":"err","what":"psram","note":"no room for the FPV scratch / HIL stage: FPV classifies by level only"}}"#);
+            println!(r#"{{"t":"err","what":"psram","note":"no room for the HIL stage"}}"#);
         }
     }
 
@@ -385,6 +379,11 @@ fn new_radio() -> alloc::boxed::Box<radio::Radio> {
 }
 
 #[inline(never)]
+fn new_scratch() -> alloc::boxed::Box<fpvscan::Scratch> {
+    alloc::boxed::Box::new(fpvscan::Scratch::new())
+}
+
+#[inline(never)]
 fn new_hub(role: link::NodeRole) -> alloc::boxed::Box<hub::Hub> {
     alloc::boxed::Box::new(hub::Hub::new(role))
 }
@@ -440,6 +439,9 @@ fn drain_events(radio: &mut radio::Radio, hub: &mut hub::Hub) {
 }
 
 fn apply_assignment(radio: &mut radio::Radio, hub: &mut hub::Hub, a: &link::Assignment) {
+    if radio.pinned {
+        return; // a console `role` holds the job (`role auto` releases it)
+    }
     let same = a.role == radio.role && a.id == radio.plan_id && radio.hopping;
     let ok = radio.assign(a.role, &a.plan, a.id);
     if !same {
@@ -457,10 +459,15 @@ fn apply_assignment(radio: &mut radio::Radio, hub: &mut hub::Hub, a: &link::Assi
 /// A node-sdr console command (beyond rawcap's capture commands).
 fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
     match l {
-        Local::Role(r) => {
+        Local::Role(Some(r)) => {
             radio.set_role(r);
             radio.builtin_plan();
-            println!(r#"{{"t":"ok","role":"{}","hops":{}}}"#, hub::role_name(r), radio.plan().len());
+            radio.pinned = true;
+            println!(r#"{{"t":"ok","role":"{}","hops":{},"pinned":true}}"#, hub::role_name(r), radio.plan().len());
+        }
+        Local::Role(None) => {
+            radio.pinned = false;
+            println!(r#"{{"t":"ok","role":"auto"}}"#);
         }
         Local::Hop(on) => {
             radio.hopping = on && !radio.plan().is_empty();
