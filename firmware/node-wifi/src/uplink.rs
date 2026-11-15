@@ -26,7 +26,11 @@ const HOLD: Duration = Duration::from_millis(50);
 /// Retry a failed batch for this long, then drop it.
 const GIVE_UP: Duration = Duration::from_secs(2);
 /// Forget a gateway not heard from for this long (stop sending).
-const GATEWAY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Forget a gateway neither heard (beacon) nor reached (ACKed send) for this
+/// long. Generous: a node that is on channel 6 only 40 ms of a second (5 GHz
+/// plan) or only 100 ms of it (Bluetooth) catches few of the twice-a-second
+/// beacons, and each ACK proves the gateway is there just as well.
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the task looks at the queue and the channel.
 const POLL: Duration = Duration::from_millis(5);
 
@@ -75,6 +79,31 @@ pub static BEACONS: AtomicU32 = AtomicU32::new(0);
 /// Microseconds spent waiting for sends to complete (radio busy transmitting).
 pub static SEND_US: AtomicU32 = AtomicU32::new(0);
 
+/// Command packets from the gateway, and repeats of one already taken (a
+/// retry whose ACK was lost).
+pub static COMMANDS: AtomicU32 = AtomicU32::new(0);
+pub static COMMAND_DUPS: AtomicU32 = AtomicU32::new(0);
+
+/// A command packet: drop a repeat (same gateway, same sequence number), else
+/// decode its `link::Command`s and queue each `Assign` for `role::control`.
+fn on_command(last: &mut Option<([u8; 6], u16)>, src: [u8; 6], pkt: &airlink::Packet<'_>) {
+    if *last == Some((src, pkt.seq)) {
+        COMMAND_DUPS.fetch_add(1, Relaxed);
+        return;
+    }
+    *last = Some((src, pkt.seq));
+    COMMANDS.fetch_add(1, Relaxed);
+    let mut dec = link::CommandDecoder::new();
+    for f in airlink::frames(pkt) {
+        dec.feed(f, |r| {
+            if let Ok(link::Command::Assign(a)) = r {
+                // Full: an older command is still queued; the hub resends.
+                let _ = crate::role::COMMANDS.try_send(a);
+            }
+        });
+    }
+}
+
 /// Called by the hopper before each retune.
 pub async fn wait_idle() {
     let t = Instant::now();
@@ -95,11 +124,23 @@ pub async fn run(mut now: EspNow) {
         esp_println::println!(r#"{{"t":"uplink","lr_protocol":{}}}"#, e == 0);
     }
     let mut pending: Option<heapless::Vec<u8, { link::MAX_FRAME }>> = None;
+    let mut cmd_seq: Option<([u8; 6], u16)> = None;
 
     loop {
-        // Beacons: learn (or refresh) the gateway.
+        // Beacons: learn (or refresh) the gateway. Commands: hand to `role`.
         while let Some(got) = now.receive() {
             let Some(pkt) = airlink::parse(got.data()) else { continue };
+            if pkt.kind == airlink::Kind::Command {
+                on_command(&mut cmd_seq, got.info.src_address, &pkt);
+                // From the gateway: proof it is there (a 5 GHz plan is on 6
+                // only 40 ms at a time and may miss its beacons for a while).
+                if let Some((m, ch, _)) = gateway
+                    && m == got.info.src_address
+                {
+                    gateway = Some((m, ch, Instant::now()));
+                }
+                continue;
+            }
             let Some(ch) = airlink::beacon_channel(&pkt) else { continue };
             BEACONS.fetch_add(1, Relaxed);
             let mac = got.info.src_address;
@@ -162,6 +203,7 @@ pub async fn run(mut now: EspNow) {
                     BUSY.store(false, Relaxed);
                     SEND_US.fetch_add(t0.elapsed().as_micros() as u32, Relaxed);
                     if r.is_ok() {
+                        gateway = Some((mac, ch, Instant::now()));
                         // Only on success: a retry of a batch whose ACK was lost
                         // reuses the number, so the gateway drops the duplicate.
                         seq = seq.wrapping_add(1);
@@ -186,9 +228,11 @@ pub async fn run(mut now: EspNow) {
         if last_stats.elapsed() >= Duration::from_secs(1) {
             last_stats = Instant::now();
             esp_println::println!(
-                r#"{{"t":"uplink","gw":{},"beacons":{},"pkts":{},"frames":{},"bytes":{},"failed":{},"dropped":{},"send_us":{}}}"#,
+                r#"{{"t":"uplink","gw":{},"beacons":{},"cmds":{},"cmd_dups":{},"pkts":{},"frames":{},"bytes":{},"failed":{},"dropped":{},"send_us":{}}}"#,
                 gateway.is_some(),
                 BEACONS.load(Relaxed),
+                COMMANDS.load(Relaxed),
+                COMMAND_DUPS.load(Relaxed),
                 PACKETS.load(Relaxed),
                 FRAMES.load(Relaxed),
                 BYTES.load(Relaxed),

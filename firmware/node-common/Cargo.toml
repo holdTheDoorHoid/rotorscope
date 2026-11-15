@@ -1,0 +1,27 @@
+# Flash glue shared by the node images (node-wifi, node-ble): which images
+# this board holds (so the node can report its `can` mask), and switching to
+# another image with a job that survives the reboot. The pure logic is
+# crates/nodeimage (host-tested); this is the part that touches flash.
+# A library used by path from each firmware; it builds inside that firmware's
+# workspace, for that firmware's chip.
+[package]
+name         = "node-common"
+version      = "0.1.0"
+edition      = "2024"
+license      = "GPL-3.0-or-later"
+publish      = false
+
+[lib]
+test = false
+bench = false
+
+[features]
+esp32s3 = ["esp-hal/esp32s3", "esp-bootloader-esp-idf/esp32s3"]
+esp32c5 = ["esp-hal/esp32c5", "esp-bootloader-esp-idf/esp32c5"]
+
+[dependencies]
+link      = { path = "../../crates/link" }
+nodeimage = { path = "../../crates/nodeimage" }
+esp-hal                = { version = "~1.2.2", features = ["unstable"] }
+esp-bootloader-esp-idf = { version = "0.6.0" }
+heapless = { version = "0.8", features = ["serde"] }

@@ -12,6 +12,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "airlink"
+version = "0.1.0"
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -497,6 +501,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embassy-net-driver"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "524eb3c489760508f71360112bca70f6e53173e6fe48fc5f0efd0f5ab217751d"
+
+[[package]]
 name = "embassy-sync"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -892,11 +902,13 @@ dependencies = [
  "bt-hci-transport",
  "docsplay",
  "document-features",
+ "embassy-net-driver",
  "embassy-sync 0.8.0",
  "embedded-io 0.6.1",
  "embedded-io 0.7.1",
  "embedded-io-async 0.6.1",
  "embedded-io-async 0.7.0",
+ "enumset",
  "esp-alloc",
  "esp-config",
  "esp-hal",
@@ -924,6 +936,7 @@ dependencies = [
  "num-traits",
  "portable-atomic",
  "portable_atomic_enum",
+ "xarxa-driver",
  "xtensa-lx-rt",
 ]
 
@@ -1586,6 +1599,7 @@ checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 name = "node-ble"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "bt-hci 0.10.1",
  "critical-section",
  "embassy-executor",
@@ -1603,12 +1617,34 @@ dependencies = [
  "heapless 0.8.0",
  "link",
  "log",
+ "node-common",
+ "nodeimage",
  "postcard",
  "rid",
  "serde",
  "serde-json-core",
  "static_cell",
  "trouble-host",
+]
+
+[[package]]
+name = "node-common"
+version = "0.1.0"
+dependencies = [
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "heapless 0.8.0",
+ "link",
+ "nodeimage",
+]
+
+[[package]]
+name = "nodeimage"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "link",
+ "postcard",
 ]
 
 [[package]]
@@ -2393,6 +2429,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "xarxa-driver"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "241eb997638d080753b73e5335427d3a27568678aafa6c0e0564485257e90738"
+dependencies = [
+ "critical-section",
+ "document-features",
 ]
 
 [[package]]

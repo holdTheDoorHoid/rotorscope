@@ -198,7 +198,7 @@ pub struct ScanInfo {
 }
 
 #[derive(Serialize)]
-pub struct HelloLine {
+pub struct HelloLine<'a> {
     pub t: &'static str,
     pub node: &'static str,
     pub fw: &'static str,
@@ -206,6 +206,40 @@ pub struct HelloLine {
     pub proto: u8,
     pub scan: ScanInfo,
     pub uart_baud: u32,
+    /// Hub frames go over ESP-NOW (true) or the UART.
+    pub espnow: bool,
+    /// Roles this board can take (mask of `NodeRole::bit`), the image in each
+    /// app slot (`null`: empty or unknown), and the plan id applied.
+    pub can: u8,
+    pub images: &'a [Option<&'static str>],
+    pub plan_id: u16,
+}
+
+/// `assign`: a new plan id from the hub; `switch`: leaving for another image.
+#[derive(Serialize)]
+pub struct AssignLine {
+    pub t: &'static str,
+    pub role: link::NodeRole,
+    pub plan_id: u16,
+}
+
+/// ESP-NOW uplink counters, totals since boot (`uplink.rs`).
+#[derive(Serialize)]
+pub struct UplinkLine {
+    pub t: &'static str,
+    pub gw: bool,
+    pub beacons: u32,
+    pub cmds: u32,
+    pub cmd_dups: u32,
+    pub pkts: u32,
+    pub frames: u32,
+    pub failed: u32,
+    pub dropped: u32,
+    pub oversize: u32,
+    /// Wi-Fi gaps the scan loop gave, and sends tried in them.
+    pub gaps: u32,
+    pub tries: u32,
+    pub send_us: u32,
 }
 
 /// Per-second counts (deltas over the last `win_ms`), plus a few running
@@ -233,7 +267,11 @@ pub struct StatsLine {
     pub hci_err: u32,
     pub scan_err: u32,
     pub heap_free: usize,
+    /// Plan id applied, and hub commands: applied / repeats / rejected.
+    pub plan_id: u16,
+    pub cmds: [u32; 3],
     pub tot_adv: u32,
     pub tot_rid: u32,
     pub tot_drops: u32,
 }
+

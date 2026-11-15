@@ -70,16 +70,25 @@ commands from the hub, packets sent, ACKed, given up, replaced, and whether
 one is still pending; the `"t":"gw"` line counts bytes and commands from the
 hub and any corrupt or orphan (no `To`) commands.
 
-Nodes built before kind 3 existed do not parse it and ignore it. **The node
-side is not built yet**: a node does not apply an assignment, and still
-reports its own built-in plan. When it is built:
+Nodes built before kind 3 existed do not parse it and ignore it.
 
-* Wi-Fi plans for relayed nodes already include a visit to channel 6 at
-  least once a second (a 5 GHz node has to switch band for it).
-* A relayed raw-capture node (DroneID, FPV) has frequencies in its plan,
-  not channels: it must retune briefly to channel 6 by itself whenever it
-  has something to send, and listen there long enough for the gateway's
-  reply.
+**Node side (branch `node-roles`).** node-wifi and node-ble take the command
+packet in their uplink, drop a repeat (same gateway, same sequence number)
+and hand each `Assign` to their `role` module:
+
+* node-wifi applies a Wi-Fi job at once (new channel plan, band chosen per
+  hop, so a 5 GHz plan's channel-6 visits work) and echoes the plan id in
+  `Frame::Status`; it still sends only while tuned to 6.
+* node-ble echoes the plan id (Bluetooth has no plan). It parks Wi-Fi on
+  channel 6 and stops its scan for 200 ms of every second to send and to
+  hear the gateway; that costs ~18% of the adverts it hears (its README).
+* A role the running image cannot do switches image (OTA slots,
+  `firmware/node-common`, `tools/flash-node.sh`); the other image boots with
+  the job and reports it. The node's MAC is the same in every image, so the
+  gateway and hub keep tracking it across the switch.
+* Still open: a relayed raw-capture node (DroneID, FPV) has frequencies in
+  its plan, not channels; it must retune briefly to channel 6 by itself to
+  send and to hear the gateway (node-sdr's side).
 
 Downlink is new transmitting by the gateway, but only to our own nodes and
 only when the hub has something to say (a few short packets every 5 s per
@@ -91,8 +100,8 @@ node a fake assignment and make it listen elsewhere. See "Trade-offs" below.
 | Node | ESP-NOW | Why |
 |---|---|---|
 | Wi-Fi 2.4 GHz (S3, or C5 `cargo fw24-now`) | yes, built and tested | already dwells on ch 6 |
-| Wi-Fi 5 GHz (C5) | not yet | would have to leave 5 GHz to reach ch 6: lost listening time |
-| BLE | not yet | needs Wi-Fi + BLE coexistence on the C5, which esp-radio beta.1 stubs |
+| Wi-Fi 5 GHz (C5) | yes (same image, band chosen at run time) | 40 ms on ch 6 at least once a second, from the plan |
+| BLE (C5, `espnow` feature) | yes, built and tested | time-shares the radio: scan off 200 ms of every second (~18% fewer adverts) |
 | Raw capture (node-sdr) | no | the whole radio is the capture front end |
 
 ## Trade-offs to know
@@ -156,3 +165,23 @@ and the node from `firmware/node-wifi/target-espnow/...`.
 * More than two nodes, and two nodes under heavy traffic.
 * The node side of the downlink (applying an `Assign`), see above.
 * The S3 build of node-wifi with `espnow` compiles; it has not been run.
+
+### Node roles and image switching (2026-11-15, c5a node, c5c gateway, P4 hub)
+
+c5a ran the multi-image firmware (`tools/flash-node.sh`: node-wifi in
+`ota_0`, node-ble in `ota_1`, `ota_2` empty), c5b another agent's node-sdr
+reporting DroneID through the same gateway.
+
+* **Status and `can`:** c5a reported `can` = Wi-Fi 2.4 + Wi-Fi 5 + Bluetooth
+  (7). With c5b (an older image, no Status) holding the 2.4 GHz slot, the hub
+  gave c5a Bluetooth, which it could only know from the Status.
+* **Plans:** Wi-Fi 2.4 plan `0x1503` applied and echoed (hub: `applied=2`);
+  per-channel visits 6:1328, 1:663, 11:663 in 270 s, matching 6/1/6/11. Wi-Fi 5
+  plan `0x8a0c` (18 hops, 149 anchor, 153-165 and 36-48, two 40 ms visits to
+  6) applied: 0 band-change errors, 0 channel errors, every channel visited
+  per cycle, uplink 0 failed sends.
+* **Role switching:** with a bench build (`ROTORSCOPE_BENCH_FLIP=1`, which
+  hides roles from `can` so one node flips), the hub moved c5a
+  Bluetooth -> Wi-Fi 5 -> Bluetooth ... 7 times in 5.5 minutes in one run;
+  every switch came from a hub command, every new image started with the
+  plan id the hub sent and kept reporting through the gateway.

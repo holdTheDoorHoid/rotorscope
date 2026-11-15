@@ -11,6 +11,11 @@
 #   tools/dev-board.sh --list                           registered boards: attached? busy?
 #   tools/dev-board.sh --resolve <board>                print "<port> <chip>" and exit
 #   tools/dev-board.sh --hold <seconds> [board]         take the lock and sit on it
+#   tools/dev-board.sh --pt <csv> --app <label>=<elf> [--app ...] --multi [seconds] [board]
+#                                                       multi-image flash (tools/flash-node.sh):
+#                                                       partition table, otadata + rsjob (and any
+#                                                       --erase LABEL) erased so it boots ota_0,
+#                                                       each ELF into its slot
 #
 # Options (before the positional arguments):
 #   --send KEYS        after the reset, type these characters on the board's console
@@ -144,9 +149,12 @@ PY
 esac
 
 # ---- option parsing -----------------------------------------------------------
-send=""; send_after=8; dry=0; hold=""
-while [[ ${1:-} == --* && ${1:-} != --log ]]; do
+send=""; send_after=8; dry=0; hold=""; pt=""; apps=(); erase=(otadata rsjob); multi=0
+while [[ ${1:-} == --* && ${1:-} != --log && ${1:-} != --multi ]]; do
   case $1 in
+    --pt) pt=${2:?--pt needs a CSV}; shift 2 ;;
+    --app) apps+=("${2:?--app needs LABEL=ELF}"); shift 2 ;;
+    --erase) erase+=("${2:?--erase needs a partition label}"); shift 2 ;;
     --send) send=${2:?--send needs KEYS}; shift 2 ;;
     --send-after) send_after=${2:?}; shift 2 ;;
     --dry-run) dry=1; shift ;;
@@ -154,7 +162,11 @@ while [[ ${1:-} == --* && ${1:-} != --log ]]; do
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-if [[ -n $hold ]]; then elf=""; secs=$hold; board=${1:-s3}
+if [[ ${1:-} == --multi ]]; then
+  shift; elf=""; multi=1; secs=${1:-15}; board=${2:-s3}
+  [[ -f $pt && ${#apps[@]} -gt 0 ]] || { echo "--multi needs --pt <csv> and at least one --app <label>=<elf>" >&2; exit 2; }
+  for a in "${apps[@]}"; do [[ -f ${a#*=} ]] || { echo "no such ELF: ${a#*=}" >&2; exit 1; }; done
+elif [[ -n $hold ]]; then elf=""; secs=$hold; board=${1:-s3}
 elif [[ ${1:-} == --log ]]; then elf=""; shift; secs=${1:-15}; board=${2:-s3}
 else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]  (or --register / --list)}; shift; secs=${1:-15}; board=${2:-s3}; fi
 port=${BOARDS[$board]:-}
@@ -165,6 +177,10 @@ if (( dry )); then
   echo "[dry-run] board=$board chip=$chip port=$port"
   echo "[dry-run] lock: $lock_dir/$(lock_name "$port")"
   [[ -n $elf ]] && echo "[dry-run] espflash flash --chip $chip --port $port --non-interactive $elf"
+  if (( multi )); then
+    echo "[dry-run] espflash erase-parts --chip $chip --port $port --partition-table $pt -a no-reset ${erase[*]}"
+    for a in "${apps[@]}"; do echo "[dry-run] espflash flash --chip $chip --port $port --non-interactive --partition-table $pt --target-app-partition ${a%%=*} ${a#*=}"; done
+  fi
   echo "[dry-run] reset (DTR/RTS) then read ${secs}s${send:+; after ${send_after}s type '$send'}"
   exit 0
 fi
@@ -183,11 +199,27 @@ if ! flock -w 600 9; then echo "board $board busy for 10 min; giving up" >&2; ex
 # still running (or a checkout that has not pulled yet) still excludes us.
 exec 8>>"$old_lock"
 if ! flock -w 600 8; then echo "board $board busy (legacy lock) for 10 min; giving up" >&2; exit 1; fi
-printf 'pid=%s since=%s cmd=%s %s\n' "$$" "$(date +%T)" "$(basename "${elf:-log}")" "$board" >"$lock"
+label=${elf:-log}; (( multi )) && label="multi:${apps[*]##*/}"
+printf 'pid=%s since=%s cmd=%s %s\n' "$$" "$(date +%T)" "$(basename "$label")" "$board" >"$lock"
 
 if [[ -n $hold ]]; then echo "holding $board for ${hold}s"; sleep "$hold"; exit 0; fi
 if [[ -n $elf ]]; then
   espflash flash --chip "$chip" --port "$port" --non-interactive "$elf" 2>&1 | tail -3
+fi
+if (( multi )); then
+  # Erase the boot selection (so the bootloader starts ota_0) and any stored
+  # job, then write each image into its slot. The chip stays in the ROM
+  # loader between steps; the last one resets it into the new firmware.
+  espflash erase-parts --chip "$chip" --port "$port" --non-interactive --partition-table "$pt" -a no-reset "${erase[@]}" 2>&1 | tail -2
+  n=${#apps[@]}; i=0
+  for a in "${apps[@]}"; do
+    i=$((i + 1)); after=no-reset; (( i == n )) && after=hard-reset
+    echo "dev-board: ${a%%=*} <- $(basename "${a#*=}")"
+    espflash flash --chip "$chip" --port "$port" --non-interactive --partition-table "$pt" \
+      --target-app-partition "${a%%=*}" -a "$after" "${a#*=}" 2>&1 | tail -2
+    # The C5 re-enumerates USB when it changes mode: wait for the port.
+    for _ in $(seq 50); do [[ -e $port ]] && break; sleep 0.2; done
+  done
 fi
 python3 -I - "$port" "$secs" "$send" "$send_after" <<'PY'
 import os, sys, time, termios, serial

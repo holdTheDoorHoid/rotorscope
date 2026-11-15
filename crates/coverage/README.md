@@ -47,8 +47,7 @@ A node that reports through the ESP-NOW gateway can only send while it is
 on 2.4 GHz channel 6 (the gateway's channel). So every Wi-Fi plan for such a
 node gets a 40 ms visit to channel 6 at least once a second (`plans.rs`,
 `ESPNOW_MAX_AWAY_MS`). A 5 GHz node therefore leaves 5 GHz for a moment
-once a second; its firmware has to switch band for that (the node side is
-not built yet).
+once a second; node-wifi switches band per hop for that (branch `node-roles`).
 
 The raw-capture jobs (DroneID, FPV) do not get that visit in their plan:
 their plan is radio frequencies, not channels. A relayed DroneID or FPV node

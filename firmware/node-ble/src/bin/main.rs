@@ -18,13 +18,14 @@ use esp_backtrace as _;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-use esp_hal::uart::{self, UartTx};
+#[cfg(not(feature = "espnow"))]
+use esp_hal::uart::{self, Uart, UartRx, UartTx};
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
 use esp_radio::ble::controller::BleConnector;
 use log::{error, warn};
 use node_ble::adv::{self, COUNTERS, bump};
 use node_ble::out::{self, HelloLine, Mac, RidErrLine, RidLine, ScanInfo, StatsLine};
-use node_ble::{FIRMWARE, SCAN_INTERVAL_MS, chip, hub};
+use node_ble::{FIRMWARE, SCAN_INTERVAL_MS, SCAN_WINDOW_MS, chip, hub, role};
 use trouble_host::prelude::*;
 
 extern crate alloc;
@@ -40,7 +41,7 @@ extern "Rust" fn custom_halt() -> ! {
     esp_hal::system::software_reset()
 }
 
-fn hello_line() -> HelloLine {
+fn hello_line<'a>(images: &'a [Option<&'static str>]) -> HelloLine<'a> {
     HelloLine {
         t: "hello",
         node: "ble",
@@ -50,11 +51,15 @@ fn hello_line() -> HelloLine {
         scan: ScanInfo {
             phys: "1M+Coded",
             interval_ms: SCAN_INTERVAL_MS,
-            window_ms: SCAN_INTERVAL_MS,
+            window_ms: SCAN_WINDOW_MS,
             active: false,
             dup_filter: false,
         },
         uart_baud: hub::BAUD,
+        espnow: cfg!(feature = "espnow"),
+        can: role::CAN.load(core::sync::atomic::Ordering::Relaxed),
+        images,
+        plan_id: role::PLAN_ID.load(core::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -78,6 +83,9 @@ async fn main(spawner: Spawner) -> ! {
     // Headroom: esp-radio queues every HCI event on the heap until the host
     // reads it, so a burst of adverts needs more than the controller's own use.
     esp_alloc::heap_allocator!(size: 32 * 1024);
+    // The Wi-Fi driver (ESP-NOW) wants its own buffers on top.
+    #[cfg(feature = "espnow")]
+    esp_alloc::heap_allocator!(size: 48 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
@@ -86,24 +94,54 @@ async fn main(spawner: Spawner) -> ! {
     let (_, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
     spawner.spawn(usb_task(usb_tx).unwrap());
 
-    // UART: the hub side. TX only for now; the hub does not talk back yet.
-    // Pins are placeholders until the carrier board fixes them.
-    #[cfg(feature = "esp32s3")]
-    let hub_tx = peripherals.GPIO17; // hub RX; GPIO18 reserved for hub TX
-    #[cfg(feature = "esp32c5")]
-    let hub_tx = peripherals.GPIO10; // hub RX; GPIO9 reserved for hub TX
-    let uart = UartTx::new(peripherals.UART1, uart::Config::default().with_baudrate(hub::BAUD))
-        .unwrap()
-        .with_tx(hub_tx)
-        .into_async();
-    spawner.spawn(uart_task(uart).unwrap());
+    // Which images this board holds (OTA slots) and the job, if this image
+    // was started by a role switch.
+    let mut images = node_common::Images::scan(peripherals.FLASH, link::NodeRole::Ble.bit());
+    role::init(images.stored_job(), images.can);
+    let names: heapless::Vec<Option<&'static str>, 8> =
+        images.slots.iter().map(|s| s.image.map(nodeimage::Image::project)).collect();
 
-    let mut line = [0u8; 384];
-    out::json_line(&hello_line(), &mut line);
+    // UART: the hub side (wired builds). TX to the hub, RX for its commands.
+    #[cfg(not(feature = "espnow"))]
+    {
+        #[cfg(feature = "esp32s3")]
+        let (hub_tx, hub_rx) = (peripherals.GPIO17, peripherals.GPIO18);
+        #[cfg(feature = "esp32c5")]
+        let (hub_tx, hub_rx) = (peripherals.GPIO11, peripherals.GPIO12);
+        let (rx, tx) = Uart::new(peripherals.UART1, uart::Config::default().with_baudrate(hub::BAUD))
+            .unwrap()
+            .with_tx(hub_tx)
+            .with_rx(hub_rx)
+            .into_async()
+            .split();
+        spawner.spawn(uart_task(tx).unwrap());
+        spawner.spawn(uart_rx_task(rx).unwrap());
+    }
+
+    // ESP-NOW: Wi-Fi parked on the gateway's channel, sharing the radio with
+    // the Bluetooth scan (coexistence). Started before Bluetooth.
+    #[cfg(feature = "espnow")]
+    let mut wifi = {
+        let mut wifi = esp_radio::wifi::WifiController::new(peripherals.WIFI, Default::default()).unwrap();
+        if let Err(e) = wifi.set_band_mode(esp_radio::wifi::BandMode::_2_4G) {
+            warn!("set_band_mode: {e:?}");
+        }
+        let now = wifi.esp_now();
+        if let Err(e) = now.set_channel(node_ble::uplink::CHANNEL) {
+            warn!("esp-now set_channel: {e:?}");
+        }
+        spawner.spawn(node_ble::uplink::run(now).unwrap());
+        wifi
+    };
+
+    let mut line = [0u8; 512];
+    out::json_line(&hello_line(&names), &mut line);
     out::hub_frame(&hello_frame());
+    out::hub_frame(&role::status_frame());
 
     spawner.spawn(decode_task().unwrap());
     spawner.spawn(stats_task().unwrap());
+    spawner.spawn(role::control(images).unwrap());
 
     let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 4> = ExternalController::new(connector);
@@ -119,8 +157,13 @@ async fn main(spawner: Spawner) -> ! {
         active: false,
         phys: PhySet::M1Coded,
         interval: Duration::from_millis(SCAN_INTERVAL_MS),
-        window: Duration::from_millis(SCAN_INTERVAL_MS),
+        window: Duration::from_millis(SCAN_WINDOW_MS),
+        // ESP-NOW builds: the controller ends each scan itself after
+        // SCAN_ON_MS (a clean stop, before the Wi-Fi gap); otherwise forever.
+        #[cfg(not(feature = "espnow"))]
         timeout: Duration::from_secs(0),
+        #[cfg(feature = "espnow")]
+        timeout: Duration::from_millis(node_ble::uplink::SCAN_ON_MS),
         // Off: a drone's repeated adverts carry fresh positions, and the
         // controller's duplicate filter would swallow all but the first.
         filter_duplicates: FilterDuplicates::Disabled,
@@ -141,7 +184,20 @@ async fn main(spawner: Spawner) -> ! {
             match scanner.scan_ext(&config).await {
                 // With no timeout the session never completes; awaiting it
                 // keeps it (and the scan) alive.
+                #[cfg(not(feature = "espnow"))]
                 Ok(session) => session.await,
+                // ESP-NOW: scan for a while, then stop (dropping the session
+                // stops the scan) and leave the radio to Wi-Fi for a moment.
+                #[cfg(feature = "espnow")]
+                Ok(session) => {
+                    // Ends when the controller's scan duration runs out; the
+                    // outer timeout only guards against a lost completion event.
+                    let _ = embassy_time::with_timeout(Duration::from_millis(node_ble::uplink::SCAN_ON_MS + 200), session).await;
+                    node_ble::uplink::WIFI_TURN.store(true, core::sync::atomic::Ordering::Relaxed);
+                    node_ble::uplink::GAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    Timer::after_millis(node_ble::uplink::WIFI_GAP_MS).await;
+                    node_ble::uplink::WIFI_TURN.store(false, core::sync::atomic::Ordering::Relaxed);
+                }
                 Err(e) => {
                     bump(&COUNTERS.scan_err);
                     warn!("scan_ext failed: {e:?}");
@@ -151,6 +207,9 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
     join(host, scan).await;
+    // The Wi-Fi controller must outlive the uplink (dropping it stops Wi-Fi).
+    #[cfg(feature = "espnow")]
+    let _ = &mut wifi;
     unreachable!()
 }
 
@@ -167,6 +226,22 @@ async fn usb_task(mut tx: UsbSerialJtagTx<'static, Async>) {
     }
 }
 
+#[cfg(not(feature = "espnow"))]
+#[embassy_executor::task]
+async fn uart_rx_task(mut rx: UartRx<'static, Async>) {
+    let mut dec = link::CommandDecoder::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let Ok(n) = rx.read_async(&mut buf).await else { continue };
+        dec.feed(&buf[..n], |r| {
+            if let Ok(link::Command::Assign(a)) = r {
+                let _ = role::COMMANDS.try_send(a);
+            }
+        });
+    }
+}
+
+#[cfg(not(feature = "espnow"))]
 #[embassy_executor::task]
 async fn uart_task(mut tx: UartTx<'static, Async>) {
     let mut buf = [0u8; 256];
@@ -302,6 +377,11 @@ async fn stats_task() {
             hci_err: d(|s| s.hci_err),
             scan_err: d(|s| s.scan_err),
             heap_free: esp_alloc::HEAP.free(),
+            plan_id: role::PLAN_ID.load(core::sync::atomic::Ordering::Relaxed),
+            cmds: {
+                use core::sync::atomic::Ordering::Relaxed;
+                [role::APPLIED.load(Relaxed), role::REPEATS.load(Relaxed), role::REJECTED.load(Relaxed)]
+            },
             tot_adv: cur.adv,
             tot_rid: cur.rid,
             tot_drops: cur.drops,
@@ -324,6 +404,7 @@ async fn stats_task() {
         });
         if secs.is_multiple_of(hub::HELLO_EVERY_S) {
             out::hub_frame(&hello_frame());
+            out::hub_frame(&role::status_frame());
         }
         prev = cur;
         last = now;

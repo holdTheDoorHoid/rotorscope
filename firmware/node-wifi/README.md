@@ -47,7 +47,7 @@ Each line is one JSON object with a `"t"` tag. The ESP-IDF second-stage bootload
 not start with `{`. Diagnostic logging is off (`LOG_LEVEL` in `src/main.rs`) to keep the stream clean.
 
 ```json
-{"t":"hello","fw":"node-wifi","ver":"0.1.0","chip":"esp32s3","role":"Wifi24","proto":2,"fcs":4,"plan":[[6,150],[1,50],[6,150],[11,50]]}
+{"t":"hello","fw":"node-wifi","ver":"0.1.0","chip":"esp32c5","role":"Wifi24","proto":4,"fcs":4,"can":7,"images":["node-wifi","node-ble",null],"plan_id":0,"plan":[[6,150],[1,50],[6,150],[11,50]]}
 {"t":"stats","up_us":59266007,"ch":6,"seen":3131,"fps":62,"data":5210,"open":0,"open_ev":0,"rid":0,"drop":0,"qmax":1,"other":0,"trunc":12,"ch_err":0,"hub_drop":0,"iefit":[2886,0,0],"per_ch":[[6,2652],[1,410],[11,69]]}
 {"t":"rid","tr":"WifiBeacon","ch":6,"rssi":-60,"mac":"aa:bb:cc:dd:ee:ff","ctr":12,"up_us":123456,"msgs":[{"BasicId":{...}},{"Location":{...}},"0d1f..."]}
 {"t":"open","sys":"WfbNg","id":7669206,"port":0,"dir":"AirToGround","ch":161,"rssi":-63,"mac":"57:42:75:05:d6:00","up_us":123456,"n":4321}
@@ -138,6 +138,50 @@ Built and unit-tested only. Nothing has been checked against a real transmitter:
 ## Bench tests
 
 Two-board tests that flash and judge this firmware: `tools/bench/run.py --list` (see `docs/BENCH.md`).
+
+## Roles, hub commands and the multi-image node (protocol 4)
+
+- **Status.** With every Hello (boot, then every 5 s) and whenever its job
+  changes, the node sends `Frame::Status { role, can, plan }`: the role it
+  is running (Wifi24 or Wifi5), the roles the *board* can take (this image's
+  plus those of every other image in its flash, read from the app slots'
+  descriptors; `crates/nodeimage`, `firmware/node-common`) and the plan id it
+  applied (0 = built-in).
+- **Assign.** From the ESP-NOW gateway (airlink command packets) or, on a
+  wired node, the hub UART's RX pin: **C5 GPIO12 (XIAO D7)**, S3 GPIO44 (D7),
+  921600 baud, the same `link::Command` stream the gateway reads. A Wi-Fi job
+  is applied at once: the hopper drops its current dwell and starts the new
+  plan's `(channel, dwell ms)` list; empty plan = built-in plan for that role.
+  The band (2.4 / 5 GHz) is chosen per hop from the channel, so one C5 image
+  does both; `band24` only picks the role it boots in. ESP-NOW builds add a
+  40 ms visit to channel 6 at least once a second if a plan lacks one (same
+  rule as the hub, `coverage::plans::with_espnow_visits`) and still send only
+  while tuned to 6.
+- **Another role** (Bluetooth, DroneID, FPV): `node_common::Images::switch`
+  writes the job to the `rsjob` sector, points `otadata` at the slot holding
+  that image and resets; the other image starts with the job and echoes its
+  plan id. No image for the role: an `err` line, the node carries on.
+- USB lines: `assign` (new job applied), `switch` (leaving for another
+  image); `hello` has `can`, `images` (per slot) and the plan; `stats` has
+  `role`, `plan_id`, `cmds` [applied, repeats, rejected], `per_ch`
+  `[channel, frames, visits]` for the current plan, `band_err`, `dji`, `wdrone`.
+
+Flash a multi-image node (node-wifi in `ota_0`, node-ble in `ota_1`, node-sdr
+in `ota_2` when built) with `tools/flash-node.sh <board>`; layout in
+`tools/partitions-node.csv`.
+
+## DJI Wi-Fi DroneID and Wi-Fi drones
+
+- Beacons carrying DJI's legacy DroneID vendor element (OUI `26:37:12`) are
+  forwarded raw as `Frame::DjiWifi` (element body from the OUI on; the hub
+  decodes it with `rid::dji::parse_element`). The USB `dji` line has only
+  channel, RSSI, address, subcommand and length: the node never decodes the
+  record, so it never prints a serial.
+- Beacons and probe responses whose address or network name matches the
+  maker table (`wifidrone::classify`) go out as `Frame::WifiDrone`, USB `wifidrone`.
+- Both at most once a second per transmitter (16 tracked per kind).
+- Neither has been seen from a real drone yet (no DJI Wi-Fi drone or listed
+  maker's drone on the bench).
 
 ## ESP-NOW uplink (experimental)
 

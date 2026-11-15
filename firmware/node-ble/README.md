@@ -80,19 +80,60 @@ are never blocked.
 **UART to the hub** carries `link::Frame`, as postcard + COBS via `link::encode`,
 at 921 600 baud, 8N1, TX only for now.
 
-| Chip | Node TX (to hub RX) | Reserved RX |
+| Chip | Node TX (to hub RX) | Node RX (hub commands) |
 |---|---|---|
 | ESP32-S3 | GPIO17 | GPIO18 |
-| ESP32-C5 | GPIO10 | GPIO9 |
+| ESP32-C5 | GPIO11 (XIAO D6) | GPIO12 (XIAO D7) |
 
-The pins are placeholders until the carrier board fixes them. The C5 pins are
-unverified against the XIAO C5 silkscreen.
+The C5 pins moved from GPIO10/9 to the same pins node-wifi and the gateway
+use, so every image on a multi-image board talks to the same carrier wiring.
+The S3 pins are placeholders until the carrier board fixes them.
 
 | Frame | When |
 |---|---|
 | `Hello` | at boot and every 5 s |
 | `Detection` | per Remote ID advert |
 | `Stats` | 1 s, with **running totals**: `frames_seen` = adverts, `rid_found`, and `dropped` = queue drops + UART drops |
+
+## Roles and hub commands (protocol 4)
+
+The node sends `Frame::Status { role: Ble, can, plan }` with every Hello and
+when it changes; `can` covers every image in the board's flash (see
+node-wifi's README). `Assign(Ble)` only sets the plan id it echoes (Bluetooth
+has no channel plan). Any other role switches image (`firmware/node-common`).
+
+## ESP-NOW (feature `espnow`, C5)
+
+```sh
+cargo +stable build --release --no-default-features --features esp32c5,espnow \
+      --target riscv32imac-unknown-none-elf
+```
+
+Hub frames go to the ESP-NOW gateway instead of the UART (`src/uplink.rs`),
+and the hub's commands come back the same way. Bluetooth and Wi-Fi share the
+C5's one radio. With both simply running (esp-radio `coex`), Wi-Fi heard
+**nothing** on the bench: 0 gateway beacons in 45 s, with the scan window at
+100% and at 80% of the interval, and with the coexistence preference set to
+Wi-Fi. So the node time-shares: the scan runs 800 ms (the controller's own
+scan duration, so it stops cleanly), stays off for 200 ms (`SCAN_ON_MS`,
+`WIFI_GAP_MS`), and batches are sent only in that gap, when the gateway's
+beacons and commands are heard too. The node also takes the gateway's
+address from its command packets (they get through the gaps more often than
+its broadcast beacons) and keeps it for 30 s after the last beacon, command or
+ACKed send.
+
+Bench, 2026-11-15, c5a, gateway c5c ~1 m away, same spot, ambient adverts only:
+
+| Build | Adverts heard | Uplink |
+|---|---|---|
+| wired (no ESP-NOW), 114 s | 29.4 / s | n/a |
+| `espnow`, 87 s in the Bluetooth role | 24.1 / s (**-18%**) | 80 gaps, 77 sends tried, 77 delivered, 0 failed, 1 batch dropped (at boot, before the gateway was known); 40 beacons and 14 hub commands heard |
+
+So ESP-NOW costs the Bluetooth scan about a fifth of its listening time,
+which is the 200 ms gap per second. Earlier settings that did not work: both
+stacks at once (0 beacons in 45 s, also with the scan window at 80% of the
+interval or the coexistence preference set to Wi-Fi), and 900/100 with the
+host cancelling the scan (often a minute or more with nothing heard).
 
 ## Panics
 

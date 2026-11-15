@@ -18,7 +18,9 @@
 )]
 
 mod chip;
+mod detect;
 mod report;
+mod role;
 mod rx;
 #[cfg(feature = "espnow")]
 mod uplink;
@@ -26,12 +28,12 @@ mod uplink;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, with_timeout};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 #[cfg(not(feature = "espnow"))]
-use esp_hal::uart::{Config as UartConfig, UartTx};
+use esp_hal::uart::{Config as UartConfig, Uart};
 use esp_radio::wifi::{SecondaryChannel, WifiController};
 use rid::wifi::{BEACON_OUI, BEACON_OUI_TYPE, NAN_DEST};
 
@@ -51,11 +53,13 @@ static TRUNCATED: AtomicU32 = AtomicU32::new(0);
 static CHANNEL_ERRORS: AtomicU32 = AtomicU32::new(0);
 /// Beacon element-walk fit, see `report::StatsLine::iefit`.
 static IE_FIT: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
-/// Management frames per channel, indexed by the channel's first position in
-/// `chip::PLAN`. Shows the hop plan is really being followed.
-static PER_CHANNEL: [AtomicU32; MAX_PLAN] = [const { AtomicU32::new(0) }; MAX_PLAN];
-const MAX_PLAN: usize = 16;
-const _: () = assert!(chip::PLAN.len() <= MAX_PLAN);
+/// Management frames heard, and hopper visits, per channel number (1-177).
+/// Shows the hop plan is really being followed.
+static PER_CHANNEL: [AtomicU32; CHANNELS] = [const { AtomicU32::new(0) }; CHANNELS];
+static VISITS: [AtomicU32; CHANNELS] = [const { AtomicU32::new(0) }; CHANNELS];
+const CHANNELS: usize = 178;
+/// Failed band changes (C5).
+static BAND_ERRORS: AtomicU32 = AtomicU32::new(0);
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -68,15 +72,25 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
-    report::hello_json();
+    // Which images this board holds (OTA slots) and the job, if this image
+    // was started by a role switch.
+    let mut images = node_common::Images::scan(peripherals.FLASH, chip::OWN_ROLES);
+    role::init(images.stored_job(), images.can);
+    let names: heapless::Vec<Option<&'static str>, 8> =
+        images.slots.iter().map(|s| s.image.map(nodeimage::Image::project)).collect();
+    report::hello_json(&names);
 
     #[cfg(not(feature = "espnow"))]
     {
-        let hub_uart = UartTx::new(peripherals.UART1, UartConfig::default().with_baudrate(chip::HUB_BAUD))
+        // TX to the hub, RX for the hub's commands (`chip::hub_rx_pin!`).
+        let (hub_rx, hub_tx) = Uart::new(peripherals.UART1, UartConfig::default().with_baudrate(chip::HUB_BAUD))
             .expect("hub UART config")
             .with_tx(chip::hub_tx_pin!(peripherals))
-            .into_async();
-        spawner.spawn(report::hub_writer(hub_uart).expect("spawn hub_writer"));
+            .with_rx(chip::hub_rx_pin!(peripherals))
+            .into_async()
+            .split();
+        spawner.spawn(report::hub_writer(hub_tx).expect("spawn hub_writer"));
+        spawner.spawn(report::hub_reader(hub_rx).expect("spawn hub_reader"));
     }
 
     let mut wifi = WifiController::new(peripherals.WIFI, Default::default()).expect("Wi-Fi init");
@@ -95,6 +109,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(uplink::run(wifi.esp_now()).expect("spawn uplink"));
     spawner.spawn(drain().expect("spawn drain"));
     spawner.spawn(stats().expect("spawn stats"));
+    spawner.spawn(role::control(images).expect("spawn control"));
     if chip::OPEN_LINKS {
         spawner.spawn(open_links().expect("spawn open_links"));
     }
@@ -103,28 +118,50 @@ async fn main(spawner: Spawner) -> ! {
     hop_forever(&mut wifi).await
 }
 
-/// Walk the channel plan forever. Runs in `main`, which owns the controller.
+/// Walk the current channel plan forever; start over at once on a new plan
+/// (`role::CHANGED`). Runs in `main`, which owns the controller.
 async fn hop_forever(wifi: &mut WifiController<'_>) -> ! {
-    // One error line per plan entry, then only the counter, so a channel the
+    // One error line per channel, then only the counter, so a channel the
     // driver rejects (e.g. 149 under the wrong country) is visible without
     // flooding the stream.
-    let mut reported = [false; MAX_PLAN];
+    let mut reported = [false; CHANNELS];
+    let mut band: Option<bool> = None; // Some(true) = 5 GHz
     loop {
-        for (i, hop) in chip::PLAN.iter().enumerate() {
-            let ch = hop.channel();
-            #[cfg(feature = "espnow")]
-            uplink::wait_idle().await;
-            match wifi.set_channel(ch, SecondaryChannel::None) {
-                Ok(()) => rx::TUNED_CHANNEL.store(ch, Relaxed),
-                Err(e) => {
-                    CHANNEL_ERRORS.fetch_add(1, Relaxed);
-                    if let Some(seen @ false) = reported.get_mut(i) {
-                        *seen = true;
-                        esp_println::println!(r#"{{"t":"err","what":"set_channel","ch":{ch},"e":"{e:?}"}}"#);
+        let plan = role::current().plan;
+        'plan: loop {
+            for hop in &plan {
+                let ch = hop.channel();
+                #[cfg(feature = "espnow")]
+                uplink::wait_idle().await;
+                let five = ch > 14;
+                if band != Some(five) {
+                    match chip::set_band(wifi, ch) {
+                        Ok(()) => band = Some(five),
+                        Err(e) => {
+                            BAND_ERRORS.fetch_add(1, Relaxed);
+                            esp_println::println!(r#"{{"t":"err","what":"set_band","ch":{ch},"e":"{e:?}"}}"#);
+                        }
                     }
                 }
+                match wifi.set_channel(ch, SecondaryChannel::None) {
+                    Ok(()) => {
+                        rx::TUNED_CHANNEL.store(ch, Relaxed);
+                        if let Some(v) = VISITS.get(usize::from(ch)) {
+                            v.fetch_add(1, Relaxed);
+                        }
+                    }
+                    Err(e) => {
+                        CHANNEL_ERRORS.fetch_add(1, Relaxed);
+                        if let Some(seen @ false) = reported.get_mut(usize::from(ch)) {
+                            *seen = true;
+                            esp_println::println!(r#"{{"t":"err","what":"set_channel","ch":{ch},"e":"{e:?}"}}"#);
+                        }
+                    }
+                }
+                if with_timeout(Duration::from_millis(hop.dwell_ms()), role::CHANGED.wait()).await.is_ok() {
+                    break 'plan;
+                }
             }
-            Timer::after(Duration::from_millis(hop.dwell_ms())).await;
         }
     }
 }
@@ -173,18 +210,23 @@ fn check_ie_fit(f: &rx::RxFrame) {
 async fn drain() {
     // Declared outside the loop so it lives in the task's static state.
     let mut json = [0u8; report::JSON_BYTES];
+    let mut detect = detect::Detect::new();
     loop {
         let f = rx::next().await;
         if f.truncated() {
             TRUNCATED.fetch_add(1, Relaxed);
         }
         check_ie_fit(&f);
-        if let Some(i) = chip::PLAN.iter().position(|h| h.channel() == f.channel) {
-            PER_CHANNEL[i].fetch_add(1, Relaxed);
+        if let Some(c) = PER_CHANNEL.get(usize::from(f.channel)) {
+            c.fetch_add(1, Relaxed);
         }
 
         let frame = f.mpdu();
-        if frame.len() < 24 || !maybe_rid(frame) {
+        if frame.len() < 24 {
+            continue;
+        }
+        detect.frame(&f, frame);
+        if !maybe_rid(frame) {
             continue;
         }
         let Some(found) = rid::wifi::extract(frame) else { continue };
@@ -246,8 +288,8 @@ async fn open_links() {
     }
 }
 
-/// Stats every second on both outputs; the hub also gets Hello every 5 s so a
-/// hub that restarts learns who is attached.
+/// Stats every second on both outputs; the hub also gets Hello + Status every
+/// 5 s so a hub that restarts learns who is attached and what it can do.
 #[embassy_executor::task]
 async fn stats() {
     let mut ticker = Ticker::every(Duration::from_secs(1));
@@ -258,9 +300,21 @@ async fn stats() {
         ticker.next().await;
         tick = tick.wrapping_add(1);
         let seen = rx::MGMT_SEEN.load(Relaxed);
+        let job = role::current();
+        let mut per_ch: heapless::Vec<(u8, u32, u32), 24> = heapless::Vec::new();
+        for h in &job.plan {
+            let ch = h.channel();
+            if per_ch.iter().all(|p| p.0 != ch) {
+                let i = usize::from(ch);
+                let _ = per_ch.push((ch, PER_CHANNEL[i].load(Relaxed), VISITS[i].load(Relaxed)));
+            }
+        }
         let line = report::StatsLine {
             t: "stats",
             up_us: Instant::now().as_micros(),
+            role: job.role,
+            plan_id: job.id,
+            cmds: [role::APPLIED.load(Relaxed), role::REPEATS.load(Relaxed), role::REJECTED.load(Relaxed)],
             ch: rx::TUNED_CHANNEL.load(Relaxed),
             seen,
             fps: seen.wrapping_sub(last_seen),
@@ -275,12 +329,10 @@ async fn stats() {
             ch_err: CHANNEL_ERRORS.load(Relaxed),
             hub_drop: report::HUB_DROPPED.load(Relaxed),
             iefit: IE_FIT.each_ref().map(|c| c.load(Relaxed)),
-            per_ch: chip::PLAN
-                .iter()
-                .enumerate()
-                .filter(|&(i, h)| chip::PLAN[..i].iter().all(|p| p.channel() != h.channel()))
-                .map(|(i, h)| (h.channel(), PER_CHANNEL[i].load(Relaxed)))
-                .collect(),
+            per_ch,
+            band_err: BAND_ERRORS.load(Relaxed),
+            dji: detect::DJI.load(Relaxed),
+            wdrone: detect::WIFI_DRONES.load(Relaxed),
         };
         last_seen = seen;
         report::stats_json(&line);

@@ -13,13 +13,14 @@ use embassy_sync::channel::Channel;
 #[cfg(not(feature = "espnow"))]
 use esp_hal::Async;
 #[cfg(not(feature = "espnow"))]
-use esp_hal::uart::UartTx;
+use esp_hal::uart::{UartRx, UartTx};
 use heapless::Vec;
 use rid::{MAX_PACK, RawMessage, Transport};
 use serde::ser::{SerializeSeq, Serializer};
 use serde::Serialize;
 
-use crate::chip::{self, Hop};
+use crate::chip;
+use crate::role::{self, Plan};
 
 pub type Messages = Vec<RawMessage, MAX_PACK>;
 
@@ -46,7 +47,7 @@ fn emit<T: Serialize>(value: &T, buf: &mut [u8], what: &'static str) {
 // ------------------------------------------------------------------- hello --
 
 #[derive(Serialize)]
-struct HelloLine {
+struct HelloLine<'a> {
     t: &'static str,
     fw: &'static str,
     ver: &'static str,
@@ -54,28 +55,63 @@ struct HelloLine {
     role: link::NodeRole,
     proto: u8,
     fcs: usize,
-    plan: &'static [Hop],
+    /// Roles this board can take (mask of `NodeRole::bit`), and the image in
+    /// each app slot (`null` for an empty or unknown slot).
+    can: u8,
+    images: &'a [Option<&'static str>],
+    /// Plan id applied (0 = built-in) and the plan.
+    plan_id: u16,
+    plan: &'a Plan,
 }
 
-pub fn hello_json() {
+pub fn hello_json(images: &[Option<&'static str>]) {
+    let job = role::current();
     let line = HelloLine {
         t: "hello",
         fw: env!("CARGO_PKG_NAME"),
         ver: env!("CARGO_PKG_VERSION"),
         chip: chip::CHIP,
-        role: chip::ROLE,
+        role: job.role,
         proto: link::PROTOCOL_VERSION,
         fcs: chip::FCS_LEN,
-        plan: chip::PLAN,
+        can: role::CAN.load(Relaxed),
+        images,
+        plan_id: job.id,
+        plan: &job.plan,
     };
-    emit(&line, &mut [0u8; 512], "hello");
+    emit(&line, &mut [0u8; 768], "hello");
 }
 
+/// Hello, then Status (protocol 4: the hub learns `can` and the plan id).
 pub fn hello_hub() {
     let mut firmware = heapless::String::<16>::new();
     // "node-wifi 0.1.0" fits in 16; truncation would only shorten the label.
     let _ = write!(firmware, "node-wifi {}", env!("CARGO_PKG_VERSION"));
-    to_hub(&link::Frame::Hello { role: chip::ROLE, protocol: link::PROTOCOL_VERSION, firmware });
+    to_hub(&link::Frame::Hello { role: role::current().role, protocol: link::PROTOCOL_VERSION, firmware });
+    status_hub();
+}
+
+pub fn status_hub() {
+    let job = role::current();
+    to_hub(&link::Frame::Status { role: job.role, can: role::CAN.load(Relaxed), plan: job.id });
+}
+
+#[derive(Serialize)]
+struct AssignLine<'a> {
+    t: &'static str,
+    role: link::NodeRole,
+    plan_id: u16,
+    plan: &'a Plan,
+}
+
+/// A new job from the hub, applied.
+pub fn assign_json(job: &role::Job) {
+    emit(&AssignLine { t: "assign", role: job.role, plan_id: job.id, plan: &job.plan }, &mut [0u8; 512], "assign");
+}
+
+/// About to switch image for `a`.
+pub fn switch_json(a: &link::Assignment) {
+    esp_println::println!(r#"{{"t":"switch","role":"{:?}","plan_id":{},"hops":{}}}"#, a.role, a.id, a.plan.len());
 }
 
 // ------------------------------------------------------------------- stats --
@@ -84,6 +120,11 @@ pub fn hello_hub() {
 pub struct StatsLine {
     pub t: &'static str,
     pub up_us: u64,
+    /// Role and plan id being run.
+    pub role: link::NodeRole,
+    pub plan_id: u16,
+    /// Hub commands: applied (changed the job), repeats, rejected / switch failed.
+    pub cmds: [u32; 3],
     /// Channel the hopper is on right now.
     pub ch: u8,
     /// Management frames seen, total and in the last second.
@@ -112,12 +153,19 @@ pub struct StatsLine {
     /// Beacon element walks: [end at sig_len-4, end at sig_len, neither or both].
     /// The first should dominate; if the second does, `chip::FCS_LEN` is wrong.
     pub iefit: [u32; 3],
-    /// `[channel, frames]` per distinct channel in the plan, total.
-    pub per_ch: Vec<(u8, u32), 16>,
+    /// `[channel, frames, visits]` per distinct channel in the current plan:
+    /// management frames heard there and times the hopper tuned to it, totals
+    /// since boot.
+    pub per_ch: Vec<(u8, u32, u32), 24>,
+    /// Failed band changes (C5), total.
+    pub band_err: u32,
+    /// DJI DroneID elements / Wi-Fi drone networks reported (rate-limited), total.
+    pub dji: u32,
+    pub wdrone: u32,
 }
 
 pub fn stats_json(line: &StatsLine) {
-    emit(line, &mut [0u8; 512], "stats");
+    emit(line, &mut [0u8; 1024], "stats");
 }
 
 pub fn stats_hub(line: &StatsLine) {
@@ -296,6 +344,60 @@ pub fn open_hub(s: &openlink::Sighting) {
     }));
 }
 
+// ------------------------------------------------------- DJI / Wi-Fi drones --
+
+/// `{"t":"dji",...}`: a DJI DroneID element was heard. Only its subcommand
+/// and length: the node never decodes it (no serials on the USB line).
+pub fn dji_json(f: &crate::rx::RxFrame, src: [u8; 6], body: &[u8]) {
+    esp_println::println!(
+        r#"{{"t":"dji","ch":{},"rssi":{},"mac":"{}","sub":{},"len":{},"up_us":{}}}"#,
+        f.channel,
+        f.rssi,
+        Mac(src),
+        body.get(6).copied().unwrap_or(0),
+        body.len(),
+        f.up_us
+    );
+}
+
+pub fn dji_hub(f: &crate::rx::RxFrame, src: [u8; 6], body: &[u8]) {
+    let Ok(element) = Vec::from_slice(&body[..body.len().min(255)]) else { return };
+    to_hub(&link::Frame::DjiWifi { channel: f.channel, rssi: f.rssi, mac: src, uptime_us: f.up_us, element });
+}
+
+/// The network name, printable ASCII or nothing (it goes in a JSON string).
+fn ssid_str(ssid: &[u8]) -> heapless::String<32> {
+    let mut s = heapless::String::new();
+    for &b in ssid.iter().take(32) {
+        let _ = s.push(if (0x20..0x7F).contains(&b) && b != b'"' && b != b'\\' { b as char } else { '?' });
+    }
+    s
+}
+
+pub fn wifi_drone_json(f: &crate::rx::RxFrame, maker: u8, src: [u8; 6], ssid: &[u8]) {
+    esp_println::println!(
+        r#"{{"t":"wifidrone","maker":{maker},"ch":{},"rssi":{},"mac":"{}","ssid":"{}","up_us":{}}}"#,
+        f.channel,
+        f.rssi,
+        Mac(src),
+        ssid_str(ssid),
+        f.up_us
+    );
+}
+
+pub fn wifi_drone_hub(f: &crate::rx::RxFrame, maker: u8, src: [u8; 6], ssid: &[u8]) {
+    // Raw bytes may not be UTF-8; the hub only shows it.
+    let ssid = ssid_str(ssid);
+    to_hub(&link::Frame::WifiDrone(link::WifiDroneSighting {
+        maker,
+        mac: src,
+        ssid,
+        channel: f.channel,
+        rssi: f.rssi,
+        uptime_us: f.up_us,
+    }));
+}
+
 // --------------------------------------------------------------------- hub --
 
 fn to_hub(frame: &link::Frame) {
@@ -306,6 +408,23 @@ fn to_hub(frame: &link::Frame) {
         .is_some_and(|v| HUB_QUEUE.try_send(v).is_ok());
     if !queued {
         HUB_DROPPED.fetch_add(1, Relaxed);
+    }
+}
+
+/// A wired node's hub commands, on the hub UART's RX pin (`chip::hub_rx_pin!`).
+#[cfg(not(feature = "espnow"))]
+#[embassy_executor::task]
+pub async fn hub_reader(mut uart: UartRx<'static, Async>) {
+    let mut dec = link::CommandDecoder::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let Ok(n) = uart.read_async(&mut buf).await else { continue };
+        dec.feed(&buf[..n], |r| {
+            if let Ok(link::Command::Assign(a)) = r {
+                // Full: the older command is still queued; the hub resends.
+                let _ = role::COMMANDS.try_send(a);
+            }
+        });
     }
 }
 
