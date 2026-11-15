@@ -343,9 +343,11 @@ impl Aircraft {
     }
 
     /// The position was updated in the last reporting interval, i.e. it is
-    /// at most about a second old.
+    /// at most about a second old. Only believed on a line that also heard
+    /// the aircraft ([`Self::heard`]): the `UPDATED_*` bits can stay set on
+    /// lines that repeat old values.
     pub fn position_updated(&self) -> bool {
-        self.has(flag::UPDATED_POSITION)
+        self.heard() && self.has(flag::UPDATED_POSITION)
     }
 
     pub fn baro_altitude_ft(&self) -> Option<i32> {
@@ -393,8 +395,13 @@ impl Aircraft {
     /// The ADSBee heard this aircraft during the last reporting interval.
     /// It keeps listing an aircraft for a while after it goes quiet; such a
     /// line repeats old data and should not count as a fresh sighting.
+    ///
+    /// Judged by the per-second message counts only. The `UPDATED_*` flag
+    /// bits are not trusted for this: on ADSBee 0.9.0 they were seen staying
+    /// set on lines that only repeated old values (docs/ADSBEE.md), which
+    /// made a quiet aircraft look current.
     pub fn heard(&self) -> bool {
-        self.frames_per_s > 0 || self.es_frames_per_s > 0 || self.flags >> 23 & 0x7f != 0
+        self.frames_per_s > 0 || self.es_frames_per_s > 0
     }
 
     /// The emergency a squawk code declares, if any.

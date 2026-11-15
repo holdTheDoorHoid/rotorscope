@@ -107,6 +107,27 @@ fn quiet_reports_neither_create_nor_refresh() {
     assert_eq!(ctx.aircraft_state(a), TrackState::Active);
 }
 
+/// ADSBee 0.9.0 can keep the UPDATED_* bits set on lines that only repeat
+/// old values (docs/ADSBEE.md). With no messages counted, such a line must
+/// not refresh the aircraft or re-stamp its position.
+#[test]
+fn sticky_updated_bits_neither_create_nor_refresh() {
+    let mut tr: Tracker = Tracker::default();
+    let r = report(0xA1B2C3, 1000.0, 800, 7);
+    let mut sticky = r;
+    sticky.flags = ALL_VALID | 0x7f << 23;
+    sticky.frames_per_s = 0;
+    sticky.es_frames_per_s = 0;
+    assert_eq!(tr.ingest_aircraft(&sticky, 0), None);
+    tr.ingest_aircraft(&r, 1_000).unwrap();
+    tr.ingest_aircraft(&sticky, 9_000).unwrap();
+    let a = &tr.aircraft()[0];
+    assert_eq!(a.last_seen_ms, 1_000);
+    assert_eq!(a.position.as_ref().unwrap().rx_ms, 1_000);
+    let ctx = tr.context(1_000 + AIRCRAFT_STALE_MS, None);
+    assert_eq!(ctx.aircraft_state(a), TrackState::Stale);
+}
+
 #[test]
 fn aircraft_expire_on_their_own_clock() {
     let mut tr: Tracker = Tracker::default();

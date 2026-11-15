@@ -183,8 +183,8 @@ switching protocols every few seconds; it has not been seen in CSBee-only use. T
 observations, for whoever works on the CSBee path:
 
 - On these lines the `UPDATED_*` flag bits (23-29) stayed set while the values repeated, so
-  `adsb::Aircraft::heard()` (which trusts them) can call a repeated line fresh. The comparison
-  uses the per-second frame counts instead.
+  `adsb::Aircraft::heard()` could call a repeated line fresh. Fixed 2026-11-15: `heard()` now
+  uses only the per-second frame counts, and `position_updated()` requires `heard()`.
 - A Beast byte stream fed through `adsb::LineSplitter` produces `TooLong` errors (a stray `#`
   in binary); the hub's `modes` build counts those as "other", not errors.
 

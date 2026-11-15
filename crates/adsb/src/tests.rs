@@ -196,6 +196,21 @@ fn quiet_aircraft_is_not_heard() {
     assert_eq!(a.position(), Some((40.0, -75.0)));
 }
 
+#[test]
+fn sticky_updated_bits_do_not_make_a_quiet_aircraft_heard() {
+    // ADSBee 0.9.0: the UPDATED_* bits (here 0x3F80_0000, all seven) stay
+    // set on a line that repeats old values with no messages this second.
+    let line = sealed("#A:ABC123,3F80003F,?,?,1,40.00000,-75.00000,3000,0,10,120,0,0,0,0,2,-90,0,0,0,");
+    let a = aircraft(&line);
+    assert!(!a.heard());
+    assert!(!a.position_updated());
+    assert_eq!(a.position(), Some((40.0, -75.0)));
+    // The same line with messages heard this second is fresh.
+    let line = sealed("#A:ABC123,3F80003F,?,?,1,40.00000,-75.00000,3000,0,10,120,0,0,0,0,2,-90,0,1,0,");
+    let a = aircraft(&line);
+    assert!(a.heard() && a.position_updated());
+}
+
 // ---------------------------------------------------------- bad lines ----
 
 #[test]
