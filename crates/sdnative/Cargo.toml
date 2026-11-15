@@ -1,0 +1,8 @@
+[package]
+name = "sdnative"
+description = "SD card native bus (1-bit) protocol over three GPIOs: bit-banged, no_std, host-tested against a simulated card"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]

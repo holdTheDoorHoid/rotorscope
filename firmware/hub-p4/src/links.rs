@@ -151,9 +151,9 @@ impl<'d> GatewayLink<'d> {
         }
     }
 
-    /// Bench only (`fakenode`): put bytes into the receive ring as if they
+    /// Bench only (`fakenode`, `fakedrone`): put bytes into the receive ring as if they
     /// had arrived on the wire.
-    #[cfg(feature = "fakenode")]
+    #[cfg(any(feature = "fakenode", feature = "fakedrone"))]
     pub fn inject(&mut self, bytes: &[u8]) {
         critical_section::with(|cs| {
             let mut ring = RX.borrow_ref_mut(cs);

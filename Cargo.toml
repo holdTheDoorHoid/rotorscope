@@ -8,6 +8,7 @@ members = [
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap", "crates/airlink",
     "crates/coverage",
     "crates/wifidrone",
+    "crates/sdnative",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull",
     "tools/cc26xx-flash",
 ]

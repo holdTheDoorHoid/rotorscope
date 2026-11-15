@@ -19,6 +19,8 @@ mod downlink;
 mod links;
 mod psram_test;
 mod rgb;
+mod sd;
+mod sdbb;
 mod touch;
 
 use esp_backtrace as _;
@@ -213,6 +215,8 @@ fn main() -> ! {
     let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28(), p.GPIO27);
     println!("hub-p4: gateway link on UART3 RX GPIO28, TX GPIO27 at {} baud", links::BAUD);
     let mut down = downlink::Downlink::new();
+    // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
+    let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
 
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
@@ -227,6 +231,8 @@ fn main() -> ! {
 
     #[cfg(feature = "fakenode")]
     let mut last_fake = Instant::now();
+    #[cfg(feature = "fakedrone")]
+    let mut last_drone = Instant::now();
     let mut last = Instant::now();
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
@@ -246,8 +252,40 @@ fn main() -> ! {
                 gw.poll(app::now_ms());
             });
         }
+        sdlog.tick(app.tracker, ms);
         #[cfg(feature = "selftest")]
         selftest.tick();
+        #[cfg(feature = "fakedrone")]
+        if last_drone.elapsed() >= Duration::from_millis(1000) {
+            last_drone = Instant::now();
+            let node = [0x02, 0x52, 0x53, 0, 0, 0x02];
+            // Remote ID Basic ID (type 0, protocol 2): serial number,
+            // multirotor, "RSTEST-SD-0001".
+            let mut basic = [0u8; 25];
+            basic[0] = 0x02;
+            basic[1] = 0x12;
+            basic[2..16].copy_from_slice(b"RSTEST-SD-0001");
+            let mut msgs = heapless::Vec::new();
+            let _ = msgs.push(basic);
+            let frames = [
+                link::Frame::Via { node, rssi: -45 },
+                link::Frame::Detection(link::Detection {
+                    transport: rid::Transport::WifiBeacon,
+                    channel: 6,
+                    rssi: -45,
+                    mac: [0x02, 0x52, 0x53, 0x0D, 0x00, 0x01],
+                    counter: (app::now_ms() / 1000) as u8,
+                    uptime_us: app::now_ms() * 1000,
+                    messages: msgs,
+                }),
+            ];
+            for f in &frames {
+                let mut buf = [0u8; link::MAX_FRAME];
+                if let Ok(b) = link::encode(f, &mut buf) {
+                    gw.inject(b);
+                }
+            }
+        }
         #[cfg(feature = "fakenode")]
         if last_fake.elapsed() >= Duration::from_millis(1000) {
             last_fake = Instant::now();
