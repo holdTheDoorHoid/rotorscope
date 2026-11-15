@@ -397,8 +397,12 @@ fn combine(flags: &mut Vec<Flag, MAX_FLAGS>, conds: &[Cond], s: &Settings) {
 pub struct Engine<const N: usize> {
     pub settings: Settings,
     entries: Vec<Entry, N>,
-    /// Evaluations run and the slowest single track, for the timing report.
+    /// Evaluations run, for the timing report.
     pub evals: u32,
+    /// Summaries of flights that ended (track dropped by the tracker) with
+    /// at least one flag, for [`Engine::take_finished`]. The oldest goes
+    /// when full.
+    finished: heapless::Deque<(Key, Summary), 4>,
 }
 
 impl<const N: usize> Default for Engine<N> {
@@ -412,6 +416,7 @@ impl<const N: usize> Engine<N> {
         Self {
             settings,
             entries: Vec::new(),
+            finished: heapless::Deque::new(),
             evals: 0,
         }
     }
@@ -550,11 +555,27 @@ impl<const N: usize> Engine<N> {
             e.apply(&conds, &s, now, false);
             self.evals += 1;
         }
-        // Forget tracks the tracker dropped.
-        self.entries.retain(|e| match e.key {
-            Key::Drone(id) => tracker.get(id).is_some(),
-            Key::Aircraft(icao) => tracker.aircraft().iter().any(|a| a.key.icao == icao),
+        // Forget tracks the tracker dropped, keeping a flagged flight's summary.
+        let finished = &mut self.finished;
+        self.entries.retain(|e| {
+            let keep = match e.key {
+                Key::Drone(id) => tracker.get(id).is_some(),
+                Key::Aircraft(icao) => tracker.aircraft().iter().any(|a| a.key.icao == icao),
+            };
+            if !keep && e.summary.rules_seen != 0 {
+                if finished.is_full() {
+                    finished.pop_front();
+                }
+                let _ = finished.push_back((e.key, e.summary));
+            }
+            keep
         });
+    }
+
+    /// The next finished flight's summary (worst flag, highest height above
+    /// ground, seconds inside each kind of area), oldest first.
+    pub fn take_finished(&mut self) -> Option<(Key, Summary)> {
+        self.finished.pop_front()
     }
 }
 

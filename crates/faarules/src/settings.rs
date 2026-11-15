@@ -86,7 +86,7 @@ settings! {
         "project choice: a few seconds of consistent position before the top level.";
     /// Drone-to-operator distance for a Watch.
     vlos_watch_m: 500.0, "m", "14 CFR 107.31; 49 USC 44809(a)(7)",
-        "UK CAA CAP 722: VLOS normally out to 500 m. Field studies put 50 % detection of a Phantom 4 at ~245 m (Applied Ergonomics, 2018) and a Mavic Air at ~307 m (Applied Sciences 10(16):5501, 2020). Sources seen as search snippets only; verify.";
+        "UK CAA CAP 722 guidance: VLOS normally out to 500 m. Measured 50 % detection (ground observers, 'definitely/probably yes'): DJI Phantom 4 ~245 m, 0.3 probability at 300 m (Li, Jia, Peng, Gan, 'Line-of-sight in operating a small unmanned aerial vehicle', Applied Ergonomics vol. 81); DJI Mavic Air ~307 m (Applied Sciences 10(16):5501, 2020). Studies seen via abstracts/search summaries, not full text.";
     /// Distance for a Warning (sustained).
     vlos_warn_m: 1000.0, "m", "107.31",
         "unsourced: about three times the measured 50 % detection range above.";

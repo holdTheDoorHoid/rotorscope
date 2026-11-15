@@ -262,6 +262,19 @@ impl Faa {
         self.update_us_last = us;
         self.update_us_max = self.update_us_max.max(us);
         self.log_new(tracker);
+        // A flagged flight ended (the tracker dropped its track): one
+        // summary line, as a log line and a {"t":"flight"} JSON line.
+        while let Some((key, sm)) = self.engine.take_finished() {
+            let mut j: heapless::String<512> = heapless::String::new();
+            let _ = match key {
+                Key::Drone(id) => write!(j, "{{\"t\":\"flight\",\"track\":{},", id.0),
+                Key::Aircraft(icao) => write!(j, "{{\"t\":\"flight\",\"icao\":\"{icao:06x}\",", ),
+            };
+            let _ = faarules::text::write_summary_json(&mut j, &sm);
+            let _ = j.push_str("}\n");
+            println!("hub-p4: faa flight summary {}", j.as_str().trim_end());
+            crate::console::json(j.as_bytes());
+        }
         if now.saturating_sub(self.last_print) >= 5_000 {
             self.last_print = now;
             let flagged = self

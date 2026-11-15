@@ -340,6 +340,21 @@ fn facility_map_and_controlled_airspace() {
     assert_eq!(s.level(Rule::Controlled), Some(0), "{}", s.texts());
     assert_eq!(s.level(Rule::FacilityMap), Some(2), "{}", s.texts());
     assert!(s.entry().summary.area_s[AreaKind::ClassD as usize] >= 10);
+    let mut j = heapless::String::<2048>::new();
+    text::write_json(&mut j, s.entry(), None).unwrap();
+    assert!(
+        j.contains("\"area_s\":{\"Class D\":") && j.contains("\"above_uasfm_s\":"),
+        "{j}"
+    );
+    // The track goes away: its flight summary is kept for the log.
+    let id = s.tr.tracks()[0].id;
+    s.now += 700_000;
+    s.tr.expire(s.now);
+    assert!(s.tr.get(id).is_none());
+    s.eval();
+    let (k, sm) = s.eng.take_finished().expect("summary");
+    assert_eq!(k, Key::Drone(id));
+    assert_eq!(sm.worst_level, 2);
 }
 
 #[test]
@@ -484,7 +499,10 @@ fn low_aircraft_over_town_away_from_airports() {
 #[test]
 fn compact_item_text() {
     let t = text::item_text(Rule::Height as u8, 0, 2, 280.4);
-    assert_eq!(t.as_str(), "Warning HEIGHT 920 ft AGL (14 CFR 107.51(b) / 49 USC 44809(a)(6))");
+    assert_eq!(
+        t.as_str(),
+        "Warning HEIGHT 920 ft AGL (14 CFR 107.51(b) / 49 USC 44809(a)(6))"
+    );
     let t = text::item_text(Rule::Area as u8, AreaKind::NationalSecurity as u8, 3, 0.0);
     assert!(t.starts_with("Alert AREA inside Natl security UAS"), "{t}");
 }

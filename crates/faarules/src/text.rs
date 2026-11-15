@@ -261,14 +261,8 @@ pub fn write_json(w: &mut impl Write, e: &Entry, pack: Option<&Pack<'_>>) -> fmt
             Evidence(fl)
         )?;
     }
-    let sm = &e.summary;
-    write!(w, "],\"worst\":{}", sm.worst_level)?;
-    if let Some(r) = sm.worst_rule {
-        write!(w, ",\"worst_rule\":\"{}\"", r.code())?;
-    }
-    if sm.has_agl {
-        write!(w, ",\"max_agl_m\":{:.1}", sm.max_agl_m)?;
-    }
+    w.write_str("],")?;
+    write_summary_json(w, &e.summary)?;
     w.write_str("}\n")
 }
 
@@ -297,7 +291,13 @@ pub fn screen_text(fl: &Flag) -> heapless::String<24> {
 /// sun elevation, number of serial changes; 0 for the rest.
 pub fn item_value(fl: &Flag) -> f32 {
     match fl.rule {
-        Rule::Height | Rule::FacilityMap | Rule::LowAircraft | Rule::Vlos | Rule::VlosTerrain | Rule::Night | Rule::SerialChanged => fl.ev[0],
+        Rule::Height
+        | Rule::FacilityMap
+        | Rule::LowAircraft
+        | Rule::Vlos
+        | Rule::VlosTerrain
+        | Rule::Night
+        | Rule::SerialChanged => fl.ev[0],
         _ => 0.0,
     }
 }
@@ -328,4 +328,25 @@ pub fn item_text(rule: u8, area: u8, level: u8, value: f32) -> heapless::String<
     };
     let _ = write!(s, " ({})", r.citation(area));
     s
+}
+
+/// The per-flight summary as JSON members: `"worst":2,"worst_rule":"HEIGHT",
+/// "max_agl_m":152.0,"area_s":{"Class B":40},"above_uasfm_s":30`.
+pub fn write_summary_json(w: &mut impl Write, sm: &crate::Summary) -> fmt::Result {
+    write!(w, "\"worst\":{}", sm.worst_level)?;
+    if let Some(r) = sm.worst_rule {
+        write!(w, ",\"worst_rule\":\"{}\"", r.code())?;
+    }
+    if sm.has_agl {
+        write!(w, ",\"max_agl_m\":{:.1}", sm.max_agl_m)?;
+    }
+    w.write_str(",\"area_s\":{")?;
+    let mut first = true;
+    for (i, &secs) in sm.area_s.iter().enumerate() {
+        if let (true, Some(k)) = (secs > 0, airspace::AreaKind::from_u8(i as u8)) {
+            write!(w, "{}\"{}\":{secs}", if first { "" } else { "," }, k.name())?;
+            first = false;
+        }
+    }
+    write!(w, "}},\"above_uasfm_s\":{}", sm.above_uasfm_s)
 }
