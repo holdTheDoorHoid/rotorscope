@@ -95,8 +95,11 @@ is on by default (it carries what the console JSON already did); the
 **server upload is the owner's choice** and nothing uploads unless someone
 runs the uploader. Open FPV link identifiers stay out of the summary text
 (project policy) but are inside the raw bytes, as they must be for the
-record to be complete: **owner decision needed** on whether raw bytes of
-open-link frames should be kept. Retention limits are still to be built
+record to be complete. **Owner decision 2026-11-15: always keep them.** The
+evidence log stores open-link frames' raw bytes in full, whatever the
+`show-link-ids` setting; that setting only controls what screens, the phone
+page, CSV, CoT and the summary text show. So anyone with the evidence log or
+an export bundle can read link IDs; treat both as sensitive. Retention limits are still to be built
 (PLAN Phase 13 item 6).
 
 ## Using it on the bench

@@ -410,6 +410,8 @@ Decided 2026-11-09 (see RESEARCH.md "Autel, Skydio and digital FPV").
    page and log output.
    - Recognising the system is on by default.
    - Link IDs and vehicle IDs are identifiers, shown only when opted in.
+   - Exception (owner decision 2026-11-15): the Phase 13 evidence log always keeps the raw frame
+     bytes, IDs included, so a record is complete; display settings don't change it.
    - Bench checks needed: does ESP32 promiscuous mode deliver LDPC/STBC-coded frames
      (wfb-ng's default video profile), and does the C5 receive channel 165?
    - **2026-11-14:** channel 165 answered **yes**; the fake frames of all four systems pass on
