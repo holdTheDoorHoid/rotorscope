@@ -23,8 +23,56 @@ const SLOW_HZ: u32 = 400_000;
 /// Transfer clock ceiling (Elecrow uses 10 MHz on this slot).
 pub const FAST_MAX_HZ: u32 = 10_000_000;
 
+/// Bank-1 GPIO registers (pins 32..), taken from esp-hal's own register
+/// block so the address map is the one `Flex` already uses on this chip.
+/// Measured 2026-11-14: the bus clock is ~0.94 MHz (~115 kB/s) either way,
+/// through `Flex` or these raw set/clear writes, so the GPIO register path
+/// itself (~300 ns per access) is the limit, not esp-hal.
+#[derive(Clone, Copy)]
+struct Bank1 {
+    out_set: *mut u32,
+    out_clr: *mut u32,
+    en_set: *mut u32,
+    en_clr: *mut u32,
+    input: *const u32,
+}
+
+impl Bank1 {
+    fn new() -> Self {
+        let g = esp_hal::peripherals::GPIO::regs();
+        Self {
+            out_set: g.out1_w1ts().as_ptr(),
+            out_clr: g.out1_w1tc().as_ptr(),
+            en_set: g.enable1_w1ts().as_ptr(),
+            en_clr: g.enable1_w1tc().as_ptr(),
+            input: g.in1().as_ptr(),
+        }
+    }
+    #[inline(always)]
+    fn level(&self, mask: u32, high: bool) {
+        // SAFETY: write-1-to-set/clear registers; only our pins' bits.
+        unsafe { (if high { self.out_set } else { self.out_clr }).write_volatile(mask) }
+    }
+    #[inline(always)]
+    fn enable(&self, mask: u32, on: bool) {
+        // SAFETY: as above, output-enable set/clear registers.
+        unsafe { (if on { self.en_set } else { self.en_clr }).write_volatile(mask) }
+    }
+    #[inline(always)]
+    fn read(&self, mask: u32) -> bool {
+        // SAFETY: read-only input register.
+        unsafe { self.input.read_volatile() & mask != 0 }
+    }
+}
+
+const CLK: u32 = 1 << (43 - 32);
+const CMD: u32 = 1 << (44 - 32);
+const DAT: u32 = 1 << (39 - 32);
+
 pub struct BbPins<'d> {
-    clk: Flex<'d>,
+    bank: Bank1,
+    /// Owned so nothing else takes the pin; driven through `bank`.
+    _clk: Flex<'d>,
     cmd: Flex<'d>,
     dat: Flex<'d>,
     cmd_driving: bool,
@@ -39,10 +87,6 @@ fn spin(n: u32) {
     while i < n {
         i = core::hint::black_box(i) + 1;
     }
-}
-
-fn lvl(high: bool) -> Level {
-    if high { Level::High } else { Level::Low }
 }
 
 impl<'d> BbPins<'d> {
@@ -67,8 +111,8 @@ impl<'d> BbPins<'d> {
         // Half periods: 1.25 us at 400 kHz; 50 ns at 10 MHz. The GPIO writes
         // themselves add to this, so the real clock is somewhat slower.
         let slow_spins = per_us * 1_000_000 / SLOW_HZ / 2 + 1;
-        let fast_spins = (per_us * 1_000_000 / FAST_MAX_HZ / 2).max(1);
-        Self { clk, cmd, dat, cmd_driving: false, dat_driving: false, slow_spins, fast_spins }
+        let fast_spins = (per_us * 1_000_000).div_ceil(2 * FAST_MAX_HZ).max(1);
+        Self { bank: Bank1::new(), _clk: clk, cmd, dat, cmd_driving: false, dat_driving: false, slow_spins, fast_spins }
     }
 
     /// Calibration result, for the log: (spins per slow half, per fast half).
@@ -85,41 +129,41 @@ impl<'d> BbPins<'d> {
 impl Pins for BbPins<'_> {
     #[inline(always)]
     fn clk(&mut self, high: bool) {
-        self.clk.set_level(lvl(high));
+        self.bank.level(CLK, high);
     }
     #[inline(always)]
     fn cmd_out(&mut self, high: bool) {
-        self.cmd.set_level(lvl(high));
+        self.bank.level(CMD, high);
         if !self.cmd_driving {
-            self.cmd.set_output_enable(true);
+            self.bank.enable(CMD, true);
             self.cmd_driving = true;
         }
     }
     fn cmd_release(&mut self) {
-        self.cmd.set_level(Level::High);
-        self.cmd.set_output_enable(false);
+        self.bank.level(CMD, true);
+        self.bank.enable(CMD, false);
         self.cmd_driving = false;
     }
     #[inline(always)]
     fn cmd_in(&mut self) -> bool {
-        self.cmd.is_high()
+        self.bank.read(CMD)
     }
     #[inline(always)]
     fn dat_out(&mut self, high: bool) {
-        self.dat.set_level(lvl(high));
+        self.bank.level(DAT, high);
         if !self.dat_driving {
-            self.dat.set_output_enable(true);
+            self.bank.enable(DAT, true);
             self.dat_driving = true;
         }
     }
     fn dat_release(&mut self) {
-        self.dat.set_level(Level::High);
-        self.dat.set_output_enable(false);
+        self.bank.level(DAT, true);
+        self.bank.enable(DAT, false);
         self.dat_driving = false;
     }
     #[inline(always)]
     fn dat_in(&mut self) -> bool {
-        self.dat.is_high()
+        self.bank.read(DAT)
     }
     #[inline(always)]
     fn half(&mut self, slow: bool) {

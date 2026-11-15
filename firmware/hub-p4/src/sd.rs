@@ -55,10 +55,12 @@ const POLL_EVERY_MS: u64 = 10;
 const POLL_FOR_MS: u64 = 1_500;
 /// With nothing to write, check the card is still there this often (CMD13).
 const PRESENCE_EVERY_MS: u64 = 3_000;
-/// Read the file back after a flush while it is at most this long.
-const READBACK_MAX: u32 = 16 * 1024;
+/// Read the file back after a flush while it is at most this long. Each
+/// block costs ~6 ms bit-banged, so keep this small: it is a proof, not a
+/// feature.
+const READBACK_MAX: u32 = 2 * 1024;
 /// Count the previous boot's file at mount if it is at most this long.
-const PREVIOUS_MAX: u32 = 32 * 1024;
+const PREVIOUS_MAX: u32 = 16 * 1024;
 const STATS_EVERY_MS: u64 = 5_000;
 
 type Vm = VolumeManager<SdDev, NoClock, 2, 2, 1>;

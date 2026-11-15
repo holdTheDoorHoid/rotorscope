@@ -60,6 +60,7 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 11 | Real ESP-NOW chain: nodes -> C5 gateway (c5c) -> wire -> P4 UART3 RX GPIO28 | PASS 2026-11-14: two ESP-NOW nodes (c5a, and c5b on its own power) relayed by the gateway; P4 decoded 520 frames, 0 corrupt, 0 UART errors, 0 ring overflow, nodes=2, while drawing at ~36 fps. Gateway: 0 lost, 0 duplicates, RSSI -47 to -55 dBm on the desk. No test beacon ran (no spare board), so no detections yet |
 | 12 | Test drone end to end: c5b rid-beacon (Wi-Fi beacon, 2.4 GHz ch 6) -> node c5a -> ESP-NOW -> gateway -> wire -> P4 | PASS 2026-11-14: P4 track count went 0 -> 1 about 18 s after the beacon started and held for the rest of the run, 0 corrupt. c5b then returned to node firmware (gateway in sight, 0 failed sends) |
 | 13 | Downlink: hub -> wire (P4 UART3 TX GPIO27 -> gateway c5c D7/GPIO12) -> ESP-NOW command packet -> node | PASS 2026-11-14 (branch `coverage`): wire present. Coverage coordinator ran every 2 s over the relayed node table and sent `To` + `Assign` (changes at once, all every 5 s). Gateway read 1439 bytes / 32 commands from the hub, 0 corrupt, 0 orphans. Two real ESP-NOW nodes (c5a, c5b, Wi-Fi 2.4 firmware without Status, so 2.4 only): one parked on 6, the other sweeping 1-13 with a 6 visit; 21 commands, **21 ACKed first try, 0 failed**. A made-up node injected in the P4 (`--features fakenode`, can 2.4 + 5 GHz) was given Wi-Fi 5 (18 hops incl. 6 visits); no board has its address, so 4 tries each then "failed", as designed. P4 meanwhile: 0 corrupt, 0 ring overflow, max band 6.8 ms, ~35 fps. Nodes do not apply assignments yet (node side not built), so "applied" stays 0 |
+| 14 | microSD log (bit-banged SD native 1-bit, CLK 43 / CMD 44 / D0 39), owner's card | PASS 2026-11-14 (branch `p4-sd`): card initialises as SDHC, 3728 MiB (7,635,968 blocks), CSD v2, manufacturer 0x6f, product "CBADS", FAT32 (partition type 0x0b). Created `ROTORSCP\` and one `LOGnnnnn.CSV` per boot; nothing else on the card touched. With `--features fakedrone` (made-up Remote ID drone, 1 row/s) and the real gateway link live (2-3 nodes): 14 of 14 flush read-backs OK (bytes and line counts match), and the next boot counted the previous file back (9556 bytes, 105 lines). Bus clock ~0.94 MHz (~115 kB/s, limited by the GPIO register path). Cost to the loop: one block ~5.5 ms, the longest normal step (flush) 18.3 ms, a flush with read-back up to 37 ms; mount at boot 93-166 ms once. Throughout: 0 corrupt, 0 UART errors, 0 ring_full, 0 dropped rows, 0 card errors; loops/s and max_gap (~6.7-7.0 ms, the screen band) same as before SD. No-card path host-tested only (owner's card stayed in) |
 | - | CPU clock | esp-hal defaults to 90 MHz on the P4; now 360 MHz (`CpuClock::max()`), 3.4x faster drawing |
 | - | Gateway UART | moved to the UART3 interrupt with an 8 KB ring (~90 ms at full rate): a screen band takes ~6.5 ms and a touch read ~3 ms, the FIFO only lasts 1.4 ms |
 
@@ -142,3 +143,22 @@ v2.8.1). Receiving ESP-NOW on the C6 therefore needs a different C6 image,
 installed by esp-hosted's OTA over SDIO. The C6 has no UART or boot pins
 brought out, so a bad image could leave the board without a working radio.
 Not done without the owner's explicit go-ahead.
+
+## microSD log
+
+The card slot is wired for **SD native 1-bit mode on SDMMC slot 0**: CLK
+GPIO43, CMD GPIO44, DAT0 GPIO39, no DAT1-3 and no chip select, so SPI mode is
+impossible (Elecrow's IDF example: 1-bit, 10 MHz max, internal pull-ups, no
+power switch). The patched esp-hal has no SDMMC driver for the P4, so the SD
+bus protocol is bit-banged:
+
+| Piece | What |
+|---|---|
+| `crates/sdnative` | The protocol over a `Pins` trait: CRC7 commands, R1/R1b/R2/R3/R6/R7, init (CMD0, CMD8, ACMD41 with HCS, CMD2, CMD3, CMD9, CMD7, ACMD6 1-bit, CMD16 for SDSC), single + multi-block read/write with CRC16, CRC status token, busy on DAT0. A write returns once the block is accepted; `is_busy()` (8 clocks) lets the loop skip while the card programs. Host tests: `cargo test -p sdnative` (CRC vectors from the spec, CSD/CID decode, and the driver against a clock-edge card simulator: init SDHC/SDSC v1/v2, empty slot, never-ready, single/multi read/write, data starting inside the response, bad CRC, rejected write, card pulled out) |
+| `src/sdbb.rs` | The pins (esp-hal `Flex`, pull-ups on CMD/DAT0), calibrated half-period spins: <= 400 kHz identifying, <= 10 MHz after; the `embedded-sdmmc` `BlockDevice` |
+| `src/sd.rs` | The S3 hub's CSV log (`tracker::csv`): `ROTORSCP\LOGnnnnn.CSV`, one file per boot, rows once a second for every active drone, open link, RF emitter and Wi-Fi drone. One step per loop pass: a probe, an ACMD41, the mount, one block-aligned chunk (<= 512 B) or one flush (every 5 s). Nothing while the card is busy. Read-back line count after each flush while the file is <= 2 KB, and of the previous boot's file at mount |
+
+Never formats, never deletes, never writes outside its folder; exFAT (or any
+non-FAT16/32 card) is reported and left alone (`embedded-sdmmc` reads FAT16/32
+only). No card: a ~1 ms probe every 3 s. Bench: `--features fakedrone`
+injects a made-up Remote ID drone once a second so the log has rows.
