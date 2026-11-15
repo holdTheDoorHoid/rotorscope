@@ -21,6 +21,10 @@
 #   --send KEYS        after the reset, type these characters on the board's console
 #                      (rid-beacon's one-key commands, e.g. "xw"). Default delay 8 s.
 #   --send-after SECS  how long after the reset to start typing (default 8)
+#   --run CMD          instead of resetting and reading: run CMD (bash -c) with the lock
+#                      held and BOARD_PORT set to the board's port, for at most [seconds].
+#                      No reset. For host tools that talk to the board themselves
+#                      (e.g. tools/droneid-hil). Combine with an <elf> to flash first.
 #   --dry-run          print what would happen; touch no hardware, take no lock
 #
 # Boards are addressed by their USB by-id path (it contains the MAC), never by
@@ -149,7 +153,7 @@ PY
 esac
 
 # ---- option parsing -----------------------------------------------------------
-send=""; send_after=8; dry=0; hold=""; pt=""; apps=(); erase=(otadata rsjob); multi=0
+send=""; send_after=8; dry=0; hold=""; run=""; pt=""; apps=(); erase=(otadata rsjob); multi=0
 while [[ ${1:-} == --* && ${1:-} != --log && ${1:-} != --multi ]]; do
   case $1 in
     --pt) pt=${2:?--pt needs a CSV}; shift 2 ;;
@@ -159,6 +163,7 @@ while [[ ${1:-} == --* && ${1:-} != --log && ${1:-} != --multi ]]; do
     --send-after) send_after=${2:?}; shift 2 ;;
     --dry-run) dry=1; shift ;;
     --hold) hold=${2:?--hold needs seconds}; shift 2 ;;
+    --run) run=${2:?--run needs a command}; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -167,6 +172,7 @@ if [[ ${1:-} == --multi ]]; then
   [[ -f $pt && ${#apps[@]} -gt 0 ]] || { echo "--multi needs --pt <csv> and at least one --app <label>=<elf>" >&2; exit 2; }
   for a in "${apps[@]}"; do [[ -f ${a#*=} ]] || { echo "no such ELF: ${a#*=}" >&2; exit 1; }; done
 elif [[ -n $hold ]]; then elf=""; secs=$hold; board=${1:-s3}
+elif [[ -n $run && ( $# -lt 1 || ${1:-} =~ ^[0-9]+$ ) ]]; then elf=""; secs=${1:-15}; board=${2:-s3}
 elif [[ ${1:-} == --log ]]; then elf=""; shift; secs=${1:-15}; board=${2:-s3}
 else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]  (or --register / --list)}; shift; secs=${1:-15}; board=${2:-s3}; fi
 port=${BOARDS[$board]:-}
@@ -220,6 +226,11 @@ if (( multi )); then
     # The C5 re-enumerates USB when it changes mode: wait for the port.
     for _ in $(seq 50); do [[ -e $port ]] && break; sleep 0.2; done
   done
+fi
+if [[ -n $run ]]; then
+  for _ in $(seq 50); do [[ -e $port ]] && break; sleep 0.2; done
+  BOARD_PORT=$port timeout "$secs" bash -c "$run"
+  exit $?
 fi
 python3 -I - "$port" "$secs" "$send" "$send_after" <<'PY'
 import os, sys, time, termios, serial

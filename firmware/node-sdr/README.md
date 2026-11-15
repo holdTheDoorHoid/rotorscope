@@ -1,9 +1,13 @@
 # node-sdr: the ESP32-C5 as a raw radio sampler
 
-PLAN.md Phase 10b. A dedicated ESP32-C5 reads its own radio's raw I/Q, watches one frequency
-for DJI DroneID bursts, and hands each one to `crates/droneid`. **Receive-only**: the Wi-Fi driver
-runs only to power and calibrate the PHY; the MAC's transmit queues are stopped and checked, and
-nothing here can send a frame or a tone.
+PLAN.md Phase 10b (DroneID), Phase 7 option 2 and 11b (FPV / RF scan). A dedicated ESP32-C5 reads
+its own radio's raw I/Q and does one of two jobs, chosen by the hub: **DroneID** (walk the DJI
+DroneID frequencies, decode every burst with `crates/droneid`) or **FPV** (walk the analog FPV
+channels, classify what is on each with `crates/fpvscan`). **Receive-only while capturing**: the
+Wi-Fi driver runs only to power and calibrate the PHY; the MAC's transmit queues are stopped and
+checked, and the capture path cannot send a frame or a tone. The one exception is the optional
+ESP-NOW hub uplink (`cargo fw-now`, see "Hub link" below), which transmits only in short, separate
+windows between captures.
 
 **Status: builds (`cargo fw` and `cargo fw-lite`), clippy-clean, host logic tested; bring-up on two
 XIAO ESP32-C5 boards under way ([BRINGUP-RESULTS.md](BRINGUP-RESULTS.md)).** [BRINGUP.md](BRINGUP.md)
@@ -23,6 +27,8 @@ checking Path B against full-resolution data, and as the 10-bit fallback PLAN.md
 cd firmware/node-sdr/c5
 cargo fw        # with the DroneID decoder in PSRAM (XIAO ESP32-C5 = C5HR8)
 cargo fw-lite   # capture/trigger/dump only, for a C5 without PSRAM
+cargo fw-now    # cargo fw + the ESP-NOW hub uplink (TRANSMITS between captures)
+#   -> firmware/node-sdr/target-espnow/riscv32imac-unknown-none-elf/release/node-sdr
 #   -> firmware/node-sdr/target/riscv32imac-unknown-none-elf/release/node-sdr (+ node-sdr.map)
 NODE_SDR_BOOT="level;grab;dump" cargo fw   # bake console commands that run after boot
 ```
@@ -84,6 +90,86 @@ named by `tools/rawcap-pull`, and `resend <first> [last]` sends just those. What
 tools/dev-board.sh --log 30 c5 > c5.log      # while typing / baking `grab;dump`
 cargo run --release -p rawcap-pull -- c5.log --out caps --spectrum
 cargo run --release -p droneid-file -- caps/c5-1.cs16 --rate 40000000 --format ci16 --redact --failures
+```
+
+## Jobs, plans and the hub (2026-11-14)
+
+`hub.rs` speaks `crates/link` protocol 4. The node says `Hello` + `Status` (role, `can` =
+DroneId|Fpv, plan id) at boot, every 5 s and on every change; a `Frame::DroneId` for every burst that
+matched the DroneID reference pattern (`Flight` for plaintext flight records, `Encrypted{key_id}`
+for O4, `Detected` when the pattern matched but the block did not decode or is another record
+type); and a `Frame::Rf` per FPV verdict worth reporting, at most once per channel per 10 s unless
+the kind changes. `rssi` in a DroneID sighting is the burst level in dB below the 4-bit window's
+full scale (this receiver has no dBm calibration); `snr_db` is the decoder's per-carrier SNR.
+
+The hub's `Command::Assign` (through the gateway, or the `assign` console command, which takes the
+same fields) sets role and plan. Idempotent: the same role and plan id change nothing. Plans are
+`(centre in 100 kHz units, dwell ms)`. Empty plan = built-in: DroneID 5756.5 / 5776.5 / 5796.5 /
+2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 700 ms each (the LO sits on the whole MHz below,
++0.5 MHz off the DC spike); FPV every reachable channel, 60 ms each. Entries outside the C5's reach
+are dropped. Roles this image cannot do (Wi-Fi, BLE) are refused and the node keeps its job;
+switching images is the multi-image layout's business. Console: `role droneid|fpv` (holds that job
+against hub assignments until `role auto`, for bench work), `hop on|off`
+(`freq` parks the node), `plan`, `assign <role> <id> [f:ms ...]`, `fpv verbose on|off`, `uplink [now]`.
+
+### FPV / RF scanner
+
+Each dwell: every trigger probe goes into a level meter (half-dB histogram); the noise floor is
+the quietest channel's 10th percentile across the sweep (a video transmitter never pauses, so its
+own channel cannot show the floor). The trigger runs ungated and the first rise freezes one window
+(else the newest window is taken at the end), decimated to 20 MS/s. The receiver DC offset is
+re-measured whenever the LO moves more than 8 MHz from the last measurement: a residual offset
+inflates the probe level (the meter sees raw 4-bit samples) and made flat noise look like a loud,
+wide, continuous signal at 37 MHz from the last calibration. A channel loud by 8 dB or more
+is analysed (`crates/fpvscan`, scratch in internal RAM: about 13.6 KiB of heap): FM line rate (AnalogVideo), cyclic prefix at 66.7 µs (LteStyle),
+3.2 / 12.8 µs (Wi-Fi: printed, never sent to the hub), 6.4 µs (WifiNarrow), wide flat continuous
+on the HDZero grid (Hdzero), else continuous = FpvCarrier, bursty = Energy (printed, not sent: on 5.8 GHz it is nearly always Wi-Fi that missed the capture). Console: one `fpv` line
+per non-quiet channel, a `sweep` line per sweep.
+
+Reach: carriers 5181–5810 MHz (LO 5180–5800, a channel above 5801 sits up to +10 MHz in the
+capture): 31 of the 47 distinct channels. **Skipped** (above reach; an RX5808 covers them):
+5820 F5, 5825 A3, 5828 B6, 5840 F6, 5843 R6, 5845 A2, 5847 B7, 5860 F7, 5865 A1, 5866 B8,
+5880 F8/R7, 5885 E5, 5905 E6, 5917 R8, 5925 E7, 5945 E8.
+
+### Hub link: the ESP-NOW uplink (feature `espnow`, `cargo fw-now`)
+
+The radio is the capture front end, so sending means stopping capture. At a hop boundary, when
+frames are waiting and the last window was at least 1 s ago (keepalives make that every 5 s),
+`uplink.rs` opens a window: ring and dump engine stopped; `esp_wifi_stop` + `esp_wifi_start`
+hand the PHY back to the driver in its ordinary state (this undoes our forced gain, AGC-off and
+forced-off TX chain through documented calls only); channel 6; gateway learnt from its beacon
+(up to 1.2 s, first time only); one `airlink` batch sent unicast (radio ACK + retries); 40 ms of
+listening for the gateway's command reply; then `Radio::resume` re-tunes, re-measures the DC
+offset, forces gain and AGC off, powers the TX chain down, stops the MAC transmit queues and
+**reads them back**. A bad read-back is counted (`relock_bad`) and retried once; a second failure
+halts capture (mode idle) rather than capture with a transmit-capable MAC. What transmits: the
+batch, and the MAC-level ACKs of the gateway's command packets. Nothing else, and never during
+capture. A batch is retried in 3 windows, then dropped and counted. `{"t":"uplink"}` lines count
+windows, sent, acked, failed, frames, beacons, command packets and window time.
+
+Measured on c5b (gateway c5c, 2026-11-14): about 49 ms per window once the gateway is known
+(0.4–0.5 s the first time, while it waits for a beacon), plus ~25 ms to re-lock (DC calibration);
+one window per ~5 s, so about 1.5 % of capture time. See BRINGUP-RESULTS.md "Hub link, FPV scan, HIL".
+
+**Stack.** The capture loop runs as its own embassy task (`capture_loop`) so its state is static:
+the main stack (block 2) also carries the decoder and ends right above SRAM block 1. With the loop
+inline in `main`, main's future took 20 KiB and the decoder overflowed ~12 KiB into the capture bank
+(found by the HIL test). The `link` line reports `stack_free` (never-touched stack, painted at boot):
+about 6.9 KiB after decodes.
+
+### Hardware in the loop (DroneID without a drone)
+
+`tools/droneid-hil` turns every burst of the public recordings into exactly the bytes Path B
+would hold (+0.5 MHz, 20 MHz analog band, 40 MS/s, receiver noise, 4-bit clip window), sends one
+53,760-byte block at a time as `@F <offset> <base64>` console lines into a PSRAM staging buffer,
+and `hil run <len> <crc32>` checks it and runs it through the live path (`Radio::hil_run`: copy
+into the stopped ring, a fresh trigger, `window`: length gate, half-band, DC removal, decoder,
+redacted `burst` line, hub sighting). HIL sightings are encoded and round-tripped but **never
+queued for the hub**: a recording must not appear on the hub as a live drone.
+
+```sh
+tools/fetch-droneid-samples.sh
+tools/dev-board.sh --run 'target/release/droneid-hil --rms 200,150,125' 800 c5b
 ```
 
 ## How it works

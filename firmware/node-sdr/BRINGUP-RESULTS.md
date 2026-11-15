@@ -206,3 +206,79 @@ code: nothing printed while the ring runs may take more than about a millisecond
 
 Next for node-sdr: step 9 (window comparison at gain 83 against a distant source), 10 (a minute of
 trigger statistics), 12 (ten-minute soak, including DC drift as the board warms), and 11 with a DJI drone.
+
+## Hub link, FPV scan, HIL (2026-11-14, branch `sdr-node`, board c5b, gateway c5c)
+
+Firmware `cargo fw-now` (decoder + ESP-NOW uplink). Logs in `bench-logs/sdr-node/` (local).
+
+### Three bugs found and fixed
+
+1. **Burst length overflowed u32** (`radio.rs` `window`): `(n * SEG) as u32 * 1_000_000` wraps past
+   ~107 µs, so every real DroneID burst (570–640 µs) measured as tens of µs and was rejected by the
+   length gate before decoding. Found by the HIL test (every fed burst: `ev`, `dur_us` 5). The live
+   path had never seen a DroneID-length burst, so nothing showed it before. Now u64.
+2. **Main stack overflowed into the capture bank.** The main stack (block 2, 57 KiB) ends right
+   above SRAM block 1. With the hub/uplink state in `main`'s future (20 KiB), the decoder ran
+   ~12 KiB past the bottom into the top of the decoder's own input (found by a HIL check that the
+   input is unchanged after decoding; symptom: 1–2 of 13 identical bursts failing CRC at random).
+   esp-hal's stack guard word did not fire (a large frame stepped over it). Fix: the capture loop is
+   its own embassy task (static state), big values are built in non-inlined helpers. Now
+   `stack_free` (never-touched stack) is ~6.9 KiB after decodes and the input is intact in every run.
+3. **FPV levels counted the receiver DC residual** (the meter sums raw 4-bit power): with the DC
+   calibration reused across 37–40 MHz, flat noise on some L-band and E-band LOs read 8–16 dB "loud",
+   continuous and wide, i.e. false `hdzero` / `fpv_carrier`. Fix: recalibrate within 8 MHz, and the
+   FPV meter subtracts each probe's own DC power. 5 false `Rf` sightings reached the hub during the
+   run that found it (before the fix).
+
+### HIL: public recordings through the C5's own capture path
+
+`tools/droneid-hil`: 13 bursts (3 Mavic Air 2 + 10 Mini 2, all CRC-valid on the laptop), each as one
+53,760-byte Path B grab at 40 MS/s, 4-bit clip window, receiver noise 48 codes RMS per axis (gain
+83), sent over USB (~0.9 s per burst) and run on the chip. SNR = burst power over noise power.
+
+| burst level (SNR) | trigger | detected | CRC-valid on the chip | decode time |
+|---|---|---|---|---|
+| 200 codes (9.4 dB), 3 passes | 6 dB (default) | 39/39 | 39/39 | median 151 ms, max 158 |
+| 150 (6.9 dB), 3 passes | 6 dB | 39/39 | 39/39 | median 144 ms, max 152 |
+| 125 (5.3 dB) | 6 dB | 1/13 | 1/13 | |
+| 100 (3.4 dB) | 6 dB | 0/13 (no trigger) | 0 | |
+| 100 (3.4 dB) | 3 dB (`trig 3`) | 13/13 | 13/13 | median 149 ms |
+| 80 (1.4 dB) | 3 dB | 9/13 | 9/13 | |
+| 70 (0.3 dB) | 3 dB | 0/13 | 0 | |
+
+The decoder works ~3.5 dB below where the default energy trigger stops firing; `trig 3` costs more
+full looks in busy Wi-Fi (not measured). Record types: 12 `flight_info`, 1 `info11` per pass. A
+`Frame::DroneId` was built and round-tripped for every CRC-valid burst; HIL sightings are never
+queued for the hub. Identities: not printed anywhere (board redaction on; the tool prints types only).
+
+### On air, DroneID job (200 s, hub assignment)
+
+The P4 hub assigned `droneid` plan 46828 (8 hops, 700 ms) through the gateway within seconds; the
+node applied it and echoed it in `Status`. 1,559 Wi-Fi frames of DroneID length (450–800 µs) went
+through the decoder; 26 passed its cyclic-prefix and Zadoff–Chu thresholds but all had reference
+SNR < −6 dB and sat 3–6 MHz from where a burst must be. **0 DroneID sightings sent** (the
+`Detected` gate: reference SNR ≥ 0 dB and within 300 kHz of +0.5 MHz). No real DroneID expected (no
+drone). Capture: `dma_err` 0, `gain_lost` 0, `lapped` 6, `skipped` 15 in 200 s.
+
+### Uplink
+
+| run | windows | ACKed | failed | frames delivered | command packets | relock_bad |
+|---|---|---|---|---|---|---|
+| DroneID 200 s | 41 | 41 | 0 | 82 | 12 | 0 |
+| FPV 200 s | 54 | 54 | 0 | 100 | 15 | 0 |
+
+Window: 48–49 ms once the gateway is known (0.38–0.54 s for the first, which waits for a beacon),
+plus ~25 ms re-lock; one per ~5 s, ~1.5 % of capture time.
+
+### On air, FPV job (200 s, `role fpv` pinned, final firmware)
+
+72 sweeps of the 31 reachable channels, ~2.5 s each. 130 dwells were loud (8 dB or more over the floor),
+all on 5 GHz Wi-Fi channels (busiest: F3 5780, B4 5790, R5 5806, B5 5809, A5 5785); every other
+dwell was quiet. Verdicts: **124 `wifi`** (3.2 µs cyclic prefix found; metric 23–270 against a
+threshold of 24–60), **6 `energy`** (Wi-Fi bursts whose capture showed too little of the frame;
+not sent), **0 `analog_video`**, 0 `fpv_carrier`, 0 `hdzero`, 0 `lte_style`. Largest line-rate
+metric on any Wi-Fi capture: 41 (video needs 150; synthetic video scores 257–900). Wi-Fi level over
+the floor: 8–19 dB, median 12; duty 10–100 %. Analysis takes ~100 ms per loud channel (the ring is
+stopped meanwhile), mostly the 64-bit correlation sums: a candidate for optimisation. 0 `Rf` sightings
+sent to the hub. No analog transmitter was on the bench, so the `analog_video` path is proven only
+on synthetic signals (crates/fpvscan tests), not on a real VTX.

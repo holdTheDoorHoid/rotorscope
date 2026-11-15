@@ -18,7 +18,40 @@ use rawcap::ring::{NODE_BYTES, RING_BYTES, window_ok};
 use rawcap::trigger::{self, Rise, Trigger, db10_x10, extent};
 use rawcap::word;
 
+use heapless::Vec as HVec;
+use link::{DroneIdRecord, DroneIdSighting, NodeRole, RfKind, RfSighting};
+
 use crate::{engine, phy, ring, route};
+
+/// Something for the hub, drained by `main` after every call into the radio.
+#[derive(Clone, Debug)]
+pub enum Event {
+    /// `hil`: produced by a hardware-in-the-loop run from a recording.
+    DroneId { s: DroneIdSighting, hil: bool },
+    /// An FPV verdict for the channel at `mhz`.
+    Rf { s: RfSighting, mhz: u16 },
+}
+
+/// One hop: centre in 100 kHz units, dwell ms (as `link::Assignment::plan`).
+pub type Hop = (u32, u16);
+pub type Plan = HVec<Hop, 48>;
+
+/// The built-in DroneID plan (crates/coverage DRONEID_58 + DRONEID_24, 700 ms
+/// each: a burst comes every ~640 ms, so one dwell catches one).
+pub const DRONEID_PLAN: [Hop; 8] =
+    [(57565, 700), (57765, 700), (57965, 700), (24145, 700), (24295, 700), (24445, 700), (24595, 700), (23995, 700)];
+
+/// DroneID burst centres the receiver accepts in an assignment: the C5's
+/// measured reach, 2200-2650 and 5180-5800 MHz LO (100 kHz units).
+fn droneid_freq_ok(f: u32) -> bool {
+    (22_000..=26_500).contains(&f) || (51_800..=58_100).contains(&f)
+}
+
+/// FPV retunes within this distance of the last DC calibration reuse it (a
+/// calibration costs ~22 ms on 5 GHz, a whole dwell is 60 ms). 40 MHz was
+/// too far (2026-11-14, c5b): the residual DC offset raised the probe level
+/// of L2/L4 by ~10 dB and their (flat, DC-free) noise passed for HDZero.
+const FPV_DCAL_MHZ: u16 = 8;
 
 /// Decoder input: 16,384 samples at 20 MS/s (819 µs), in the upper half of
 /// SRAM block 1, the same 64 KiB the dump engine writes snapshots into.
@@ -126,6 +159,31 @@ pub struct Radio {
     #[cfg(feature = "decode")]
     rx: Option<&'static mut droneid::rx::Receiver>,
     pub phy_ok: bool,
+    /// What the node is doing, the plan it follows and where it is in it.
+    pub role: NodeRole,
+    plan: Plan,
+    pub plan_id: u16,
+    hop_idx: usize,
+    hop_until_us: u64,
+    /// false: parked on `s.mhz` (a console `freq`), the plan is not walked.
+    pub hopping: bool,
+    /// A console `role` holds the job against hub assignments until `role auto`.
+    pub pinned: bool,
+    /// What is being listened to now, 100 kHz units (burst or channel centre).
+    pub cur_freq: u32,
+    pub events: HVec<Event, 8>,
+    /// FPV: level meter for this dwell, floor across the sweep, and whether
+    /// the capture bank holds this dwell's window.
+    meter: fpvscan::Meter,
+    floor: fpvscan::FloorTracker,
+    fpv_cap: bool,
+    fpv_scratch: Option<&'static mut fpvscan::Scratch>,
+    pub fpv_verbose: bool,
+    sweep: SweepStats,
+    /// A hardware-in-the-loop run is in progress (events are marked).
+    hil: bool,
+    /// CRC of the decoder input as built in a HIL run (checked after decoding).
+    hil_cap_crc: u32,
     /// Last receive DC calibration (ours), and the setting it was made for.
     dc: phy::DcCal,
     dc_for_mhz: u16,
@@ -145,6 +203,13 @@ fn reader(start: u64) -> impl Fn(usize) -> u8 {
         let i = off + k;
         bytes[if i >= RING_BYTES { i - RING_BYTES } else { i }]
     }
+}
+
+fn cap_crc() -> u32 {
+    let mut c = Crc32::new();
+    // SAFETY: the capture bank as bytes, read only.
+    c.update(unsafe { core::slice::from_raw_parts(CAPTURE_ADDR as *const u8, 4 * CAPTURE_LEN) });
+    c.finish()
 }
 
 fn capture() -> &'static mut [C16] {
@@ -169,10 +234,31 @@ impl Radio {
             #[cfg(feature = "decode")]
             rx: None,
             phy_ok: false,
+            role: NodeRole::DroneId,
+            plan: Plan::from_slice(&DRONEID_PLAN).unwrap_or_default(),
+            plan_id: 0,
+            hop_idx: DRONEID_PLAN.len() - 1,
+            hop_until_us: 0,
+            hopping: true,
+            pinned: false,
+            cur_freq: s.mhz as u32 * 10 + 5,
+            events: HVec::new(),
+            meter: fpvscan::Meter::new(),
+            floor: fpvscan::FloorTracker::new(),
+            fpv_cap: false,
+            fpv_scratch: None,
+            fpv_verbose: false,
+            sweep: SweepStats::default(),
+            hil: false,
+            hil_cap_crc: 0,
             dc: phy::DcCal::default(),
             dc_for_mhz: 0,
             dc_auto: true,
         }
+    }
+
+    pub fn set_fpv_scratch(&mut self, s: &'static mut fpvscan::Scratch) {
+        self.fpv_scratch = Some(s);
     }
 
     #[cfg(feature = "decode")]
@@ -303,13 +389,39 @@ impl Radio {
             }
             let off = (self.next_block % RING_BYTES as u64) as usize;
             let mut p = 0u32;
+            let fpv = self.role == NodeRole::Fpv;
+            let (mut si, mut sq) = (0i32, 0i32);
             for &b in &bytes[off..off + cfg.probe as usize] {
                 p += POWER[b as usize] as u32;
+                if fpv {
+                    let (i, q) = rawcap::iq::unpack(b);
+                    si += 2 * i as i32 + 1;
+                    sq += 2 * q as i32 + 1;
+                }
             }
+            // FPV levels without the probe's DC: a receiver DC residual
+            // counts in the raw power and made flat noise read 10-16 dB
+            // "loud" on some LOs (2026-11-14). POWER is in (2n+1)^2 units,
+            // so the DC power of the probe is (si^2 + sq^2) / n.
+            let p_ac = if fpv {
+                let dc = ((si * si + sq * sq) as u32) / cfg.probe;
+                p.saturating_sub(dc).max(cfg.probe)
+            } else {
+                p
+            };
             // The probe may have been overwritten while summed: re-check.
             let (now, _) = ring::produced();
             if window_ok(self.next_block, self.next_block + cfg.probe as u64, now, NODE_BYTES) {
-                self.pending = self.trig.feed(self.next_block, p);
+                if self.role == NodeRole::Fpv {
+                    self.meter.feed(p_ac);
+                    // One capture per dwell is enough; later rises only count.
+                    let r = self.trig.feed(self.next_block, p);
+                    if !self.fpv_cap && self.pending.is_none() {
+                        self.pending = r;
+                    }
+                } else {
+                    self.pending = self.trig.feed(self.next_block, p);
+                }
             }
             self.next_block += cfg.block as u64;
         }
@@ -334,6 +446,11 @@ impl Radio {
         if !window_ok(start, end, produced, NODE_BYTES) {
             self.n.lapped += 1;
             self.restart();
+            return;
+        }
+        if self.role == NodeRole::Fpv {
+            self.fpv_take(start);
+            self.restart_keep_floor();
             return;
         }
         let keep = self.window(start, r);
@@ -372,7 +489,9 @@ impl Radio {
         let thr = (floor_seg * cfg.ratio_q8 as u64 / 256) as u32;
         let (first, n) = extent((lo..hi).map(seg_power), thr);
         let first = first + lo;
-        let dur_us = (n * SEG) as u32 * 1_000_000 / RATE_B;
+        // u64: (n * SEG) * 1e6 overflows u32 past ~107 µs (found by the HIL test:
+        // every DroneID-length burst used to measure as tens of µs and be rejected).
+        let dur_us = ((n * SEG) as u64 * 1_000_000 / RATE_B as u64) as u32;
         let mean_seg: u64 = if n > 0 { (first..first + n).map(|k| seg_power(k) as u64).sum::<u64>() / n as u64 } else { 0 };
         // 0 dBFS = both axes on the rails (POWER 450 per sample).
         let lvl = db10_x10(mean_seg.max(1)) - db10_x10(450 * SEG as u64);
@@ -381,7 +500,7 @@ impl Radio {
         if !ok {
             self.n.rejected += 1;
             let t = now_us();
-            if t >= self.ev_quiet_until {
+            if t >= self.ev_quiet_until || self.hil {
                 self.ev_quiet_until = t + 200_000;
                 println!(
                     r#"{{"t":"ev","pos":{start},"mhz":{},"dur_us":{dur_us},"lvl_db":{},"snr_db":{},"note":"energy, not DroneID length"}}"#,
@@ -397,6 +516,9 @@ impl Radio {
         decimate_nibbles(&get, cap);
         remove_dc(cap);
         self.c16_len = CAPTURE_LEN;
+        if self.hil {
+            self.hil_cap_crc = cap_crc();
+        }
         let mut line = Line::new();
         let _ = write!(
             line,
@@ -407,13 +529,19 @@ impl Radio {
             self.s.gain,
             self.s.window.name()
         );
-        self.decode_into(&mut line, CAPTURE_LEN);
+        let mut found = HVec::<DroneIdSighting, 4>::new();
+        self.decode_into(&mut line, CAPTURE_LEN, Some((&mut found, lvl, snr)));
         println!("{}}}", line.as_str());
+        for s in found {
+            let _ = self.events.push(Event::DroneId { s, hil: self.hil });
+        }
         true
     }
 
-    /// Decode the first `n` capture samples, appending `,"dec":[...]`.
-    fn decode_into(&mut self, line: &mut Line, n: usize) {
+    /// Decode the first `n` capture samples, appending `,"dec":[...]`. With
+    /// `out`, also build a hub sighting for every burst that matched the
+    /// reference pattern (`lvl`, `snr`: the energy measurement, tenths of a dB).
+    fn decode_into(&mut self, line: &mut Line, n: usize, out: Option<(&mut HVec<DroneIdSighting, 4>, i32, i32)>) {
         #[cfg(feature = "decode")]
         {
             let Some(rx) = self.rx.as_deref_mut() else {
@@ -426,7 +554,17 @@ impl Radio {
             let mut first = true;
             let mut n_ok = 0;
             let mut n_all = 0;
+            let freq = self.cur_freq;
+            // Where a burst on `freq` must appear in the capture (the LO is
+            // the whole MHz below it: +500 kHz).
+            let expect_hz = freq as i64 * 100_000 - self.s.mhz as i64 * 1_000_000;
+            let mut out = out;
             rx.decode_all(&capture()[..n], &mut |res| {
+                if let (Some((v, lvl, snr)), Ok(b)) = (out.as_mut(), &res)
+                    && let Some(s) = sighting(b, freq, expect_hz, *lvl, *snr)
+                {
+                    let _ = v.push(s);
+                }
                 n_all += 1;
                 if !first {
                     let _ = write!(line, ",");
@@ -450,7 +588,7 @@ impl Radio {
         }
         #[cfg(not(feature = "decode"))]
         {
-            let _ = n;
+            let _ = (n, out);
             let _ = write!(line, r#","dec":null"#);
         }
     }
@@ -459,8 +597,12 @@ impl Radio {
         let (produced, overrun) = ring::produced();
         let _ = write!(
             line,
-            r#"{{"t":"stats","up_us":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
+            r#"{{"t":"stats","up_us":{},"role":"{}","plan":{},"hop":{},"f":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
             now_us(),
+            crate::hub::role_name(self.role),
+            self.plan_id,
+            self.hopping,
+            self.cur_freq,
             self.s.mode.name(),
             self.s.mhz,
             self.s.gain,
@@ -518,6 +660,9 @@ impl Radio {
             Command::Stats => self.stats(),
             Command::Phy => self.phy_report(),
             Command::Freq(mhz) => {
+                // A hand-tuned frequency parks the node until `hop on`.
+                self.hopping = false;
+                self.cur_freq = if self.role == NodeRole::DroneId { mhz as u32 * 10 + 5 } else { (mhz as u32 + 1) * 10 };
                 self.s.mhz = mhz;
                 self.retune();
             }
@@ -768,7 +913,7 @@ impl Radio {
         }
         let mut line = Line::new();
         let _ = write!(line, r#"{{"t":"decode","samples":{},"rate":{}"#, self.c16_len, RATE_DECODE);
-        self.decode_into(&mut line, self.c16_len);
+        self.decode_into(&mut line, self.c16_len, None);
         println!("{}}}", line.as_str());
     }
 
@@ -874,6 +1019,430 @@ impl Radio {
     }
 }
 
+// ------------------------------------------------- plan, FPV, HIL, uplink --
+
+/// Per-sweep counts of the FPV scanner's verdicts.
+#[derive(Clone, Copy, Debug, Default)]
+struct SweepStats {
+    n: u32,
+    t0_us: u64,
+    kinds: [u16; 8],
+    analysed: u16,
+    analyse_us_max: u32,
+}
+
+fn kind_index(k: fpvscan::Kind) -> usize {
+    use fpvscan::Kind::*;
+    match k {
+        Quiet => 0,
+        AnalogVideo => 1,
+        FpvCarrier => 2,
+        Hdzero => 3,
+        LteStyle => 4,
+        WifiNarrow => 5,
+        Wifi => 6,
+        Energy => 7,
+    }
+}
+
+const KIND_NAMES: [&str; 8] = ["quiet", "analog_video", "fpv_carrier", "hdzero", "lte_style", "wifi_narrow", "wifi", "energy"];
+
+fn rf_kind(k: fpvscan::Kind) -> Option<RfKind> {
+    use fpvscan::Kind::*;
+    Some(match k {
+        AnalogVideo => RfKind::AnalogVideo,
+        FpvCarrier => RfKind::FpvCarrier,
+        Hdzero => RfKind::Hdzero,
+        LteStyle => RfKind::LteStyle,
+        WifiNarrow => RfKind::WifiNarrow,
+        Energy => RfKind::Energy,
+        Quiet | Wifi => return None,
+    })
+}
+
+/// Largest distance (Hz) of an undecoded burst from where a DroneID burst on
+/// the tuned frequency must appear, for it to count as `Detected`: two
+/// crystals of +-20 ppm at 5.8 GHz, plus margin.
+const DETECT_CFO_HZ: f64 = 300_000.0;
+
+/// The hub sighting for one burst that passed the reference-pattern check.
+///
+/// A CRC-valid burst is always reported. One that did not decode becomes
+/// `Detected` only if its reference symbols carry positive SNR and it sits
+/// within [`DETECT_CFO_HZ`] of the expected offset `expect_hz`: on the bench
+/// (2026-11-14, 200 s, 1562 Wi-Fi frames of DroneID length decoded) nine Wi-Fi
+/// frames passed the decoder's cyclic-prefix and Zadoff-Chu thresholds, all
+/// with reference SNR below -6 dB and 3-6 MHz off; none passes this gate.
+#[cfg(feature = "decode")]
+fn sighting(b: &droneid::rx::Burst, freq: u32, expect_hz: i64, lvl_x10: i32, _snr_x10: i32) -> Option<DroneIdSighting> {
+    if !b.crc24_ok && (b.snr_db < 0.0 || (b.cfo_hz - expect_hz as f64).abs() > DETECT_CFO_HZ) {
+        return None;
+    }
+    use droneid::payload::Record;
+    let record = match (&b.parsed, b.crc24_ok) {
+        (Some(p), true) => match &p.record {
+            Record::FlightInfo(f) => DroneIdRecord::Flight {
+                serial: f.serial,
+                lat_raw: f.lat_raw,
+                lon_raw: f.lon_raw,
+                altitude_raw: f.altitude_raw,
+                height_raw: f.height_raw,
+                v_north: f.v_north,
+                v_east: f.v_east,
+                v_up: f.v_up,
+                yaw_raw: f.yaw_raw,
+                pilot_lat_raw: f.app_lat_raw,
+                pilot_lon_raw: f.app_lon_raw,
+                home_lat_raw: f.home_lat_raw,
+                home_lon_raw: f.home_lon_raw,
+                product_type: f.product_type,
+            },
+            Record::Encrypted(e) => DroneIdRecord::Encrypted { key_id: e.key_id },
+            _ => DroneIdRecord::Detected,
+        },
+        // The reference pattern matched (that is what an `Ok` burst means)
+        // but the block did not decode.
+        _ => DroneIdRecord::Detected,
+    };
+    Some(DroneIdSighting {
+        freq,
+        // No calibrated dBm on this receiver: the burst level in dB below
+        // the 4-bit window's full scale.
+        rssi: (lvl_x10 / 10).clamp(-128, 127) as i8,
+        snr_db: (b.snr_db as i32).clamp(-128, 127) as i8,
+        uptime_us: now_us(),
+        record,
+    })
+}
+
+impl Radio {
+    /// Restart the ring without forgetting the trigger floor (FPV, after a
+    /// mid-dwell capture).
+    fn restart_keep_floor(&mut self) {
+        self.restart();
+    }
+
+    pub fn plan(&self) -> &[Hop] {
+        &self.plan
+    }
+
+    /// Apply a hub assignment. Idempotent: the hub resends it every few
+    /// seconds, and the same role and plan id change nothing. Returns false
+    /// for a role this image cannot do (it keeps its current job).
+    pub fn assign(&mut self, role: NodeRole, plan: &[Hop], id: u16) -> bool {
+        if !matches!(role, NodeRole::DroneId | NodeRole::Fpv) {
+            return false;
+        }
+        if role == self.role && id == self.plan_id && self.hopping {
+            return true;
+        }
+        let mut p = Plan::new();
+        for &(f, ms) in plan {
+            let ok = match role {
+                NodeRole::DroneId => droneid_freq_ok(f),
+                _ => fpvscan::channels::reachable(((f + 5) / 10) as u16),
+            };
+            if ok && ms > 0 {
+                let _ = p.push((f, ms));
+            }
+        }
+        if p.is_empty() {
+            match role {
+                NodeRole::DroneId => p.extend_from_slice(&DRONEID_PLAN).ok(),
+                _ => {
+                    for &mhz in fpvscan::channels::sweep() {
+                        let _ = p.push((mhz as u32 * 10, fpvscan::channels::DWELL_MS));
+                    }
+                    Some(())
+                }
+            };
+        }
+        self.set_role(role);
+        self.plan = p;
+        self.plan_id = id;
+        self.hopping = true;
+        self.hop_idx = self.plan.len() - 1;
+        self.hop_until_us = 0;
+        true
+    }
+
+    /// Switch job, keeping the current plan only if it is the role's built-in one.
+    pub fn set_role(&mut self, role: NodeRole) {
+        if role == self.role {
+            return;
+        }
+        self.role = role;
+        self.trig.cfg = if role == NodeRole::Fpv {
+            // Report every rise at once (no burst-length gate): the scanner
+            // wants one look at whatever is loud, Wi-Fi frames included.
+            trigger::Config { gate: false, ..self.s.trig }
+        } else {
+            self.s.trig
+        };
+        self.trig.reset();
+        self.floor.reset();
+        self.sweep = SweepStats { t0_us: now_us(), ..SweepStats::default() };
+        self.events.clear();
+    }
+
+    /// The built-in plan of the current role (plan id 0).
+    pub fn builtin_plan(&mut self) {
+        let role = self.role;
+        self.plan_id = u16::MAX; // force the reload
+        self.assign(role, &[], 0);
+    }
+
+    /// Whether the current dwell is over (always false while parked).
+    pub fn dwell_over(&self) -> bool {
+        self.hopping && self.phy_ok && self.held == Held::Nothing && now_us() >= self.hop_until_us
+    }
+
+    /// End the current dwell (FPV: judge the channel) without retuning.
+    pub fn end_dwell(&mut self) {
+        if self.role == NodeRole::Fpv && self.hop_until_us != 0 {
+            self.fpv_judge();
+        }
+        ring::stop();
+    }
+
+    /// Tune to the next hop of the plan and start its dwell.
+    pub fn next_hop(&mut self) {
+        if self.plan.is_empty() {
+            self.hopping = false;
+            return;
+        }
+        self.hop_idx = (self.hop_idx + 1) % self.plan.len();
+        if self.hop_idx == 0 && self.role == NodeRole::Fpv && self.sweep.n > 0 {
+            self.sweep_line();
+        }
+        let (f, ms) = self.plan[self.hop_idx];
+        self.cur_freq = f;
+        let (lo, tol) = match self.role {
+            NodeRole::Fpv => (fpvscan::channels::lo_for(((f + 5) / 10) as u16).0, FPV_DCAL_MHZ),
+            // The whole MHz below the burst centre: +0.5 MHz off the DC spike.
+            _ => ((f / 10) as u16, 0),
+        };
+        self.tune_quiet(lo, tol);
+        self.hop_until_us = now_us() + ms as u64 * 1000;
+    }
+
+    /// Retune without printing (one `phy` line per hop would flood the
+    /// console). Re-measures the DC offset when the LO moved more than `tol`
+    /// MHz from the last measurement or changed band.
+    fn tune_quiet(&mut self, mhz: u16, tol: u16) {
+        if !self.phy_ok {
+            return;
+        }
+        ring::stop();
+        self.s.mhz = mhz;
+        let band_changed = (mhz < 4000) != (self.dc_for_mhz < 4000);
+        if self.dc_auto && (band_changed || mhz.abs_diff(self.dc_for_mhz) > tol) {
+            self.dc_cal(mhz);
+        } else {
+            phy::apply(self.tune());
+        }
+        self.trig.reset();
+        self.meter.reset();
+        self.fpv_cap = false;
+        self.restart();
+    }
+
+    /// FPV: decimate the frozen window at `start` into the capture bank.
+    fn fpv_take(&mut self, start: u64) {
+        let cap = capture();
+        decimate_nibbles(reader(start), cap);
+        remove_dc(cap);
+        self.c16_len = CAPTURE_LEN;
+        self.fpv_cap = true;
+    }
+
+    /// FPV: the dwell is over; measure, analyse if loud, classify, report.
+    fn fpv_judge(&mut self) {
+        ring::stop();
+        if !self.fpv_cap {
+            // Nothing rose: a quiet channel, or a continuous transmitter the
+            // floor followed. Take the newest window.
+            let (produced, _) = ring::produced();
+            let need = (WINDOW_BYTES + NODE_BYTES) as u64;
+            if produced >= need {
+                self.fpv_take(produced - need);
+            }
+        }
+        let mhz = ((self.cur_freq + 5) / 10) as u16;
+        let floor = self.floor.update(&self.meter);
+        let d = self.meter.dwell(floor);
+        let t0 = now_us();
+        let a = match (&mut self.fpv_scratch, self.fpv_cap && d.snr_db >= fpvscan::classify::STRONG_DB) {
+            (Some(sc), true) => Some(fpvscan::analyse(&capture()[..self.c16_len], sc)),
+            _ => None,
+        };
+        let us = (now_us() - t0) as u32;
+        let kind = fpvscan::classify(&d, a.as_ref(), mhz);
+        self.sweep.n += 1;
+        self.sweep.kinds[kind_index(kind)] += 1;
+        if a.is_some() {
+            self.sweep.analysed += 1;
+            self.sweep.analyse_us_max = self.sweep.analyse_us_max.max(us);
+        }
+        if kind != fpvscan::Kind::Quiet || self.fpv_verbose {
+            let (band, ch) = fpvscan::channels::label(mhz).unwrap_or((b'?', 0));
+            let mut line = Line::new();
+            let _ = write!(
+                line,
+                r#"{{"t":"fpv","mhz":{mhz},"ch":"{}{ch}","lo":{},"snr_db":{},"duty":{},"floor":{},"probes":{},"kind":"{}""#,
+                band as char,
+                self.s.mhz,
+                d.snr_db,
+                d.duty_pct,
+                Dec1(floor),
+                self.meter.count(),
+                kind.name()
+            );
+            if let Some(a) = &a {
+                let _ = write!(
+                    line,
+                    r#","line":{},"line_hz":{},"cp":[{},{},{}],"cp_thr":{},"width_khz":{},"flat":{},"centroid_khz":{},"us":{us}"#,
+                    a.line,
+                    a.line_hz,
+                    a.cp_wifi,
+                    a.cp_half,
+                    a.cp_lte,
+                    fpvscan::classify::cp_threshold(a),
+                    a.width_khz,
+                    Dec1(a.flat_x10 as i32),
+                    a.centroid_khz
+                );
+            }
+            println!("{}}}", line.as_str());
+        }
+        if let Some(k) = rf_kind(kind).filter(|_| kind.reported()) {
+            let s = RfSighting {
+                kind: k,
+                freq: self.cur_freq,
+                width_khz: a.map(|a| a.width_khz).unwrap_or(0),
+                snr_db: d.snr_db,
+                duty_pct: d.duty_pct,
+                line_hz: if k == RfKind::AnalogVideo { a.map(|a| a.line_hz).unwrap_or(0) } else { 0 },
+                uptime_us: now_us(),
+            };
+            let _ = self.events.push(Event::Rf { s, mhz });
+        }
+    }
+
+    fn sweep_line(&mut self) {
+        let sw = self.sweep;
+        let mut line = Line::new();
+        let _ = write!(
+            line,
+            r#"{{"t":"sweep","channels":{},"ms":{},"floor":{},"analysed":{},"analyse_us_max":{}"#,
+            sw.n,
+            (now_us() - sw.t0_us) / 1000,
+            Dec1(self.floor.get().unwrap_or(0)),
+            sw.analysed,
+            sw.analyse_us_max
+        );
+        for (k, &c) in sw.kinds.iter().enumerate() {
+            let _ = write!(line, r#","{}":{c}"#, KIND_NAMES[k]);
+        }
+        println!("{}}}", line.as_str());
+        self.sweep = SweepStats { t0_us: now_us(), ..SweepStats::default() };
+    }
+
+    // ---------------------------------------------- hardware in the loop --
+
+    /// Run the live capture path over recorded Path B bytes: they are copied
+    /// into the stopped ring, probed by a fresh trigger exactly as the ring
+    /// would be, and the first rise goes through [`Radio::window`] (length
+    /// gate, half-band, DC removal, decoder, `burst` line, hub sightings,
+    /// marked as HIL). Returns (rises, accepted, bursts matched, CRC-valid,
+    /// decode ms, whether the ring still held exactly the fed bytes after
+    /// the run).
+    pub fn hil_run(&mut self, data: &[u8]) -> (u32, u32, u32, u32, u32, bool) {
+        ring::stop();
+        engine::stop();
+        self.pending = None;
+        // Let a DMA write already in flight land before we overwrite the ring.
+        let t = now_us();
+        while now_us() - t < 200 {}
+        let n = data.len().min(GRAB_BYTES);
+        // SAFETY: ring and engine stopped; single-threaded.
+        unsafe { ring::bytes_mut()[..n].copy_from_slice(&data[..n]) };
+        let (acc0, bursts0, crc0) = (self.n.accepted, self.n.bursts, self.n.crc_ok);
+        let cfg = self.s.trig;
+        let mut trig = Trigger::new(cfg);
+        let mut rises = 0;
+        let mut pos = 0usize;
+        self.hil = true;
+        self.n.last_decode_ms = 0;
+        while pos + cfg.probe as usize <= n {
+            let p = rawcap::iq::power_sum(&data[pos..pos + cfg.probe as usize]);
+            if let Some(r) = trig.feed(pos as u64, p) {
+                rises += 1;
+                let start = r.pos.saturating_sub(PRE_BYTES);
+                if start as usize + WINDOW_BYTES <= n {
+                    self.window(start, r);
+                }
+                break;
+            }
+            pos += cfg.block as usize;
+        }
+        self.hil = false;
+        // The ring must still hold the fed bytes, and the decoder input must
+        // not have changed while it was decoded (nothing but the CPU may
+        // write SRAM block 1 while the engine is stopped).
+        let intact = ring::bytes()[..n] == data[..n] && (self.n.accepted == acc0 || cap_crc() == self.hil_cap_crc);
+
+        let out = (
+            rises,
+            self.n.accepted - acc0,
+            self.n.bursts - bursts0,
+            self.n.crc_ok - crc0,
+            self.n.last_decode_ms,
+            intact,
+        );
+        self.restart();
+        out
+    }
+
+    // ------------------------------------------------------------ uplink --
+
+    #[cfg_attr(not(feature = "espnow"), allow(dead_code, reason = "used by the espnow uplink"))]
+    /// Stop capturing for good (a failed re-lock): mode idle.
+    pub fn halt(&mut self) {
+        self.s.mode = Mode::Idle;
+        self.hopping = false;
+        self.restart();
+    }
+
+    #[cfg_attr(not(feature = "espnow"), allow(dead_code, reason = "used by the espnow uplink"))]
+    /// Stop capturing before the uplink takes the radio.
+    pub fn suspend(&mut self) {
+        ring::stop();
+        engine::stop();
+        self.pending = None;
+    }
+
+    /// Take the radio back after the uplink: tune (the Wi-Fi driver left the
+    /// PHY on 2.4 GHz channel 6 with its own gain and AGC), re-measure the DC
+    /// offset, force gain and AGC off, stop and check the MAC transmit queues
+    /// again, re-route the bus and restart the ring. Returns the transmit
+    /// queues' read-back (true = all off, the receive-only state).
+    #[cfg_attr(not(feature = "espnow"), allow(dead_code, reason = "used by the espnow uplink"))]
+    pub fn resume(&mut self) -> bool {
+        if !self.phy_ok {
+            return false;
+        }
+        self.dc_for_mhz = 0;
+        let rb = self.apply();
+        route::set_lanes(&self.s.pins, self.lanes());
+        self.trig.reset();
+        self.meter.reset();
+        self.fpv_cap = false;
+        self.restart();
+        rb.txq_off && rb.gain_forced && rb.agc_off
+    }
+}
+
 /// Gain/window advice from a snapshot's level statistics. The decoder
 /// research wants noise at about one 4-bit step in the clip window (64
 /// codes RMS) and, for the fold windows, peaks inside the fold span.
@@ -918,6 +1487,8 @@ fn help() {
         "trig <dB> [min_us max_us] | mode detect|hold|idle | reveal on|off",
         "snap (Path A, 10-bit 20 MS/s) | grab (Path B ring) | level | decode",
         "dump [raw|c16] [b64|hex] | resend <first> [last] | resume",
+        "role droneid|fpv | hop on|off | plan | assign droneid|fpv <id> [<f100k>:<ms> ...]",
+        "fpv verbose on|off | uplink [now] | hil run <len> <crc32> (after @F lines)",
     ] {
         println!(r#"{{"t":"help","l":"{l}"}}"#);
     }

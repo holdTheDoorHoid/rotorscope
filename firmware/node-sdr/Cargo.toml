@@ -27,10 +27,21 @@ default = ["decode"]
 # Without it the node captures, triggers and dumps only, and fits a C5 with
 # no PSRAM (C5HF4); see README.md "Memory".
 decode = []
+# Report to the hub over ESP-NOW (crates/airlink, docs/ESPNOW.md): between
+# captures the node pauses, retunes to the gateway's 2.4 GHz channel 6,
+# sends its queued link frames and listens briefly for a hub command, then
+# re-locks the receiver. This is the ONLY way this firmware transmits; the
+# capture path stays receive-only (see README.md "Hub link"). Off by default.
+# Build with `cargo fw-now` from c5/.
+espnow = ["esp-radio/esp-now", "dep:airlink"]
 
 [dependencies]
 rawcap  = { path = "../../crates/rawcap", default-features = false }
 droneid = { path = "../../crates/droneid", default-features = false }
+fpvscan = { path = "../../crates/fpvscan" }
+link    = { path = "../../crates/link" }
+airlink = { path = "../../crates/airlink", optional = true }
+heapless = "0.8"
 
 esp-hal                = { version = "~1.2.2", features = ["esp32c5", "unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["esp32c5", "embassy", "esp-alloc", "esp-radio"] }
