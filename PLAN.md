@@ -144,6 +144,12 @@ devices than UARTs. The PCB design step (Phase 5) has to choose between two fixe
 
 The message format doesn't change either way.
 
+**Decided 2026-11-15: many nodes on one UART is the target.** Instead of one UART per node, every
+node shares a single hub UART: the hub's TX fans out to every node's RX, and every node's TX joins
+one return wire (open-drain, one pull-up). The hub polls each node in turn ("node N, send"), so no
+two nodes ever talk at once. Three wires (TX, RX, ground) serve any number of nodes, nodes stay
+receive-only on the air, and the ESP-NOW gateway C5 becomes another listener. See Phase 5a.
+
 ---
 
 ## Rust plan: what's feasible, and the exceptions
@@ -217,7 +223,32 @@ ahead.
 ### Phase 5: Kit hardware
 - A carrier PCB with the chips as modules or castellated boards, antenna connectors, battery and
   power path, and a case.
-- Decide the SPI-bus versus Wi-Fi-link question here.
+- ~~Decide the SPI-bus versus Wi-Fi-link question here.~~ Superseded by Phase 5a.
+
+### Phase 5a: Many nodes on one UART (objective, added 2026-11-15)
+Goal: drop ESP-NOW as the default node link. That gives back the listening time it costs (Bluetooth
+node ~18% of adverts, 5 GHz node's channel-6 visits, DroneID node's send pauses), stops nodes
+transmitting at all (no unauthenticated radio input), and frees the gateway C5 to be a listener.
+
+- **Bus:** hub UART TX → every node RX (addressed commands; others ignore). Node TX pins
+  open-drain onto one shared return wire with one pull-up. 921600 baud to start.
+- **Polling:** the hub asks each node in turn ("node N, go ahead"); the node sends its queued
+  frames and a "done" marker, or "nothing". A ~20 ms cycle keeps latency below today's ESP-NOW.
+- **Joining:** a periodic "anyone new?" slot; a new node answers after a random delay and is given
+  a short bus address tied to its MAC, so it keeps it across image switches. Collisions only
+  happen at join and are caught by the frame checksum.
+- **Same frames:** `link` frames unchanged; the poll/address messages are new `Command` and
+  `Frame` variants appended to the protocol, like protocol 4. `Via` attribution comes from the
+  poll address.
+- **Long cables:** the same design over RS-485 transceivers (~$0.50 each end) for runs beyond about
+  1 m. CAN (TWAI, ~$1 transceiver per board) is the fallback if polling proves limiting.
+- **Power:** nodes powered separately on the kit; the P4 header's 5 V is not sized for several C5s.
+- **Keep ESP-NOW** as an opt-in build for a node that can't be wired.
+- **Rejected:** I2C (the P4's only I2C header is the touch bus, its I2C controller doesn't work so
+  it is bit-banged, short wires only); SPI (a chip-select wire per node, not enough free pins).
+- **Done when:** c5a, b and c (gateway turned listener) share UART3 into the P4 with 0 corrupt
+  frames, every role assignment arrives over the wire, and the listening-time gain over ESP-NOW is
+  measured.
 - Browser flasher that updates every chip, building on the earlier Orbic web-flasher work.
 - Build guide.
 - **Done when:** someone other than us builds one from the guide.
