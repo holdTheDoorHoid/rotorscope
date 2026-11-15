@@ -115,8 +115,8 @@ settings! {
     /// No 91.119 flag this close to a public airport (takeoff/landing, 91.119 preamble).
     ac_airport_excl_m: 5556.0, "m", "14 CFR 91.119 (except when necessary for takeoff or landing)",
         "project choice: 3 NM; a 3 degree approach is ~1000 ft up at 3 NM.";
-    /// ... and this close to a heliport or private field.
-    ac_heliport_excl_m: 1852.0, "m", "91.119", "project choice: 1 NM.";
+    /// ... and this close to a private airfield or seaplane base.
+    ac_private_excl_m: 1852.0, "m", "91.119", "project choice: 1 NM for private strips and seaplane bases (heliports are ignored: helicopters are not checked).";
     ac_warn_s: 30.0, "s", "91.119", "project choice.";
     /// Only positions this fresh are evaluated.
     fresh_ms: 3000.0, "ms", "-", "project choice: as the tracker's 'Remote ID preferred' window.";

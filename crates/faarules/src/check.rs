@@ -504,14 +504,18 @@ pub fn aircraft_conditions(a: &AircraftTrack, inp: &Inputs<'_, '_>) -> Conds {
         return out;
     }
     // Away from airports (takeoff and landing are exempt).
-    let near = p.airports().any(|ap| {
-        let excl = if ap.kind == 0 && ap.flags & 1 != 0 {
-            s.ac_airport_excl_m
-        } else {
-            s.ac_heliport_excl_m
-        };
-        distance_m(pos.lat, pos.lon, ap.lat, ap.lon) < f64::from(excl)
-    });
+    // Heliports do not count: helicopters are not checked at all (91.119(d)).
+    let near = p
+        .airports()
+        .filter(|ap| ap.kind == 0 || ap.kind == 2)
+        .any(|ap| {
+            let excl = if ap.flags & 1 != 0 {
+                s.ac_airport_excl_m
+            } else {
+                s.ac_private_excl_m
+            };
+            distance_m(pos.lat, pos.lon, ap.lat, ap.lon) < f64::from(excl)
+        });
     if near {
         return out;
     }

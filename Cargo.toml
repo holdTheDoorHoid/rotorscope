@@ -11,7 +11,7 @@ members = [
     "crates/sdnative",
     "crates/airspace", "crates/faarules",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull", "tools/droneid-hil",
-    "tools/cc26xx-flash",
+    "tools/cc26xx-flash", "tools/airspace-pack",
 ]
 
 [workspace.package]

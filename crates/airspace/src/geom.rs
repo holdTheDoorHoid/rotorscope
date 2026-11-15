@@ -45,10 +45,12 @@ pub fn point_in_rings(
                 if (yi > y) != (yj > y) {
                     // x < xi + (y - yi) * (xj - xi) / (yj - yi), in integers:
                     // compare (x - xi) * (yj - yi) with (y - yi) * (xj - xi),
-                    // flipping for a negative denominator. i64 is enough:
-                    // each factor is below 2^32.
-                    let lhs = (x - xi) as i128 * (yj - yi) as i128;
-                    let rhs = (y - yi) as i128 * (xj - xi) as i128;
+                    // flipping for a negative denominator. Each factor is a
+                    // coordinate difference in 1e-7 deg (at most 3.6e9 and
+                    // 1.8e9), so the products fit in i64 (no i128: slow on
+                    // a 32-bit hub).
+                    let lhs = (x - xi) * (yj - yi);
+                    let rhs = (y - yi) * (xj - xi);
                     let left = if yj > yi { lhs < rhs } else { lhs > rhs };
                     if left {
                         inside = !inside;

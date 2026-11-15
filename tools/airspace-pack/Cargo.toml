@@ -1,0 +1,21 @@
+[package]
+name = "airspace-pack"
+description = "Host tool: download public FAA/USGS/NGS/Census data around a point and write a Rotorscope airspace pack"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+airspace = { workspace = true, features = ["alloc"] }
+# Blocking HTTPS (rustls, no OpenSSL).
+ureq = "2"
+serde_json = "1"
+# The USGS 3DEP export is a float32 GeoTIFF.
+tiff = "0.9"
+
+[dev-dependencies]
+faarules.workspace = true
+tracker.workspace = true
+rid = { workspace = true, features = ["serde"] }
+heapless.workspace = true
