@@ -323,6 +323,36 @@ impl Faa {
         }
     }
 
+    /// Once a second: one `Frame::Flags` per flagged track down the web-head
+    /// wire (WEBHEAD.md), worst items first.
+    pub fn forward(&self, tracker: &HubTracker, feed: &mut crate::webhead::Feed) {
+        let pack_date = self.pack.map_or(0, |p| p.created);
+        for e in self.engine.entries().iter().filter(|e| !e.flags.is_empty()) {
+            let mut who: heapless::String<24> = heapless::String::new();
+            match e.key {
+                Key::Aircraft(icao) => {
+                    let _ = write!(who, "ICAO-{icao:06x}");
+                }
+                Key::Drone(_) => who = self::who(tracker, e.key),
+            }
+            let mut flags: heapless::Vec<&faarules::Flag, 8> = e.flags.iter().collect();
+            flags.sort_unstable_by(|a, b| b.level.cmp(&a.level));
+            let items = flags
+                .iter()
+                .take(link::MAX_FLAG_ITEMS)
+                .map(|f| link::FlagItem {
+                    rule: f.rule as u8,
+                    area: f.area.map_or(0, |a| a as u8),
+                    level: f.level,
+                    value: faarules::text::item_value(f),
+                    secs: f.secs.min(65_535.0) as u16,
+                })
+                .collect();
+            let report = link::FlagReport { who, level: e.level().unwrap_or(0), items, pack_date };
+            feed.fwd.send(&link::Frame::Flags(report));
+        }
+    }
+
     /// "pack 2026-11-15", "loading 40%", "no airspace pack", ...
     pub fn pack_text(&self) -> heapless::String<32> {
         let mut s = heapless::String::new();

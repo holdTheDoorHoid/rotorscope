@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 /// - 5: adds [`Frame::HubFix`] and [`Frame::Csbee`], sent by a hub to a "web
 ///   head" (a second board that serves the phone page; see
 ///   `firmware/hub-p4/WEBHEAD.md`). Appended likewise; nodes never send them.
-pub const PROTOCOL_VERSION: u8 = 5;
+/// - 6: adds [`Frame::Flags`] (hub to web head: possible FAA rule violations,
+///   PLAN.md Phase 12). Appended likewise.
+pub const PROTOCOL_VERSION: u8 = 6;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -212,6 +214,41 @@ pub struct HubFix {
     pub utc_pps: bool,
 }
 
+/// Protocol 6. One flag on [`FlagReport`]: the rule and level, and the one
+/// number that says most (see `faarules::text::item_text`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FlagItem {
+    /// `faarules::Rule` as u8.
+    pub rule: u8,
+    /// `airspace::AreaKind` as u8, 0 for none.
+    pub area: u8,
+    /// 0 Note, 1 Watch, 2 Warning, 3 Alert.
+    pub level: u8,
+    /// Height above ground (m), distance (m), terrain over the sight line
+    /// (m), sun elevation (deg)... per rule; 0 when none.
+    pub value: f32,
+    /// How long it has held, seconds.
+    pub secs: u16,
+}
+
+/// Most items one [`FlagReport`] carries (the worst ones).
+pub const MAX_FLAG_ITEMS: usize = 6;
+
+/// Protocol 6, hub to web head, about once a second per flagged track: the
+/// hub's possible-violation flags for one drone or aircraft. Tracks are
+/// numbered independently on the two boards, so `who` names it the way both
+/// can: a drone's primary UAS ID as text (or its transmitter address as 12
+/// hex digits when it has no ID yet), or `ICAO-xxxxxx` for an aircraft.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlagReport {
+    pub who: heapless::String<24>,
+    /// The worst level.
+    pub level: u8,
+    pub items: Vec<FlagItem, MAX_FLAG_ITEMS>,
+    /// Airspace pack build date (Unix s); 0 = the hub has no pack.
+    pub pack_date: u32,
+}
+
 /// One Remote ID reception: everything one frame or advertisement carried.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Detection {
@@ -304,6 +341,9 @@ pub enum Frame {
     /// ADSBee 1090 (`crates/adsb`), CRC and line end included, exactly as
     /// the ADSBee prints it. The web head parses it with `adsb::parse`.
     Csbee(Vec<u8, MAX_CSBEE_LINE>),
+    /// Protocol 6, hub to web head only: possible FAA rule violations on one
+    /// track (PLAN.md Phase 12).
+    Flags(FlagReport),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -422,7 +462,7 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 19] {
+    fn samples() -> [Frame; 20] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -526,6 +566,12 @@ mod tests {
             }),
             Frame::Csbee([0xFF; MAX_CSBEE_LINE].into_iter().collect()),
             Frame::Csbee(b"#S:2,0,0,0,0,0,0,0,0,0,0,ABCD\r\n".iter().copied().collect()),
+            Frame::Flags(FlagReport {
+                who: heapless::String::try_from("ABCDEFGHIJKLMNOPQRSTUVWX").unwrap(),
+                level: u8::MAX,
+                items: core::iter::repeat_n(FlagItem { rule: u8::MAX, area: u8::MAX, level: u8::MAX, value: f32::MAX, secs: u16::MAX }, MAX_FLAG_ITEMS).collect(),
+                pack_date: u32::MAX,
+            }),
         ]
     }
 
@@ -552,7 +598,7 @@ mod tests {
         }
     }
 
-    /// Protocol 1-4 tags did not move; protocol 5 took 10 and 11.
+    /// Protocol 1-4 tags did not move; protocol 5 took 10 and 11, 6 took 12.
     #[test]
     fn protocol_4_and_5_append_only() {
         let mut buf = [0u8; MAX_FRAME];
@@ -560,7 +606,7 @@ mod tests {
             .iter()
             .map(|f| postcard::to_slice(f, &mut buf).unwrap()[0])
             .collect();
-        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5, 10, 10, 11, 11]);
+        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5, 10, 10, 11, 11, 12]);
         assert_eq!(NodeRole::Fpv as u8, 3);
         assert_eq!(NodeRole::Gateway.bit(), 1 << 5);
     }

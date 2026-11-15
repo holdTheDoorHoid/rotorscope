@@ -339,6 +339,7 @@ fn main() -> ! {
             let max_age = app.tracker.config().own_fix_max_age_ms;
             if let Some(f) = gw.feed.as_mut() {
                 f.tick(&gps, max_age, frames, lost, ms);
+                faa.forward(app.tracker, f);
             }
             report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, faa, ms);
         }

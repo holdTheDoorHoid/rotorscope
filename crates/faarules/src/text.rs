@@ -291,3 +291,41 @@ pub fn screen_text(fl: &Flag) -> heapless::String<24> {
     };
     s
 }
+
+/// The one number a compact report carries for a flag (`link::FlagItem`):
+/// height above ground or distance in metres, terrain over the sight line,
+/// sun elevation, number of serial changes; 0 for the rest.
+pub fn item_value(fl: &Flag) -> f32 {
+    match fl.rule {
+        Rule::Height | Rule::FacilityMap | Rule::LowAircraft | Rule::Vlos | Rule::VlosTerrain | Rule::Night | Rule::SerialChanged => fl.ev[0],
+        _ => 0.0,
+    }
+}
+
+/// A compact flag as words, for a board that only has the compact report
+/// (the web head's phone page and CoT remark): "Warning HEIGHT 920 ft AGL
+/// (14 CFR 107.51(b) / 49 USC 44809(a)(6))".
+pub fn item_text(rule: u8, area: u8, level: u8, value: f32) -> heapless::String<120> {
+    let mut s = heapless::String::new();
+    let Some(r) = Rule::from_u8(rule) else {
+        let _ = write!(s, "{} rule {rule}", level_name(level));
+        return s;
+    };
+    let area = airspace::AreaKind::from_u8(area);
+    let ft = value * airspace::FT_PER_M as f32;
+    let _ = write!(s, "{} {} ", level_name(level), r.code());
+    let _ = match r {
+        Rule::Height => write!(s, "{ft:.0} ft AGL"),
+        Rule::FacilityMap => write!(s, "{ft:.0} ft AGL over facility-map ceiling"),
+        Rule::LowAircraft => write!(s, "{ft:.0} ft above ground"),
+        Rule::Controlled | Rule::Area => write!(s, "inside {}", area.map_or("area", |a| a.name())),
+        Rule::Vlos => write!(s, "{value:.0} m from operator"),
+        Rule::VlosTerrain => write!(s, "terrain {value:.0} m over sight line"),
+        Rule::Night => write!(s, "sun {value:.1} deg"),
+        Rule::SerialChanged => write!(s, "serial changed {}x", value as u32),
+        Rule::NoRemoteId => write!(s, "no Remote ID"),
+        Rule::NoOperator => write!(s, "no operator position"),
+    };
+    let _ = write!(s, " ({})", r.citation(area));
+    s
+}

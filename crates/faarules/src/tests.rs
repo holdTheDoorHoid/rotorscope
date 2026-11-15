@@ -480,3 +480,11 @@ fn low_aircraft_over_town_away_from_airports() {
     // ~173 m up, +/-90 m baro error, still under 1000 ft (305 m): Warning.
     assert_eq!(e.flags[0].level, 2, "{:?}", e.flags[0]);
 }
+
+#[test]
+fn compact_item_text() {
+    let t = text::item_text(Rule::Height as u8, 0, 2, 280.4);
+    assert_eq!(t.as_str(), "Warning HEIGHT 920 ft AGL (14 CFR 107.51(b) / 49 USC 44809(a)(6))");
+    let t = text::item_text(Rule::Area as u8, AreaKind::NationalSecurity as u8, 3, 0.0);
+    assert!(t.starts_with("Alert AREA inside Natl security UAS"), "{t}");
+}

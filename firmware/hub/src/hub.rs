@@ -177,6 +177,8 @@ pub struct Hub {
     /// a person typed it in, so it does not go stale like a GPS fix. Not kept
     /// across reboots yet (would need a flash write; see README).
     pub manual_pos: Cell<Option<OwnPos>>,
+    /// Possible-violation flags from a P4 hub (web head; `flags.rs`).
+    pub flags: RefCell<crate::flags::Table>,
 }
 
 impl Hub {
@@ -193,6 +195,7 @@ impl Hub {
             relayed_full: Cell::new(0),
             adsb: Cell::new(AdsbHealth::default()),
             manual_pos: Cell::new(None),
+            flags: RefCell::new(heapless::Vec::new()),
         }
     }
 
@@ -267,6 +270,8 @@ impl Hub {
             // Protocol 5, from a P4 hub this board is the web head of.
             Frame::HubFix(fix) => gnss::set_upstream(&fix, now),
             Frame::Csbee(line) => crate::adsbee::on_forwarded_line(self, &line, now),
+            // Protocol 6: the P4's possible-violation flags.
+            Frame::Flags(report) => crate::flags::on_report(&mut self.flags.borrow_mut(), report, now),
             Frame::Detection(det) => {
                 self.tracker.borrow_mut().ingest(node, &det, now);
                 self.announce_new(now);

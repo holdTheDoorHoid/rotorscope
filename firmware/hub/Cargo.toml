@@ -86,6 +86,8 @@ webui   = { path = "../../crates/webui" }
 gnss    = { path = "../../crates/gnss" }
 # On-device screen: view-model, button state machine, banded renderer.
 screen  = { path = "../../crates/screen", features = ["tracker"] }
+# Words for the P4's possible-violation flags (web head; PLAN.md Phase 12).
+faarules = { path = "../../crates/faarules" }
 
 esp-hal                = { version = "~1.2.2", features = ["unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }

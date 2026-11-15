@@ -278,6 +278,7 @@ const NEW_FOR_MS = 15000;      // how long a new drone stays highlighted
 const GRACE_MS = 1000;         // as the tracker's announce_grace_ms
 
 let st = null;                 // last good /api/state
+let flagList = [];             // last /api/flags (P4 hub's possible-violation flags; [] elsewhere)
 let lastOk = 0;                // Date.now() of that answer
 let everOk = false;
 let tab = 'radar';
@@ -427,6 +428,12 @@ async function poll() {
     lastOk = Date.now();
     everOk = true;
     checkNew();
+    // Possible FAA rule violations, forwarded by a P4 hub (web head only;
+    // other hubs answer with an empty list or not at all).
+    try {
+      const f = await fetch('/api/flags', {cache: 'no-store', signal: ctl.signal});
+      flagList = f.ok ? ((await f.json()).flags || []) : [];
+    } catch (e) { flagList = []; }
   } catch (e) {
     // Shown as "connection lost" once it has lasted LOST_AFTER_MS.
   } finally {
@@ -682,7 +689,9 @@ function renderList() {
   for (const t of all) {
     const g = t.own, l = t.loc || {};
     const stale = isStale(t);
-    const tags = (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '');
+    const fl = flagList.find(f => f.who === idOf(t) && f.level >= 1);
+    const tags = (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') +
+      (fl ? `<span class="tag">${['', 'WATCH', 'WARNING', 'ALERT'][Math.min(fl.level, 3)]}</span>` : '');
     const where = !g ? '<span class="mut">distance unknown (no position for you)</span>'
       : g.dist_m == null ? '<span class="mut">drone not sending a position yet</span>'
       : `<span class="big">${fmtDist(g.dist_m)}</span><span class="big">${bearing(g.brg)}</span>`;
@@ -696,6 +705,7 @@ function renderList() {
       `<span>heard ${ago(t.age_ms)}</span>${t.rssi != null ? `<span>${t.rssi} dBm</span>` : ''}</div>` +
       `</button>`);
   }
+  o.push(...flagCards());
   o.push(...linkCards());
   o.push(...rfCards());
   o.push(...wifiDroneCards());
@@ -775,6 +785,23 @@ function wifiDroneCards() {
    altitude in feet unless metric is chosen. */
 const aircraft = () => (st && st.aircraft) || [];
 const lowAircraft = () => aircraft().filter(a => a.own && a.own.low && a.drone == null);
+/* Possible FAA rule violations (PLAN.md Phase 12), decided by a P4 hub from
+   its offline airspace pack. Wording: "possible", never "illegal": the hub
+   cannot see waivers, LAANC or public-safety authorizations. */
+function flagCards() {
+  if (!flagList.length) return [];
+  const lv = ['Note', 'Watch', 'Warning', 'Alert'];
+  const o = [`<h2>Possible violations</h2><div class="mut" style="font-size:14px">The hub cannot see waivers, LAANC or other authorizations.</div>`];
+  for (const f of flagList.slice().sort((a, b) => b.level - a.level)) {
+    const d = f.pack_date ? new Date(f.pack_date * 1000).toISOString().slice(0, 10) : null;
+    o.push(`<div class="trk">` +
+      `<div class="r1"><span class="id mono">${esc(f.who)}</span><span class="tag">${esc(lv[Math.min(f.level, 3)].toUpperCase())}</span></div>` +
+      f.items.map(i => `<div class="r2"><span>${esc(i.text)}</span><span class="mut">${i.secs} s</span></div>`).join('') +
+      `<div class="r3"><span class="mut">${d ? 'airspace data ' + d : 'no airspace data on the hub'}</span></div></div>`);
+  }
+  return o;
+}
+
 function aircraftCards() {
   if (!st || !st.adsb) return [];
   const all = aircraft().slice().sort((a, b) =>

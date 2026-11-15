@@ -418,7 +418,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             Frame::Stats { .. } | Frame::Via { .. } => {}
             // Protocol 5, hub to web head: the hub firmware handles these
             // (own position, ADS-B), not the drone tables.
-            Frame::HubFix(_) | Frame::Csbee(_) => {}
+            Frame::HubFix(_) | Frame::Csbee(_) | Frame::Flags(_) => {}
         }
     }
 

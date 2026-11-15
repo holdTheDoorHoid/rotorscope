@@ -86,6 +86,23 @@ impl Rule {
         }
     }
 
+    pub fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            1 => Rule::Height,
+            2 => Rule::FacilityMap,
+            3 => Rule::Controlled,
+            4 => Rule::Area,
+            5 => Rule::NoRemoteId,
+            6 => Rule::NoOperator,
+            7 => Rule::SerialChanged,
+            8 => Rule::LowAircraft,
+            9 => Rule::Vlos,
+            10 => Rule::VlosTerrain,
+            11 => Rule::Night,
+            _ => return None,
+        })
+    }
+
     /// The regulation cited.
     pub fn citation(self, area: Option<AreaKind>) -> &'static str {
         match self {

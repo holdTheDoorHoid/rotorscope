@@ -82,7 +82,8 @@ pub async fn task(stack: Stack<'static>, hub: &'static Hub) {
                     let tracker = hub.tracker.borrow();
                     let Some(t) = tracker.get(id) else { break };
                     match which {
-                        Which::Drone => cot::drone_event(t, &ctx, &mut event),
+                        Which::Drone => cot::drone_event(t, &ctx, &mut event)
+                            .map(|n| with_flags(&mut event, n, &crate::flags::remark(&hub.flags.borrow(), t, now))),
                         Which::Operator => cot::operator_event(t, &ctx, &mut event),
                     }
                 };
@@ -139,6 +140,20 @@ pub async fn task(stack: Stack<'static>, hub: &'static Hub) {
         let us = Instant::now().duration_since(t0).as_micros() as u32;
         TICK_MAX_US.fetch_max(us, Relaxed);
     }
+}
+
+/// Insert the P4's possible-violation flags (if any) at the end of the
+/// drone event's `<remarks>`, when they fit. Returns the new length.
+fn with_flags(event: &mut [u8], n: usize, extra: &str) -> usize {
+    const END: &[u8] = b"</remarks>";
+    if extra.is_empty() || n + extra.len() > event.len() {
+        return n;
+    }
+    let Some(at) = event[..n].windows(END.len()).position(|w| w == END) else { return n };
+    // XML-escape is not needed: the flag words never contain '<' or '&'.
+    event.copy_within(at..n, at + extra.len());
+    event[at..at + extra.len()].copy_from_slice(extra.as_bytes());
+    n + extra.len()
 }
 
 #[derive(Clone, Copy)]
