@@ -1,0 +1,13 @@
+[package]
+name = "modes-live"
+description = "Laptop tool: decode an ADSBee's raw Beast frames with crates/modes and compare with the ADSBee's own CSBee decode"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+modes.workspace = true
+adsb.workspace = true
+# termios (raw serial mode) and SIGINT, as rid-view does.
+libc = "0.2"

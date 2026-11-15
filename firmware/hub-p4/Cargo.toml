@@ -66,6 +66,16 @@ webheadloop = []
 # is read back from the card like any pack). For loading a pack onto the
 # card without taking the card out. See src/faa.rs.
 embedpack = []
+# Phase 14a: decode the ADSBee's raw Beast frames in-house (crates/modes)
+# instead of trusting its CSBee summary. Set the ADSBee with
+# `AT+PROTOCOL_OUT=COMMS_UART,BEAST`; CSBee lines are still accepted. Off by
+# default until the raw path has run with a real ADSBee on this hub.
+modes = ["dep:modes"]
+# Bench only: on-chip loop-back test of `modes`. UART4's TX drives its own
+# RX pad (GPIO30) with Beast frames recorded from the owner's ADSBee on the
+# laptop (2026-11-15, real aircraft), at their recorded pace, looped. Leave
+# GPIO30 unconnected while it runs.
+modesloop = ["modes"]
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -83,6 +93,8 @@ gnss = { path = "../../crates/gnss" }
 evidence = { path = "../../crates/evidence", features = ["soft-signer", "decode"] }
 # `encode`: the web-head feed re-prints ADSBee reports as CSBee lines.
 adsb = { path = "../../crates/adsb", features = ["encode"] }
+# Phase 14a, feature `modes`: our Mode S / ADS-B decoder.
+modes = { path = "../../crates/modes", optional = true }
 embedded-graphics = "0.8"
 # SD card: our bit-banged native 1-bit protocol (crates/sdnative) under the
 # same FAT driver the S3 hub uses. MIT/Apache.

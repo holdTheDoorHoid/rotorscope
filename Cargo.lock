@@ -1249,6 +1249,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "modes"
+version = "0.1.0"
+dependencies = [
+ "adsb",
+ "libm",
+]
+
+[[package]]
+name = "modes-live"
+version = "0.1.0"
+dependencies = [
+ "adsb",
+ "libc",
+ "modes",
+]
+
+[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

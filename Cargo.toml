@@ -9,10 +9,10 @@ members = [
     "crates/coverage", "crates/nodeimage", "crates/fpvscan",
     "crates/wifidrone",
     "crates/sdnative",
-    "crates/airspace", "crates/faarules",
+    "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull", "tools/droneid-hil",
-    "tools/cc26xx-flash", "tools/airspace-pack",
+    "tools/cc26xx-flash", "tools/airspace-pack", "tools/modes-live",
     "tools/evidence-verify", "tools/evidence-server",
 ]
 
@@ -31,6 +31,7 @@ adsb = { path = "crates/adsb" }
 airspace = { path = "crates/airspace" }
 faarules = { path = "crates/faarules" }
 evidence = { path = "crates/evidence" }
+modes = { path = "crates/modes" }
 wifidrone = { path = "crates/wifidrone" }
 droneid = { path = "crates/droneid", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }

@@ -122,3 +122,75 @@ airliner at 12,000 ft 10 km NNE and one at 24,000 ft 22 km N; one aircraft had n
 yet. RSSI -71/-72 dBm. The parser (`crates/adsb`) agrees with the real CSBee layout. The console
 output was set back to `CONSOLE,NONE` afterwards; nothing was saved. Not yet tried: the
 ADSBee wired into a hub (the P4 has no `adsbee` input yet; the S3 build does).
+
+## Raw frames and our own decoder (Phase 14a, 2026-11-15)
+
+Besides CSBee, firmware 0.9.0 offers `AT+PROTOCOL_OUT=<iface>,<protocol>` with `NONE`, `RAW`,
+`BEAST`, `BEAST_NO_UAT`, `BEAST_NO_UAT_UPLINK`, `CSBEE`, `MAVLINK1`, `MAVLINK2`, `GDL90` and
+`AIRCRAFT_JSON` (`firmware/common/settings/settings_strs.cpp`). One protocol per interface.
+
+- **BEAST** (used): binary, `0x1A`-framed, 12 MHz timestamp, a signal byte (the ADSBee maps
+  -100..-40 dBm onto it), ~23 bytes per long frame. Parsed by `crates/modes::input::BeastReader`.
+- **RAW**: text, `#MDS*<hex>;(source,dBm,SNR,48 MHz counter)`, ~70 bytes per frame. Parsed by
+  `modes::input::parse_raw_line`, not used by default.
+- Both carry only frames the ADSBee already **accepted**: it repairs single-bit errors itself and
+  drops what it cannot validate (`adsbee.cc`, `IngestAndForwardPackets`; address/parity replies
+  only for aircraft in its own table). So our error correction rarely fires on this feed; it
+  is there for other raw sources (an SDR, 14c).
+
+`crates/modes` decodes everything above the radio (CRC-24, address recovery, 1-2 bit repair,
+CPR global and local, velocity, identification, Gillham and 25 ft altitudes, squawks, DF11,
+Comm-B BDS 1,0/2,0/4,0/5,0/6,0, TIS-B/ADS-R) and reports a table once a second as the same
+`adsb::Aircraft` records the CSBee parser gives.
+
+### Laptop check against the ADSBee's own decode
+
+`tools/modes-live` alternates the USB console between BEAST (4 s) and CSBEE (1.6 s), decodes the
+Beast frames itself and compares every CSBee aircraft line with its own table at that moment.
+It reads `AT+PROTOCOL_OUT?` first and restores it at the end (also on Ctrl-C); it never sends
+`AT+SETTINGS=SAVE` and never touches Wi-Fi or COMMS_UART.
+
+```sh
+PORT=/dev/serial/by-id/usb-Raspberry_Pi_Pico_...-if00
+cargo run --release -p modes-live -- live "$PORT" --secs 900 --own-pos 39.9526,-75.1652 \
+    --record ~/modes.bin --log ~/modes-mismatch.txt
+cargo run --release -p modes-live -- replay ~/modes.bin --own-pos 39.9526,-75.1652   # again, offline
+```
+
+**Result, 2026-11-15, centre city Philadelphia, indoors, 15 minutes** (`modes-live live`):
+5229 Beast frames (DF0 2294, DF4 451, DF5 2, DF11 683, DF16 59, DF17 1737, DF20 3), 5209 used,
+0 bad CRC, 5 address/parity replies dropped as unconfirmed, 511 global + 129 local positions,
+0 refused. Against 404 CSBee lines whose frame counts said the ADSBee heard the aircraft that
+second (27 aircraft):
+
+| Field | Agree |
+|---|---|
+| aircraft also in our table | 401 / 404 (99.3%) |
+| callsign | 306 / 306 |
+| squawk | 19 / 19 |
+| emitter category | 327 / 327 |
+| barometric altitude, allowing for climb since the last update | 396 / 397 (99.7%); exactly equal 233 |
+| position, allowing for motion since the last update | 362 / 369 (98.1%); median distance 1 m |
+
+An earlier 15-minute recording the same afternoon gave 99.5% / 100% / 94% (squawk changes by
+ATC caught at different moments) / 100% / 99.4% / 99.0% over 553 lines and 36 aircraft.
+
+**Every disagreement we looked at was the ADSBee's value being stale**, not ours being wrong:
+its CSBee line kept the same position or altitude for 17-113 s while the aircraft moved and
+our decode of its own frames moved with it (e.g. UAL1392 climbing at ~1100 ft/min: CSBee held
+28000 ft for 50 s, then jumped; our 28850 ft matched the climb). This may be an artifact of
+switching protocols every few seconds; it has not been seen in CSBee-only use. Two more
+observations, for whoever works on the CSBee path:
+
+- On these lines the `UPDATED_*` flag bits (23-29) stayed set while the values repeated, so
+  `adsb::Aircraft::heard()` (which trusts them) can call a repeated line fresh. The comparison
+  uses the per-second frame counts instead.
+- A Beast byte stream fed through `adsb::LineSplitter` produces `TooLong` errors (a stray `#`
+  in binary); the hub's `modes` build counts those as "other", not errors.
+
+### On the P4 hub
+
+Build with `--features modes` and set the ADSBee once over USB with
+`AT+PROTOCOL_OUT=COMMS_UART,BEAST` (CSBee lines are still accepted in that build). CSBee is
+still the default build. On-chip loop-back test (`--features modesloop`: UART4 replays 300 s
+of the recording above onto GPIO30): see `firmware/hub-p4/PARITY.md`.
