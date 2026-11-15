@@ -159,8 +159,8 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
     }
 
     st.nodes.clear();
-    for (i, n) in hub.nodes.borrow().iter().enumerate() {
-        let Some(role) = n.role else { continue };
+    hub.for_each_node(|n, drops| {
+        let Some(role) = n.role else { return };
         let kind = match role {
             link::NodeRole::Wifi24 => NodeKind::Wifi24,
             link::NodeRole::Wifi5 => NodeKind::Wifi5,
@@ -174,10 +174,10 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
             alive: n.alive(now),
             frames_per_s: n.seen_per_s.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
             rid_found: n.rid_total(),
-            drops: hub.link_drops(i),
+            drops,
             uptime_s: n.uptime_s(),
         });
-    }
+    });
     // The ADSBee as a node, and the aircraft line (feature `adsbee`).
     if let Some(a) = crate::adsbee::status(hub, now) {
         let _ = st.nodes.push(screen::NodeStatus {

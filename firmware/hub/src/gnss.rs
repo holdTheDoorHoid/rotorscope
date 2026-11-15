@@ -104,26 +104,102 @@ enum CfgState {
     NoAck = 4,
 }
 
+/// The latest usable fix: this board's own receiver, or the upstream hub's
+/// (web head, `Frame::HubFix`), whichever is newer.
 pub fn latest_fix() -> Option<Fix> {
-    critical_section::with(|cs| FIX.borrow(cs).get())
+    let own = critical_section::with(|cs| FIX.borrow(cs).get());
+    let up = upstream().and_then(|u| u.fix);
+    match (own, up) {
+        (Some(a), Some(b)) => Some(if b.at_ms > a.at_ms { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The UTC anchor in use: this board's receiver first (its PPS edge is
+/// measured here), else the upstream hub's.
+fn time_anchor() -> Option<TimeAnchor> {
+    critical_section::with(|cs| TIME.borrow(cs).get()).or_else(|| upstream().and_then(|u| u.time))
 }
 
 /// UTC for hub time `now_ms`, if GPS time has ever been seen. The crystal
 /// drifts ~20 ppm, so an anchor older than ~10 minutes is ~10 ms off; the
 /// task refreshes it every second while the receiver has time.
 pub fn utc_ms(now_ms: u64) -> Option<u64> {
-    critical_section::with(|cs| TIME.borrow(cs).get())
-        .map(|a| a.utc_ms.saturating_add(now_ms.saturating_sub(a.at_ms)))
+    time_anchor().map(|a| a.utc_ms.saturating_add(now_ms.saturating_sub(a.at_ms)))
 }
 
-/// The current UTC anchor came from a PPS edge.
+/// The current UTC anchor came from a PPS edge (here or on the upstream hub).
 pub fn utc_from_pps() -> bool {
-    critical_section::with(|cs| TIME.borrow(cs).get()).is_some_and(|a| a.pps)
+    time_anchor().is_some_and(|a| a.pps)
 }
 
-/// Receiver state for `/api/state` `gps`. `Absent` until a receiver answers.
+/// UTC comes from the upstream hub, not this board's own receiver.
+pub fn utc_from_upstream() -> bool {
+    critical_section::with(|cs| TIME.borrow(cs).get()).is_none() && time_anchor().is_some()
+}
+
+/// Receiver state for `/api/state` `gps`: this board's receiver, or, while
+/// it is absent, the upstream hub's (when heard recently).
 pub fn status() -> GpsStatus {
-    critical_section::with(|cs| STATUS.borrow(cs).get())
+    let own = critical_section::with(|cs| STATUS.borrow(cs).get());
+    if own.state != GpsState::Absent {
+        return own;
+    }
+    upstream().filter(|u| now_ms().saturating_sub(u.at_ms) <= UPSTREAM_ALIVE_MS).map_or(own, |u| u.status)
+}
+
+// ------------------------------------------------------------ upstream --
+
+/// What the upstream hub (a P4 feeding this board as its web head) last
+/// said about its GPS (`link::Frame::HubFix`, once a second).
+#[derive(Clone, Copy)]
+pub struct Upstream {
+    pub status: GpsStatus,
+    pub fix: Option<Fix>,
+    pub time: Option<TimeAnchor>,
+    /// Hub time the frame arrived.
+    pub at_ms: u64,
+}
+
+/// The upstream hub's GPS state counts for this long after its last frame.
+/// Its fix and UTC age on their own rules (the tracker's fix timeout; UTC
+/// keeps running from its last anchor, as for this board's own receiver).
+const UPSTREAM_ALIVE_MS: u64 = 3_000;
+
+static UPSTREAM: Mutex<Cell<Option<Upstream>>> = Mutex::new(Cell::new(None));
+pub static UPSTREAM_FRAMES: AtomicU32 = AtomicU32::new(0);
+
+pub fn upstream() -> Option<Upstream> {
+    critical_section::with(|cs| UPSTREAM.borrow(cs).get())
+}
+
+/// A `HubFix` frame arrived (at hub time `now`).
+pub fn set_upstream(h: &link::HubFix, now: u64) {
+    use link::GnssState;
+    let state = match h.state {
+        GnssState::Absent => GpsState::Absent,
+        GnssState::Searching => GpsState::Searching,
+        GnssState::Fix2d => GpsState::Fix2d,
+        GnssState::Fix3d => GpsState::Fix3d,
+    };
+    let prev = upstream();
+    let fix = match h.position {
+        Some(p) => Some(Fix {
+            lat: f64::from(p.lat_e7) / 1e7,
+            lon: f64::from(p.lon_e7) / 1e7,
+            alt_hae_m: p.alt_hae_mm.map(|mm| f64::from(mm) / 1000.0),
+            at_ms: now.saturating_sub(u64::from(p.age_ms)),
+        }),
+        // Keep the last one: it ages out by its own timestamp.
+        None => prev.and_then(|u| u.fix),
+    };
+    let time = match h.utc_ms {
+        Some(utc_ms) => Some(TimeAnchor { utc_ms, at_ms: now, pps: h.utc_pps }),
+        None => prev.and_then(|u| u.time),
+    };
+    let u = Upstream { status: GpsStatus { state, sats: h.sats }, fix, time, at_ms: now };
+    critical_section::with(|cs| UPSTREAM.borrow(cs).set(Some(u)));
+    UPSTREAM_FRAMES.fetch_add(1, Relaxed);
 }
 
 fn publish_status(s: GpsStatus) {
@@ -559,6 +635,10 @@ pub struct GpsLine {
     pps_n: u32,
     pps_age_ms: Option<u64>,
     fix_age_ms: Option<u64>,
+    /// The upstream hub's GPS (web head): `HubFix` frames received and the
+    /// age of the last one; null if none ever arrived.
+    up_frames: u32,
+    up_age_ms: Option<u64>,
 }
 
 impl GpsLine {
@@ -579,6 +659,8 @@ impl GpsLine {
             pps_n: PPS_COUNT.load(Relaxed),
             pps_age_ms: pps_last_us().map(|t| now_us.saturating_sub(t) / 1000),
             fix_age_ms: latest_fix().map(|f| now.saturating_sub(f.at_ms)),
+            up_frames: UPSTREAM_FRAMES.load(Relaxed),
+            up_age_ms: upstream().map(|u| now.saturating_sub(u.at_ms)),
         }
     }
 }

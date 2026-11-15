@@ -161,7 +161,7 @@ fn detection(d: &Drone, transport: Transport, counter: u8, msgs: &[RawMessage]) 
 
 fn inject(frame: Frame) {
     // Same queue as the UARTs; a full queue drops, as it would for a node.
-    let _ = FRAMES.try_send((NODE, frame));
+    let _ = FRAMES.try_send((NODE, None, frame));
 }
 
 /// The demo FPV link's streams: (radio port, frames per second).

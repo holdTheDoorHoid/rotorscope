@@ -18,7 +18,7 @@ use tracker::{AircraftKey, LinkTrackId, TrackId};
 use tracker::json::{self, MAX_LINE};
 
 use crate::api::OwnJson;
-use crate::hub::{Hub, MAX_AIRCRAFT, MAX_TRACKS, now_ms};
+use crate::hub::{Hub, MAX_AIRCRAFT, MAX_RELAYED, MAX_TRACKS, now_ms};
 use crate::pins::NODE_LINKS;
 use crate::{adsbee, clock, cot, gnss, hotspot, http, links, panel, screen, sd, usb};
 
@@ -54,6 +54,25 @@ struct LinkLine {
     drops: u32,
 }
 
+/// One node behind a relay (an ESP-NOW gateway, or a P4 hub feeding this
+/// board as its web head).
+#[derive(Serialize)]
+struct RelayedLine {
+    t: &'static str,
+    mac: [u8; 6],
+    /// The link it arrived on.
+    link: u8,
+    rssi: i8,
+    role: Option<link::NodeRole>,
+    fw: heapless::String<16>,
+    alive: bool,
+    seen_ps: Option<u32>,
+    rid_ps_hub: u32,
+    drops: u32,
+    can: Option<u8>,
+    plan: Option<u16>,
+}
+
 #[derive(Serialize)]
 struct HubLine {
     t: &'static str,
@@ -71,6 +90,10 @@ struct HubLine {
     aircraft_active: usize,
     own: Option<OwnJson>,
     links: heapless::Vec<LinkLine, NODE_LINKS>,
+    /// Nodes behind a relay (gateway or P4 hub; one `{"t":"relayed"}` line
+    /// each follows), and relayed frames from nodes that did not fit.
+    relayed: usize,
+    relayed_full: u32,
     heap_used: usize,
     heap_free: usize,
     /// Lowest `heap_free` seen since boot.
@@ -117,6 +140,9 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
 
         for n in hub.nodes.borrow_mut().iter_mut() {
             n.roll_rate();
+        }
+        for r in hub.relayed.borrow_mut().iter_mut() {
+            r.status.roll_rate();
         }
         hub.refresh_own(now);
         hub.tracker.borrow_mut().expire(now);
@@ -213,6 +239,8 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
                     }
                 })
                 .collect(),
+            relayed: hub.relayed.borrow().len(),
+            relayed_full: hub.relayed_full.get(),
             heap_used: esp_alloc::HEAP.used(),
             heap_free,
             heap_min_free,
@@ -235,5 +263,26 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
         };
         drop(nodes);
         usb::line(&status);
+        for i in 0..MAX_RELAYED {
+            let line = {
+                let relayed = hub.relayed.borrow();
+                let Some(r) = relayed.get(i) else { break };
+                RelayedLine {
+                    t: "relayed",
+                    mac: r.mac,
+                    link: r.link,
+                    rssi: r.rssi,
+                    role: r.status.role,
+                    fw: r.status.firmware.clone(),
+                    alive: r.status.alive(now),
+                    seen_ps: r.status.seen_per_s,
+                    rid_ps_hub: r.status.rid_per_s_hub,
+                    drops: r.status.node_dropped,
+                    can: r.status.can,
+                    plan: r.status.plan,
+                }
+            };
+            usb::line(&line);
+        }
     }
 }

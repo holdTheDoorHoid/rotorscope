@@ -77,6 +77,25 @@ pub struct NodeStatus {
     pub node_dropped: u32,
     /// Open FPV link sightings received from this link, total.
     pub open_sightings: u32,
+    /// Protocol 4 `Status`: roles the node can take and the plan it runs.
+    pub can: Option<u8>,
+    pub plan: Option<u16>,
+}
+
+/// Nodes relayed through a link (an ESP-NOW gateway, or a P4 hub feeding
+/// this board as its web head), kept apart by station address. Eight: the
+/// phone page's node list must fit its `MAX_LINE` envelope next to the
+/// three links (~150 bytes a node).
+pub const MAX_RELAYED: usize = 8;
+
+/// One relayed node: who it is, the link it came through, its health.
+#[derive(Clone)]
+pub struct Relayed {
+    pub mac: [u8; 6],
+    pub link: u8,
+    /// RSSI the relay last heard it at.
+    pub rssi: i8,
+    pub status: NodeStatus,
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +167,11 @@ pub struct OwnPos {
 pub struct Hub {
     pub tracker: RefCell<HubTracker>,
     pub nodes: RefCell<[NodeStatus; NODE_LINKS]>,
+    /// Nodes behind a relay. Tracker node number: `NODE_LINKS + index`.
+    pub relayed: RefCell<heapless::Vec<Relayed, MAX_RELAYED>>,
+    /// Relayed frames from nodes that did not fit in `relayed` (counted
+    /// against their link instead).
+    pub relayed_full: Cell<u32>,
     pub adsb: Cell<AdsbHealth>,
     /// Set by `POST /api/own-pos` or the USB `p` command. Kept until cleared:
     /// a person typed it in, so it does not go stale like a GPS fix. Not kept
@@ -165,6 +189,8 @@ impl Hub {
                 ..tracker::Config::default()
             })),
             nodes: RefCell::new(core::array::from_fn(|_| NodeStatus::default())),
+            relayed: RefCell::new(heapless::Vec::new()),
+            relayed_full: Cell::new(0),
             adsb: Cell::new(AdsbHealth::default()),
             manual_pos: Cell::new(None),
         }
@@ -173,7 +199,6 @@ impl Hub {
     /// One CSBee report from the ADSBee (feature `adsbee`, or its demo).
     /// Aircraft go to their own table: never a drone track, never an alert
     /// (`announce_new` is deliberately not called).
-    #[cfg_attr(not(feature = "adsbee"), allow(dead_code))]
     pub fn on_adsb(&self, report: &adsb::Report, now: u64) {
         let mut h = self.adsb.get();
         h.last_ms = Some(now);
@@ -187,38 +212,69 @@ impl Hub {
         crate::screen::mark_dirty();
     }
 
-    /// One frame from link `node` (or the demo source).
-    pub fn on_frame(&self, node: u8, frame: Frame, now: u64) {
-        if let Some(st) = self.nodes.borrow_mut().get_mut(usize::from(node)) {
-            st.last_heard_ms = Some(now);
-            match &frame {
-                Frame::Hello { role, protocol, firmware } => {
-                    st.role = Some(*role);
-                    st.protocol = *protocol;
-                    st.firmware = firmware.clone();
+    /// One frame from link `link`; `via` names the node a relay passed it
+    /// on for (see `links.rs`), `None` for the link's own frames (a wired
+    /// node, a gateway, a P4 hub, or the demo source).
+    pub fn on_link_frame(&self, link: u8, via: crate::links::Via, frame: Frame, now: u64) {
+        // Tracker node number and the health entry the frame counts for.
+        let node = {
+            let mut relayed = self.relayed.borrow_mut();
+            let mut nodes = self.nodes.borrow_mut();
+            let found = via.and_then(|(mac, rssi)| {
+                let i = match relayed.iter().position(|r| r.mac == mac) {
+                    Some(i) => i,
+                    None => {
+                        let r = Relayed { mac, link, rssi, status: NodeStatus::default() };
+                        if relayed.push(r).is_err() {
+                            self.relayed_full.set(self.relayed_full.get().wrapping_add(1));
+                            return None;
+                        }
+                        relayed.len() - 1
+                    }
+                };
+                relayed[i].rssi = rssi;
+                relayed[i].link = link;
+                Some(i)
+            });
+            let (node, st) = match found {
+                Some(i) => ((NODE_LINKS + i) as u8, Some(&mut relayed[i].status)),
+                None => (link, nodes.get_mut(usize::from(link))),
+            };
+            if let Some(st) = st {
+                st.last_heard_ms = Some(now);
+                match &frame {
+                    Frame::Hello { role, protocol, firmware } => {
+                        st.role = Some(*role);
+                        st.protocol = *protocol;
+                        st.firmware = firmware.clone();
+                    }
+                    Frame::Stats { uptime_us, frames_seen, rid_found, dropped, .. } => {
+                        st.on_stats(*uptime_us, *frames_seen, *rid_found, *dropped);
+                    }
+                    Frame::Status { role, can, plan } => {
+                        st.role = Some(*role);
+                        st.can = Some(*can);
+                        st.plan = Some(*plan);
+                    }
+                    Frame::Detection(_) => st.detections = st.detections.wrapping_add(1),
+                    Frame::OpenLink(_) => st.open_sightings = st.open_sightings.wrapping_add(1),
+                    _ => {}
                 }
-                Frame::Stats { uptime_us, frames_seen, rid_found, dropped, .. } => {
-                    st.on_stats(*uptime_us, *frames_seen, *rid_found, *dropped);
-                }
-                Frame::Detection(_) => st.detections = st.detections.wrapping_add(1),
-                Frame::OpenLink(_) => st.open_sightings = st.open_sightings.wrapping_add(1),
-                // ESP-NOW gateway marker. This hub has no per-node view of a
-                // gateway link yet: relayed frames count against the gateway's link.
-                Frame::Via { .. } => {}
-                // Protocol 4 frames: the S3 hub does not handle them yet.
-                _ => {}
             }
-        }
+            node
+        };
         match frame {
+            // Protocol 5, from a P4 hub this board is the web head of.
+            Frame::HubFix(fix) => gnss::set_upstream(&fix, now),
+            Frame::Csbee(line) => crate::adsbee::on_forwarded_line(self, &line, now),
             Frame::Detection(det) => {
                 self.tracker.borrow_mut().ingest(node, &det, now);
                 self.announce_new(now);
             }
-            // Kept apart from drones; no alert (there is no position to act on).
-            Frame::OpenLink(s) => {
-                self.tracker.borrow_mut().ingest_open_link(node, &s, now);
-            }
-            _ => {}
+            // Open links (kept apart from drones; no alert), protocol 4
+            // signals (DroneID, RF, DJI Wi-Fi, Wi-Fi drones) and node
+            // Hello/Status, as the P4 hub's tracker takes them.
+            other => self.tracker.borrow_mut().ingest_frame(node, &other, now),
         }
         // The screen shows tracks and node health: rebuild its view soon.
         crate::screen::mark_dirty();
@@ -276,6 +332,21 @@ impl Hub {
     /// Formatter context for this instant.
     pub fn context(&self, now: u64) -> Context {
         self.tracker.borrow().context(now, clock::utc_ms(now))
+    }
+
+    /// Every node with a health entry, links first, then relayed nodes:
+    /// (status, total drops). Links that never said Hello are left out.
+    pub fn for_each_node(&self, mut f: impl FnMut(&NodeStatus, u32)) {
+        for (i, st) in self.nodes.borrow().iter().enumerate() {
+            if st.role.is_some() {
+                f(st, self.link_drops(i));
+            }
+        }
+        for r in self.relayed.borrow().iter() {
+            if r.status.role.is_some() {
+                f(&r.status, r.status.node_dropped);
+            }
+        }
     }
 
     /// Total drops on link `i`: what the node lost plus what the hub lost.

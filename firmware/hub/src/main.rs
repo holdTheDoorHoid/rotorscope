@@ -98,8 +98,16 @@ const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" }
 const RECLAIMED_HEAP: usize = 73_744;
 #[cfg(feature = "esp32c5")]
 const RECLAIMED_HEAP: usize = 65_536;
-#[cfg(feature = "esp32s3")]
+#[cfg(all(feature = "esp32s3", not(any(feature = "adsbee", feature = "webhead"))))]
 const EXTRA_HEAP: usize = 64 * 1024;
+/// 8 KB less with an aircraft table (`adsbee`, `webhead`): the table and,
+/// for `webhead`, the relayed-node table did not fit in static RAM next to
+/// 64 KB (the `adsbee` build already failed to link by ~0.5 KB before the
+/// web head was added). The S3 showed >= 55 KB of the 137 KB heap unused,
+/// so ~47 KB stays spare. Not yet measured on a board in these builds:
+/// check `heap_min_free` in the `hub` line.
+#[cfg(all(feature = "esp32s3", any(feature = "adsbee", feature = "webhead")))]
+const EXTRA_HEAP: usize = 56 * 1024;
 /// 4 KB less on the C5: its main stack was already within ~1.2 KB of the
 /// linker's 8 KB floor, and the open-FPV-link table (`tracker::openlinks`)
 /// needed the room. The S3 keeps 64 KB; it showed >= 55 KB of heap unused.
@@ -137,6 +145,9 @@ struct BootLine {
     /// An ADSBee on UART2 (feature `adsbee`), and the aircraft table size.
     adsbee: bool,
     max_aircraft: usize,
+    /// Built as the P4 hub's web head (feature `webhead`); the P4 is wired
+    /// to node link 0.
+    webhead: bool,
     /// Screen controller the build drives.
     panel: &'static str,
     max_tracks: usize,
@@ -185,6 +196,7 @@ async fn main(spawner: Spawner) -> ! {
         gps: if cfg!(feature = "gps-uart") { "uart" } else { "i2c" },
         adsbee: adsbee::ENABLED,
         max_aircraft: hub::MAX_AIRCRAFT,
+        webhead: cfg!(feature = "webhead"),
         panel: if cfg!(feature = "ili9341") { "ili9341" } else { "st7789" },
         max_tracks: hub::MAX_TRACKS,
         track_bytes: core::mem::size_of::<hub::HubTracker>(),

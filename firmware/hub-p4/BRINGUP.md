@@ -20,6 +20,7 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 | UART1 header | 47 TX / 48 RX (shares the wireless-module socket SPI; DIP switch). **GPS** (2026-11-15) |
 | Wireless-module socket | GPIO26 CLK, 47/48 (shared with UART1), 29-32 (SX1262 BUSY/NSS/IRQ/NRST, nRF24 IRQ/CE/CS). With no module fitted: **GPIO29 = GPS PPS, GPIO30 = ADSBee TX in** (2026-11-15) |
 | UART3 header | 27 TX / 28 RX (XH2.54, also a 5 V input) |
+| Web-head feed | UART2 TX on GPIO31 (wireless-module socket), 921600, to the web head's node-A RX; WEBHEAD.md (2026-11-15) |
 | Radio | ESP32-C6 on SDIO slot 1 (CMD 54, CLK 53, D0-D3 52/51/50/49), factory esp-hosted firmware; no UART/boot pads |
 | Factory image | Backed up: `~/Desktop/rotorscope-backups/elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
 
@@ -66,6 +67,7 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 | 15 | GPS + ADS-B loop-back, LC29H(AA) emulated (`--features gpsloop`, branch `p4-parity`) | PASS 2026-11-15: UART2 played the GPS on the UART1 pads (GPIO48/47) at 115200, PPS pulsed on GPIO29 from inside the chip, UART4 sent CSBee onto its own RX pad (GPIO30). Hub found it at 115200, detected `lc29h` by `$PQTMVERNO`, 7 config steps ACKed, 3D fix, 14 in view / 14 used, dual band; 55 PPS edges in 59 s, UTC anchored to PPS; own position in the tracker (test aircraft at 1401 m, 37.6 deg); ADS-B 116 lines, 0 errors; 0 checksum / UART errors; gateway 2 nodes, 0 corrupt meanwhile |
 | 16 | Same, u-blox MAX-M10S emulated as shipped (`--features gpsloop-m10`) | PASS 2026-11-15: nothing valid at 115200, NMEA at 9600; detected `max-m10s` by MON-VER, 4 VALSETs ACKed, baud step to 115200 followed, NAV-PVT 3D fixes, PPS anchor; SD file named from GPS time (`11160000.CSV`, the emulator's 2026-11-16 00:00). 2 UART errors = the 9600 bytes heard at 115200 during the hunt |
 | 17 | Normal build from `p4-parity`, nothing on UART1/GPIO29/GPIO30 | PASS 2026-11-15, 45 s: GPS hunts 115200/9600/38400 and reports `absent` (0 bytes, 0 UART errors: pull-ups hold the idle lines), ADSBee not alive (0 bytes), SD `LOG00023.CSV`, gateway 2 nodes, 0 corrupt, 0 UART errors, 0 ring overflow, ~600 loops/s, max gap < 0.8 ms, max band 7.1 ms |
+| 18 | Web-head feed: UART2 TX GPIO31 (branch `webhead`, WEBHEAD.md) | PASS on-chip loop-back 2026-11-15 (`--features webheadloop`: UART4 RX on the GPIO31 pad decodes what UART2 sends; NMEA and CSBee fed from inside the chip; real gateway with 2 nodes): 8724 bytes sent = received, 306 frames, 0 corrupt, 0 orphan `Via`, 0 dropped, HubFix with the test point and UTC, every Csbee line CRC-good; with `fakedrone` detections forwarded too. Normal build: feed runs with nothing on GPIO31 (0 dropped), gateway 2 nodes, 0 corrupt. Not yet with the real web head or wire |
 | - | Gateway UART | moved to the UART3 interrupt with an 8 KB ring (~90 ms at full rate): a screen band takes ~6.5 ms and a touch read ~3 ms, the FIFO only lasts 1.4 ms |
 
 ## PSRAM and the I2C pins (resolved: it was the stack)

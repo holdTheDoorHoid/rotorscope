@@ -20,6 +20,8 @@ pub(crate) use println;
 
 #[cfg(all(feature = "selftest", feature = "gpsloop"))]
 compile_error!("`selftest` and `gpsloop` both use UART2; build one at a time");
+#[cfg(all(feature = "webheadloop", any(feature = "selftest", feature = "gpsloop")))]
+compile_error!("`webheadloop` needs the web-head feed on UART2, which `selftest` and `gpsloop` take");
 
 mod adsbee;
 mod app;
@@ -41,6 +43,9 @@ mod sd;
 mod sdbb;
 mod touch;
 mod uartring;
+mod webhead;
+#[cfg(feature = "webheadloop")]
+mod webheadloop;
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -234,6 +239,13 @@ fn main() -> ! {
     let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28(), p.GPIO27);
     println!("hub-p4: gateway link on UART3 RX GPIO28, TX GPIO27 at {} baud", links::BAUD);
     let mut down = downlink::Downlink::new();
+    // The web head (WEBHEAD.md): UART2 TX on GPIO31. The bench self-tests
+    // `selftest` and `gpsloop` need UART2 themselves, so they build without it.
+    #[cfg(not(any(feature = "selftest", feature = "gpsloop")))]
+    {
+        gw.feed = Some(webhead::Feed::new(p.UART2, p.GPIO31));
+        println!("hub-p4: web head feed on UART2 TX GPIO{} at {} baud", webhead::TX_PIN, webhead::BAUD);
+    }
 
     // GPS on UART1 (header RX GPIO48 / TX GPIO47), PPS on GPIO29; ADSBee on
     // UART4 RX GPIO30. See gps.rs, adsbee.rs and PARITY.md.
@@ -245,9 +257,17 @@ fn main() -> ! {
     let mut io = esp_hal::gpio::Io::new(p.IO_MUX);
     gps::pps_init(&mut io, Flex::new(p.GPIO29));
     let mut gps = gps::Gps::new();
+    #[cfg(not(feature = "webheadloop"))]
     let adsb_uart = esp_hal::uart::Uart::new(p.UART4, uartring::adsb_rx::config(adsb::DEFAULT_BAUD))
         .expect("UART4")
         .with_rx(p.GPIO30);
+    // Web-head loop-back test: UART4 listens to the web-head TX pad instead
+    // (see webheadloop.rs); the ADSBee input is fed from inside the chip.
+    #[cfg(feature = "webheadloop")]
+    let adsb_uart = esp_hal::uart::Uart::new(p.UART4, uartring::adsb_rx::config(webhead::BAUD))
+        .expect("UART4")
+        // SAFETY: bench only; GPIO31 is driven by UART2 TX and read here on purpose.
+        .with_rx(unsafe { esp_hal::peripherals::GPIO31::steal() });
     // Loop-back test: UART4 also drives its own RX pad.
     #[cfg(feature = "gpsloop")]
     // SAFETY: bench only; GPIO30 is shared with UART4 RX on purpose.
@@ -262,6 +282,8 @@ fn main() -> ! {
 
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
+    #[cfg(feature = "webheadloop")]
+    let mut whloop = webheadloop::Loop::new();
 
     // SAFETY: each static is taken exactly once, here, before the loop.
     let tracker = unsafe {
@@ -297,11 +319,19 @@ fn main() -> ! {
         app.ingest(&mut gw, ms);
         down.tick(&mut gw, ms);
         gps.tick(ms);
-        adsbee.tick(app.tracker, ms);
+        #[cfg(not(feature = "webheadloop"))]
+        adsbee.tick(app.tracker, ms, gw.feed.as_mut());
+        #[cfg(feature = "webheadloop")]
+        whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
         command(&mut app, &gps, ms);
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
             app.housekeeping(&gps, ms);
+            let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
+            let max_age = app.tracker.config().own_fix_max_age_ms;
+            if let Some(f) = gw.feed.as_mut() {
+                f.tick(&gps, max_age, frames, lost, ms);
+            }
             report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, ms);
         }
         app.touch(&mut i2c, ms);
@@ -401,7 +431,15 @@ fn main() -> ! {
             );
             if ms / 1000 % 5 == 0 {
                 print_gps_adsb(&app, &gps, &adsbee, ms);
+                if let Some(f) = gw.feed.as_ref() {
+                    println!(
+                        "hub-p4: webhead tx={} frames={} dropped={} queued={} csbee_err={} encode_err={}",
+                        f.tx_bytes, f.fwd.frames, f.fwd.dropped, f.fwd.len(), f.csbee_err, f.fwd.encode_err
+                    );
+                }
             }
+            #[cfg(feature = "webheadloop")]
+            whloop.print();
             #[cfg(feature = "gpsloop")]
             println!("hub-p4: gpsloop emulator cmds={} bad={}", gpsloop.cmds, gpsloop.bad);
             app.frames_drawn = 0;

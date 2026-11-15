@@ -119,6 +119,8 @@ pub struct GatewayLink<'d> {
     /// Bytes written to the TX FIFO, and bytes refused for want of queue room.
     pub tx_bytes: u32,
     pub tx_full: u32,
+    /// The web head's copy of this stream (`webhead.rs`), when built with one.
+    pub feed: Option<crate::webhead::Feed>,
 }
 
 impl<'d> GatewayLink<'d> {
@@ -148,6 +150,7 @@ impl<'d> GatewayLink<'d> {
             tx: heapless::Deque::new(),
             tx_bytes: 0,
             tx_full: 0,
+            feed: None,
         }
     }
 
@@ -206,6 +209,9 @@ impl<'d> GatewayLink<'d> {
         let mut buf = [0u8; 256];
         let mut handled = 0;
         self.pump_tx();
+        if let Some(f) = self.feed.as_mut() {
+            f.pump();
+        }
         self.stats.uart_err = UART_ERR.load(core::sync::atomic::Ordering::Relaxed);
         self.stats.ring_full = RING_FULL.load(core::sync::atomic::Ordering::Relaxed);
         loop {
@@ -223,21 +229,34 @@ impl<'d> GatewayLink<'d> {
                 break;
             }
             self.stats.bytes += n as u32;
-            let (stats, nodes, via, out, out_full) = (&mut self.stats, &mut self.nodes, &mut self.via, &mut self.out, &mut self.out_full);
+            let (stats, nodes, via, out, out_full, feed) =
+                (&mut self.stats, &mut self.nodes, &mut self.via, &mut self.out, &mut self.out_full, &mut self.feed);
             self.dec.feed(&buf[..n], |r| {
                 handled += 1;
                 match r {
-                    Ok(f) => Self::on_frame(stats, nodes, via, out, out_full, now_ms, f),
-                    Err(LinkError::Corrupt) => {
-                        stats.corrupt += 1;
-                        *via = None;
+                    Ok(f) => {
+                        // The web head gets the stream as it came, before
+                        // anything here consumes the frame.
+                        if let Some(feed) = feed.as_mut() {
+                            feed.relay(&f);
+                        }
+                        Self::on_frame(stats, nodes, via, out, out_full, now_ms, f)
                     }
-                    Err(LinkError::Overflow) => {
-                        stats.overflow += 1;
+                    Err(e) => {
+                        match e {
+                            LinkError::Corrupt => stats.corrupt += 1,
+                            LinkError::Overflow => stats.overflow += 1,
+                        }
                         *via = None;
+                        if let Some(feed) = feed.as_mut() {
+                            feed.stream_error();
+                        }
                     }
                 }
             });
+        }
+        if let Some(f) = self.feed.as_mut() {
+            f.pump();
         }
         handled
     }

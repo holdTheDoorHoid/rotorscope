@@ -37,10 +37,10 @@ to be the GPS / ADSBee on its own pins), never with the real modules.
 | New-drone alert banner | done | Shared UI |
 | New-drone buzzer | not ported | The board has no buzzer, only an I2S amplifier and speaker (GPIO21-23). Needs an I2S driver on the pre-v3 chip; a separate task |
 | Battery level | not ported | The BAT connector's voltage is not wired to a GPIO we know of; the screen says USB power (as a bench S3 does) |
-| **Phone web page over the hub's hotspot** | **blocked** | The P4 has no radio of its own. See "Phone page: the routes" below |
-| TAK CoT multicast | blocked | Needs a network (same reason) |
-| Station mode (join a Wi-Fi network) | blocked | Needs a network (same reason) |
-| Captive portal, DHCP, DNS | blocked | Part of the hotspot |
+| **Phone web page over the hub's hotspot** | **built (web head), wire untested** | Route 3 below, branch `webhead` (2026-11-15): a second board (the old S3 hub, `--features webhead`) serves it, fed by the P4 over one wire (P4 GPIO31 -> S3 GPIO4 + GND). See WEBHEAD.md. P4 side loop-back tested; the S3 and the wire still need the owner |
+| TAK CoT multicast | built (web head) | From the web head, stamped with the P4's GPS time (`HubFix`) |
+| Station mode (join a Wi-Fi network) | built (web head) | The S3 hub's own station mode, unchanged |
+| Captive portal, DHCP, DNS | built (web head) | Part of the web head's hotspot (channel 11) |
 | Watchdog (reboot if the loop hangs) | not ported | The S3 uses the RTC watchdog; it has not been checked on this pre-v3 chip and esp-hal patch. A wrong setting means reboot loops, so it needs its own bench test |
 | Reboot after a panic (`custom-halt`) | not ported | The P4 halts and prints the panic; same reason as the watchdog |
 | Demo mode (made-up drones) | done (different) | `--features fakedrone` / `fakenode`; the S3's two-circle demo is not ported |
@@ -55,9 +55,10 @@ to be the GPS / ADSBee on its own pins), never with the real modules.
 | GPS PPS | GPIO29 | Wireless-module socket (the SX1262 BUSY / nRF24 IRQ pin). Free while no radio module is fitted |
 | ADSBee TX -> hub | GPIO30 | Wireless-module socket (the SX1262 NSS pin). Plus GND |
 | Gateway link | GPIO27 / 28 | UART3-IN header, unchanged |
+| Web head feed (P4 TX -> web head RX) | GPIO31 | Wireless-module socket (SX1262 IRQ / nRF24 CE). Plus GND. WEBHEAD.md |
 
-UARTs: UART0 console, UART1 GPS, UART2 free (used by the bench self-tests),
-UART3 gateway, UART4 ADSBee. The socket pin numbers are from Elecrow's wiki;
+UARTs: UART0 console, UART1 GPS, UART2 web-head feed (TX GPIO31; the bench
+self-tests `selftest`/`gpsloop` take it instead), UART3 gateway, UART4 ADSBee. The socket pin numbers are from Elecrow's wiki;
 **check with a meter which socket hole is GPIO29 and GPIO30 before wiring**,
 and do not fit a radio module in the socket while they are used.
 
@@ -144,7 +145,12 @@ every track, link and aircraft once a second. A laptop can read them now; a
 phone with USB-OTG serial could too. This is not the phone page, but it is
 the zero-risk fallback.
 
-**Recommendation:** route 3 now (it reuses tested code and keeps channel 6
+**Built (2026-11-15, branch `webhead`): route 3**, with the old S3 hub as
+the web head; see WEBHEAD.md. The P4 forwards the gateway's frames as they
+came plus its GPS (`HubFix`) and ADSBee lines (`Csbee`), link protocol 5,
+on UART2 TX GPIO31.
+
+**Recommendation (before):** route 3 now (it reuses tested code and keeps channel 6
 clean), and route 1 as the long-term goal, starting with the read-only C6
 probe once the owner agrees. Built in this task for the routes: the JSON
 feed (route 4, and the data route 3 needs). No hotspot was built or run.

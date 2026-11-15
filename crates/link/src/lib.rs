@@ -8,6 +8,8 @@
 //! as [`Frame::OpenLink`] sightings, rate-limited per link.
 #![cfg_attr(not(test), no_std)]
 
+pub mod forward;
+
 use heapless::Vec;
 use rid::{MAX_PACK, RawMessage, Transport};
 use serde::{Deserialize, Serialize};
@@ -23,7 +25,15 @@ use serde::{Deserialize, Serialize};
 /// - 4: adds [`Frame::Status`], [`Frame::DroneId`], [`Frame::Rf`],
 ///   [`Frame::DjiWifi`], [`Frame::WifiDrone`] (node to hub) and the hub-to-node
 ///   [`Command`] stream; [`NodeRole`] gains `DroneId` and `Gateway`.
-pub const PROTOCOL_VERSION: u8 = 4;
+/// - 5: adds [`Frame::HubFix`] and [`Frame::Csbee`], sent by a hub to a "web
+///   head" (a second board that serves the phone page; see
+///   `firmware/hub-p4/WEBHEAD.md`). Appended likewise; nodes never send them.
+pub const PROTOCOL_VERSION: u8 = 5;
+
+/// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
+/// crate does not depend on `adsb`, so the number is repeated here and
+/// checked in the hub firmware).
+pub const MAX_CSBEE_LINE: usize = 200;
 
 /// Largest encoded frame, COBS overhead included. Size buffers with this.
 pub const MAX_FRAME: usize = 320;
@@ -163,6 +173,45 @@ pub struct WifiDroneSighting {
     pub uptime_us: u64,
 }
 
+/// Protocol 5. A GPS receiver's state, as a hub reports it to a web head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GnssState {
+    /// No receiver answering.
+    Absent,
+    /// Receiver present, no fix.
+    Searching,
+    Fix2d,
+    Fix3d,
+}
+
+/// Protocol 5. A usable GPS position (never a typed-in one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubPosition {
+    /// Degrees x 1e7 (1.1 cm steps, finer than any GPS fix).
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    /// Height above the WGS-84 ellipsoid, millimetres; `None` for a 2D fix.
+    pub alt_hae_mm: Option<i32>,
+    /// How old the fix was when this frame was built, milliseconds.
+    pub age_ms: u32,
+}
+
+/// Protocol 5. The sending hub's own GPS: what a web head needs to compute
+/// distances and to stamp CoT events, without a receiver of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubFix {
+    pub state: GnssState,
+    /// Satellites used (or tracked while searching), if known.
+    pub sats: Option<u8>,
+    /// The hub's latest usable fix, if it is still fresh.
+    pub position: Option<HubPosition>,
+    /// UTC (Unix milliseconds) at the moment the frame was built, if known.
+    /// The frame reaches the web head a few milliseconds later (queue + wire).
+    pub utc_ms: Option<u64>,
+    /// The hub's UTC is anchored to a GPS PPS edge (sub-millisecond there).
+    pub utc_pps: bool,
+}
+
 /// One Remote ID reception: everything one frame or advertisement carried.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Detection {
@@ -248,6 +297,13 @@ pub enum Frame {
     },
     /// Protocol 4.
     WifiDrone(WifiDroneSighting),
+    /// Protocol 5, hub to web head only, about once a second: the hub's own
+    /// GPS position, receiver state and UTC.
+    HubFix(HubFix),
+    /// Protocol 5, hub to web head only: one CSBee line from the hub's
+    /// ADSBee 1090 (`crates/adsb`), CRC and line end included, exactly as
+    /// the ADSBee prints it. The web head parses it with `adsb::parse`.
+    Csbee(Vec<u8, MAX_CSBEE_LINE>),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -366,7 +422,7 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 15] {
+    fn samples() -> [Frame; 19] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -449,6 +505,27 @@ mod tests {
                 uptime_us: u64::MAX,
             }),
             Frame::Status { role: NodeRole::Wifi24, can: 0, plan: 0 },
+            Frame::HubFix(HubFix {
+                state: GnssState::Fix3d,
+                sats: Some(u8::MAX),
+                position: Some(HubPosition {
+                    lat_e7: i32::MIN,
+                    lon_e7: i32::MIN,
+                    alt_hae_mm: Some(i32::MIN),
+                    age_ms: u32::MAX,
+                }),
+                utc_ms: Some(u64::MAX),
+                utc_pps: true,
+            }),
+            Frame::HubFix(HubFix {
+                state: GnssState::Absent,
+                sats: None,
+                position: None,
+                utc_ms: None,
+                utc_pps: false,
+            }),
+            Frame::Csbee([0xFF; MAX_CSBEE_LINE].into_iter().collect()),
+            Frame::Csbee(b"#S:2,0,0,0,0,0,0,0,0,0,0,ABCD\r\n".iter().copied().collect()),
         ]
     }
 
@@ -475,15 +552,15 @@ mod tests {
         }
     }
 
-    /// Protocol 1-3 tags did not move.
+    /// Protocol 1-4 tags did not move; protocol 5 took 10 and 11.
     #[test]
-    fn protocol_4_appends_only() {
+    fn protocol_4_and_5_append_only() {
         let mut buf = [0u8; MAX_FRAME];
         let tags: std::vec::Vec<u8> = samples()
             .iter()
             .map(|f| postcard::to_slice(f, &mut buf).unwrap()[0])
             .collect();
-        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5]);
+        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5, 10, 10, 11, 11]);
         assert_eq!(NodeRole::Fpv as u8, 3);
         assert_eq!(NodeRole::Gateway.bit(), 1 << 5);
     }

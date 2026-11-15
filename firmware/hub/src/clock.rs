@@ -6,6 +6,10 @@
 //!    last second (`"utc_src":"gps_pps"`, sub-millisecond), otherwise to the
 //!    time NAV-PVT arrived (`"gps"`, late by the receiver's output delay plus
 //!    up to one 100 ms I2C poll).
+//!    On a web head, the upstream hub's GPS time (`Frame::HubFix`) when this
+//!    board has no receiver of its own (`"hub_gps_pps"` / `"hub_gps"`):
+//!    anchored when the frame arrives, so late by the queue and wire time
+//!    (a few milliseconds), which CoT and the CSV log do not notice.
 //! 2. `demo` builds only: the build machine's clock plus uptime, so CoT can be
 //!    exercised on the bench. Reported as `"utc_src":"build"` on USB so it is
 //!    never mistaken for real time. A GPS, when present, overrides it.
@@ -18,7 +22,13 @@ use crate::gnss;
 /// Where UTC currently comes from, for the USB status line.
 pub fn source(now_ms: u64) -> Option<&'static str> {
     if gnss::utc_ms(now_ms).is_some() {
-        Some(if gnss::utc_from_pps() { "gps_pps" } else { "gps" })
+        Some(match (gnss::utc_from_upstream(), gnss::utc_from_pps()) {
+            (false, true) => "gps_pps",
+            (false, false) => "gps",
+            // The upstream hub's GPS time (web head), a few ms late (queue + wire).
+            (true, true) => "hub_gps_pps",
+            (true, false) => "hub_gps",
+        })
     } else if demo_utc(now_ms).is_some() {
         Some("build")
     } else {

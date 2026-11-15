@@ -25,7 +25,7 @@ use tracker::json::{self, GpsStatus, HubStatus, MAX_LINE, ManualPos, NodeStatus,
 use tracker::openlinks::MAX_LINK_TRACKS;
 use tracker::{AircraftKey, Context, LinkTrackId, TrackId};
 
-use crate::hub::{Hub, MAX_AIRCRAFT, MAX_TRACKS, OwnSource};
+use crate::hub::{Hub, MAX_AIRCRAFT, MAX_RELAYED, MAX_TRACKS, OwnSource};
 use crate::pins::NODE_LINKS;
 use crate::{adsbee, gnss, sd};
 
@@ -34,28 +34,26 @@ use crate::{adsbee, gnss, sd};
 const EMPTY_TAIL: usize =
     json::STATE_LINKS_TO_TRACKS.len() + json::STATE_TRACKS_TO_AIRCRAFT.len() + json::STATE_END.len();
 
-/// Node entries for the state object: one per link that has said Hello.
-fn node_statuses(hub: &Hub, now: u64) -> heapless::Vec<NodeStatus, NODE_LINKS> {
-    let nodes = hub.nodes.borrow();
-    nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| {
-            let role = s.role?;
-            let alive = s.alive(now);
-            Some(NodeStatus {
-                role,
-                alive,
-                age_ms: s.last_heard_ms.map(|t| now.saturating_sub(t)),
-                // A dead node's last rate would be a lie.
-                seen_per_s: s.seen_per_s.map(|r| if alive { r } else { 0 }),
-                rid_per_s: if alive { s.rid_per_s_hub } else { 0 },
-                drops: Some(hub.link_drops(i)),
-                can: None,
-                plan: None,
-            })
-        })
-        .collect()
+/// Node entries for the state object: one per link that has said Hello,
+/// then one per relayed node (behind a gateway or a P4 hub) that has.
+fn node_statuses(hub: &Hub, now: u64) -> heapless::Vec<NodeStatus, { NODE_LINKS + MAX_RELAYED }> {
+    let mut out = heapless::Vec::new();
+    hub.for_each_node(|s, drops| {
+        let Some(role) = s.role else { return };
+        let alive = s.alive(now);
+        let _ = out.push(NodeStatus {
+            role,
+            alive,
+            age_ms: s.last_heard_ms.map(|t| now.saturating_sub(t)),
+            // A dead node's last rate would be a lie.
+            seen_per_s: s.seen_per_s.map(|r| if alive { r } else { 0 }),
+            rid_per_s: if alive { s.rid_per_s_hub } else { 0 },
+            drops: Some(drops),
+            can: s.can,
+            plan: s.plan,
+        });
+    });
+    out
 }
 
 /// Write the envelope (everything before the first track) into `buf`.

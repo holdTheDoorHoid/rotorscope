@@ -48,10 +48,18 @@ show-link-ids = []
 # (GPIO29) is pulsed from inside the chip, and UART4 sends CSBee lines onto
 # its own RX pad (GPIO30). Leave the UART1 header, GPIO29 and GPIO30
 # unconnected while it runs. Excludes `selftest` (both use UART2).
-gpsloop = ["adsb/encode"]
+gpsloop = []
 # As `gpsloop`, but UART2 plays a u-blox MAX-M10S as shipped (NMEA at 9600),
 # so the baud hunt, MON-VER detection and UBX configuration are exercised.
 gpsloop-m10 = ["gpsloop"]
+# Bench only: on-chip loop-back test of the web-head feed (WEBHEAD.md).
+# UART4's RX is moved from the ADSBee pad (GPIO30) to the web-head TX pad
+# (GPIO31), where UART2 sends the feed, and the frames are decoded and
+# counted. NMEA (a fixed test point) is injected into the GPS input and
+# CSBee lines into the ADSBee input from inside the chip. The gateway wire
+# stays connected and its traffic is forwarded as usual. Leave GPIO31 and
+# GPIO30 unconnected while it runs.
+webheadloop = []
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -62,7 +70,8 @@ critical-section = "1.2"
 screen = { path = "../../crates/screen", features = ["tracker"] }
 tracker = { path = "../../crates/tracker" }
 gnss = { path = "../../crates/gnss" }
-adsb = { path = "../../crates/adsb" }
+# `encode`: the web-head feed re-prints ADSBee reports as CSBee lines.
+adsb = { path = "../../crates/adsb", features = ["encode"] }
 embedded-graphics = "0.8"
 # SD card: our bit-banged native 1-bit protocol (crates/sdnative) under the
 # same FAT driver the S3 hub uses. MIT/Apache.
