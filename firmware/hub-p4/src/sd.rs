@@ -205,6 +205,8 @@ pub struct Logger {
     replay: Option<Replay>,
     pub ev_flushes: u32,
     pub ev_errors: u32,
+    max_ev_us: u64,
+    max_ev_what: &'static str,
 }
 
 impl Logger {
@@ -244,6 +246,8 @@ impl Logger {
             replay: None,
             ev_flushes: 0,
             ev_errors: 0,
+            max_ev_us: 0,
+            max_ev_what: "",
         }
     }
 
@@ -342,12 +346,13 @@ impl Logger {
             io.blocks_read, io.blocks_written, io.errors, self.busy_skips, io.max_io_us, self.max_tick_us, self.max_tick_what
         );
         println!(
-            "hub-p4: evidence file={}/{}/{} bytes={} seq={} queued={} records={} record_bytes={} drained={} flushes={} errors={} checkpoints={} sign={}us max_sign={}us max_build={}us stream={} stream_drops={} not_logged={}",
+            "hub-p4: evidence file={}/{}/{} bytes={} seq={} queued={} records={} record_bytes={} drained={} flushes={} errors={} checkpoints={} sign={}us max_sign={}us max_build={}us max_sd_step={}us ({}) stream={} stream_drops={} not_logged={}",
             DIR, EV_DIR, self.ev_name(), self.ev_file.as_ref().map_or(0, |f| f.pos), ev.seq(), ev.queued(), ev.records, ev.bytes,
             ev.drained, self.ev_flushes, self.ev_errors, ev.checkpoints, ev.last_sign_us, ev.max_sign_us, ev.max_build_us,
-            ev.stream, ev.stream_drops, ev.not_logged_total
+            self.max_ev_us, self.max_ev_what, ev.stream, ev.stream_drops, ev.not_logged_total
         );
         self.max_tick_us = 0;
+        self.max_ev_us = 0;
         if let Some(vm) = &self.vm {
             vm.device(|d| d.stats.borrow_mut().max_io_us = 0);
         }
@@ -825,6 +830,28 @@ impl Logger {
             self.last_rows = now;
             self.queue_rows(tracker, faa, now);
         }
+        if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
+            self.busy_skips += 1;
+            return "busy";
+        }
+        // Evidence first: its queue only shrinks once flushed.
+        let t = Instant::now();
+        let r = self.ev_step(ev, now);
+        let us = t.elapsed().as_micros();
+        match r {
+            Ok(Some(w)) => {
+                if us > self.max_ev_us {
+                    self.max_ev_us = us;
+                    self.max_ev_what = w;
+                }
+                return w;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.ev_errors += 1;
+                return self.lost(ev, &e, now);
+            }
+        }
         if self.pack_file.is_some() && self.pending.len() < PENDING / 2 {
             if self
                 .vm
@@ -845,18 +872,6 @@ impl Logger {
             }
         }
 
-        if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
-            self.busy_skips += 1;
-            return "busy";
-        }
-        match self.ev_step(ev, now) {
-            Ok(Some(w)) => return w,
-            Ok(None) => {}
-            Err(e) => {
-                self.ev_errors += 1;
-                return self.lost(ev, &e, now);
-            }
-        }
         let (Some(vm), Some(open)) = (self.vm.as_ref(), self.open.as_ref()) else { return "idle" };
         let file = open.file;
         // One block-aligned chunk.

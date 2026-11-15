@@ -3,15 +3,17 @@
 //! reach the server through a laptop, one of three ways:
 //!
 //! ```text
-//! evidence-upload --server URL --serial /dev/ttyUSB0 [--replay] [--seconds N] [--save FILE]
+//! evidence-upload --server URL --serial /dev/ttyUSB0 [--replay] [--seconds N] [--save FILE] [--send TEXT]
 //!     live: read the hub's USB console (@EV1 lines); --replay first asks the
-//!     hub (console `r`) to re-send its current card file
+//!     hub (console `r`) to re-send its current card file; --send types
+//!     console commands (e.g. "k" for a checkpoint now, "nSome note\r")
 //! evidence-upload --server URL --capture console.log
 //!     a console capture saved earlier
 //! evidence-upload --server URL --card /media/.../ROTORSCP/EVIDENCE
 //!     the SD card's evidence files, in a card reader
 //!
 //! common: [--register NAME] [--token T] [--actor NAME] [--allow-gap]
+//!         [--ca cert.pem]  trust this certificate (a bench server's own)
 //! ```
 //!
 //! It uploads each boot's records from the first one the server lacks, in
@@ -27,6 +29,7 @@ use evidence::format::{self, Body, EventCode, Kind};
 use evidence::verify::hex;
 
 struct Opts {
+    agent: ureq::Agent,
     server: String,
     token: Option<String>,
     actor: String,
@@ -94,12 +97,26 @@ impl Collected {
     }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build()
+fn agent(ca: Option<&str>) -> ureq::Agent {
+    let mut b = ureq::AgentBuilder::new().timeout(Duration::from_secs(30));
+    if let Some(ca) = ca {
+        use rustls::pki_types::pem::PemObject;
+        let mut roots = rustls::RootCertStore::empty();
+        for c in rustls::pki_types::CertificateDer::pem_file_iter(ca).expect("read --ca") {
+            roots.add(c.expect("certificate")).expect("add certificate");
+        }
+        let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        b = b.tls_config(std::sync::Arc::new(cfg));
+    }
+    b.build()
 }
 
 fn req(o: &Opts, method: &str, path: &str) -> ureq::Request {
-    let mut r = agent().request(method, &format!("{}{path}", o.server.trim_end_matches('/'))).set("X-Actor", &o.actor);
+    let mut r = o.agent.request(method, &format!("{}{path}", o.server.trim_end_matches('/'))).set("X-Actor", &o.actor);
     if let Some(t) = &o.token {
         r = r.set("Authorization", &format!("Bearer {t}"));
     }
@@ -196,6 +213,7 @@ fn main() {
         std::process::exit(2);
     };
     let o = Opts {
+        agent: agent(arg(&args, "--ca").as_deref()),
         server,
         token: arg(&args, "--token").or_else(|| std::env::var("EVIDENCE_TOKEN").ok()),
         actor: arg(&args, "--actor").unwrap_or_else(|| "evidence-upload".into()),
@@ -215,7 +233,8 @@ fn main() {
         }
         println!("evidence-upload: {} card files read", files.len());
     } else if let Some(port) = arg(&args, "--serial") {
-        serial(&o, &mut c, &port, args.iter().any(|a| a == "--replay"), arg(&args, "--seconds").and_then(|s| s.parse().ok()), arg(&args, "--save"));
+        let send = arg(&args, "--send").map(|s| s.replace("\\r", "\r"));
+        serial(&o, &mut c, &port, args.iter().any(|a| a == "--replay"), arg(&args, "--seconds").and_then(|s| s.parse().ok()), arg(&args, "--save"), send);
     } else {
         eprintln!("evidence-upload: give --serial, --capture or --card");
         std::process::exit(2);
@@ -237,9 +256,11 @@ fn report(c: &Collected) {
     }
 }
 
-fn serial(o: &Opts, c: &mut Collected, path: &str, replay: bool, seconds: Option<u64>, save: Option<String>) {
-    // Hold DTR and RTS released: on the CrowPanel they reset the P4.
-    let mut port = serialport::new(path, 115_200).timeout(Duration::from_millis(200)).dtr_on_open(false).open().expect("open serial port");
+fn serial(o: &Opts, c: &mut Collected, path: &str, replay: bool, seconds: Option<u64>, save: Option<String>, send: Option<String>) {
+    // DTR and RTS drive the P4's EN and BOOT pins (CH340 auto-reset).
+    // Linux asserts both at open, which is harmless; DTR released while RTS
+    // is still asserted resets the chip. So release RTS first, then DTR.
+    let mut port = serialport::new(path, 115_200).timeout(Duration::from_millis(200)).open().expect("open serial port");
     let _ = port.write_request_to_send(false);
     let _ = port.write_data_terminal_ready(false);
     let mut save = save.map(|f| std::fs::OpenOptions::new().append(true).create(true).open(f).expect("save file"));
@@ -247,6 +268,13 @@ fn serial(o: &Opts, c: &mut Collected, path: &str, replay: bool, seconds: Option
         std::thread::sleep(Duration::from_millis(300));
         let _ = port.write_all(b"r");
         println!("evidence-upload: asked the hub to replay its current evidence file");
+    }
+    if let Some(t) = send {
+        // One character at a time: the hub reads one command byte per pass.
+        for b in t.bytes() {
+            let _ = port.write_all(&[b]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
     let t0 = Instant::now();
     let mut last_up = Instant::now();

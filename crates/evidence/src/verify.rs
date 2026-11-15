@@ -529,7 +529,7 @@ fn check_detection(rep: &mut Report, d: &format::DetectionBody<'_>, w: &Where) {
                 diffs.push("decode summary");
             }
             if !diffs.is_empty() {
-                rep.add(Level::Fail, w.clone(), format!("the stored {} do not match a fresh decode of the raw bytes", diffs.join(", ")));
+                rep.add(Level::Fail, w.clone(), format!("stored fields differ from a fresh decode of the raw bytes: {}", diffs.join(", ")));
             }
         }
     }
@@ -796,6 +796,23 @@ pub fn verify_bundle(json: &[u8]) -> Report {
             Some((n, s)) if *n == batch.n && *s == sha => {}
             Some(_) => rep.add(Level::Fail, w(&name), "batch does not match the audit log's upload entry at this position"),
             None => rep.add(Level::Fail, w(&name), "batch has no upload entry in the audit log"),
+        }
+        // The server only accepts contiguous runs: a hole inside a batch was
+        // made after upload.
+        let mut prev: Option<([u8; 8], u64)> = None;
+        for (off, r) in format::records(&bytes) {
+            let Ok(r) = r else { break };
+            if let Some((b, s)) = prev
+                && b == r.header.boot_id
+                && r.header.seq != s + 1
+            {
+                rep.add(
+                    Level::Fail,
+                    Where { source: name.clone(), offset: Some(off), boot: Some(b), seq: Some(r.header.seq) },
+                    format!("inside one uploaded batch record #{} follows #{s}: records were removed or reordered after upload", r.header.seq),
+                );
+            }
+            prev = Some((r.header.boot_id, r.header.seq));
         }
         inputs.push(Input { name, bytes, file_no: None });
     }

@@ -585,6 +585,14 @@ limits as a setting, access control on the server, and the legal line from Phase
 export; editing, deleting or reordering any record in the log, the upload or the bundle makes the
 verifier fail and say where; and a cold-start with no GPS is visibly marked in the records.
 
+**Status 2026-11-15 (branch `evidence`): the done-when is met on the bench with a development key.**
+`crates/evidence` (format, chain, checkpoints, verifier core), the P4 evidence log
+(`firmware/hub-p4/src/evlog.rs`, `ROTORSCP/EVIDENCE/`), `tools/evidence-verify`,
+`tools/evidence-server` (+ `evidence-upload`). Records reach the server through a laptop (USB
+console or the SD card). Still to do: the hardware key and secure boot (eFuse; owner's per-unit
+go-ahead), automatic outside time-stamps, upload through the web head, retention settings, real
+server accounts. See docs/EVIDENCE.md (plain language) and docs/EVIDENCE-FORMAT.md (byte layout).
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
