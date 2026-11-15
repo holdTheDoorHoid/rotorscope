@@ -1,0 +1,14 @@
+[package]
+name = "airspace"
+description = "Offline airspace/terrain pack: format, point-in-polygon, facility-map and terrain lookups, sun elevation, terrain line of sight"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# The pack writer (host tool and tests). The hub only reads.
+alloc = []
+
+[dependencies]
+# Pure-Rust maths without std.
+libm = "0.2"

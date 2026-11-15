@@ -9,6 +9,7 @@ members = [
     "crates/coverage", "crates/nodeimage", "crates/fpvscan",
     "crates/wifidrone",
     "crates/sdnative",
+    "crates/airspace", "crates/faarules",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull", "tools/droneid-hil",
     "tools/cc26xx-flash",
 ]
@@ -25,6 +26,8 @@ link = { path = "crates/link" }
 tracker = { path = "crates/tracker" }
 openlink = { path = "crates/openlink" }
 adsb = { path = "crates/adsb" }
+airspace = { path = "crates/airspace" }
+faarules = { path = "crates/faarules" }
 wifidrone = { path = "crates/wifidrone" }
 droneid = { path = "crates/droneid", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
