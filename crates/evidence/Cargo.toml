@@ -1,0 +1,33 @@
+[package]
+name = "evidence"
+description = "Tamper-evident evidence log: hash-chained, signed-checkpoint records of what a Rotorscope hub received (PLAN.md Phase 13)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# Host-side checking: parse, chain, signatures, re-decode (verifier, server).
+verify = ["std", "decode", "dep:p256", "dep:serde", "dep:serde_json"]
+# The software (development) signer. The hub firmware uses this until a
+# hardware signer (ECDSA peripheral / DS) replaces it (docs/EVIDENCE.md).
+soft-signer = ["dep:p256"]
+# Decode a stored link frame into the short summary text (hub and verifier
+# share this so the verifier can check the summary against the raw bytes).
+decode = ["dep:link", "dep:rid", "dep:postcard", "dep:heapless"]
+std = []
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
+link = { workspace = true, optional = true }
+rid = { workspace = true, optional = true }
+postcard = { workspace = true, optional = true }
+heapless = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive", "std"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+evidence = { path = ".", features = ["verify", "soft-signer"] }
+rid = { workspace = true, features = ["encode"] }
+link = { workspace = true }
+heapless = { workspace = true }

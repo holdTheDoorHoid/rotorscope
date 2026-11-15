@@ -29,6 +29,14 @@
 //! CMD55) looks for a card: about 1 ms at 400 kHz. Any card error while
 //! recording drops back to probing; a card put back gets a new file.
 //!
+//! **Evidence log.** `ROTORSCP/EVIDENCE/EVnnnnnn.EVL`, one new file per
+//! mount, numbered one past the highest there (never reused, never
+//! rewritten). The queue lives in `evlog.rs`; here it is appended in
+//! block-aligned chunks ahead of the CSV, and flushed only at a record
+//! boundary, after which the flushed records leave the queue. At mount the
+//! previous evidence file's last record is read and named in the new file's
+//! first event, so the files link up. Console `r` replays the current file.
+//!
 //! **Proof of writing.** While the file is small ([`READBACK_MAX`]) each
 //! flush reads the whole file back and counts its lines; at mount the
 //! previous boot's file is counted too. Both are printed.
@@ -43,6 +51,7 @@ use tracker::TrackState;
 use tracker::csv::{self, MAX_ROW};
 
 use crate::app::HubTracker;
+use crate::evlog::Evidence;
 use crate::faa::Faa;
 use crate::sdbb::{BbPins, Card, SdDev};
 
@@ -56,6 +65,10 @@ const PACK_READ: usize = 1024;
 static EMBEDDED: &[u8] = include_bytes!(env!("AIRSPACE_PAK"));
 
 const DIR: &str = "ROTORSCP";
+/// Evidence files, inside `DIR`.
+const EV_DIR: &str = "EVIDENCE";
+/// Bytes of the previous evidence file read at mount to find its last record.
+const EV_TAIL: usize = 2048;
 const PENDING: usize = 8192;
 const ROW_EVERY_MS: u64 = 1_000;
 const FLUSH_EVERY_MS: u64 = 5_000;
@@ -80,7 +93,9 @@ const WAIT_FOR_TIME_MS: u64 = 90_000;
 /// ... and always this long after boot, for the GPS to be found.
 const GPS_FIND_MS: u64 = 8_000;
 
-type Vm = VolumeManager<SdDev, GpsClock, 2, 2, 1>;
+/// Directories: root, ROTORSCP, EVIDENCE. Files: CSV, pack, evidence (and
+/// the previous evidence file briefly at mount).
+type Vm = VolumeManager<SdDev, GpsClock, 4, 4, 1>;
 type FsError = embedded_sdmmc::Error<sdnative::Error>;
 
 /// UTC (Unix ms) at hub time (ms), set from the GPS by [`set_clock`].
@@ -137,6 +152,25 @@ struct Open {
     file: RawFile,
 }
 
+/// The open evidence file.
+struct EvFile {
+    #[allow(dead_code)]
+    dir: RawDirectory,
+    file: RawFile,
+    name: heapless::String<12>,
+    /// Bytes in the file (we only append).
+    pos: u32,
+    dirty: bool,
+    flushed_at: u64,
+}
+
+/// Console `r`: the current evidence file, re-streamed from the start.
+struct Replay {
+    pos: u32,
+    buf: heapless::Vec<u8, { 2 * evidence::format::MAX_RECORD }>,
+    sent: u32,
+}
+
 pub struct Logger {
     card: Option<Card>,
     vm: Option<Vm>,
@@ -167,6 +201,12 @@ pub struct Logger {
     #[cfg(feature = "embedpack")]
     pack_writing: Option<u32>,
     shown_flag_row: bool,
+    ev_file: Option<EvFile>,
+    replay: Option<Replay>,
+    pub ev_flushes: u32,
+    pub ev_errors: u32,
+    max_ev_us: u64,
+    max_ev_what: &'static str,
 }
 
 impl Logger {
@@ -202,13 +242,39 @@ impl Logger {
             #[cfg(feature = "embedpack")]
             pack_writing: None,
             shown_flag_row: false,
+            ev_file: None,
+            replay: None,
+            ev_flushes: 0,
+            ev_errors: 0,
+            max_ev_us: 0,
+            max_ev_what: "",
         }
+    }
+
+    /// Console `r`: re-stream the current evidence file from its start.
+    pub fn start_replay(&mut self) -> bool {
+        if self.ev_file.is_none() {
+            return false;
+        }
+        self.replay = Some(Replay { pos: 0, buf: heapless::Vec::new(), sent: 0 });
+        true
+    }
+
+    /// Console `e`: flush the evidence file as soon as the queue is written.
+    pub fn flush_now(&mut self) {
+        if let Some(f) = self.ev_file.as_mut() {
+            f.flushed_at = 0;
+        }
+    }
+
+    pub fn ev_name(&self) -> &str {
+        self.ev_file.as_ref().map_or("-", |f| f.name.as_str())
     }
 
     /// One step. Call every main-loop pass. `utc_ms`: GPS time now, if
     /// known; `gps_present`: a receiver is answering (worth waiting for its
     /// time before naming the file).
-    pub fn tick(&mut self, tracker: &HubTracker, faa: &mut Faa, now: u64, utc_ms: Option<u64>, gps_present: bool) {
+    pub fn tick(&mut self, tracker: &HubTracker, faa: &mut Faa, ev: &mut Evidence, now: u64, utc_ms: Option<u64>, gps_present: bool) {
         let t0 = Instant::now();
         self.utc_ms = utc_ms;
         // The first few seconds too: the GPS hunt needs ~1-3 s to find a
@@ -230,7 +296,7 @@ impl Logger {
             }
             "wait_time"
         } else {
-            self.step(tracker, faa, now)
+            self.step(tracker, faa, ev, now)
         };
         if self.state != State::Recording {
             faa.card_gone();
@@ -242,7 +308,7 @@ impl Logger {
         }
         if now.saturating_sub(self.last_stats) >= STATS_EVERY_MS {
             self.last_stats = now;
-            self.print_stats();
+            self.print_stats(ev);
         }
     }
 
@@ -271,7 +337,7 @@ impl Logger {
         self.name.as_str()
     }
 
-    fn print_stats(&mut self) {
+    fn print_stats(&mut self, ev: &Evidence) {
         let state = self.state_name();
         let io = self.io_stats();
         println!(
@@ -279,7 +345,14 @@ impl Logger {
             DIR, self.name, self.rows, self.dropped, self.pending.len(), self.pos, self.flushes, self.errors,
             io.blocks_read, io.blocks_written, io.errors, self.busy_skips, io.max_io_us, self.max_tick_us, self.max_tick_what
         );
+        println!(
+            "hub-p4: evidence file={}/{}/{} bytes={} seq={} queued={} records={} record_bytes={} drained={} flushes={} errors={} checkpoints={} sign={}us max_sign={}us max_build={}us max_sd_step={}us ({}) stream={} stream_drops={} not_logged={}",
+            DIR, EV_DIR, self.ev_name(), self.ev_file.as_ref().map_or(0, |f| f.pos), ev.seq(), ev.queued(), ev.records, ev.bytes,
+            ev.drained, self.ev_flushes, self.ev_errors, ev.checkpoints, ev.last_sign_us, ev.max_sign_us, ev.max_build_us,
+            self.max_ev_us, self.max_ev_what, ev.stream, ev.stream_drops, ev.not_logged_total
+        );
         self.max_tick_us = 0;
+        self.max_ev_us = 0;
         if let Some(vm) = &self.vm {
             vm.device(|d| d.stats.borrow_mut().max_io_us = 0);
         }
@@ -292,7 +365,7 @@ impl Logger {
         }
     }
 
-    fn step(&mut self, tracker: &HubTracker, faa: &mut Faa, now: u64) -> &'static str {
+    fn step(&mut self, tracker: &HubTracker, faa: &mut Faa, ev: &mut Evidence, now: u64) -> &'static str {
         match self.state {
             State::NoCard(at) | State::Error(at) => {
                 if now < at {
@@ -301,7 +374,7 @@ impl Logger {
                 let Some(card) = self.card.as_mut() else { return "idle" };
                 let r = card.begin().and_then(|_| card.poll_ready());
                 match r {
-                    Ok(true) => self.identify(faa, now),
+                    Ok(true) => self.identify(faa, ev, now),
                     Ok(false) => self.state = State::Waking(now, now + POLL_EVERY_MS),
                     Err(sdnative::Error::NoResponse(_)) => {
                         if !matches!(self.state, State::NoCard(_)) || at == 0 {
@@ -320,7 +393,7 @@ impl Logger {
                 let Some(card) = self.card.as_mut() else { return "idle" };
                 match card.poll_ready() {
                     Ok(true) => {
-                        self.identify(faa, now);
+                        self.identify(faa, ev, now);
                         "identify+mount"
                     }
                     Ok(false) if now.saturating_sub(since) < POLL_FOR_MS => {
@@ -337,7 +410,7 @@ impl Logger {
                     }
                 }
             }
-            State::Recording => self.record(tracker, faa, now),
+            State::Recording => self.record(tracker, faa, ev, now),
         }
     }
 
@@ -351,6 +424,8 @@ impl Logger {
     /// Drop every handle and get the card driver back.
     fn close_all(&mut self) {
         self.open = None;
+        self.ev_file = None;
+        self.replay = None;
         self.pack_file = None;
         #[cfg(feature = "embedpack")]
         {
@@ -366,7 +441,7 @@ impl Logger {
         self.pending.clear();
     }
 
-    fn identify(&mut self, faa: &mut Faa, now: u64) {
+    fn identify(&mut self, faa: &mut Faa, ev: &mut Evidence, now: u64) {
         let Some(card) = self.card.as_mut() else { return };
         let info = match card.finish() {
             Ok(i) => i,
@@ -397,6 +472,19 @@ impl Logger {
                 self.flushed_at = now;
                 self.last_io = now;
                 println!("hub-p4: sd recording to {}/{} ({} bytes already)", DIR, self.name, self.pos);
+                let t = Instant::now();
+                match self.mount_evidence(ev, now) {
+                    Ok(()) => println!(
+                        "hub-p4: evidence recording to {DIR}/{EV_DIR}/{} (mount {} us)",
+                        self.ev_name(),
+                        t.elapsed().as_micros()
+                    ),
+                    Err(e) => {
+                        self.ev_errors += 1;
+                        self.ev_file = None;
+                        println!("hub-p4: evidence folder/file failed: {e:?}; records stay queued");
+                    }
+                }
                 if let Err(e) = self.open_pack(faa, now) {
                     println!("hub-p4: sd airspace pack: {e:?}");
                     self.pack_file = None;
@@ -489,6 +577,134 @@ impl Logger {
         // Rows kept while waiting for GPS time stay queued.
         self.dirty = false;
         Ok(())
+    }
+
+    /// Open `ROTORSCP/EVIDENCE` (creating it if missing), read the end of
+    /// the highest-numbered file, create the next one. Never opens an
+    /// existing evidence file for writing.
+    fn mount_evidence(&mut self, ev: &mut Evidence, now: u64) -> Result<(), FsError> {
+        let vm = self.vm.as_ref().unwrap();
+        let Some(parent) = self.open.as_ref().map(|o| o.dir) else { return Ok(()) };
+        let dir = match vm.open_dir(parent, EV_DIR) {
+            Ok(d) => d,
+            Err(embedded_sdmmc::Error::NotFound) => {
+                println!("hub-p4: sd creating folder {DIR}/{EV_DIR}");
+                vm.make_dir_in_dir(parent, EV_DIR)?;
+                vm.open_dir(parent, EV_DIR)?
+            }
+            Err(e) => return Err(e),
+        };
+        let mut max = 0u32;
+        vm.iterate_dir(dir, |e| {
+            let base = e.name.base_name();
+            if e.name.extension() == b"EVL" && base.len() == 8 && base.starts_with(b"EV") {
+                let n = base[2..].iter().try_fold(0u32, |acc, &d| d.is_ascii_digit().then(|| acc * 10 + u32::from(d - b'0')));
+                if let Some(n) = n {
+                    max = max.max(n);
+                }
+            }
+            ControlFlow::Continue(())
+        })?;
+        let mut prev = None;
+        if max > 0 {
+            let mut pname: heapless::String<12> = heapless::String::new();
+            let _ = write!(pname, "EV{max:06}.EVL");
+            let f = vm.open_file_in_dir(dir, pname.as_str(), Mode::ReadOnly)?;
+            let len = vm.file_length(f)?;
+            let n = (len as usize).min(EV_TAIL);
+            let mut tail = [0u8; EV_TAIL];
+            vm.file_seek_from_start(f, len - n as u32)?;
+            let mut got = 0;
+            while got < n {
+                let r = vm.read(f, &mut tail[got..n])?;
+                if r == 0 {
+                    break;
+                }
+                got += r;
+            }
+            vm.close_file(f)?;
+            let (hash, status) = match evidence::format::last_complete(&tail[..got]) {
+                Some((at, partial)) => {
+                    let l = evidence::format::peek_len(&tail[at..]).unwrap_or(0);
+                    (evidence::sha256(&tail[at..at + l]), if partial { 2 } else { 1 })
+                }
+                None => ([0; 32], 3),
+            };
+            println!(
+                "hub-p4: evidence previous file {DIR}/{EV_DIR}/{pname}: {len} bytes, last record {:02x}{:02x}{:02x}{:02x}.. ({})",
+                hash[0], hash[1], hash[2], hash[3],
+                match status { 1 => "ends on a whole record", 2 => "ends in an incomplete record", _ => "no whole record in its last 2 KB" }
+            );
+            prev = Some((max, len, hash, status));
+        }
+        let no = max + 1;
+        let mut name: heapless::String<12> = heapless::String::new();
+        let _ = write!(name, "EV{no:06}.EVL");
+        // ReadWriteCreate refuses a name that exists: never rewrites a file.
+        let file = vm.open_file_in_dir(dir, name.as_str(), Mode::ReadWriteCreate)?;
+        ev.card_mounted(name.as_str(), no, prev);
+        self.ev_file = Some(EvFile { dir, file, name, pos: 0, dirty: false, flushed_at: now });
+        Ok(())
+    }
+
+    /// One evidence step, if one is due: a chunk, a flush, or (console `r`)
+    /// a replay read. Evidence goes before the CSV.
+    fn ev_step(&mut self, ev: &mut Evidence, now: u64) -> Result<Option<&'static str>, FsError> {
+        let (Some(vm), Some(f)) = (self.vm.as_ref(), self.ev_file.as_mut()) else { return Ok(None) };
+        let un = ev.unwritten();
+        let room = 512 - (f.pos % 512) as usize;
+        let flush_due = now.saturating_sub(f.flushed_at) >= FLUSH_EVERY_MS;
+        if un.len() >= room || (flush_due && !un.is_empty()) {
+            let n = room.min(un.len());
+            vm.write(f.file, &un[..n])?;
+            ev.wrote(n);
+            f.pos += n as u32;
+            f.dirty = true;
+            self.last_io = now;
+            return Ok(Some("ev_write"));
+        }
+        if flush_due {
+            f.flushed_at = now;
+            if f.dirty {
+                // Everything queued is written, so the file ends on a record.
+                vm.flush_file(f.file)?;
+                f.dirty = false;
+                ev.flushed();
+                self.ev_flushes += 1;
+                self.last_io = now;
+                return Ok(Some("ev_flush"));
+            }
+        }
+        let Some(rp) = self.replay.as_mut() else { return Ok(None) };
+        // One record line needs ~1.4 KB of console room.
+        if crate::console::room() < 4096 {
+            return Ok(None);
+        }
+        // Send whole records already read.
+        while let Ok(len) = evidence::format::peek_len(&rp.buf) {
+            if rp.buf.len() < len {
+                break;
+            }
+            if !crate::evlog::stream_record(&rp.buf[..len]) {
+                return Ok(Some("ev_replay"));
+            }
+            rp.sent += 1;
+            rp.buf.copy_within(len.., 0);
+            rp.buf.truncate(rp.buf.len() - len);
+        }
+        if rp.pos >= f.pos || (rp.buf.len() >= 8 && evidence::format::peek_len(&rp.buf).is_err()) {
+            println!("hub-p4: evidence replay of {} done: {} records, {} bytes", f.name, rp.sent, rp.pos);
+            self.replay = None;
+            return Ok(Some("ev_replay"));
+        }
+        let mut b = [0u8; 512];
+        let want = (512 - (rp.pos % 512) as usize).min((f.pos - rp.pos) as usize).min(rp.buf.capacity() - rp.buf.len());
+        vm.file_seek_from_start(f.file, rp.pos)?;
+        let n = vm.read(f.file, &mut b[..want])?;
+        vm.file_seek_from_end(f.file, 0)?;
+        let _ = rp.buf.extend_from_slice(&b[..n]);
+        rp.pos += n as u32;
+        Ok(Some("ev_replay"))
     }
 
     /// After mount: find the airspace pack and start copying it (or, in an
@@ -609,10 +825,32 @@ impl Logger {
         Ok("pack_read")
     }
 
-    fn record(&mut self, tracker: &HubTracker, faa: &mut Faa, now: u64) -> &'static str {
+    fn record(&mut self, tracker: &HubTracker, faa: &mut Faa, ev: &mut Evidence, now: u64) -> &'static str {
         if now.saturating_sub(self.last_rows) >= ROW_EVERY_MS {
             self.last_rows = now;
             self.queue_rows(tracker, faa, now);
+        }
+        if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
+            self.busy_skips += 1;
+            return "busy";
+        }
+        // Evidence first: its queue only shrinks once flushed.
+        let t = Instant::now();
+        let r = self.ev_step(ev, now);
+        let us = t.elapsed().as_micros();
+        match r {
+            Ok(Some(w)) => {
+                if us > self.max_ev_us {
+                    self.max_ev_us = us;
+                    self.max_ev_what = w;
+                }
+                return w;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.ev_errors += 1;
+                return self.lost(ev, &e, now);
+            }
         }
         if self.pack_file.is_some() && self.pending.len() < PENDING / 2 {
             if self
@@ -636,10 +874,6 @@ impl Logger {
 
         let (Some(vm), Some(open)) = (self.vm.as_ref(), self.open.as_ref()) else { return "idle" };
         let file = open.file;
-        if vm.device(|d| d.card.borrow_mut().is_busy()) {
-            self.busy_skips += 1;
-            return "busy";
-        }
         // One block-aligned chunk.
         let room = 512 - (self.pos % 512) as usize;
         let flush_due = now.saturating_sub(self.flushed_at) >= FLUSH_EVERY_MS;
@@ -682,12 +916,21 @@ impl Logger {
             Ok(())
         })();
         if let Err(e) = r {
-            let rows_lost = self.pending.len();
-            self.fail("write", &e, now);
-            println!("hub-p4: sd lost the card while recording ({rows_lost} bytes unwritten); probing again");
-            self.state = State::NoCard(now + PROBE_EVERY_MS);
+            return self.lost(ev, &e, now);
         }
         what
+    }
+
+    /// A write failed while recording: the card is taken to be gone.
+    fn lost(&mut self, ev: &mut Evidence, e: &FsError, now: u64) -> &'static str {
+        let rows_lost = self.pending.len();
+        if self.ev_file.is_some() {
+            ev.card_lost();
+        }
+        self.fail("write", e, now);
+        println!("hub-p4: sd lost the card while recording ({rows_lost} CSV bytes unwritten; evidence stays queued); probing again");
+        self.state = State::NoCard(now + PROBE_EVERY_MS);
+        "write_err"
     }
 
     fn queue_rows(&mut self, tracker: &HubTracker, faa: &Faa, now: u64) {

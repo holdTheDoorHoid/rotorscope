@@ -1,0 +1,9 @@
+[package]
+name = "evidence-verify"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+evidence = { workspace = true, features = ["verify"] }
