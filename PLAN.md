@@ -290,16 +290,32 @@ Decided 2026-11-09 (see RESEARCH.md "Expansion research"):
 - Airtime is scarce. Send only on a new or significantly changed track, plus a heartbeat every 30–60 s, on a private channel using a 500 kHz preset. Those presets are the ones that clearly meet FCC 15.247.
 - **Never share one LoRa radio between backhaul and detection.** A mesh node must keep listening to relay packets, and it is deaf to drone links whenever it transmits.
 
-### Phase 9: Control-link detection node (LR1121)
-- One **LR1121** radio covers both bands drone control links use: 900 MHz and 2.4 GHz.
-  - Cheapest board: RadioMaster XR1, an ESP32-C3 + LR1121 at about $12–17. Whether it can be reflashed freely is unverified.
-  - Alternative: LilyGo T3-S3 LR1121, about $24–31.
-- Rust driver: `lora-phy`'s LR11xx driver.
+### Phase 9: Control-link detection node (LR2021; switched from LR1121 on 2026-11-15)
+- One **Semtech LR2021** radio covers both bands drone control links use: 900 MHz and 2.4 GHz
+  (150–960 MHz and 1.5–2.5 GHz, one band at a time).
+- **Why LR2021 over LR1121** (research 2026-11-15, Semtech LR20xx datasheet rev 2.2):
+  - SX1280-compatible **FLRC**, so it hears ELRS's high-rate racing mode. The separate SX1280 idea is dropped.
+  - **Multi-SF receive**: up to 4 spreading factors at once on one channel, so several ELRS rates are
+    heard together instead of tried in turn (within its processing budget, e.g. 3 SFs at 812 kHz).
+  - Receive bandwidth up to ~3 MHz (vs ~0.5 MHz), so energy maps need far fewer steps.
+  - About 4 dB more LoRa sensitivity; chip about the same price (~$8–10).
+  - Buy the **LR2021** itself: the LR2022 and LR2012 lack FLRC.
+- **Boards:** none cheap on sale yet. ExpressLRS master (not yet released) has LR2021 targets for
+  ESP32-C3 receivers (GEPRC LINKFLOW LR20, BlackSheep ES4, generic C3), the same shape as the
+  RadioMaster XR1; wait for one of those for the kit. For bench work now: Seeed/Semtech LR2021
+  evaluation kit (~$99, two radios) or a Waveshare Core2021 / Elecrow LR2021 module wired to a spare
+  ESP32. Keep one RadioMaster XR1 (ESP32-C3 + LR1121, ~$12–17) as the fallback.
+- **Rust driver:** the standalone `lr2021` crate (no_std, async; young, one maintainer, not yet
+  tried on an ESP32). `lora-phy` has no LR2021 driver (lora-rs issue #438); its LR11xx driver is
+  the fallback path.
+- **Backhaul (Phase 8) stays SX1262.** An LR2021 Meshtastic board also works over the air, so it is
+  allowed, not required.
+- **Ignore** the undocumented raw-IQ "SDR" mode (depends on the chip's ROM version).
 - Detects ExpressLRS (the most common FPV control link) on both bands **without knowing the pilot's binding phrase**:
   - It parks on ELRS's fixed sync channel and tries each rate setting.
   - It also builds energy maps of both bands.
 - Also catches mLRS, and the hopping energy pattern of SiK/RFD900 autopilot telemetry.
-- It cannot decode Crossfire, Tracer or Ghost; those show up as energy only. It misses ELRS's high-rate racing mode (FLRC), which needs an SX1280.
+- It cannot decode Crossfire, Tracer or Ghost; those show up as energy only. ELRS's high-rate racing mode (FLRC) is covered by the LR2021 (it was the LR1121's gap).
 - **Legal line.** A 2020 DOJ/FAA/FCC/DHS advisory warns that monitoring drone control links can fall under wiretap and pen-register law.
   - Presence and energy detection are the default.
   - Reading a link's identifier (ELRS UID bytes) is **opt-in**.
@@ -384,7 +400,7 @@ Decided 2026-11-09 (see RESEARCH.md "Autel, Skydio and digital FPV").
 | Walksnail Avatar | Fingerprint | Same as DJI (Artosyn LTE-style chip); telling the two apart needs recordings |
 | HDZero | Fingerprint | Fixed 37 MHz channel grid, 27 or 17 MHz wide, continuous |
 | Autel SkyLink 2.4/5.x GHz | Fingerprint | TD-LTE based: 1.1/4.5/9/18 MHz wide on a 1 MHz raster |
-| Autel 900 MHz, Skydio X10D 1.6–2.1 GHz | Not reachable | No ESP32 covers it; LR1121 wideband energy at best |
+| Autel 900 MHz, Skydio X10D 1.6–2.1 GHz | Not reachable | No ESP32 covers it; LR2021 wideband energy at best (1.5–2.5 GHz reaches part of X10D) |
 | Video or telemetry content of any of them | Out of scope | Encrypted or proprietary, and legally off-limits |
 
 1. **11a. Open digital FPV over Wi-Fi.** **BUILT 2026-11-09**, untested on radios: `crates/openlink`,
@@ -422,9 +438,9 @@ Walksnail + OpenIPC).
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
 - **nRF24L01+** ($1–8) for the 55 toy-drone protocols it carries (SymaX, Bayang, MJX…), if Wi-Fi matching proves insufficient.
-- **SX1280**, only if ELRS racing (FLRC) mode matters.
+- ~~**SX1280**, only if ELRS racing (FLRC) mode matters.~~ Not needed: the LR2021 (Phase 9) does FLRC.
 - RTL-SDR as an optional laptop add-on for a waterfall next to `rid-view`.
-- **Skip:** CC1101, CC2500, A7105 and CYRF6936. They duplicate the LR1121 or cover declining protocols.
+- **Skip:** CC1101, CC2500, A7105 and CYRF6936. They duplicate the LR2021 or cover declining protocols.
 - Time sync across nodes using the GPS PPS pulse.
 
 ### Node chip (2026-11-12)

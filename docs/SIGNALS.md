@@ -89,8 +89,8 @@ verdicts, 0 analog video, nothing sent to the RF table (as designed with no vide
 
 | Link | Where | What we can get | Status |
 |---|---|---|---|
-| ExpressLRS 2.4 GHz | 2400–2480, 80 channels; sync near 2440.4 | Presence, rate; ID opt-in | **Not built**, needs an LR1121 or SX1280 radio (not owned) |
-| ExpressLRS 900 MHz | 903.5–926.9, 40 channels; sync near 915.5 | same | **Can't** on ESP32; LR1121 |
+| ExpressLRS 2.4 GHz | 2400–2480, 80 channels; sync near 2440.4 | Presence, rate; ID opt-in | **Not built**, needs an LR2021 radio (Phase 9; not owned). It also covers the FLRC racing mode |
+| ExpressLRS 900 MHz | 903.5–926.9, 40 channels; sync near 915.5 | same | **Can't** on ESP32; LR2021 (Phase 9) |
 | TBS Crossfire / Tracer, ImmersionRC Ghost, FrSky, Spektrum, FlySky | 868/915 or 2.4 GHz | energy only | **Not built**; 2.4 GHz energy maybe on a raw-capture C5 |
 | SiK / RFD900 telemetry | 902–928 | hopping pattern | **Can't** on ESP32 |
 
