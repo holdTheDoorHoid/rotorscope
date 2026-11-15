@@ -185,7 +185,9 @@ const LOUD: Dwell = Dwell { snr_db: 20, duty_pct: 100 };
 /// Pictures: flat grey, colour-bar-like steps, a vertical gradient, fixed
 /// fine detail, and fresh random detail on every line (only the sync
 /// pulses repeat).
-fn pictures() -> Vec<(&'static str, Box<dyn Fn(usize, f64) -> f64>)> {
+type Picture = Box<dyn Fn(usize, f64) -> f64>;
+
+fn pictures() -> Vec<(&'static str, Picture)> {
     vec![
         ("grey", Box::new(|_, _| 0.35)),
         ("bars", Box::new(|_, x| (7.0 - (x * 8.0).floor()) * 0.1)),

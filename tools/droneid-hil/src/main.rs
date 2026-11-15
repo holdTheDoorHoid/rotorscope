@@ -20,7 +20,7 @@
 //! ```sh
 //! tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT"' 600 c5b
 //! ```
-//! Options: `--rms 200,100,60` burst levels (codes RMS; receiver noise is
+//! Options: `--pre "trig 3"` console commands first, `--rms 200,100,60` burst levels (codes RMS; receiver noise is
 //! `--noise 48`, the board's measured noise at gain 83), `--dir` recordings.
 
 use std::io::{BufRead, BufReader, Write};
@@ -123,16 +123,19 @@ fn main() {
     let mut dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/droneid").to_string();
     let mut rms_list = vec![200.0, 100.0, 60.0];
     let mut noise = 48.0;
+    let mut pre: Vec<String> = vec![];
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--port" => port = args.next(),
             "--dir" => dir = args.next().expect("--dir"),
             "--rms" => rms_list = args.next().expect("--rms").split(',').map(|v| v.parse().expect("rms")).collect(),
+            "--pre" => pre.push(args.next().expect("--pre")),
             "--noise" => noise = args.next().expect("--noise").parse().expect("noise"),
             _ => panic!("unknown argument {a}"),
         }
     }
+    let debug = std::env::var_os("HIL_DEBUG").is_some();
     let port = port.expect("--port or $BOARD_PORT (run under tools/dev-board.sh --run)");
 
     let mut all = vec![];
@@ -162,6 +165,11 @@ fn main() {
     };
     // Park on one channel so the live path is quiet between runs.
     send(&mut w, "hop off");
+    for c in &pre {
+        // e.g. --pre "trig 3": console commands before the runs (restored by reboot).
+        std::thread::sleep(Duration::from_millis(100));
+        send(&mut w, c);
+    }
     std::thread::sleep(Duration::from_millis(300));
     while rx.try_recv().is_ok() {}
 
@@ -182,6 +190,14 @@ fn main() {
             let mut result = None;
             while Instant::now() < deadline && result.is_none() {
                 let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) else { continue };
+                if debug && (line.contains("\"t\":\"ev\"") || line.contains("\"t\":\"hil\"")) {
+                    eprintln!("board: {line}");
+                }
+                if debug && line.contains("\"t\":\"burst\"") {
+                    // Decoder metrics only: cut before any record field.
+                    let cut = line.find("\"crc16\"").unwrap_or(line.len());
+                    eprintln!("board: {}", &line[..cut]);
+                }
                 if line.contains("\"t\":\"burst\"") {
                     // Record types only; identities are never printed.
                     record = ["flight_info", "o4_encrypted", "info11", "unknown"]
@@ -199,6 +215,9 @@ fn main() {
                 eprintln!("burst {k}: no hil result within 20 s");
                 continue;
             };
+            if field(&res, "intact") != Some("true") {
+                eprintln!("burst {k}: ring changed during the run: {res}");
+            }
             if field(&res, "ok") != Some("true") {
                 eprintln!("burst {k}: {res}");
                 continue;

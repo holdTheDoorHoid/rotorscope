@@ -81,6 +81,38 @@ fn addr(s: &u8) -> usize {
     s as *const u8 as usize
 }
 
+/// Lowest stack address (the stack grows down to it) and the paint word.
+static STACK_LO: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+const PAINT: u32 = 0x5afe_57ac;
+
+/// Paint the unused part of the main stack, so [`stack_free`] can tell how
+/// deep it has ever been.
+fn paint_stack(lo: usize) {
+    let sp: usize;
+    // SAFETY: reads the stack pointer.
+    unsafe { core::arch::asm!("mv {}, sp", out(reg) sp) };
+    // Skip esp-hal's stack guard word at the very bottom.
+    let lo = lo + 256;
+    STACK_LO.store(lo, core::sync::atomic::Ordering::Relaxed);
+    let mut p = lo.next_multiple_of(4);
+    while p + 4096 < sp {
+        // SAFETY: below the live stack (with a 4 KiB margin), inside it.
+        unsafe { (p as *mut u32).write_volatile(PAINT) };
+        p += 4;
+    }
+}
+
+/// Bytes of the main stack never used since boot.
+pub fn stack_free() -> usize {
+    let lo = STACK_LO.load(core::sync::atomic::Ordering::Relaxed).next_multiple_of(4);
+    let mut p = lo;
+    // SAFETY: inside the stack region, below anything live when untouched.
+    while unsafe { (p as *const u32).read_volatile() } == PAINT {
+        p += 4;
+    }
+    p - lo
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger(LOG_LEVEL);
@@ -107,6 +139,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let (stack_lo, stack_hi, bank) = unsafe { (addr(&_stack_end), addr(&_stack_start), addr(&_sdr_bank_start)) };
+    paint_stack(stack_lo);
     println!(
         r#"{{"t":"hello","fw":"node-sdr","ver":"{}","chip":"esp32c5","decode":{},"bank":"{bank:#x}","heap_gap":{gap},"heap_reclaimed":{HEAP_RECLAIMED},"stack":{}}}"#,
         env!("CARGO_PKG_VERSION"),
@@ -114,7 +147,11 @@ async fn main(spawner: Spawner) -> ! {
         stack_hi - stack_lo
     );
 
-    let mut radio = radio::Radio::new(radio::Settings::default());
+    // On the heap, not in main's future: the main stack also carries the
+    // DroneID decoder (~30 KiB) and sits right above SRAM block 1, so every
+    // byte kept here is a byte closer to the capture bank (2026-11-14: with
+    // these on the stack it overflowed into the decoder input).
+    let mut radio = new_radio();
 
     // PSRAM: [DroneID receiver][FPV scratch][HIL staging], bump-allocated.
     let psram = esp_hal::psram::Psram::new(peripherals.PSRAM, Default::default());
@@ -223,11 +260,11 @@ async fn main(spawner: Spawner) -> ! {
     let (rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(console(rx, tx).expect("spawn console"));
 
-    let mut hub = hub::Hub::new(radio.role);
+    let hub = new_hub(radio.role);
     #[cfg(feature = "espnow")]
-    let mut up = wifi.as_ref().map(|w| uplink::Uplink::new(w.esp_now()));
+    let up = wifi.as_ref().map(|w| new_uplink(w.esp_now()));
     #[cfg(not(feature = "espnow"))]
-    let _ = &wifi;
+    let up: Option<()> = None;
     println!(
         r#"{{"t":"hub","transport":"{}","role":"{}","can":"droneid,fpv","protocol":{}}}"#,
         if cfg!(feature = "espnow") { "espnow" } else { "none (build with --features espnow / cargo fw-now)" },
@@ -235,6 +272,32 @@ async fn main(spawner: Spawner) -> ! {
         link::PROTOCOL_VERSION
     );
 
+    // The capture loop runs as its own task so its state (the hub queue,
+    // the uplink's futures, everything held across an await) is static, not
+    // on the main stack: that stack also carries the DroneID decoder (~30
+    // KiB) and ends right above SRAM block 1, the capture bank. With this
+    // loop inline in `main`, main's future took 20 KiB of stack and the
+    // decoder overflowed 12 KiB into the bank (found by the HIL test,
+    // 2026-11-14).
+    spawner.spawn(capture_loop(radio, hub, up).expect("spawn capture loop"));
+    // `wifi` must stay alive (dropping the controller stops the driver).
+    let _wifi = wifi;
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
+    }
+}
+
+#[cfg(feature = "espnow")]
+type Up = Option<alloc::boxed::Box<uplink::Uplink>>;
+#[cfg(not(feature = "espnow"))]
+type Up = Option<()>;
+
+#[embassy_executor::task]
+async fn capture_loop(mut radio: alloc::boxed::Box<radio::Radio>, mut hub: alloc::boxed::Box<hub::Hub>, up: Up) -> ! {
+    #[cfg(feature = "espnow")]
+    let mut up = up;
+    #[cfg(not(feature = "espnow"))]
+    let _ = up;
     let mut last_stats = Instant::now();
     let mut script = BOOT_SCRIPT.unwrap_or("").split(';').map(str::trim).filter(|c| !c.is_empty());
     let mut next_script = Instant::now() + Duration::from_secs(2);
@@ -271,10 +334,9 @@ async fn main(spawner: Spawner) -> ! {
             #[cfg(feature = "espnow")]
             if let Some(u) = up.as_mut()
                 && u.due(&hub)
+                && let Some(a) = u.window(&mut radio, &mut hub).await
             {
-                if let Some(a) = u.window(&mut radio, &mut hub).await {
-                    apply_assignment(&mut radio, &mut hub, &a);
-                }
+                apply_assignment(&mut radio, &mut hub, &a);
             }
             radio.next_hop();
         } else if !radio.hopping {
@@ -282,10 +344,9 @@ async fn main(spawner: Spawner) -> ! {
             #[cfg(feature = "espnow")]
             if let Some(u) = up.as_mut()
                 && u.due(&hub)
+                && let Some(a) = u.window(&mut radio, &mut hub).await
             {
-                if let Some(a) = u.window(&mut radio, &mut hub).await {
-                    apply_assignment(&mut radio, &mut hub, &a);
-                }
+                apply_assignment(&mut radio, &mut hub, &a);
             }
         }
         #[cfg(not(feature = "espnow"))]
@@ -311,23 +372,60 @@ async fn main(spawner: Spawner) -> ! {
             radio.poll();
             radio.stats_paced();
             radio.poll();
-            let mut line = radio::Line::new();
-            use core::fmt::Write as _;
-            let _ = write!(
-                line,
-                r#"{{"t":"link","queued":{},"waiting":{},"dropped":{},"droneid":{},"rf":{},"hil_frames":{},"commands":{},"bad_commands":{}}}"#,
-                hub.queued,
-                hub.len(),
-                hub.dropped,
-                hub.droneid,
-                hub.rf,
-                hub.hil_frames,
-                hub.commands,
-                hub.bad_commands
-            );
-            out::paced(line.as_str(), 128, || radio.probe());
+            link_line(&mut radio, &hub);
         }
     }
+}
+
+// Built here, not in `main`: a value built in main's frame keeps its slot
+// there for the whole run even after it is moved into a Box.
+#[inline(never)]
+fn new_radio() -> alloc::boxed::Box<radio::Radio> {
+    alloc::boxed::Box::new(radio::Radio::new(radio::Settings::default()))
+}
+
+#[inline(never)]
+fn new_hub(role: link::NodeRole) -> alloc::boxed::Box<hub::Hub> {
+    alloc::boxed::Box::new(hub::Hub::new(role))
+}
+
+#[cfg(feature = "espnow")]
+#[inline(never)]
+fn new_uplink(now: esp_radio::esp_now::EspNow) -> alloc::boxed::Box<uplink::Uplink> {
+    alloc::boxed::Box::new(uplink::Uplink::new(now))
+}
+
+#[inline(never)]
+fn print_plan(radio: &radio::Radio) {
+    let mut line = radio::Line::new();
+    use core::fmt::Write as _;
+    let _ = write!(line, r#"{{"t":"plan","role":"{}","id":{},"hop":{},"hops":["#, hub::role_name(radio.role), radio.plan_id, radio.hopping);
+    for (k, (f, ms)) in radio.plan().iter().enumerate() {
+        let _ = write!(line, "{}[{f},{ms}]", if k == 0 { "" } else { "," });
+    }
+    println!("{}]}}", line.as_str());
+}
+
+/// The once-a-second link counters, paced like the stats line. Its own
+/// function so its 2 KiB line buffer is not part of main's future.
+#[inline(never)]
+fn link_line(radio: &mut radio::Radio, hub: &hub::Hub) {
+    let mut line = radio::Line::new();
+    use core::fmt::Write as _;
+    let _ = write!(
+        line,
+        r#"{{"t":"link","stack_free":{},"queued":{},"waiting":{},"dropped":{},"droneid":{},"rf":{},"hil_frames":{},"commands":{},"bad_commands":{}}}"#,
+        stack_free(),
+        hub.queued,
+        hub.len(),
+        hub.dropped,
+        hub.droneid,
+        hub.rf,
+        hub.hil_frames,
+        hub.commands,
+        hub.bad_commands
+    );
+    out::paced(line.as_str(), 128, || radio.probe());
 }
 
 /// Hand the radio's events to the hub.
@@ -368,15 +466,7 @@ fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
             radio.hopping = on && !radio.plan().is_empty();
             println!(r#"{{"t":"ok","hop":{}}}"#, radio.hopping);
         }
-        Local::Plan => {
-            let mut line = radio::Line::new();
-            use core::fmt::Write as _;
-            let _ = write!(line, r#"{{"t":"plan","role":"{}","id":{},"hop":{},"hops":["#, hub::role_name(radio.role), radio.plan_id, radio.hopping);
-            for (k, (f, ms)) in radio.plan().iter().enumerate() {
-                let _ = write!(line, "{}[{f},{ms}]", if k == 0 { "" } else { "," });
-            }
-            println!("{}]}}", line.as_str());
-        }
+        Local::Plan => print_plan(radio),
         Local::FpvVerbose(on) => {
             radio.fpv_verbose = on;
             println!(r#"{{"t":"ok","fpv_verbose":{on}}}"#);
@@ -399,12 +489,13 @@ fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
             }
             let frames0 = hub.hil_frames;
             let t0 = esp_hal::time::Instant::now();
-            let (rises, accepted, matched, crc_ok, ms) = radio.hil_run(data);
+            let (rises, accepted, matched, crc_ok, ms, intact) = radio.hil_run(data);
             let total_ms = t0.elapsed().as_millis();
             drain_events(radio, hub);
             println!(
-                r#"{{"t":"hil","ok":true,"bytes":{len},"rises":{rises},"accepted":{accepted},"matched":{matched},"crc_ok":{crc_ok},"frames":{},"decode_ms":{ms},"total_ms":{total_ms}}}"#,
-                hub.hil_frames - frames0
+                r#"{{"t":"hil","ok":true,"bytes":{len},"rises":{rises},"accepted":{accepted},"matched":{matched},"crc_ok":{crc_ok},"frames":{},"decode_ms":{ms},"total_ms":{total_ms},"intact":{intact},"stack_free":{}}}"#,
+                hub.hil_frames - frames0,
+                stack_free()
             );
         }
     }

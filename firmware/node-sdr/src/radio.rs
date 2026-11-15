@@ -178,6 +178,8 @@ pub struct Radio {
     sweep: SweepStats,
     /// A hardware-in-the-loop run is in progress (events are marked).
     hil: bool,
+    /// CRC of the decoder input as built in a HIL run (checked after decoding).
+    hil_cap_crc: u32,
     /// Last receive DC calibration (ours), and the setting it was made for.
     dc: phy::DcCal,
     dc_for_mhz: u16,
@@ -197,6 +199,13 @@ fn reader(start: u64) -> impl Fn(usize) -> u8 {
         let i = off + k;
         bytes[if i >= RING_BYTES { i - RING_BYTES } else { i }]
     }
+}
+
+fn cap_crc() -> u32 {
+    let mut c = Crc32::new();
+    // SAFETY: the capture bank as bytes, read only.
+    c.update(unsafe { core::slice::from_raw_parts(CAPTURE_ADDR as *const u8, 4 * CAPTURE_LEN) });
+    c.finish()
 }
 
 fn capture() -> &'static mut [C16] {
@@ -236,6 +245,7 @@ impl Radio {
             fpv_verbose: false,
             sweep: SweepStats::default(),
             hil: false,
+            hil_cap_crc: 0,
             dc: phy::DcCal::default(),
             dc_for_mhz: 0,
             dc_auto: true,
@@ -457,7 +467,9 @@ impl Radio {
         let thr = (floor_seg * cfg.ratio_q8 as u64 / 256) as u32;
         let (first, n) = extent((lo..hi).map(seg_power), thr);
         let first = first + lo;
-        let dur_us = (n * SEG) as u32 * 1_000_000 / RATE_B;
+        // u64: (n * SEG) * 1e6 overflows u32 past ~107 µs (found by the HIL test:
+        // every DroneID-length burst used to measure as tens of µs and be rejected).
+        let dur_us = ((n * SEG) as u64 * 1_000_000 / RATE_B as u64) as u32;
         let mean_seg: u64 = if n > 0 { (first..first + n).map(|k| seg_power(k) as u64).sum::<u64>() / n as u64 } else { 0 };
         // 0 dBFS = both axes on the rails (POWER 450 per sample).
         let lvl = db10_x10(mean_seg.max(1)) - db10_x10(450 * SEG as u64);
@@ -466,7 +478,7 @@ impl Radio {
         if !ok {
             self.n.rejected += 1;
             let t = now_us();
-            if t >= self.ev_quiet_until {
+            if t >= self.ev_quiet_until || self.hil {
                 self.ev_quiet_until = t + 200_000;
                 println!(
                     r#"{{"t":"ev","pos":{start},"mhz":{},"dur_us":{dur_us},"lvl_db":{},"snr_db":{},"note":"energy, not DroneID length"}}"#,
@@ -482,6 +494,9 @@ impl Radio {
         decimate_nibbles(&get, cap);
         remove_dc(cap);
         self.c16_len = CAPTURE_LEN;
+        if self.hil {
+            self.hil_cap_crc = cap_crc();
+        }
         let mut line = Line::new();
         let _ = write!(
             line,
@@ -518,10 +533,15 @@ impl Radio {
             let mut n_ok = 0;
             let mut n_all = 0;
             let freq = self.cur_freq;
+            // Where a burst on `freq` must appear in the capture (the LO is
+            // the whole MHz below it: +500 kHz).
+            let expect_hz = freq as i64 * 100_000 - self.s.mhz as i64 * 1_000_000;
             let mut out = out;
             rx.decode_all(&capture()[..n], &mut |res| {
-                if let (Some((v, lvl, snr)), Ok(b)) = (out.as_mut(), &res) {
-                    let _ = v.push(sighting(b, freq, *lvl, *snr));
+                if let (Some((v, lvl, snr)), Ok(b)) = (out.as_mut(), &res)
+                    && let Some(s) = sighting(b, freq, expect_hz, *lvl, *snr)
+                {
+                    let _ = v.push(s);
                 }
                 n_all += 1;
                 if !first {
@@ -1018,9 +1038,24 @@ fn rf_kind(k: fpvscan::Kind) -> Option<RfKind> {
     })
 }
 
+/// Largest distance (Hz) of an undecoded burst from where a DroneID burst on
+/// the tuned frequency must appear, for it to count as `Detected`: two
+/// crystals of +-20 ppm at 5.8 GHz, plus margin.
+const DETECT_CFO_HZ: f64 = 300_000.0;
+
 /// The hub sighting for one burst that passed the reference-pattern check.
+///
+/// A CRC-valid burst is always reported. One that did not decode becomes
+/// `Detected` only if its reference symbols carry positive SNR and it sits
+/// within [`DETECT_CFO_HZ`] of the expected offset `expect_hz`: on the bench
+/// (2026-11-14, 200 s, 1562 Wi-Fi frames of DroneID length decoded) nine Wi-Fi
+/// frames passed the decoder's cyclic-prefix and Zadoff-Chu thresholds, all
+/// with reference SNR below -6 dB and 3-6 MHz off; none passes this gate.
 #[cfg(feature = "decode")]
-fn sighting(b: &droneid::rx::Burst, freq: u32, lvl_x10: i32, _snr_x10: i32) -> DroneIdSighting {
+fn sighting(b: &droneid::rx::Burst, freq: u32, expect_hz: i64, lvl_x10: i32, _snr_x10: i32) -> Option<DroneIdSighting> {
+    if !b.crc24_ok && (b.snr_db < 0.0 || (b.cfo_hz - expect_hz as f64).abs() > DETECT_CFO_HZ) {
+        return None;
+    }
     use droneid::payload::Record;
     let record = match (&b.parsed, b.crc24_ok) {
         (Some(p), true) => match &p.record {
@@ -1047,7 +1082,7 @@ fn sighting(b: &droneid::rx::Burst, freq: u32, lvl_x10: i32, _snr_x10: i32) -> D
         // but the block did not decode.
         _ => DroneIdRecord::Detected,
     };
-    DroneIdSighting {
+    Some(DroneIdSighting {
         freq,
         // No calibrated dBm on this receiver: the burst level in dB below
         // the 4-bit window's full scale.
@@ -1055,7 +1090,7 @@ fn sighting(b: &droneid::rx::Burst, freq: u32, lvl_x10: i32, _snr_x10: i32) -> D
         snr_db: (b.snr_db as i32).clamp(-128, 127) as i8,
         uptime_us: now_us(),
         record,
-    }
+    })
 }
 
 impl Radio {
@@ -1298,11 +1333,15 @@ impl Radio {
     /// would be, and the first rise goes through [`Radio::window`] (length
     /// gate, half-band, DC removal, decoder, `burst` line, hub sightings,
     /// marked as HIL). Returns (rises, accepted, bursts matched, CRC-valid,
-    /// decode ms).
-    pub fn hil_run(&mut self, data: &[u8]) -> (u32, u32, u32, u32, u32) {
+    /// decode ms, whether the ring still held exactly the fed bytes after
+    /// the run).
+    pub fn hil_run(&mut self, data: &[u8]) -> (u32, u32, u32, u32, u32, bool) {
         ring::stop();
         engine::stop();
         self.pending = None;
+        // Let a DMA write already in flight land before we overwrite the ring.
+        let t = now_us();
+        while now_us() - t < 200 {}
         let n = data.len().min(GRAB_BYTES);
         // SAFETY: ring and engine stopped; single-threaded.
         unsafe { ring::bytes_mut()[..n].copy_from_slice(&data[..n]) };
@@ -1326,12 +1365,18 @@ impl Radio {
             pos += cfg.block as usize;
         }
         self.hil = false;
+        // The ring must still hold the fed bytes, and the decoder input must
+        // not have changed while it was decoded (nothing but the CPU may
+        // write SRAM block 1 while the engine is stopped).
+        let intact = ring::bytes()[..n] == data[..n] && (self.n.accepted == acc0 || cap_crc() == self.hil_cap_crc);
+
         let out = (
             rises,
             self.n.accepted - acc0,
             self.n.bursts - bursts0,
             self.n.crc_ok - crc0,
             self.n.last_decode_ms,
+            intact,
         );
         self.restart();
         out

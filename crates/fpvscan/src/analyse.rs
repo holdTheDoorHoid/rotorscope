@@ -112,7 +112,7 @@ fn cp_corr(x: &[C16], lag: usize) -> i32 {
     }
     let mag = droneid::math::C64 { re, im }.abs();
     let den = droneid::math::isqrt64(p0) * droneid::math::isqrt64(p1);
-    if den == 0 { 0 } else { (mag.saturating_mul(1000) / den) as i32 }
+    mag.saturating_mul(1000).checked_div(den).unwrap_or(0) as i32
 }
 
 /// CP metric at `lag` against controls `lag +- off`.
