@@ -112,9 +112,13 @@ fn espnow_rule(p: Plan) -> Plan {
 /// Bench only, see node-ble's `role::BENCH_FLIP`: leave Wi-Fi 2.4 out of `can`.
 pub const BENCH_FLIP: bool = option_env!("ROTORSCOPE_BENCH_FLIP").is_some();
 
+/// Bench only, see `node_common::bench_can_mask`: report only one role.
+pub const BENCH_CAN: u8 = node_common::bench_can_mask(option_env!("ROTORSCOPE_BENCH_CAN"));
+
 /// Set the job at boot: a stored job this image can run, else the default.
 pub fn init(stored: Option<Assignment>, can: u8) {
-    CAN.store(if BENCH_FLIP { can & !NodeRole::Wifi24.bit() } else { can }, Relaxed);
+    let can = if BENCH_FLIP { can & !NodeRole::Wifi24.bit() } else { can };
+    CAN.store(can & BENCH_CAN, Relaxed);
     let job = stored
         .filter(|a| is_wifi(a.role) && chip::OWN_ROLES & a.role.bit() != 0)
         .and_then(|a| plan_from(&a).ok().map(|plan| Job { role: a.role, plan, id: a.id }))

@@ -127,3 +127,148 @@ the same board at once, while the two boards of one test can run at the same tim
 The old lock lived in `/tmp`. A sandboxed program can have its own private `/tmp`, so two programs
 could each hold "the" lock without seeing each other. That is the most likely cause of the earlier
 report that the lock did not serialize (not proven; it could not be reproduced without hardware).
+
+## End-to-end through the P4 (2026-11-15)
+
+Every signal we may legally send, through the whole chain: test transmitter (`c5b`, rid-beacon,
+2 dBm Wi-Fi, -15 dBm BLE, about a metre away) -> listener node `c5a` (multi-image, ESP-NOW) ->
+gateway `c5c` -> wire -> P4 hub. **PASS means the hub's own tracker table had it**, read from the
+hub's console with a bench-only build (below), not from the node.
+
+### How it was run
+
+* **One role at a time.** With one listener node the coordinator always gives it Wi-Fi 2.4. A bench
+  build switch makes the node offer only one role, so the hub assigns that role:
+  `ROTORSCOPE_BENCH_CAN=wifi24|wifi5|ble tools/flash-node.sh c5a` (`node_common::bench_can_mask`;
+  both images get the same mask; any other value stops the build; unset = no restriction). Never
+  for a deployed node.
+* **Hub evidence.** `cargo build --release --features benchlog` in `firmware/hub-p4`
+  (`src/bench.rs`): a `bench new-slot` / `new-link` / `new-rf` / `new-wifidrone` line the moment the
+  tracker gets a new drone slot (transport and band), open-link stream, RF emitter or Wi-Fi drone,
+  a table summary every 5 s, and at boot a count by kind of every row in the previous SD log file.
+  It prints only our test IDs (`TESTDRONE...`); link IDs only as `fake` / `none` / `other`.
+* Per role: session A = hub reboot, beacon on, reflash `c5a` with the mask (role switch timing);
+  session B = hub reboot, then one transmission at a time (45 s each for Remote ID, 30 s for each
+  fake link, 2 s of silence between). Each hub boot writes its own SD log file; the next boot counts it.
+* "Time" = from typing the key on the beacon to the hub's `new-` line. It includes the beacon's
+  own restart (opening its console resets it, about 1 s), so the chain itself is faster.
+
+### 1. Remote ID through the hub
+
+One track all along: `TESTDRONE0000000001`, `drones=1`, `decode_err=0`, location present.
+
+| Signal | Node role (hub plan) | Hub slot | Time | Heard by the hub (segment) | RSSI | Result |
+|---|---|---|---|---|---|---|
+| Wi-Fi beacon, ch 6 | Wi-Fi 2.4 (`0x1503`) | WifiBeacon / 2.4, ch 6 | 2.4 s | 26 in 45 s | -38 | PASS |
+| Wi-Fi NAN, ch 6 | Wi-Fi 2.4 | WifiNan / 2.4, ch 6 | 1.6 s | 33 in 45 s | -40 | PASS |
+| Wi-Fi beacon, ch 149 | Wi-Fi 5 (`0x8a0c`) | WifiBeacon / 5, ch 149 | 2.8 s | 27 in 45 s | -41 | PASS |
+| Wi-Fi NAN, ch 149 | Wi-Fi 5 | WifiNan / 5, ch 149 | 2.8 s | 30 in 45 s | -41 | PASS |
+| Bluetooth 4 legacy | Bluetooth (`0x6749`) | BleLegacy | 1.8 s | 158 in 45 s | -58 | PASS |
+| Bluetooth 5 extended | Bluetooth | BleExtended | 2.5 s | 76 in 45 s | -57 | PASS |
+| Bluetooth 5 Long Range | Bluetooth | BleLongRange | 2.6 s | 55 in 45 s | -57 | PASS |
+
+The first legacy advert carries one message, not always the Basic ID, so its slot appears a moment
+before the ID does; the next adverts fill it in on the same track. No transmission showed up in
+another transport's slot.
+
+### 2. Fake open FPV links through the hub's open-link table
+
+All 16 PASS: each system appeared within 1.5-3.2 s of its key, with the fake ID recognised
+(`id=fake`; OpenHD has no clear ID: `none`).
+
+| Channel | Node role | wfb-ng | OpenHD | RubyFPV | DroneBridge | RSSI |
+|---|---|---|---|---|---|---|
+| 6 | Wi-Fi 2.4 | 1.5 s, 23 reports | 1.7 s, 25 | 1.7 s, 24 | 1.7 s, 28 | -39 |
+| 149 | Wi-Fi 5 | 2.2 s, 22 | 1.8 s, 24 | 2.4 s, 22 | 2.8 s, 24 | -41 |
+| 161 | Wi-Fi 5 | 3.0 s, ~19 | 3.2 s, ~18 | 1.8 s, ~21 | 2.4 s, ~19 | -43 |
+| 165 | Wi-Fi 5 | 2.8 s, ~18 | 3.2 s, ~14 | 2.0 s, ~17 | 2.2 s, ~18 | -45 |
+
+("reports" = the node's once-a-second sightings the hub received in that 30 s; the same link on a
+second channel is the same table entry, so 161/165 are the increase.) One extra stream: the ch 6
+wfb-ng link was also reported on **ch 1** once, while the node visited 1: at a metre the 2 dBm
+signal is decoded 25 MHz off its channel, and the node labels a frame with the channel it is tuned
+to. A real effect of the bench distance, not a fault; it would not happen at range.
+
+### 3. Role switching under the hub
+
+| Role | Flash done -> hub assigns | Node applies | First detection on the hub |
+|---|---|---|---|
+| Wi-Fi 2.4 (already running it) | 4.6 s (plan echoed; same image) | at once | detections never stopped |
+| Wi-Fi 5 (same image) | 1.0 s | at once (0 band or channel errors) | 2.2 s after boot |
+| Bluetooth (image switch) | 2.0 s | node-wifi switches image; node-ble up 1.0 s later | 4.0 s after the first boot |
+
+Flashing itself takes 15-20 s before that. Every assignment was `applied=true` on the hub after.
+
+### 4. DroneID (chip only)
+
+`tools/droneid-hil` on `c5b` (node-sdr `cargo fw-now`): the 13 public-recording bursts at two
+levels. 200 codes (9.4 dB): 13/13 detected, 13/13 CRC-valid, median decode 151 ms (max 158).
+150 codes (6.9 dB): 13/13, 13/13, median 144 ms (max 151). Same as 2026-11-14: no regression.
+**Chip only by design:** HIL sightings are never sent to the hub, so a recording can never appear
+as a live drone. A real DroneID on the hub needs a real DJI drone.
+
+### 5. FPV scanner, 2 minutes, through the hub
+
+`c5b` pinned to FPV (`role fpv`), reporting through the gateway (32 uplink windows, 32 ACKed).
+58 sweeps of the 31 reachable channels; 84 loud dwells analysed: 77 `wifi`, 7 `energy`,
+**0 `analog_video`**, 0 `fpv_carrier`, 0 `hdzero`, 0 `lte_style`, 0 `wifi_narrow`. The hub's RF
+table stayed empty (`rf=0` in every summary): Wi-Fi and plain energy are never sent, as designed.
+PASS as a sanity check. (The hub kept asking for DroneID, `applied=false`, because of the pin.)
+
+### 6. SD card
+
+Each hub boot counted the previous file on the card (read back on the device, every row):
+
+| File | Session | Rows | Test drone rows | Open-link rows | Kinds |
+|---|---|---|---|---|---|
+| LOG00010 | Wi-Fi 2.4, A | 138 | 137 | 0 | WifiBeacon, WifiBeacon\|WifiNan |
+| LOG00011 | Wi-Fi 2.4, B | 508 | 149 | 358 | + WfbNg, OpenHd, RubyFpv, DroneBridge |
+| LOG00012 | Wi-Fi 5, A | 114 | 113 | 0 | WifiNan5G, WifiBeacon5G\|WifiNan5G |
+| LOG00013 | Wi-Fi 5, B | 1205 | 150 | 1054 | + WfbNg5G, OpenHd5G, RubyFpv5G, DroneBridge5G |
+| LOG00014 | Bluetooth, A | 113 | 112 | 0 | BleLegacy\|BleExtended\|BleLongRange |
+| LOG00016 / 17 | Bluetooth (after the fix) | 139 / 200 | 137 / 198 | 0 | BleLegacy, ...\|BleExtended\|BleLongRange |
+
+(Each count includes the header line. The one "other drone" row in 16 and 17 is the Bluetooth
+track's first second, before its Basic ID arrived: an empty ID, not a foreign drone.) Every
+flush read-back OK, 0 errors, 0 dropped rows. Nothing deleted or formatted.
+
+### 7. Health over the whole run
+
+Ten hub sessions, about 34 minutes logged, 11,228 frames from the gateway: **2 corrupt frames,
+8 UART errors** (5 in one Wi-Fi 2.4 session, 1, 2), **0 ring_full**, 0 lcd DMA errors. Loop
+max_gap 6.8-7.2 ms normally (the screen band); worst 17.0 ms, at SD flushes (BRINGUP: 18.3 ms).
+Node uplinks: 0 failed sends.
+
+### Bug found and fixed: Bluetooth node reset under Long Range traffic
+
+`node-ble` with ESP-NOW reset itself in the controller,
+`ASSERT r_ble_lll_mmgmt_block_cnt_check:669 0 1`, while the beacon sent all three Bluetooth
+transports: 4 resets in 120 s (first run: 3 in 100 s). Isolated on `c5a`:
+
+| Build, beacon | Resets |
+|---|---|
+| ESP-NOW, controller-timed 800 ms scans: all three / legacy only / extended only / Long Range only | 4 in 120 s / 0 in 90 / 0 in 90 / 1 in 90 |
+| ESP-NOW, bigger HCI event buffers (24 x 257 B) | 5 in 150 s (no help) |
+| Wired (no ESP-NOW, one endless scan), all three | 0 in 150 s |
+| ESP-NOW, one endless scan, all three | 0 in 150 s |
+| **ESP-NOW, host stops each 800 ms scan (the fix)**, all three | **0 in 180 s** (and 0 in the 100 s hub run) |
+
+So the trigger is the controller ending a scan by its duration while Long Range (coded PHY) reports
+are in flight. Fix (`firmware/node-ble/src/bin/main.rs`): no controller duration; the host drops
+the scan session after `SCAN_ON_MS`, which disables the scan. Same 800/200 split. Uplink with the
+fix, 180 s: 178 gaps, 220 sends, 0 failed, 44 gateway beacons and 30 hub commands heard (fewer
+beacons than the 0.4/s with the controller stop, but commands still arrive). Each reset cost about
+2 s of blindness; the hub track survived them.
+
+### Not testable with our hardware
+
+| Signal | Needs |
+|---|---|
+| Real DJI OcuSync / O4 DroneID on the hub | a real DJI drone (we never transmit DroneID) |
+| DJI legacy Wi-Fi DroneID | a Wi-Fi DJI (Spark, Mavic Air, Mini SE); we never transmit it |
+| Analog FPV video | a 5.8 GHz VTX and an amateur radio licence |
+| HDZero, Walksnail | an HDZero VTX / Walksnail kit (and HDZero scanning is not built) |
+| ExpressLRS | an LR1121 or SX1280 receiver (not built) |
+| Wi-Fi drone makers (Tello, Parrot, ...) | a real one; we never imitate a maker's network |
+| China GB 46750 Remote ID | a test-beacon mode or a DJI on 2026 firmware |
+| wfb-ng's real LDPC/STBC video | OpenIPC hardware |

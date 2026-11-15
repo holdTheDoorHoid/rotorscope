@@ -13,6 +13,8 @@
 #![no_main]
 
 mod app;
+#[cfg(feature = "benchlog")]
+mod bench;
 mod bb;
 mod display;
 mod downlink;
@@ -233,6 +235,8 @@ fn main() -> ! {
     let mut last_fake = Instant::now();
     #[cfg(feature = "fakedrone")]
     let mut last_drone = Instant::now();
+    #[cfg(feature = "benchlog")]
+    let mut bench = bench::Bench::default();
     let mut last = Instant::now();
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
@@ -253,6 +257,8 @@ fn main() -> ! {
             });
         }
         sdlog.tick(app.tracker, ms);
+        #[cfg(feature = "benchlog")]
+        bench.tick(app.tracker, &gw, ms);
         #[cfg(feature = "selftest")]
         selftest.tick();
         #[cfg(feature = "fakedrone")]

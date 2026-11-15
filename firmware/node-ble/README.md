@@ -114,8 +114,9 @@ and the hub's commands come back the same way. Bluetooth and Wi-Fi share the
 C5's one radio. With both simply running (esp-radio `coex`), Wi-Fi heard
 **nothing** on the bench: 0 gateway beacons in 45 s, with the scan window at
 100% and at 80% of the interval, and with the coexistence preference set to
-Wi-Fi. So the node time-shares: the scan runs 800 ms (the controller's own
-scan duration, so it stops cleanly), stays off for 200 ms (`SCAN_ON_MS`,
+Wi-Fi. So the node time-shares: the scan runs 800 ms (then the host
+disables it: a controller-timed stop crashed the controller under Long Range
+traffic, see docs/BENCH.md "End-to-end through the P4"), stays off for 200 ms (`SCAN_ON_MS`,
 `WIFI_GAP_MS`), and batches are sent only in that gap, when the gateway's
 beacons and commands are heard too. The node also takes the gateway's
 address from its command packets (they get through the gaps more often than

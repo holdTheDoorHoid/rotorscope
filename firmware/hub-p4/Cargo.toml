@@ -35,6 +35,10 @@ fakenode = []
 # the gateway had relayed it, so the tracker has an active track and the SD
 # log gets rows without a test transmitter. Nothing is driven onto any pin.
 fakedrone = []
+# Bench only: print the tracker's tables (a line per new drone slot, open-link
+# stream, RF emitter and Wi-Fi drone; a summary every 5 s) and, at mount, count
+# the previous SD log file's rows by kind. Test IDs only; see src/bench.rs.
+benchlog = []
 
 [dependencies]
 link = { path = "../../crates/link" }

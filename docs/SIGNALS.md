@@ -19,12 +19,12 @@ channel 165 (5825) is still to be checked.
 
 | Signal | Where | How it's sent | Node | Status | How we test it |
 |---|---|---|---|---|---|
-| Wi-Fi NAN, 2.4 GHz | ch 6 (2437) only | Wi-Fi action frame to `51:6f:9a:01:00:00` | Wi-Fi 2.4 | **On air** (S3 and C5) | `rid-beacon` |
-| Wi-Fi beacon, 2.4 GHz | any channel, mostly 6; also 1 (2412), 11 (2462) | Vendor element, OUI `FA:0B:BC` type `0x0D` | Wi-Fi 2.4 | **On air**, and through ESP-NOW to the P4 (2026-11-14) | `rid-beacon` |
-| Wi-Fi beacon and NAN, 5 GHz | anchor ch 149 (5745); 153, 157, 161, 165; 36–48 (5180–5240) | Same as 2.4 | Wi-Fi 5 | **On air** at 149 | `rid-beacon` on a C5 |
-| Bluetooth 4 legacy | advertising ch 37/38/39 (2402, 2426, 2480) | Service data UUID `0xFFFA`, app code `0x0D` | Bluetooth | **On air** | `rid-beacon`, laptop `rid-ble-beacon` |
-| Bluetooth 5 extended (1M PHY) | primary 37–39, data on 0–36 (2404–2478) | Same, extended adverts, message packs | Bluetooth | **On air** | `rid-beacon` |
-| Bluetooth 5 Long Range (coded PHY) | same channels | Same, coded PHY | Bluetooth | **On air** | `rid-beacon` |
+| Wi-Fi NAN, 2.4 GHz | ch 6 (2437) only | Wi-Fi action frame to `51:6f:9a:01:00:00` | Wi-Fi 2.4 | **On air** (S3 and C5); **through the P4 hub's tracker** (2026-11-15, BENCH.md "End-to-end through the P4") | `rid-beacon` |
+| Wi-Fi beacon, 2.4 GHz | any channel, mostly 6; also 1 (2412), 11 (2462) | Vendor element, OUI `FA:0B:BC` type `0x0D` | Wi-Fi 2.4 | **On air**; **through the P4 hub's tracker** (2026-11-15) | `rid-beacon` |
+| Wi-Fi beacon and NAN, 5 GHz | anchor ch 149 (5745); 153, 157, 161, 165; 36–48 (5180–5240) | Same as 2.4 | Wi-Fi 5 | **On air** at 149; **through the P4 hub's tracker**, beacon and NAN, node in the hub-assigned Wi-Fi 5 role (2026-11-15) | `rid-beacon` on a C5 |
+| Bluetooth 4 legacy | advertising ch 37/38/39 (2402, 2426, 2480) | Service data UUID `0xFFFA`, app code `0x0D` | Bluetooth | **On air**; **through the P4 hub's tracker** (2026-11-15) | `rid-beacon`, laptop `rid-ble-beacon` |
+| Bluetooth 5 extended (1M PHY) | primary 37–39, data on 0–36 (2404–2478) | Same, extended adverts, message packs | Bluetooth | **On air**; **through the P4 hub's tracker** (2026-11-15) | `rid-beacon` |
+| Bluetooth 5 Long Range (coded PHY) | same channels | Same, coded PHY | Bluetooth | **On air**; **through the P4 hub's tracker** (2026-11-15; found and fixed a node-ble reset under Long Range traffic) | `rid-beacon` |
 | China GB 46750-2025 | inside the Wi-Fi element above | Different record layout | Wi-Fi 2.4 / 5 | **Built** (decoder) | needs a test-beacon mode, or a DJI drone on 2026 firmware |
 
 ## 2. DJI
@@ -32,7 +32,7 @@ channel 165 (5825) is still to be checked.
 | Signal | Where | What it is | Node | Status | How we test it |
 |---|---|---|---|---|---|
 | DJI legacy Wi-Fi DroneID (Spark, Mavic Air, Mini SE and other Wi-Fi DJIs) | 2.4 GHz Wi-Fi beacons, any channel | Vendor element, OUI `26:37:12`: serial, drone and pilot position | Wi-Fi 2.4 | **Built**: decoder in `rid::dji`; Wi-Fi nodes forward the element raw as `Frame::DjiWifi` (rate-limited); hub makes a drone track merged with Remote ID by serial, in every output (2026-11-14). Never heard from a real drone | Recorded captures; a real Wi-Fi DJI. We never transmit it |
-| OcuSync DroneID burst (OcuSync 2, 3, 3+) | 2399.5, 2414.5, 2429.5, 2444.5, 2459.5 / 5756.5, 5776.5, 5796.5 | 9 MHz LTE-style burst, about 0.6 ms, every ~640 ms, only while the motors run. Plaintext: serial, drone, pilot and home position | DroneID (raw capture) | **Built, proven on the chip with recordings**: the public recordings, fed through the C5's own capture path over USB, detect and decode 78/78 at 7-9 dB SNR, ~151 ms per decode (2026-11-14). Node sends `Frame::DroneId` over ESP-NOW; hub shows drone, pilot and home, merged with Remote ID by serial. 0 false detections in 200 s on air. Never a real drone | `tools/droneid-hil` (recordings into the chip, no radio); a real DJI with props off, or a field visit |
+| OcuSync DroneID burst (OcuSync 2, 3, 3+) | 2399.5, 2414.5, 2429.5, 2444.5, 2459.5 / 5756.5, 5776.5, 5796.5 | 9 MHz LTE-style burst, about 0.6 ms, every ~640 ms, only while the motors run. Plaintext: serial, drone, pilot and home position | DroneID (raw capture) | **Built, proven on the chip with recordings**: the public recordings, fed through the C5's own capture path over USB, detect and decode 78/78 at 7-9 dB SNR, ~151 ms per decode (2026-11-14). Node sends `Frame::DroneId` over ESP-NOW; hub shows drone, pilot and home, merged with Remote ID by serial. 0 false detections in 200 s on air. HIL re-run 2026-11-15: 26/26 decoded (no regression); chip only, recordings never reach the hub by design. Never a real drone | `tools/droneid-hil` (recordings into the chip, no radio); a real DJI with props off, or a field visit |
 | O4 / O4+ DroneID (Mini 4 Pro, Air 3, Avata 2, Neo, Flip, Mavic 4) | hops 2414.5, 2429.5, 2444.5, 5756.5, 5776.5, 5796.5, 5816.5 | Same burst, encrypted | DroneID | **Built**: detect only, with a session ID. Never decrypted, by design. Hub: presence-only track per session key ID | A real O4 drone |
 | OcuSync / O4 video downlink | 2400–2483; 5725–5850; O4 also 5170–5250 | OFDM, 10/20/40 MHz (O4 up to 60) | Fingerprint (raw capture) | **Not built** (PLAN 11b) | Public RFUAV recordings, then a real drone |
 | DJI controller uplink | same bands | narrow hops, 0.4–5 MHz wide, 0.5–5 ms bursts | Fingerprint | **Not built** | as above |
@@ -51,8 +51,9 @@ channel 165 (5825) is still to be checked.
 
 Hub side (2026-11-14): `Frame::Rf` sightings fill an RF-emitter table (kind and frequency, level,
 duty, line rate) shown on the phone page, screen SIGNALS page, CSV and rid-view; analog video,
-HDZero, LTE-style and narrow Wi-Fi alert, plain energy never does. The node scanner that sends them
-is still **Not built**.
+HDZero, LTE-style and narrow Wi-Fi alert, plain energy never does. The node scanner is built
+(node-sdr FPV job). Through the hub, 2026-11-15: 2 minutes, 58 sweeps, 77 Wi-Fi and 7 energy
+verdicts, 0 analog video, nothing sent to the RF table (as designed with no video transmitter).
 
 - **How:** a C5 in raw-capture mode steps across the channels and measures the energy on each. It then
   confirms real video by the 15.6/15.7 kHz line rate in the FM-demodulated signal, so Wi-Fi isn't
@@ -68,10 +69,10 @@ is still **Not built**.
 
 | System | Where | What we can get | Node | Status | How we test it |
 |---|---|---|---|---|---|
-| wfb-ng / OpenIPC | 5 GHz Wi-Fi, default ch 165 (5825), often 161 | System, link ID (opt-in) | Wi-Fi 5 / 2.4 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14); real LDPC/STBC video untested | `tools/bench/run.py --group openlink`; OpenIPC hardware for LDPC/STBC |
-| OpenHD | 5745 (ch 149) default | System, air or ground side | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) | `--group openlink`; real hardware |
-| RubyFPV | 5 GHz Wi-Fi | System, vehicle ID (opt-in) | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) | `--group openlink`; real hardware |
-| DroneBridge | 2.4 / 5 GHz Wi-Fi | System | Wi-Fi | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) | `--group openlink`; real hardware |
+| wfb-ng / OpenIPC | 5 GHz Wi-Fi, default ch 165 (5825), often 161 | System, link ID (opt-in) | Wi-Fi 5 / 2.4 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15); real LDPC/STBC video untested | `tools/bench/run.py --group openlink`; OpenIPC hardware for LDPC/STBC |
+| OpenHD | 5745 (ch 149) default | System, air or ground side | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15) | `--group openlink`; real hardware |
+| RubyFPV | 5 GHz Wi-Fi | System, vehicle ID (opt-in) | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15) | `--group openlink`; real hardware |
+| DroneBridge | 2.4 / 5 GHz Wi-Fi | System | Wi-Fi | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15) | `--group openlink`; real hardware |
 | HDZero | R1–R8 (5658–5917, 37 MHz apart), E1 5705, F1 5740, F2 5760, F4 5800, low band 5362–5621 | "HDZero on channel X" by the grid and 27/17 MHz width | Fingerprint; RX5808 above 5820 | **Not built** | HDZero VTX ($40–70); it transmits without pairing |
 | Walksnail Avatar | same 8-channel plan as DJI (inferred), 20/40 MHz | "LTE-style video link" | Fingerprint | **Not built** | needs a kit |
 

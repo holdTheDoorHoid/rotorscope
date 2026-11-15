@@ -34,10 +34,14 @@ pub static REJECTED: AtomicU32 = AtomicU32::new(0);
 /// with one node, whatever else holds the 2.4 GHz slot. Never for a deployed node.
 pub const BENCH_FLIP: bool = option_env!("ROTORSCOPE_BENCH_FLIP").is_some();
 
+/// Bench only, see `node_common::bench_can_mask`: report only one role.
+pub const BENCH_CAN: u8 = node_common::bench_can_mask(option_env!("ROTORSCOPE_BENCH_CAN"));
+
 /// At boot: the board's roles, and the job this image was switched in for.
 pub fn init(stored: Option<Assignment>, can: u8) {
     let hide = NodeRole::Ble.bit() | NodeRole::Wifi24.bit();
-    CAN.store(if BENCH_FLIP { can & !hide } else { can }, Relaxed);
+    let can = if BENCH_FLIP { can & !hide } else { can };
+    CAN.store(can & BENCH_CAN, Relaxed);
     if let Some(a) = stored.filter(|a| a.role == NodeRole::Ble) {
         PLAN_ID.store(a.id, Relaxed);
     }

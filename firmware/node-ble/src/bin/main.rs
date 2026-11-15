@@ -158,12 +158,14 @@ async fn main(spawner: Spawner) -> ! {
         phys: PhySet::M1Coded,
         interval: Duration::from_millis(SCAN_INTERVAL_MS),
         window: Duration::from_millis(SCAN_WINDOW_MS),
-        // ESP-NOW builds: the controller ends each scan itself after
-        // SCAN_ON_MS (a clean stop, before the Wi-Fi gap); otherwise forever.
-        #[cfg(not(feature = "espnow"))]
+        // No controller-timed end, in either build. ESP-NOW builds stop the
+        // scan from the host after SCAN_ON_MS (below). Letting the controller
+        // end each scan by its duration crashed the C5 controller under
+        // Long Range traffic: `ASSERT r_ble_lll_mmgmt_block_cnt_check:669`,
+        // 4 resets in 120 s with the test beacon's three BLE transports on, 1
+        // in 90 s with Long Range alone; host stop: 0 in 180 s (docs/BENCH.md,
+        // "End-to-end through the P4").
         timeout: Duration::from_secs(0),
-        #[cfg(feature = "espnow")]
-        timeout: Duration::from_millis(node_ble::uplink::SCAN_ON_MS),
         // Off: a drone's repeated adverts carry fresh positions, and the
         // controller's duplicate filter would swallow all but the first.
         filter_duplicates: FilterDuplicates::Disabled,
@@ -190,9 +192,9 @@ async fn main(spawner: Spawner) -> ! {
                 // stops the scan) and leave the radio to Wi-Fi for a moment.
                 #[cfg(feature = "espnow")]
                 Ok(session) => {
-                    // Ends when the controller's scan duration runs out; the
-                    // outer timeout only guards against a lost completion event.
-                    let _ = embassy_time::with_timeout(Duration::from_millis(node_ble::uplink::SCAN_ON_MS + 200), session).await;
+                    // The session never completes by itself; dropping it at
+                    // the timeout disables the scan from the host.
+                    let _ = embassy_time::with_timeout(Duration::from_millis(node_ble::uplink::SCAN_ON_MS), session).await;
                     node_ble::uplink::WIFI_TURN.store(true, core::sync::atomic::Ordering::Relaxed);
                     node_ble::uplink::GAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     Timer::after_millis(node_ble::uplink::WIFI_GAP_MS).await;

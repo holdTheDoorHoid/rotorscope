@@ -34,13 +34,17 @@ const GATEWAY_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(5);
 
 /// Time-sharing the radio: the Bluetooth scan runs for `SCAN_ON_MS` (the
-/// controller ends it by itself), then stays off for `WIFI_GAP_MS`, during
+/// host then disables it), then stays off for `WIFI_GAP_MS`, during
 /// which [`WIFI_TURN`] is set and batches go out. With both running at once,
 /// the coexistence scheduler gave Wi-Fi no receive time at all on the bench
 /// (zero gateway beacons heard); with 900/100 and the host cancelling the
 /// scan, the node often went a minute without hearing the gateway. 800/200
 /// with a controller-timed stop: a send in every gap, none failed, ~0.4
 /// beacons a second heard, for ~18% fewer adverts (README.md "ESP-NOW").
+/// The controller-timed stop then crashed the controller under Long Range
+/// traffic (2026-11-15), so the host stops the scan again: 800/200 with a
+/// host stop, 180 s with the test beacon's three BLE transports on: 0 resets,
+/// 178 gaps, 220 sends, 0 failed, 44 gateway beacons and 30 hub commands heard.
 pub const SCAN_ON_MS: u64 = 800;
 pub const WIFI_GAP_MS: u64 = 200;
 pub static WIFI_TURN: AtomicBool = AtomicBool::new(false);

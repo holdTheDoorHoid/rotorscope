@@ -157,3 +157,33 @@ impl<'d> Images<'d> {
 fn flash_read(flash: &mut FlashStorage<'_>, at: u32, buf: &mut [u8]) -> Result<(), ()> {
     flash.read(at, buf).map_err(|_| ())
 }
+
+/// Bench only: the `can` mask a `ROTORSCOPE_BENCH_CAN` build reports, so
+/// that the hub's coordinator can be steered to one role with a single node.
+/// Pass `option_env!("ROTORSCOPE_BENCH_CAN")` (evaluated in the image's own
+/// crate): unset = every role the board has (`0xff`, no restriction); `ble`,
+/// `wifi5` or `wifi24` = only that role. Any other value stops the build.
+/// Every image on one board must be built with the same value, or the board
+/// flips between them. Never for a deployed node.
+pub const fn bench_can_mask(v: Option<&str>) -> u8 {
+    const fn eq(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+    match v {
+        None => 0xff,
+        Some(s) if eq(s.as_bytes(), b"ble") => link::NodeRole::Ble.bit(),
+        Some(s) if eq(s.as_bytes(), b"wifi5") => link::NodeRole::Wifi5.bit(),
+        Some(s) if eq(s.as_bytes(), b"wifi24") => link::NodeRole::Wifi24.bit(),
+        Some(_) => panic!("ROTORSCOPE_BENCH_CAN must be ble, wifi5 or wifi24"),
+    }
+}

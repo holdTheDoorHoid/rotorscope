@@ -342,6 +342,11 @@ impl Logger {
             } else {
                 println!("hub-p4: sd previous file {DIR}/{prev}: {len} bytes (too long to count here)");
             }
+            #[cfg(feature = "benchlog")]
+            {
+                let (c, lines) = bench_count(vm, f)?;
+                c.print(prev.as_str(), lines);
+            }
             vm.close_file(f)?;
         }
         println!("hub-p4: sd {count} log files in {DIR}");
@@ -452,6 +457,37 @@ impl Logger {
             self.dropped += 1;
         }
     }
+}
+
+/// Bench only: read the whole file and count its rows by kind (blocks the
+/// loop for the length of the file, once, at mount).
+#[cfg(feature = "benchlog")]
+fn bench_count(vm: &Vm, file: RawFile) -> Result<(crate::bench::CsvCount, u32), FsError> {
+    vm.file_seek_from_start(file, 0)?;
+    let mut c = crate::bench::CsvCount::default();
+    let mut buf = [0u8; 512];
+    let mut line: heapless::Vec<u8, 600> = heapless::Vec::new();
+    let mut lines = 0u32;
+    loop {
+        let n = vm.read(file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\n' {
+                lines += 1;
+                c.line(&line);
+                line.clear();
+            } else if line.push(b).is_err() {
+                c.bad += 1;
+                line.clear();
+            }
+        }
+        if vm.file_eof(file)? {
+            break;
+        }
+    }
+    Ok((c, lines))
 }
 
 /// Read `file` from the start and count newlines: (lines, bytes).
