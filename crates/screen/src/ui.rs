@@ -21,6 +21,9 @@ pub enum Button {
 pub enum Page {
     Radar,
     List,
+    /// Possible FAA rule violations (PLAN.md Phase 12). Only in the cycle
+    /// when the hub fills [`UiState::flags`](crate::UiState::flags).
+    Flags,
     /// RF emitters and Wi-Fi drones (no position, so not on the radar).
     Signals,
     Health,
@@ -28,9 +31,10 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [
+    pub const ALL: [Page; 6] = [
         Page::Radar,
         Page::List,
+        Page::Flags,
         Page::Signals,
         Page::Health,
         Page::Settings,
@@ -40,6 +44,7 @@ impl Page {
         match self {
             Page::Radar => "RADAR",
             Page::List => "DRONE LIST",
+            Page::Flags => "FLAGS",
             Page::Signals => "SIGNALS",
             Page::Health => "HEALTH",
             Page::Settings => "SETTINGS",
@@ -50,15 +55,22 @@ impl Page {
         match self {
             Page::Radar => 0,
             Page::List => 1,
-            Page::Signals => 2,
-            Page::Health => 3,
-            Page::Settings => 4,
+            Page::Flags => 2,
+            Page::Signals => 3,
+            Page::Health => 4,
+            Page::Settings => 5,
         }
     }
 
-    fn step(self, delta: isize) -> Page {
+    /// The next page `delta` away; FLAGS is skipped when `flags` is false.
+    fn step(self, delta: isize, flags: bool) -> Page {
         let n = Self::ALL.len() as isize;
-        Self::ALL[(self.index() as isize + delta).rem_euclid(n) as usize]
+        let next = Self::ALL[(self.index() as isize + delta).rem_euclid(n) as usize];
+        if next == Page::Flags && !flags {
+            next.step(delta, flags)
+        } else {
+            next
+        }
     }
 }
 
@@ -268,8 +280,8 @@ impl Ui {
 
         match self.mode {
             Mode::Browse => match b {
-                Button::Up => self.flip(-1, now),
-                Button::Down => self.flip(1, now),
+                Button::Up => self.flip(-1, now, state.flags.is_some()),
+                Button::Down => self.flip(1, now, state.flags.is_some()),
                 Button::Select => match self.page {
                     Page::Radar | Page::List => {
                         if let Some(&first) = state.order().first() {
@@ -281,7 +293,7 @@ impl Ui {
                         self.settings_row = 0;
                         self.mode = Mode::Edit;
                     }
-                    Page::Health | Page::Signals => {}
+                    Page::Health | Page::Signals | Page::Flags => {}
                 },
                 Button::Back => {
                     self.page = Page::Radar;
@@ -332,8 +344,8 @@ impl Ui {
         }
     }
 
-    fn flip(&mut self, delta: isize, now: u64) {
-        self.page = self.page.step(delta);
+    fn flip(&mut self, delta: isize, now: u64, flags: bool) {
+        self.page = self.page.step(delta, flags);
         self.toast_until_ms = now + PAGE_TOAST_MS;
     }
 

@@ -34,6 +34,7 @@ mod clock;
 mod cot;
 #[cfg(feature = "demo")]
 mod demo;
+mod flags;
 mod gnss;
 mod hotspot;
 mod http;

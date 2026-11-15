@@ -49,6 +49,9 @@ struct Counts {
     overflow: u32,
     /// A `Via` followed by another `Via` (its frame went missing).
     orphan_via: u32,
+    /// Protocol 6 `Flags` reports, and the worst level in the latest one.
+    flags: u32,
+    flags_level: u8,
 }
 
 pub struct Loop {
@@ -173,6 +176,10 @@ impl Loop {
                         Ok(_) => c.csbee_ok += 1,
                         Err(_) => c.csbee_bad += 1,
                     },
+                    Frame::Flags(r) => {
+                        c.flags += 1;
+                        c.flags_level = r.level;
+                    }
                     _ => c.other_data += 1,
                 }
             });
@@ -187,9 +194,9 @@ impl Loop {
         self.last_print_ms = now;
         let c = &self.n;
         crate::println!(
-            "hub-p4: webheadloop rx bytes={} via={} hello={} stats={} status={} det={} open={} other={} hubfix={} csbee_ok={} csbee_bad={} corrupt={} overflow={} orphan_via={} uart4_err={} ring_full={}",
+            "hub-p4: webheadloop rx bytes={} via={} hello={} stats={} status={} det={} open={} other={} hubfix={} csbee_ok={} csbee_bad={} flags={} (level {}) corrupt={} overflow={} orphan_via={} uart4_err={} ring_full={}",
             c.bytes, c.via, c.hello, c.stats, c.status, c.detection, c.open_link, c.other_data, c.hub_fix,
-            c.csbee_ok, c.csbee_bad, c.corrupt, c.overflow, c.orphan_via,
+            c.csbee_ok, c.csbee_bad, c.flags, c.flags_level, c.corrupt, c.overflow, c.orphan_via,
             adsb_rx::UART_ERR.load(core::sync::atomic::Ordering::Relaxed),
             adsb_rx::RING_FULL.load(core::sync::atomic::Ordering::Relaxed)
         );

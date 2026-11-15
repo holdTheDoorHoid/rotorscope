@@ -509,6 +509,15 @@ a CoT remark, and a per-flight summary (worst flag, max height above ground, tim
 the right flags against the public data, the pack fits on the SD card and lookups take under a few
 milliseconds on the P4.
 
+**Status (2026-11-15, branch `faa-flags`):** built and run on the P4. `crates/airspace` (pack
+format, lookups, sun, line of sight), `crates/faarules` (checks 1-7, levels, the settings table
+with citations in `settings.rs`), `tools/airspace-pack` (FAA ADDS, USGS 3DEP, NGS GEOID18, Census
+TIGERweb; a 100 km Philadelphia pack is 662 KB). On the P4 the pack loads from
+`ROTORSCP/AIRSPACE.PAK` in ~9 s; one drone's evaluation takes ~3 ms (area lookup 0.3 ms).
+Real-data tests: `AIRSPACE_PAK=... cargo test -p airspace-pack --test philly`. Open: TFRs (tfr.faa.gov
+refuses the tool's HTTP client; save the files by hand), the VLOS distance defaults rest on two
+studies seen only as search snippets, the S3 web-head side is untested on hardware.
+
 ### Phase 13: Uploading detections, with evidence-grade integrity (added 2026-11-15)
 Goal: the unit uploads drone (and aircraft) detections to a web server, either one on the local
 network or a hosted/cloud one, and every record can be shown later to be exactly what the device

@@ -398,9 +398,17 @@ fn health_assigned() {
     let mut st = five_drones(true);
     st.nodes[2].kind = NodeKind::DroneId;
     st.assigned.extend([
-        Some(Assigned { role: "Wi-Fi 2.4", plan: 0x5a3c, applied: true }),
+        Some(Assigned {
+            role: "Wi-Fi 2.4",
+            plan: 0x5a3c,
+            applied: true,
+        }),
         None,
-        Some(Assigned { role: "DroneID", plan: 0x0b17, applied: false }),
+        Some(Assigned {
+            role: "DroneID",
+            plan: 0x0b17,
+            applied: false,
+        }),
     ]);
     let mut ui = Ui::default();
     press(&mut ui, &st, &[Button::Down, Button::Down]);
@@ -550,6 +558,43 @@ fn signals() {
     press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
     ui.tick(NOW + 5_000);
     shot("health_roles", &ui, &st);
+}
+
+/// The FLAGS page (PLAN.md Phase 12): only in the page cycle when the hub
+/// fills `flags`.
+#[test]
+fn flags() {
+    let mut st = base(true);
+    let mut f = FlagsView {
+        pack: s("pack 2026-11-15"),
+        total: 4,
+        ..Default::default()
+    };
+    for (who, level, rule, text, secs) in [
+        ("RSTEST-SD-0001", 3, "AREA", "Natl security UAS", 12),
+        ("RSTEST-SD-0001", 2, "HEIGHT", "853ft AGL", 41),
+        ("1581F5FJD2", 1, "VLOS", "640m from pilot", 9),
+        ("N12345", 2, "LOW", "520ft<1000 91.119", 33),
+    ] {
+        let _ = f.rows.push(FlagRow {
+            who: s(who),
+            level,
+            rule,
+            text: s(text),
+            secs,
+        });
+    }
+    st.flags = Some(f);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    assert_eq!(ui.page(), Page::Flags);
+    ui.tick(NOW + 5_000);
+    shot("flags", &ui, &st);
+    // Without the engine the page is skipped.
+    let st = base(true);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    assert_eq!(ui.page(), Page::Signals);
 }
 
 #[test]

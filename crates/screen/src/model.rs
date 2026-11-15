@@ -425,6 +425,36 @@ pub struct WifiDroneView {
     pub last_seen_ms: u64,
 }
 
+/// Most flag rows the FLAGS page lists.
+pub const MAX_FLAG_ROWS: usize = 12;
+
+/// One "possible violation" flag (PLAN.md Phase 12), for the FLAGS page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FlagRow {
+    /// Drone ID (or aircraft callsign / ICAO), shortened.
+    pub who: String<14>,
+    /// 0 Note, 1 Watch, 2 Warning, 3 Alert.
+    pub level: u8,
+    /// Short rule code ("HEIGHT", "UASFM", "AREA"...).
+    pub rule: &'static str,
+    /// Evidence in a few words ("520ft AGL", "Class B").
+    pub text: String<24>,
+    /// How long it has held, seconds.
+    pub secs: u16,
+}
+
+/// The FLAGS page's content. `UiState::flags` is `None` on a hub without
+/// the rule engine, and the page is then left out of the page cycle.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FlagsView {
+    /// Airspace pack status: "pack 2026-11-15", "no airspace pack", ...
+    pub pack: String<32>,
+    /// Worst first.
+    pub rows: Vec<FlagRow, MAX_FLAG_ROWS>,
+    /// Flags the hub holds (may exceed `rows.len()`).
+    pub total: u16,
+}
+
 /// Everything one frame shows. The hub owns one (e.g. in a `static`) and
 /// refills it each frame; nothing in it is retained by the screen.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -454,6 +484,8 @@ pub struct UiState {
     /// Wi-Fi drones, active first then strongest, and how many in all.
     pub wifi_drones: Vec<WifiDroneView, MAX_SIGNALS>,
     pub total_wifi_drones: u16,
+    /// Possible-violation flags (P4 hub); `None` hides the FLAGS page.
+    pub flags: Option<FlagsView>,
 }
 
 impl UiState {

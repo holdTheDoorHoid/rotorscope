@@ -43,7 +43,17 @@ use tracker::TrackState;
 use tracker::csv::{self, MAX_ROW};
 
 use crate::app::HubTracker;
+use crate::faa::Faa;
 use crate::sdbb::{BbPins, Card, SdDev};
+
+/// The airspace pack (PLAN.md Phase 12), in the same folder.
+const PACK_NAME: &str = "AIRSPACE.PAK";
+/// Pack bytes read per main-loop step (~2 blocks, ~12 ms bit-banged).
+const PACK_READ: usize = 1024;
+/// `embedpack` builds: the pack built into the firmware, written to the card
+/// when the card has none or a different one (`AIRSPACE_PAK` at build time).
+#[cfg(feature = "embedpack")]
+static EMBEDDED: &[u8] = include_bytes!(env!("AIRSPACE_PAK"));
 
 const DIR: &str = "ROTORSCP";
 const PENDING: usize = 8192;
@@ -152,6 +162,11 @@ pub struct Logger {
     holding: bool,
     max_tick_us: u64,
     max_tick_what: &'static str,
+    /// The pack being copied into PSRAM (or, `embedpack`, written).
+    pack_file: Option<RawFile>,
+    #[cfg(feature = "embedpack")]
+    pack_writing: Option<u32>,
+    shown_flag_row: bool,
 }
 
 impl Logger {
@@ -183,13 +198,17 @@ impl Logger {
             holding: false,
             max_tick_us: 0,
             max_tick_what: "",
+            pack_file: None,
+            #[cfg(feature = "embedpack")]
+            pack_writing: None,
+            shown_flag_row: false,
         }
     }
 
     /// One step. Call every main-loop pass. `utc_ms`: GPS time now, if
     /// known; `gps_present`: a receiver is answering (worth waiting for its
     /// time before naming the file).
-    pub fn tick(&mut self, tracker: &HubTracker, now: u64, utc_ms: Option<u64>, gps_present: bool) {
+    pub fn tick(&mut self, tracker: &HubTracker, faa: &mut Faa, now: u64, utc_ms: Option<u64>, gps_present: bool) {
         let t0 = Instant::now();
         self.utc_ms = utc_ms;
         // The first few seconds too: the GPS hunt needs ~1-3 s to find a
@@ -207,12 +226,15 @@ impl Logger {
         let what = if hold {
             if now.saturating_sub(self.last_rows) >= ROW_EVERY_MS {
                 self.last_rows = now;
-                self.queue_rows(tracker, now);
+                self.queue_rows(tracker, faa, now);
             }
             "wait_time"
         } else {
-            self.step(tracker, now)
+            self.step(tracker, faa, now)
         };
+        if self.state != State::Recording {
+            faa.card_gone();
+        }
         let us = t0.elapsed().as_micros();
         if us > self.max_tick_us {
             self.max_tick_us = us;
@@ -270,7 +292,7 @@ impl Logger {
         }
     }
 
-    fn step(&mut self, tracker: &HubTracker, now: u64) -> &'static str {
+    fn step(&mut self, tracker: &HubTracker, faa: &mut Faa, now: u64) -> &'static str {
         match self.state {
             State::NoCard(at) | State::Error(at) => {
                 if now < at {
@@ -279,7 +301,7 @@ impl Logger {
                 let Some(card) = self.card.as_mut() else { return "idle" };
                 let r = card.begin().and_then(|_| card.poll_ready());
                 match r {
-                    Ok(true) => self.identify(now),
+                    Ok(true) => self.identify(faa, now),
                     Ok(false) => self.state = State::Waking(now, now + POLL_EVERY_MS),
                     Err(sdnative::Error::NoResponse(_)) => {
                         if !matches!(self.state, State::NoCard(_)) || at == 0 {
@@ -298,7 +320,7 @@ impl Logger {
                 let Some(card) = self.card.as_mut() else { return "idle" };
                 match card.poll_ready() {
                     Ok(true) => {
-                        self.identify(now);
+                        self.identify(faa, now);
                         "identify+mount"
                     }
                     Ok(false) if now.saturating_sub(since) < POLL_FOR_MS => {
@@ -315,7 +337,7 @@ impl Logger {
                     }
                 }
             }
-            State::Recording => self.record(tracker, now),
+            State::Recording => self.record(tracker, faa, now),
         }
     }
 
@@ -329,6 +351,11 @@ impl Logger {
     /// Drop every handle and get the card driver back.
     fn close_all(&mut self) {
         self.open = None;
+        self.pack_file = None;
+        #[cfg(feature = "embedpack")]
+        {
+            self.pack_writing = None;
+        }
         if let Some(vm) = self.vm.take() {
             let (dev, _) = vm.free();
             self.card = Some(dev.card.into_inner());
@@ -339,7 +366,7 @@ impl Logger {
         self.pending.clear();
     }
 
-    fn identify(&mut self, now: u64) {
+    fn identify(&mut self, faa: &mut Faa, now: u64) {
         let Some(card) = self.card.as_mut() else { return };
         let info = match card.finish() {
             Ok(i) => i,
@@ -370,6 +397,10 @@ impl Logger {
                 self.flushed_at = now;
                 self.last_io = now;
                 println!("hub-p4: sd recording to {}/{} ({} bytes already)", DIR, self.name, self.pos);
+                if let Err(e) = self.open_pack(faa, now) {
+                    println!("hub-p4: sd airspace pack: {e:?}");
+                    self.pack_file = None;
+                }
             }
             Err(e) => {
                 if let embedded_sdmmc::Error::FormatError(_) = e {
@@ -444,8 +475,13 @@ impl Logger {
         self.pos = vm.file_length(file)?;
         self.lines = 0;
         if self.pos == 0 {
-            vm.write(file, csv::HEADER.as_bytes())?;
-            self.pos = csv::HEADER.len() as u32;
+            // The tracker's header plus this hub's flag columns.
+            let head = csv::HEADER.trim_end_matches('\n');
+            let suffix = faarules::text::CSV_HEADER_SUFFIX;
+            vm.write(file, head.as_bytes())?;
+            vm.write(file, suffix.as_bytes())?;
+            vm.write(file, b"\n")?;
+            self.pos = (head.len() + suffix.len() + 1) as u32;
             self.lines = 1;
         }
         vm.flush_file(file)?;
@@ -455,11 +491,149 @@ impl Logger {
         Ok(())
     }
 
-    fn record(&mut self, tracker: &HubTracker, now: u64) -> &'static str {
+    /// After mount: find the airspace pack and start copying it (or, in an
+    /// `embedpack` build, start writing the built-in one first).
+    fn open_pack(&mut self, faa: &mut Faa, now: u64) -> Result<(), FsError> {
+        if faa.pack().is_some() {
+            return Ok(());
+        }
+        let vm = self.vm.as_ref().unwrap();
+        let Some(dir) = self.open.as_ref().map(|o| o.dir) else {
+            return Ok(());
+        };
+        let found = match vm.open_file_in_dir(dir, PACK_NAME, Mode::ReadOnly) {
+            Ok(f) => Some(f),
+            Err(embedded_sdmmc::Error::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        #[cfg(feature = "embedpack")]
+        {
+            let same = match found {
+                Some(f) => {
+                    let mut head = [0u8; 64];
+                    let n = vm.read(f, &mut head)?;
+                    let len = vm.file_length(f)?;
+                    vm.close_file(f)?;
+                    n == 64 && head[..] == EMBEDDED[..64] && len as usize == EMBEDDED.len()
+                }
+                None => false,
+            };
+            if !same {
+                println!(
+                    "hub-p4: sd writing the built-in airspace pack to {DIR}/{PACK_NAME} ({} bytes)",
+                    EMBEDDED.len()
+                );
+                let f = vm.open_file_in_dir(dir, PACK_NAME, Mode::ReadWriteCreateOrTruncate)?;
+                self.pack_file = Some(f);
+                self.pack_writing = Some(0);
+                faa.set_writing(0, EMBEDDED.len() as u32);
+                return Ok(());
+            }
+            println!("hub-p4: sd {DIR}/{PACK_NAME} already matches the built-in pack");
+            let f = vm.open_file_in_dir(dir, PACK_NAME, Mode::ReadOnly)?;
+            return self.start_load(f, faa, now);
+        }
+        #[cfg(not(feature = "embedpack"))]
+        match found {
+            Some(f) => self.start_load(f, faa, now),
+            None => {
+                faa.missing();
+                Ok(())
+            }
+        }
+    }
+
+    fn start_load(&mut self, f: RawFile, faa: &mut Faa, now: u64) -> Result<(), FsError> {
+        let vm = self.vm.as_ref().unwrap();
+        let len = vm.file_length(f)?;
+        if faa.begin(len, now) {
+            self.pack_file = Some(f);
+        } else {
+            vm.close_file(f)?;
+        }
+        Ok(())
+    }
+
+    /// One step of the pack copy (or write). Returns what it did.
+    fn pack_step(&mut self, faa: &mut Faa, now: u64) -> Result<&'static str, FsError> {
+        let (Some(vm), Some(f)) = (self.vm.as_ref(), self.pack_file) else {
+            return Ok("idle");
+        };
+        #[cfg(feature = "embedpack")]
+        if let Some(done) = self.pack_writing {
+            let total = EMBEDDED.len();
+            let n = 512.min(total - done as usize);
+            vm.write(f, &EMBEDDED[done as usize..done as usize + n])?;
+            let done = done + n as u32;
+            faa.set_writing(done, total as u32);
+            if done as usize >= total {
+                vm.close_file(f)?;
+                self.pack_writing = None;
+                self.pack_file = None;
+                println!(
+                    "hub-p4: sd wrote {DIR}/{PACK_NAME} ({total} bytes); reading it back into PSRAM"
+                );
+                let dir = self.open.as_ref().map(|o| o.dir).unwrap();
+                let f = vm.open_file_in_dir(dir, PACK_NAME, Mode::ReadOnly)?;
+                self.start_load(f, faa, now)?;
+            } else {
+                self.pack_writing = Some(done);
+            }
+            return Ok("pack_write");
+        }
+        let Some(buf) = faa.chunk(PACK_READ) else {
+            vm.close_file(f)?;
+            self.pack_file = None;
+            return Ok("idle");
+        };
+        let mut got = 0;
+        while got < buf.len() {
+            let n = vm.read(f, &mut buf[got..])?;
+            if n == 0 {
+                break;
+            }
+            got += n;
+        }
+        if got == 0 {
+            // Shorter than its length said: let the CRC check refuse it.
+            println!("hub-p4: sd airspace pack ended early");
+            vm.close_file(f)?;
+            self.pack_file = None;
+            faa.card_gone();
+            return Ok("pack_read");
+        }
+        if faa.advance(got, now) {
+            vm.close_file(f)?;
+            self.pack_file = None;
+        }
+        Ok("pack_read")
+    }
+
+    fn record(&mut self, tracker: &HubTracker, faa: &mut Faa, now: u64) -> &'static str {
         if now.saturating_sub(self.last_rows) >= ROW_EVERY_MS {
             self.last_rows = now;
-            self.queue_rows(tracker, now);
+            self.queue_rows(tracker, faa, now);
         }
+        if self.pack_file.is_some() && self.pending.len() < PENDING / 2 {
+            if self
+                .vm
+                .as_ref()
+                .is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy()))
+            {
+                self.busy_skips += 1;
+                return "busy";
+            }
+            match self.pack_step(faa, now) {
+                Ok(w) => return w,
+                Err(e) => {
+                    println!("hub-p4: sd airspace pack read failed: {e:?}");
+                    self.pack_file = None;
+                    faa.card_gone();
+                    return "pack_err";
+                }
+            }
+        }
+
         let (Some(vm), Some(open)) = (self.vm.as_ref(), self.open.as_ref()) else { return "idle" };
         let file = open.file;
         if vm.device(|d| d.card.borrow_mut().is_busy()) {
@@ -516,32 +690,42 @@ impl Logger {
         what
     }
 
-    fn queue_rows(&mut self, tracker: &HubTracker, now: u64) {
+    fn queue_rows(&mut self, tracker: &HubTracker, faa: &Faa, now: u64) {
         let ctx = tracker.context(now, self.utc_ms);
-        let mut row = [0u8; MAX_ROW];
+        let mut row = [0u8; ROW_BUF];
+        let pack = faa.pack();
         for t in tracker.tracks().iter().filter(|t| ctx.state(t) == TrackState::Active) {
-            let r = csv::row(t, &ctx, &mut row);
+            let entry = faa.engine.drone(t.id);
+            let r = csv::row(t, &ctx, &mut row).map(|n| with_flags(&mut row, n, entry, pack));
+            // Show the first row with flags once, as proof of the columns.
+            if let Ok(n) = r
+                && entry.is_some_and(|e| e.level() >= Some(1))
+                && !self.shown_flag_row
+            {
+                self.shown_flag_row = true;
+                println!("hub-p4: sd first flagged row: {}", core::str::from_utf8(&row[..n]).unwrap_or("?").trim_end());
+            }
             self.push_row(&row, r);
         }
         for l in tracker.open_links().iter().filter(|l| ctx.link_state(l) == TrackState::Active) {
-            let r = csv::link_row(l, &ctx, &mut row);
+            let r = csv::link_row(l, &ctx, &mut row).map(|n| with_flags(&mut row, n, None, pack));
             self.push_row(&row, r);
         }
         for e in tracker.emitters().iter().filter(|e| ctx.emitter_state(e) == TrackState::Active) {
-            let r = csv::rf_row(e, &ctx, &mut row);
+            let r = csv::rf_row(e, &ctx, &mut row).map(|n| with_flags(&mut row, n, None, pack));
             self.push_row(&row, r);
         }
         for w in tracker.wifi_drones().iter().filter(|w| ctx.wifi_drone_state(w) == TrackState::Active) {
-            let r = csv::wifi_drone_row(w, &ctx, &mut row);
+            let r = csv::wifi_drone_row(w, &ctx, &mut row).map(|n| with_flags(&mut row, n, None, pack));
             self.push_row(&row, r);
         }
         for a in tracker.aircraft().iter().filter(|a| ctx.aircraft_state(a) == TrackState::Active) {
-            let r = csv::aircraft_row(a, &ctx, &mut row);
+            let r = csv::aircraft_row(a, &ctx, &mut row).map(|n| with_flags(&mut row, n, faa.engine.aircraft(a.key.icao), pack));
             self.push_row(&row, r);
         }
     }
 
-    fn push_row<E>(&mut self, row: &[u8; MAX_ROW], r: Result<usize, E>) {
+    fn push_row<E>(&mut self, row: &[u8; ROW_BUF], r: Result<usize, E>) {
         let Ok(n) = r else { return };
         if self.pending.extend_from_slice(&row[..n]).is_ok() {
             self.rows += 1;
@@ -549,6 +733,50 @@ impl Logger {
             self.dropped += 1;
         }
     }
+}
+
+/// A row plus the flag columns: up to [`MAX_ROW`] of tracker columns and
+/// the rest for `flag_level,flags`.
+const ROW_BUF: usize = MAX_ROW + 768;
+
+/// Replace the row's newline with the two flag columns (empty for rows with
+/// no flags), cut to fit, and end the row again. Returns the new length.
+fn with_flags(
+    row: &mut [u8; ROW_BUF],
+    n: usize,
+    entry: Option<&faarules::Entry>,
+    pack: Option<&airspace::Pack<'_>>,
+) -> usize {
+    struct Cut<'a> {
+        buf: &'a mut [u8],
+        len: usize,
+    }
+    impl core::fmt::Write for Cut<'_> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            // Keep one byte for the newline; cut on a char boundary.
+            let room = self.buf.len() - 1 - self.len;
+            let mut take = s.len().min(room);
+            while !s.is_char_boundary(take) {
+                take -= 1;
+            }
+            self.buf[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+            self.len += take;
+            Ok(())
+        }
+    }
+    let start = if n > 0 && row[n - 1] == b'\n' {
+        n - 1
+    } else {
+        n
+    };
+    let mut w = Cut {
+        buf: &mut row[..],
+        len: start,
+    };
+    let _ = faarules::text::write_csv_columns(&mut w, entry, pack);
+    let end = w.len;
+    row[end] = b'\n';
+    end + 1
 }
 
 /// Bench only: read the whole file and count its rows by kind (blocks the

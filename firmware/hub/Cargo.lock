@@ -22,6 +22,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "airspace"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1328,6 +1335,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "faarules"
+version = "0.1.0"
+dependencies = [
+ "adsb",
+ "airspace",
+ "heapless 0.8.0",
+ "libm",
+ "rid",
+ "tracker",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1533,6 +1552,7 @@ dependencies = [
  "esp-rtos",
  "esp-wifi-sys-esp32c5",
  "esp-wifi-sys-esp32s3",
+ "faarules",
  "gnss",
  "heapless 0.8.0",
  "libm",

@@ -4,6 +4,7 @@
 //! - `GET /`                 the phone page (`webui::INDEX_HTML_GZ`, gzip, ETag/304)
 //! - `GET /api/state`        state JSON, streamed in chunks (see `api.rs`)
 //! - `POST /api/own-pos`     `{lat,lon,alt}` or `{clear:true}`
+//! - `GET /api/flags`         possible-violation flags from a P4 hub (`flags.rs`)
 //! - `GET|POST /api/cot`     read / set the CoT multicast toggle (`{"on":bool}`)
 //! - anything else           302 to `/`. This covers every OS's captive-portal
 //!   probe (Android `/generate_204`, Apple `/hotspot-detect.html`, Windows
@@ -65,6 +66,40 @@ impl Chunks for StateChunks {
             // anyway so formatting many tracks does not starve other tasks.
             embassy_futures::yield_now().await;
         }
+        writer.finalize().await
+    }
+}
+
+/// Streams `/api/flags` one report per chunk (`flags.rs`).
+struct FlagsChunks(&'static Hub);
+
+impl Chunks for FlagsChunks {
+    fn content_type(&self) -> &'static str {
+        "application/json"
+    }
+
+    async fn write_chunks<W: picoserve::io::Write>(
+        self,
+        mut writer: ChunkWriter<W>,
+    ) -> Result<ChunksWritten, W::Error> {
+        let hub = self.0;
+        let now = now_ms();
+        let mut piece = [0u8; tracker::json::MAX_LINE];
+        writer.write_chunk(b"{\"flags\":[").await?;
+        let mut first = true;
+        for i in 0..crate::flags::MAX_REPORTS {
+            // Borrow the table only while formatting one report.
+            let n = crate::flags::report_json(&hub.flags.borrow(), i, now, first, &mut piece);
+            match n {
+                None => break,
+                Some(0) => {}
+                Some(n) => {
+                    writer.write_chunk(&piece[..n]).await?;
+                    first = false;
+                }
+            }
+        }
+        writer.write_chunk(b"]}").await?;
         writer.finalize().await
     }
 }
@@ -138,6 +173,15 @@ async fn serve(id: usize, stack: Stack<'static>, hub: &'static Hub) -> ! {
             get(async move || {
                 REQUESTS.fetch_add(1, Relaxed);
                 ChunkedResponse::new(StateChunks(hub))
+                    .into_response()
+                    .with_header("Cache-Control", "no-store")
+            }),
+        )
+        .route(
+            "/api/flags",
+            get(async move || {
+                REQUESTS.fetch_add(1, Relaxed);
+                ChunkedResponse::new(FlagsChunks(hub))
                     .into_response()
                     .with_header("Cache-Control", "no-store")
             }),

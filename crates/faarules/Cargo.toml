@@ -1,0 +1,19 @@
+[package]
+name = "faarules"
+description = "Flags flights that may be breaking FAA rules (PLAN.md Phase 12): rule engine over tracker tracks and an airspace pack"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+airspace.workspace = true
+tracker.workspace = true
+rid.workspace = true
+adsb.workspace = true
+heapless.workspace = true
+libm = "0.2"
+
+[dev-dependencies]
+airspace = { workspace = true, features = ["alloc"] }
+rid = { workspace = true, features = ["serde", "encode"] }
+link.workspace = true

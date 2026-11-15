@@ -34,7 +34,7 @@ fakenode = []
 # "RSTEST-SD-0001", from a made-up node 02:52:53:00:00:02) is decoded as if
 # the gateway had relayed it, so the tracker has an active track and the SD
 # log gets rows without a test transmitter. Nothing is driven onto any pin.
-fakedrone = []
+fakedrone = ["rid/encode"]
 # Bench only: print the tracker's tables (a line per new drone slot, open-link
 # stream, RF emitter and Wi-Fi drone; a summary every 5 s) and, at mount, count
 # the previous SD log file's rows by kind. Test IDs only; see src/bench.rs.
@@ -60,6 +60,12 @@ gpsloop-m10 = ["gpsloop"]
 # stays connected and its traffic is forwarded as usual. Leave GPIO31 and
 # GPIO30 unconnected while it runs.
 webheadloop = []
+# Bench only: build the airspace pack named by the AIRSPACE_PAK environment
+# variable into the firmware and write it to the SD card as
+# ROTORSCP/AIRSPACE.PAK when the card has none or a different one (then it
+# is read back from the card like any pack). For loading a pack onto the
+# card without taking the card out. See src/faa.rs.
+embedpack = []
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -69,6 +75,9 @@ heapless = "0.8"
 critical-section = "1.2"
 screen = { path = "../../crates/screen", features = ["tracker"] }
 tracker = { path = "../../crates/tracker" }
+# Phase 12: airspace pack lookups and the possible-violation rule engine.
+airspace = { path = "../../crates/airspace" }
+faarules = { path = "../../crates/faarules" }
 gnss = { path = "../../crates/gnss" }
 # `encode`: the web-head feed re-prints ADSBee reports as CSBee lines.
 adsb = { path = "../../crates/adsb", features = ["encode"] }

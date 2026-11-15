@@ -46,6 +46,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
             Page::Radar => no_fix_home(ui, s, p, d)?,
             Page::List => list_page(ui, s, p, d)?,
             Page::Signals => signals(s, p, d)?,
+            Page::Flags => flags_page(s, p, d)?,
             Page::Health => health(s, p, d)?,
             Page::Settings => settings(ui, p, d)?,
         },
@@ -1064,6 +1065,97 @@ fn signals<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -
 }
 
 // ---------------------------------------------------------------------------
+// Flags (PLAN.md Phase 12)
+// ---------------------------------------------------------------------------
+
+/// Level colours: Alert in the accent, Warning in full ink, Watch and Note
+/// quieter. Words carry the meaning too (no colour-only signal).
+fn level_label(level: u8) -> &'static str {
+    match level {
+        0 => "NOTE",
+        1 => "WATCH",
+        2 => "WARN",
+        _ => "ALERT",
+    }
+}
+
+fn flags_page<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
+    const RH: i32 = 14;
+    let mut y = BAR_H + 4;
+    let hint_y = HEIGHT - 12;
+    text(d, "FLAGS", 4, y, F_BAR, p.fg)?;
+    let Some(f) = &s.flags else {
+        return text(d, "no rule engine on this hub", 18, y + 24, F_LABEL, p.dim).map(drop);
+    };
+    text_right(d, &f.pack, WIDTH - 4, y + 2, F_SMALL, p.dim)?;
+    y += 16;
+    // The wording rule (PLAN.md): possible, never "illegal".
+    text(
+        d,
+        "possible violations - hub can't see waivers/LAANC",
+        4,
+        y,
+        F_SMALL,
+        p.dim,
+    )?;
+    y += 13;
+    for (x, h, right) in [
+        (4, "LEVEL", false),
+        (52, "WHO", false),
+        (146, "RULE", false),
+        (314, "FOR", true),
+    ] {
+        if right {
+            text_right(d, h, x, y, F_SMALL, p.dim)?;
+        } else {
+            text(d, h, x, y, F_SMALL, p.dim)?;
+        }
+    }
+    hline(d, 0, WIDTH, y + 11, p.grid)?;
+    y += 14;
+    if f.rows.is_empty() {
+        text(d, "none", 18, y, F_LABEL, p.dim)?;
+    }
+    let mut b: String<40> = String::new();
+    let mut shown = 0;
+    for r in &f.rows {
+        if y + 2 * RH > hint_y {
+            break;
+        }
+        let col = match r.level {
+            3 => p.accent,
+            2 => p.fg,
+            _ => p.dim,
+        };
+        text(d, level_label(r.level), 4, y, F_LABEL, col)?;
+        // 12 characters of the ID fit before the rule column.
+        text(
+            d,
+            r.who.get(..r.who.len().min(12)).unwrap_or(""),
+            52,
+            y,
+            F_LABEL,
+            col,
+        )?;
+        text(d, r.rule, 146, y, F_LABEL, col)?;
+        b.clear();
+        let _ = write!(b, "{}s", r.secs);
+        text_right(d, &b, 314, y, F_LABEL, col)?;
+        y += RH - 2;
+        text(d, &r.text, 52, y, F_SMALL, p.dim)?;
+        y += RH;
+        shown += 1;
+    }
+    let more = usize::from(f.total).max(f.rows.len()).saturating_sub(shown);
+    if more > 0 {
+        b.clear();
+        let _ = write!(b, "+{more} more");
+        text_right(d, &b, WIDTH - 4, hint_y, F_SMALL, p.dim)?;
+    }
+    text(d, "UP/DN: pages", 4, hint_y, F_SMALL, p.dim).map(drop)
+}
+
+// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 
@@ -1120,7 +1212,14 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             b.clear();
             let state = if a.applied { "running" } else { "sent" };
             let _ = write!(b, "-> {} plan {:04x} {state}", a.role, a.plan);
-            text(d, &b, 18, y - 4, F_SMALL, if a.applied { p.dim } else { p.accent })?;
+            text(
+                d,
+                &b,
+                18,
+                y - 4,
+                F_SMALL,
+                if a.applied { p.dim } else { p.accent },
+            )?;
             y += 9;
         }
     }

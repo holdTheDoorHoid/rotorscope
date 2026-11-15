@@ -14,3 +14,7 @@ tools/boards.local
 bench-logs/
 __pycache__/
 firmware/patches/esp-hal-p4-pre-v3/upstream/
+
+# Airspace-pack downloads and packs (public data, never committed).
+tools/airspace-pack/cache/
+*.PAK

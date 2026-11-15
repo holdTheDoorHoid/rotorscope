@@ -7,6 +7,13 @@ name = "adsb"
 version = "0.1.0"
 
 [[package]]
+name = "airspace"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "arbitrary-int"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -757,6 +764,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "faarules"
+version = "0.1.0"
+dependencies = [
+ "adsb",
+ "airspace",
+ "heapless 0.8.0",
+ "libm",
+ "rid",
+ "tracker",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -905,6 +924,7 @@ name = "hub-p4"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "airspace",
  "coverage",
  "critical-section",
  "embedded-graphics",
@@ -913,6 +933,7 @@ dependencies = [
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
+ "faarules",
  "gnss",
  "heapless 0.8.0",
  "link",

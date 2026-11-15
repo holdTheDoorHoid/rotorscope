@@ -44,10 +44,18 @@ The same `link` frames the nodes speak (postcard + COBS, `crates/link`):
 | `Stats` (gateway frames, detections, frames the P4 lost) | the P4 itself | every 1 s |
 | **`HubFix`** (protocol 5): GPS state, satellites, latest usable fix (1e-7 deg, mm), UTC, PPS flag | the P4's GPS | every 1 s |
 | **`Csbee`** (protocol 5): one ADSBee line, CRC included | the P4's ADSBee | as it arrives (about 1 s) |
+| **`Flags`** (protocol 6): possible FAA rule violations on one track (who, worst level, up to 6 rule/level/value items, airspace pack date) | the P4's rule engine (`src/faa.rs`) | every 1 s per flagged track |
 
 Protocol 5 appends `HubFix` and `Csbee` after every older variant, so old
 nodes, gateways and hubs are unaffected (an old hub would count them as
-corrupt and carry on). Nodes never send them.
+corrupt and carry on). Nodes never send them. Protocol 6 appends `Flags`
+the same way. The web head keeps the 4 worst flagged tracks (its RAM is
+nearly full), shows them on the phone page (`GET /api/flags`, "Possible
+violations" on the list tab, a WATCH/WARNING/ALERT tag on the drone row)
+and adds them to the drone's CoT remark. Tracks are matched by UAS ID (or
+transmitter address), since the two boards number tracks independently.
+`webheadloop` counts `Flags` frames too (tested 2026-11-15: 68 frames, 0
+corrupt); the S3 side is built but not yet run on hardware.
 
 `crates/link/src/forward.rs` (`Forwarder`) is the P4's send queue (8 KB,
 about 90 ms of the wire). Two rules: whole frames only (a frame that does
