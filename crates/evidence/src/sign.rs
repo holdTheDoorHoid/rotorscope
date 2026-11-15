@@ -130,6 +130,11 @@ mod soft {
         vk.verify_prehash(digest, &sig).is_ok()
     }
 
+    /// The bytes are a valid uncompressed point on P-256.
+    pub fn key_is_valid(pubkey: &[u8; 65]) -> bool {
+        pubkey[0] == 4 && VerifyingKey::from_sec1_bytes(pubkey).is_ok()
+    }
+
     /// Public key of a secret (for the key generator).
     pub fn public_of(secret: &[u8; 32]) -> Option<[u8; 65]> {
         SoftSigner::new(secret, KeyClass::DevelopmentSoftware).map(|s| s.public)

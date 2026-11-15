@@ -99,9 +99,11 @@ impl App {
         }
     }
 
-    /// Hand queued link frames to the tracker.
-    pub fn ingest(&mut self, gw: &mut GatewayLink<'_>, now: u64) {
+    /// Hand queued link frames to the evidence log and the tracker.
+    pub fn ingest(&mut self, gw: &mut GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
         while let Some((node, f)) = gw.out.pop_front() {
+            let relay = node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| (n.mac, n.rssi));
+            ev.frame(node, relay, &f);
             self.tracker.ingest_frame(node, &f, now);
         }
         self.announce_new(now);

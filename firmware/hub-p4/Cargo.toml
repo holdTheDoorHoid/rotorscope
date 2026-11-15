@@ -79,6 +79,8 @@ tracker = { path = "../../crates/tracker" }
 airspace = { path = "../../crates/airspace" }
 faarules = { path = "../../crates/faarules" }
 gnss = { path = "../../crates/gnss" }
+# Phase 13: the evidence log (hash chain, signed checkpoints, software key).
+evidence = { path = "../../crates/evidence", features = ["soft-signer", "decode"] }
 # `encode`: the web-head feed re-prints ADSBee reports as CSBee lines.
 adsb = { path = "../../crates/adsb", features = ["encode"] }
 embedded-graphics = "0.8"

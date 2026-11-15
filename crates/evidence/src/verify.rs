@@ -806,6 +806,10 @@ pub fn verify_bundle(json: &[u8]) -> Report {
             format!("the audit log records {} uploads but the bundle holds {} batches: batches were removed", uploads.len(), b.batches.len()),
         );
     }
+    // A gap filled later arrives in a later batch: check the records in
+    // chain order (each batch holds one boot's contiguous run; their arrival
+    // order was checked against the audit log above).
+    inputs.sort_by_key(|i| format::parse(&i.bytes).map(|r| (r.header.boot_id, r.header.seq)).unwrap_or(([0xFF; 8], u64::MAX)));
     let inner = verify(&inputs, &Options { gaps_allowed: true, expect_key: key });
     rep.findings.extend(inner.findings);
     rep.chains = inner.chains;

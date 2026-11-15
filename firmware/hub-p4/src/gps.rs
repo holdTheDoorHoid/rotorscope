@@ -113,6 +113,10 @@ pub struct Fix {
     /// Height above the WGS-84 ellipsoid (Remote ID altitudes are geodetic).
     pub alt_hae_m: Option<f64>,
     pub at_ms: u64,
+    /// Horizontal accuracy estimate (UBX only) and HDOP (NMEA only), for
+    /// the evidence log's fix quality.
+    pub hacc_m: Option<f32>,
+    pub hdop: Option<f32>,
 }
 
 /// UTC anchored to hub time.
@@ -426,7 +430,7 @@ impl Gps {
             && let Some((lat, lon)) = f.position()
         {
             let alt_hae_m = if f.fix.has_altitude() { f.alt_ellipsoid_m.map(f64::from) } else { None };
-            self.fix = Some(Fix { lat, lon, alt_hae_m, at_ms: now });
+            self.fix = Some(Fix { lat, lon, alt_hae_m, at_ms: now, hacc_m: f.h_acc_m, hdop: f.hdop });
         }
         // UTC only when the receiver vouches for it: NMEA RMC status A, or
         // UBX with the time of day fully resolved.

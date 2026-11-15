@@ -32,6 +32,7 @@ mod civil;
 mod console;
 mod display;
 mod downlink;
+mod evlog;
 mod faa;
 mod gps;
 #[cfg(feature = "gpsloop")]
@@ -287,6 +288,24 @@ fn main() -> ! {
         (*(&raw mut FAA)).assume_init_mut()
     };
 
+    // Phase 13: the evidence log (evlog.rs). A random boot id names this
+    // boot's chain.
+    let mut boot_id = [0u8; 8];
+    esp_hal::rng::Rng::new().read(&mut boot_id);
+    let mut ev = evlog::Evidence::new(psram, boot_id);
+    let chip = esp_hal::efuse::chip_revision();
+    {
+        let fw = ev.fw_hash();
+        println!(
+            "hub-p4: evidence boot id {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}, firmware sha256 {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}..",
+            boot_id[0], boot_id[1], boot_id[2], boot_id[3], boot_id[4], boot_id[5], boot_id[6], boot_id[7],
+            fw[0], fw[1], fw[2], fw[3], fw[4], fw[5], fw[6], fw[7]
+        );
+    }
+    ev.ctx.uptime_ms = app::now_ms();
+    ev.boot((chip.major, chip.minor));
+    let mut note: Option<heapless::String<120>> = None;
+
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
     #[cfg(feature = "webheadloop")]
@@ -323,17 +342,20 @@ fn main() -> ! {
         let ms = app::now_ms();
         console::pump();
         gw.poll(ms);
-        app.ingest(&mut gw, ms);
+        ev.set_context(&app, &gps, ms);
+        app.ingest(&mut gw, &mut ev, ms);
         down.tick(&mut gw, ms);
         gps.tick(ms);
         #[cfg(not(feature = "webheadloop"))]
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
-        command(&mut app, &gps, faa, ms);
+        command(&mut app, &gps, faa, &mut ev, &mut sdlog, &mut note, ms);
+        ev.tick(ms);
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
             app.housekeeping(&gps, ms);
+            ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
             let max_age = app.tracker.config().own_fix_max_age_ms;
@@ -360,7 +382,7 @@ fn main() -> ! {
                 console::pump();
             });
         }
-        sdlog.tick(app.tracker, faa, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
+        sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         #[cfg(feature = "gpsloop")]
         gpsloop.tick();
         #[cfg(feature = "benchlog")]
@@ -481,10 +503,68 @@ fn gps_view(app: &app::App, gps: &gps::Gps, now: u64) -> screen::Gps {
     screen::Gps { fix, sats: gps.status.sats.unwrap_or(0) }
 }
 
-/// One console command byte, if any (see `console.rs`).
-fn command(app: &mut app::App, gps: &gps::Gps, faa: &faa::Faa, now: u64) {
+/// One console command byte, if any (see `console.rs`). `n` starts an
+/// operator note: the text up to Enter goes into the evidence log.
+fn command(
+    app: &mut app::App,
+    gps: &gps::Gps,
+    faa: &faa::Faa,
+    ev: &mut evlog::Evidence,
+    sdlog: &mut sd::Logger,
+    note: &mut Option<heapless::String<120>>,
+    now: u64,
+) {
     let Some(c) = console::read_command() else { return };
+    if let Some(n) = note.as_mut() {
+        match c {
+            b'\r' | b'\n' => {
+                let text = note.take().unwrap_or_default();
+                if !text.is_empty() {
+                    ev.set_context(app, gps, now);
+                    ev.event(evidence::EventCode::Note, text.as_bytes(), &[]);
+                    println!("hub-p4: cmd evidence note logged ({} chars)", text.len());
+                }
+            }
+            0x1b => {
+                *note = None;
+                println!("hub-p4: cmd note cancelled");
+            }
+            c if c.is_ascii() && !c.is_ascii_control() => {
+                let _ = n.push(c as char);
+            }
+            _ => {}
+        }
+        return;
+    }
+    ev.set_context(app, gps, now);
     match c {
+        b'n' => {
+            *note = Some(heapless::String::new());
+            println!("hub-p4: cmd type the note, then Enter (Esc cancels)");
+        }
+        b'u' => {
+            ev.stream = !ev.stream;
+            let t: &[u8] = if ev.stream { b"console evidence stream on (command u)" } else { b"console evidence stream off (command u)" };
+            ev.event(evidence::EventCode::Setting, t, &[ev.stream as u8]);
+            println!("hub-p4: cmd evidence stream {}", if ev.stream { "on" } else { "off" });
+        }
+        b'k' => {
+            ev.checkpoint(evidence::format::CheckpointReason::Requested, now);
+            println!("hub-p4: cmd evidence checkpoint #{} queued", ev.seq().saturating_sub(1));
+        }
+        b'r' => {
+            if sdlog.start_replay() {
+                println!("hub-p4: cmd evidence replay of {} started", sdlog.ev_name());
+            } else {
+                println!("hub-p4: cmd evidence replay: no evidence file open");
+            }
+        }
+        b'e' => {
+            ev.event(evidence::EventCode::Shutdown, b"operator asked to stop (command e)", &[]);
+            ev.checkpoint(evidence::format::CheckpointReason::Shutdown, now);
+            sdlog.flush_now();
+            println!("hub-p4: cmd evidence shutdown checkpoint queued; the card is safe to remove after the next 'evidence ... flushes' line shows queued=0");
+        }
         b'p' => {
             // The S3 hub's test point (300 m south of its demo circle).
             app.manual = Some(app::OwnPos {
@@ -496,16 +576,18 @@ fn command(app: &mut app::App, gps: &gps::Gps, faa: &faa::Faa, now: u64) {
             });
             app.housekeeping(gps, now);
             app.redraw_now();
+            ev.event(evidence::EventCode::Setting, b"manual own position set to the test point 39.949902,-75.165200 (command p)", &[1]);
             println!("hub-p4: cmd own position set to the test point (manual)");
         }
         b'c' => {
             app.manual = None;
             app.housekeeping(gps, now);
             app.redraw_now();
+            ev.event(evidence::EventCode::Setting, b"manual own position cleared (command c)", &[0]);
             println!("hub-p4: cmd manual own position cleared");
         }
         b'b' => faa.bench(),
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, h=help. JSON lines start with '{{'."),
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

@@ -1,8 +1,38 @@
 [package]
 name = "evidence-server"
+description = "Receives, checks and keeps Rotorscope evidence records; map, audit log, export bundles (PLAN.md Phase 13)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "evidence-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "evidence-upload"
+path = "src/bin/evidence-upload.rs"
+
 [dependencies]
+evidence = { workspace = true, features = ["verify", "soft-signer"] }
+rid = { workspace = true }
+link = { workspace = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS (optional at run time): rustls with the ring provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "service"] }
+tower = { version = "0.5", features = ["util"] }
+getrandom = "0.2"
+# The uploader: HTTP client and the P4's USB serial console.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+serialport = { version = "4", default-features = false }
+
+[dev-dependencies]
+http-body-util = "0.1"
+heapless = { workspace = true }

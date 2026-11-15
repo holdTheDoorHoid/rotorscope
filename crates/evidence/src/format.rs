@@ -194,8 +194,8 @@ pub enum EventCode {
     NodeJoin = 9,
     /// A node fell silent. Data: station address (6).
     NodeLeave = 10,
-    /// Airspace pack loaded. Data: build date Unix s (u32), CRC (u32),
-    /// length (u32).
+    /// Airspace pack loaded. Data: build date Unix s (u32), length (u32),
+    /// pack format version (u16).
     Pack = 11,
     /// Free text from the operator.
     Note = 12,

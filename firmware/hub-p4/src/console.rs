@@ -73,7 +73,8 @@ pub fn pump() {
     });
 }
 
-fn room() -> usize {
+/// Free bytes in the console ring.
+pub fn room() -> usize {
     critical_section::with(|cs| {
         let tx = TX.borrow_ref(cs);
         tx.capacity() - tx.len()
