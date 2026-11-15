@@ -434,6 +434,50 @@ Decided 2026-11-09 (see RESEARCH.md "Autel, Skydio and digital FPV").
 RESEARCH.md for the recording list and the hardware that unblocks it (about $250 for HDZero +
 Walksnail + OpenIPC).
 
+### Phase 12: Flagging flights that are likely breaking FAA rules (added 2026-11-15)
+Start after the web-head work. Goal: the hub flags, logs and shows drones (and, from ADS-B, crewed
+aircraft) whose reported position and altitude look like a rule violation, using an on-device
+database of airspace and restrictions. Works offline from the SD card.
+
+**Wording rule: "likely", never "illegal".** The hub cannot see waivers, LAANC authorizations,
+public-safety (COA) operations or Part 107 vs recreational status, so every flag is "possible
+violation: <rule>, <evidence>", with the data source and its date. Flags are a log for the owner,
+never sent anywhere automatically.
+
+**Checks, in order of value and data cost:**
+1. **Height above ground over 400 ft** (Part 107.51(b), 44809(a)(6)). Remote ID gives geodetic
+   altitude, often pressure altitude, and height above takeoff or ground. Ground height comes from
+   an elevation tile (USGS 3DEP or SRTM, public domain) on the SD card. Allow the 107.51 exception
+   (within 400 ft of a structure) only as a softer "high, check for structures" level, since the hub
+   has no building data. Include a margin for Remote ID's own altitude accuracy class.
+2. **Controlled airspace without a known authorization** (Class B, C, D, E surface): FAA airspace
+   shapes from NASR / the FAA ADDS open data (public domain), plus **UAS Facility Map** grid
+   ceilings (the LAANC altitude limits). Flag "above the facility-map ceiling" more strongly than
+   "inside controlled airspace" (which is often authorized).
+3. **Restricted areas:** Special Use Airspace (prohibited/restricted), the DC SFRA/FRZ, stadium and
+   national-security UAS flight restrictions, and **TFRs**. TFRs change daily and need a network
+   (web head's station mode or a laptop sync); show the database date so stale TFR data is obvious.
+4. **Remote ID problems:** a DroneID/Wi-Fi drone seen with no Remote ID, operator position missing,
+   or a Remote ID serial that changes mid-flight.
+5. **Crewed aircraft (ADS-B):** below the 91.119 minimum safe altitudes (1000 ft over congested
+   areas, 500 ft elsewhere) away from airports, using the same elevation tiles. Lower priority; many
+   legitimate exceptions (helicopters, approach paths).
+6. Later: night operations without anti-collision lighting can't be seen by radio; flying over
+   people and beyond visual line of sight can't be judged from radio data. Out of scope.
+
+**Data:** a host tool (`tools/airspace-pack`) downloads the public FAA and USGS datasets, cuts a
+region (e.g. 100 km around the owner), simplifies shapes, and writes a compact versioned pack to the
+SD card; the hub never parses shapefiles. Pack holds: airspace polygons with floor/ceiling, facility
+map grid, SUA, a terrain grid, and a dated TFR list. Shared crate `crates/airspace` does point-in-
+polygon and height lookups with host tests on known airports (PHL, PNE).
+
+**Outputs:** a flag column and reason in the SD CSV, a "flags" screen page and phone page section,
+a CoT remark, and a per-flight summary (worst flag, max height above ground, time inside each area).
+
+**Done when:** test-beacon tracks placed (by fake positions) at known spots around PHL and PNE get
+the right flags against the public data, the pack fits on the SD card and lookups take under a few
+milliseconds on the P4.
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
