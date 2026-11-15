@@ -1,17 +1,20 @@
 //! SD-card log on the P4 hub: the S3 hub's CSV log (`firmware/hub/src/sd.rs`,
 //! `tracker::csv`), driven from the main loop in small steps.
 //!
-//! **Where.** `ROTORSCP\LOGnnnnn.CSV` on the card's first FAT16/FAT32
-//! partition: one file per boot, numbered one past the highest already
-//! there, `tracker::csv::HEADER` first. The P4 has no GPS, so no time-based
-//! names. Only that folder and our own files are ever created or written;
+//! **Where.** `ROTORSCP\` on the card's first FAT16/FAT32 partition, one
+//! file per boot, `tracker::csv::HEADER` first. With GPS time at mount:
+//! `MMDDhhmm.CSV` (UTC, as the S3 hub); without: `LOGnnnnn.CSV`, numbered
+//! one past the highest already there. While a GPS is answering but has no
+//! time yet, the mount waits up to [`WAIT_FOR_TIME_MS`] after boot (rows
+//! are kept in RAM meanwhile), so a normal start gets a dated name. FAT
+//! timestamps and the CSV `utc` column come from GPS time too. Only that folder and our own files are ever created or written;
 //! nothing is deleted and the card is never formatted. exFAT (most cards over
 //! 32 GB) is not supported by `embedded-sdmmc`: such a card is reported and
 //! left alone.
 //!
 //! **What.** Once a second, one row per *active* drone, open FPV link, RF
-//! emitter and Wi-Fi drone (`csv::row`, `link_row`, `rf_row`,
-//! `wifi_drone_row`); the P4 tracker keeps no ADS-B aircraft. Rows wait in a
+//! emitter, Wi-Fi drone and ADS-B aircraft (`csv::row`, `link_row`,
+//! `rf_row`, `wifi_drone_row`, `aircraft_row`). Rows wait in a
 //! RAM buffer ([`PENDING`] bytes; when it is full new rows are dropped and
 //! counted).
 //!
@@ -36,7 +39,6 @@ use core::ops::ControlFlow;
 use embedded_sdmmc::{Mode, RawDirectory, RawFile, RawVolume, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_hal::gpio::Flex;
 use esp_hal::time::Instant;
-use esp_println::println;
 use tracker::TrackState;
 use tracker::csv::{self, MAX_ROW};
 
@@ -63,15 +65,44 @@ const READBACK_MAX: u32 = 2 * 1024;
 const PREVIOUS_MAX: u32 = 16 * 1024;
 const STATS_EVERY_MS: u64 = 5_000;
 
-type Vm = VolumeManager<SdDev, NoClock, 2, 2, 1>;
+/// Hold the mount this long after boot for GPS time (see the module docs).
+const WAIT_FOR_TIME_MS: u64 = 90_000;
+/// ... and always this long after boot, for the GPS to be found.
+const GPS_FIND_MS: u64 = 8_000;
+
+type Vm = VolumeManager<SdDev, GpsClock, 2, 2, 1>;
 type FsError = embedded_sdmmc::Error<sdnative::Error>;
 
-/// No clock on the P4 yet: FAT timestamps say 2026-01-01 00:00.
-pub struct NoClock;
+/// UTC (Unix ms) at hub time (ms), set from the GPS by [`set_clock`].
+static CLOCK: critical_section::Mutex<core::cell::Cell<Option<(u64, u64)>>> =
+    critical_section::Mutex::new(core::cell::Cell::new(None));
 
-impl TimeSource for NoClock {
+/// Tell the FAT layer what time it is (`utc_ms` at hub time `now_ms`).
+pub fn set_clock(utc_ms: Option<u64>, now_ms: u64) {
+    critical_section::with(|cs| CLOCK.borrow(cs).set(utc_ms.map(|u| (u, now_ms))));
+}
+
+fn clock_utc() -> Option<u64> {
+    let (u, at) = critical_section::with(|cs| CLOCK.borrow(cs).get())?;
+    Some(u + crate::app::now_ms().saturating_sub(at))
+}
+
+/// FAT timestamps from GPS time; 2026-01-01 00:00 without it.
+pub struct GpsClock;
+
+impl TimeSource for GpsClock {
     fn get_timestamp(&self) -> Timestamp {
-        Timestamp { year_since_1970: 56, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 }
+        match clock_utc().map(crate::civil::civil) {
+            Some(c) => Timestamp {
+                year_since_1970: (c.year - 1970).clamp(0, 255) as u8,
+                zero_indexed_month: c.month - 1,
+                zero_indexed_day: c.day - 1,
+                hours: c.hour,
+                minutes: c.minute,
+                seconds: c.second,
+            },
+            None => Timestamp { year_since_1970: 56, zero_indexed_month: 0, zero_indexed_day: 0, hours: 0, minutes: 0, seconds: 0 },
+        }
     }
 }
 
@@ -117,6 +148,8 @@ pub struct Logger {
     pub errors: u32,
     pub flushes: u32,
     busy_skips: u32,
+    utc_ms: Option<u64>,
+    holding: bool,
     max_tick_us: u64,
     max_tick_what: &'static str,
 }
@@ -146,15 +179,40 @@ impl Logger {
             errors: 0,
             flushes: 0,
             busy_skips: 0,
+            utc_ms: None,
+            holding: false,
             max_tick_us: 0,
             max_tick_what: "",
         }
     }
 
-    /// One step. Call every main-loop pass.
-    pub fn tick(&mut self, tracker: &HubTracker, now: u64) {
+    /// One step. Call every main-loop pass. `utc_ms`: GPS time now, if
+    /// known; `gps_present`: a receiver is answering (worth waiting for its
+    /// time before naming the file).
+    pub fn tick(&mut self, tracker: &HubTracker, now: u64, utc_ms: Option<u64>, gps_present: bool) {
         let t0 = Instant::now();
-        let what = self.step(tracker, now);
+        self.utc_ms = utc_ms;
+        // The first few seconds too: the GPS hunt needs ~1-3 s to find a
+        // receiver at all.
+        let hold = self.state != State::Recording
+            && utc_ms.is_none()
+            && (gps_present || now < GPS_FIND_MS)
+            && now < WAIT_FOR_TIME_MS;
+        if hold != self.holding {
+            self.holding = hold;
+            if hold && gps_present {
+                println!("hub-p4: sd waiting up to {} s after boot for GPS time before opening the log", WAIT_FOR_TIME_MS / 1000);
+            }
+        }
+        let what = if hold {
+            if now.saturating_sub(self.last_rows) >= ROW_EVERY_MS {
+                self.last_rows = now;
+                self.queue_rows(tracker, now);
+            }
+            "wait_time"
+        } else {
+            self.step(tracker, now)
+        };
         let us = t0.elapsed().as_micros();
         if us > self.max_tick_us {
             self.max_tick_us = us;
@@ -166,13 +224,33 @@ impl Logger {
         }
     }
 
-    fn print_stats(&mut self) {
-        let state = match self.state {
+    /// `no_card`, `waking`, `wait_time`, `recording` or `error`.
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            _ if self.holding => "wait_time",
             State::NoCard(_) => "no_card",
             State::Waking(..) => "waking",
             State::Recording => "recording",
             State::Error(_) => "error",
-        };
+        }
+    }
+
+    /// For the screen.
+    pub fn ui_state(&self) -> screen::SdLog {
+        match self.state {
+            State::Recording => screen::SdLog::Recording,
+            State::Error(_) => screen::SdLog::Error,
+            _ if self.holding => screen::SdLog::Recording,
+            _ => screen::SdLog::NoCard,
+        }
+    }
+
+    pub fn file_name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn print_stats(&mut self) {
+        let state = self.state_name();
         let io = self.io_stats();
         println!(
             "hub-p4: sd {state} file={}/{} rows={} dropped={} pending={} bytes={} flushes={} errors={} | blocks r={} w={} io_err={} busy_skips={} max_io={}us max_tick={}us ({})",
@@ -285,7 +363,7 @@ impl Logger {
             "hub-p4: sd block 0 read {:?} in {us} us (~{} kHz clock, ~{} kB/s); partition 1 type 0x{:02x}, signature {:02x}{:02x}",
             r.map(|_| ()), 4180 * 1000 / us, 512 * 1000 / us, b[0][446 + 4], b[0][510], b[0][511]
         );
-        self.vm = Some(VolumeManager::new_with_limits(SdDev::new(card), NoClock, 1));
+        self.vm = Some(VolumeManager::new_with_limits(SdDev::new(card), GpsClock, 1));
         match self.mount() {
             Ok(()) => {
                 self.state = State::Recording;
@@ -349,9 +427,19 @@ impl Logger {
             }
             vm.close_file(f)?;
         }
-        println!("hub-p4: sd {count} log files in {DIR}");
+        println!("hub-p4: sd {count} numbered log files in {DIR}");
         self.name.clear();
-        let _ = write!(self.name, "LOG{:05}.CSV", (max + 1) % 100_000);
+        // GPS time: MMDDhhmm.CSV, unless that name is taken (two boots in
+        // one minute): then the numbered name.
+        if let Some(c) = self.utc_ms.map(crate::civil::civil) {
+            let _ = write!(self.name, "{:02}{:02}{:02}{:02}.CSV", c.month, c.day, c.hour, c.minute);
+            if vm.find_directory_entry(dir, self.name.as_str()).is_ok() {
+                self.name.clear();
+            }
+        }
+        if self.name.is_empty() {
+            let _ = write!(self.name, "LOG{:05}.CSV", (max + 1) % 100_000);
+        }
         let file = vm.open_file_in_dir(dir, self.name.as_str(), Mode::ReadWriteCreateOrAppend)?;
         self.pos = vm.file_length(file)?;
         self.lines = 0;
@@ -362,7 +450,7 @@ impl Logger {
         }
         vm.flush_file(file)?;
         self.open = Some(Open { vol, root, dir, file });
-        self.pending.clear();
+        // Rows kept while waiting for GPS time stay queued.
         self.dirty = false;
         Ok(())
     }
@@ -429,7 +517,7 @@ impl Logger {
     }
 
     fn queue_rows(&mut self, tracker: &HubTracker, now: u64) {
-        let ctx = tracker.context(now, None);
+        let ctx = tracker.context(now, self.utc_ms);
         let mut row = [0u8; MAX_ROW];
         for t in tracker.tracks().iter().filter(|t| ctx.state(t) == TrackState::Active) {
             let r = csv::row(t, &ctx, &mut row);
@@ -445,6 +533,10 @@ impl Logger {
         }
         for w in tracker.wifi_drones().iter().filter(|w| ctx.wifi_drone_state(w) == TrackState::Active) {
             let r = csv::wifi_drone_row(w, &ctx, &mut row);
+            self.push_row(&row, r);
+        }
+        for a in tracker.aircraft().iter().filter(|a| ctx.aircraft_state(a) == TrackState::Active) {
+            let r = csv::aircraft_row(a, &ctx, &mut row);
             self.push_row(&row, r);
         }
     }

@@ -1,7 +1,12 @@
 # gnss
 
 GPS driver core for the Rotorscope hub: a u-blox **MAX-M10S** (protocol 34.x, firmware
-SPG 5.10). `#![no_std]`, no alloc, no unsafe, no dependencies, 43 host tests.
+SPG 5.10) or a Quectel **LC29H(AA)** (dual-band L1+L5, NMEA + `$PAIR`/`$PQTM` commands),
+detected automatically. `#![no_std]`, no alloc, no unsafe, no dependencies, 59 host tests.
+
+**Status:** the u-blox path is host-tested; the LC29H path is host-tested and both were
+loop-back tested on the P4 hub against an on-chip emulator (`firmware/hub-p4/PARITY.md`).
+**Neither has been run against a real module yet.**
 
 The crate does no I/O. The hub reads bytes from UART or I2C and calls `Parser::feed`; the
 config builders write UBX frames into a buffer the hub then sends.
@@ -64,7 +69,10 @@ From UBX, `hdop` is `None`. `alt_ellipsoid_m` from NMEA is GGA altitude + geoid 
 * NMEA carries no 2D/3D flag. A GGA with an altitude is reported as `ThreeD`, one without as
   `TwoD`; RMC alone is `TwoD`. Without accuracy figures a NMEA 2D fix is never `is_usable()`.
 * `utc` needs an RMC with status `A` (date plus a time we trust). GGA alone gives no UTC.
-* Proprietary `$P...` and every other sentence type are ignored.
+* GSA's fix mode (1 none / 2 2D / 3 3D) overrides the GGA-altitude guess: a receiver that says
+  2D gives a `TwoD` fix even though its GGA prints an assumed altitude. GSA's PDOP fills `pdop`.
+* GSV and GSA feed the sky view (`Parser::sky()`, below). `$PAIR` / `$PQTM` replies come out
+  as `Event::Quectel`. Other proprietary `$P...` sentences and every other type are ignored.
 
 ### Resync
 
@@ -79,7 +87,57 @@ dropped bytes.
 UBX frames with a payload over `MAX_UBX_PAYLOAD` (392) are treated as garbage. NAV-PVT is
 92 bytes; a MON-VER is under 300.
 
-## Configuration
+## Quectel LC29H(AA)
+
+Source for everything here: Quectel *LC29H Series & LC79H(AL) GNSS Protocol Specification*
+V1.3 (2024-03-12), <https://forums.quectel.com/uploads/short-url/gJTnPOK8MkEJIgLFR7QgjvrpUey.pdf>;
+*LC29H GNSS Specification* V1.2,
+<https://quectel.com/content/uploads/sites/3/2022/06/Quectel_LC29H_GNSS_Specification_V1.2.pdf>;
+*LC29H Series Hardware Design* V1.0,
+<https://forums.quectel.com/uploads/short-url/6AJSfkCWZOBEg7psU3USNgfcBqm.pdf>; Waveshare's
+LC29H HAT wiki, <https://www.waveshare.com/wiki/LC29H%28XX%29_GPS/RTK_HAT>.
+
+| Fact | Value | Source |
+|---|---|---|
+| UART default | 115200 baud, all variants; adjustable 9600-921600 (`PAIR864`, needs a reboot) | GNSS Specification, Waveshare |
+| Frame format | 8N1 assumed: not stated in any of the documents | (unverified) |
+| Sentences on by default | GGA, GLL, GSA, GSV, RMC, VTG, at the 1 Hz default fix rate (AA max 10 Hz) | Protocol spec, `PAIR062` / `PAIR050` |
+| NMEA version | 4.10 layout by default: GSA ends with a system ID, GSV with a signal ID | Protocol spec |
+| Talkers | GP, GL, GA, GB, GN (combined, for GGA/RMC/GSA); GSV per constellation; on the AA, QZSS rides under GP (satellites 193-199, system ID 1) | Protocol spec |
+| Dual band | On by default on the AA: GPS L1 = signal 1, L5 = 8; Galileo E1 = 7, E5a = 1; BeiDou B1I = 1, B2a = 5 | Protocol spec (GSV examples) |
+| Commands | `$PAIRnnn,...*CS` answered by `$PAIR001,nnn,result` (0 ok, 1 processing, 2 failed, 3 unsupported, 4 bad parameter, 5 busy); `$PQTM...` answered by `$PQTM<name>,OK` / `,ERROR,code`. NMEA XOR checksum | Protocol spec |
+| Probe | `$PQTMVERNO*58`, read-only, reply `$PQTMVERNO,<ver>,<date>,<time>`; an AA's version starts `LC29HAA` | Protocol spec |
+| Output rate | `$PAIR062,<type>,<n>`: type 0 GGA, 1 GLL, 2 GSA, 3 GSV, 4 RMC, 5 VTG, 6 ZDA, 7 GRS, 8 GST; n = every n-th fix, 0 = off | Protocol spec |
+| PPS | Module pin 3 "1PPS"; default width 100 ms; `$PQTMCFGPPS,W,1,<on>,<ms>,<mode>,<polarity>,<interval>` (mode 1 always / 2 2D / 3 3D; polarity 1 = high; interval 0 = every second); AA only. ~100 ns accuracy, rising edge on the second | Protocol spec, Hardware Design |
+| PPS default mode, UTC vs GPS alignment | Not settled by the documents; the hub sets the mode itself and anchors to the UTC second RMC names | (unverified) |
+| UBX | Not supported (NMEA, PAIR/PQTM and RTCM only) | Protocol spec |
+| Logic level | 2.8 V I/O domain (VOH min 2.1 V), reference design for a 3.3 V MCU; supply 3.1-3.6 V | Hardware Design |
+
+`Lc29hSequence` (via `Module::QuectelLc29h.sequence(..)`) sends, one at a time, each confirmed:
+`$PAIR062` GGA 1, RMC 1, GSA 1, GSV 1 (or 0 with `Lc29hOptions { gsv: false }`), GLL 0, VTG 0,
+then `$PQTMCFGPPS,W,1,1,100,3,1,0` (PPS on, 100 ms, **3D fix only**, active high, every second).
+The fix rate stays at the 1 Hz default (changing it needs a save and restart). Nothing is saved
+to the module's flash: the hub configures it at every boot.
+
+### Detecting the module
+
+`module::probe_bytes` writes a UBX MON-VER poll followed by `$PQTMVERNO`. Each module answers
+its own and ignores the other; `Module::from_event(&ev)` says which (`MonVer`/UBX ACK =
+u-blox, any Quectel reply = LC29H). Neither: `Module::Nmea`, read as is. `Module::sequence`
+gives the matching boot configuration as `Step`s (`bytes()`, `name()`, `baud_after()`,
+`confirmed_by(&Event)`), so the hub drives either module with one loop.
+
+### Sky view
+
+`Parser::sky()` returns a `SkyView` built from GSV and GSA: per `System` (GPS, GLONASS,
+Galileo, BeiDou, QZSS, NavIC) satellites in view, satellites with signal on the L1 band and on
+the L5 band, satellites used (GSA), and the best C/N0. `dual_band()` is true while anything is
+tracked on L5. Groups not refreshed for 3 epochs are forgotten. Signal IDs map to bands per
+the NMEA 4.10/4.11 table (in `src/sky.rs`); without signal IDs (older NMEA) GSV counts as L1 and
+a `GNGSA` line's constellation is read from the satellite numbers. Empty on a UBX-only link
+(the M10 after configuration).
+
+## Configuration (u-blox)
 
 `configure_sequence()` yields five CFG-VALSET frames, layers RAM + BBR (so it survives a
 power cycle while the backup supply is up):
@@ -189,7 +247,13 @@ message set is ever needed, revisit.
 
 ## Tests
 
-`cargo test -p gnss` (43 tests): hand-built NAV-PVT frames with independently computed
+`cargo test -p gnss` (59 tests). LC29H (`src/tests_lc29h.rs`, 16): a full dual-band NMEA 4.10
+epoch built from the protocol specification's example sentences (checksums re-checked), the
+sky view per constellation and band, QZSS under GP, ageing out a band, a lost GSV message,
+2D from GSA, every talker, RMC with the 4.10 navigational-status field, no-fix output,
+PAIR001/PQTMVERNO/PQTMCFGPPS replies and errors, unknown proprietary sentences, the command
+builder against the manual's own sentences, the boot sequence and which replies confirm each
+step, module detection, and any chunking of an interleaved stream. u-blox (43): hand-built NAV-PVT frames with independently computed
 checksums (3D, 2D, no fix, negative lat/lon, invalid/partial time, unknown accuracy, heading
 wrap); real NMEA sentences with computed checksums (GP/GN/GL/GA/GB, empty no-fix GGA, void
 RMC, southern/eastern hemispheres, out-of-range coordinates); byte-at-a-time and 300

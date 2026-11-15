@@ -13,7 +13,6 @@
 
 use core::fmt::Write;
 
-use esp_println::println;
 use heapless::{String, Vec};
 
 use crate::app::HubTracker;

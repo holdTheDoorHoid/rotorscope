@@ -1,4 +1,5 @@
-//! GNSS driver core for the Rotorscope hub (u-blox MAX-M10S, protocol 34.x).
+//! GNSS driver core for the Rotorscope hub: u-blox MAX-M10S (protocol 34.x) and Quectel
+//! LC29H(AA) (NMEA + PAIR/PQTM).
 //!
 //! `#![no_std]`, no alloc, no unsafe, no dependencies. The crate never touches a bus: the
 //! caller reads bytes from UART or I2C (DDC) and calls [`Parser::feed`]; the config
@@ -19,14 +20,20 @@
 pub mod config;
 pub mod ddc;
 mod fix;
+pub mod module;
 mod nmea;
 mod parser;
+pub mod quectel;
+pub mod sky;
 mod ubx;
 
 pub use config::{
     ConfigFrame, ConfigOptions, ConfigSequence, configure_sequence, BuildError, Value,
 };
 pub use fix::{Fix, FixType, Source, UtcTime};
+pub use module::{Module, Step, Steps};
+pub use quectel::{Lc29hOptions, Lc29hSequence, QuectelCommand, Reply};
+pub use sky::{Band, ConstellationView, SkyView, System};
 pub use parser::{Event, Events, Parser, Stats, MAX_NMEA_LEN, MAX_UBX_PAYLOAD};
 pub use ubx::{build_frame, fletcher, MonVer, ValGet, ValGetItem};
 
@@ -34,3 +41,5 @@ pub use ubx::{build_frame, fletcher, MonVer, ValGet, ValGetItem};
 extern crate std;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_lc29h;

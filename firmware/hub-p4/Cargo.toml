@@ -39,6 +39,19 @@ fakedrone = []
 # stream, RF emitter and Wi-Fi drone; a summary every 5 s) and, at mount, count
 # the previous SD log file's rows by kind. Test IDs only; see src/bench.rs.
 benchlog = []
+# Show open FPV links' identifiers on every output (screen, console JSON, SD
+# log). Off by default by project policy, exactly as the S3 hub's feature of
+# the same name (see firmware/hub/Cargo.toml).
+show-link-ids = []
+# Bench only: on-chip loop-back test of the GPS and ADS-B inputs. UART2
+# plays a Quectel LC29H(AA) on the GPS pads (GPIO48/47), the PPS pad
+# (GPIO29) is pulsed from inside the chip, and UART4 sends CSBee lines onto
+# its own RX pad (GPIO30). Leave the UART1 header, GPIO29 and GPIO30
+# unconnected while it runs. Excludes `selftest` (both use UART2).
+gpsloop = ["adsb/encode"]
+# As `gpsloop`, but UART2 plays a u-blox MAX-M10S as shipped (NMEA at 9600),
+# so the baud hunt, MON-VER detection and UBX configuration are exercised.
+gpsloop-m10 = ["gpsloop"]
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -48,6 +61,8 @@ heapless = "0.8"
 critical-section = "1.2"
 screen = { path = "../../crates/screen", features = ["tracker"] }
 tracker = { path = "../../crates/tracker" }
+gnss = { path = "../../crates/gnss" }
+adsb = { path = "../../crates/adsb" }
 embedded-graphics = "0.8"
 # SD card: our bit-banged native 1-bit protocol (crates/sdnative) under the
 # same FAT driver the S3 hub uses. MIT/Apache.

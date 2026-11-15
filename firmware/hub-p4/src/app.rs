@@ -1,5 +1,6 @@
-//! The hub proper on the P4: tracker fed by the gateway link, the shared
-//! screen UI on the panel, touch keys.
+//! The hub proper on the P4: tracker fed by the gateway link (drones) and
+//! the ADSBee (aircraft), own position from the GPS or a manual position,
+//! the shared screen UI on the panel, touch keys.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::RgbColor;
@@ -14,7 +15,35 @@ use crate::touch::Gt911;
 use crate::{display, links};
 
 pub const MAX_TRACKS: usize = 64;
-pub type HubTracker = Tracker<MAX_TRACKS, 0>;
+/// ADS-B aircraft (the tracker's default capacity, as the S3 hub with `adsbee`).
+pub const MAX_AIRCRAFT: usize = tracker::aircraft::MAX_AIRCRAFT;
+pub type HubTracker = Tracker<MAX_TRACKS, MAX_AIRCRAFT>;
+
+/// Where the own position in use came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OwnSource {
+    Gps,
+    Manual,
+}
+
+/// The unit's position in use (GPS fix first, else a manual position).
+#[derive(Clone, Copy)]
+pub struct OwnPos {
+    pub lat: f64,
+    pub lon: f64,
+    pub alt: Option<f64>,
+    pub source: OwnSource,
+    pub at_ms: u64,
+}
+
+/// What the screen needs from outside the tracker and the gateway link.
+pub struct Ext {
+    pub gps: screen::Gps,
+    pub utc_ms: Option<u64>,
+    pub sd: screen::SdLog,
+    /// The ADSBee's health and uptime.
+    pub adsb: Option<(tracker::json::AdsbStatus, u32)>,
+}
 /// A relayed node not heard for this long shows as down.
 const NODE_ALIVE_MS: u64 = 5_000;
 /// Redraw at most this often (and at once after a key).
@@ -42,6 +71,11 @@ pub struct App {
     last_touch: u64,
     pub frames_drawn: u32,
     pub max_band_us: u64,
+    /// Set over the console (`p`), kept until cleared (`c`). Not kept across
+    /// reboots.
+    pub manual: Option<OwnPos>,
+    /// New drones since the last report, for the `{"t":"new"}` lines.
+    pub new_drones: heapless::Deque<u32, 8>,
 }
 
 impl App {
@@ -58,6 +92,8 @@ impl App {
             last_touch: 0,
             frames_drawn: 0,
             max_band_us: 0,
+            manual: None,
+            new_drones: heapless::Deque::new(),
         }
     }
 
@@ -66,9 +102,48 @@ impl App {
         while let Some((node, f)) = gw.out.pop_front() {
             self.tracker.ingest_frame(node, &f, now);
         }
+        self.announce_new(now);
+    }
+
+    /// New drones to the screen alert and the console, once per drone. Also
+    /// called at 1 Hz: a MAC-only track becomes due only after its grace.
+    pub fn announce_new(&mut self, now: u64) {
         while let Some(id) = self.tracker.take_new_drone(now) {
             self.ui.new_drone(id.0, now);
+            if self.new_drones.is_full() {
+                self.new_drones.pop_front();
+            }
+            let _ = self.new_drones.push_back(id.0);
         }
+    }
+
+    /// The position in use: a fresh GPS fix wins; the manual position is
+    /// the fallback (S3 hub policy, `firmware/hub/src/hub.rs`).
+    pub fn own_pos(&self, gps: &crate::gps::Gps, now: u64) -> Option<OwnPos> {
+        let max_age = self.tracker.config().own_fix_max_age_ms;
+        gps.fresh_fix(now, max_age)
+            .map(|f| OwnPos { lat: f.lat, lon: f.lon, alt: f.alt_hae_m, source: OwnSource::Gps, at_ms: f.at_ms })
+            .or(self.manual)
+    }
+
+    /// Once a second: own position into the tracker (a manual one
+    /// re-stamped so the tracker's fix timeout never drops it), expire old
+    /// tracks, announce new drones.
+    pub fn housekeeping(&mut self, gps: &crate::gps::Gps, now: u64) {
+        match self.own_pos(gps, now) {
+            Some(p) => {
+                let stamp = if p.source == OwnSource::Manual { now } else { p.at_ms };
+                self.tracker.set_own_position(p.lat, p.lon, p.alt, stamp);
+            }
+            None => self.tracker.clear_own_position(),
+        }
+        self.tracker.expire(now);
+        self.announce_new(now);
+    }
+
+    /// Redraw at once (e.g. the own position changed).
+    pub fn redraw_now(&mut self) {
+        self.last_frame = 0;
     }
 
     /// Poll touch; a press on a key is a button event.
@@ -80,7 +155,7 @@ impl App {
         if let Some(t) = self.touch.poll(i2c) {
             self.last_touch = now;
             if t.pressed {
-                esp_println::println!("hub-p4: touch x={} y={}", t.x, t.y);
+                crate::println!("hub-p4: touch x={} y={}", t.x, t.y);
                 match display::key_at(t.x, t.y) {
                     Some(screen::Button::Select) => {
                         self.sel_down = Some((now, false));
@@ -120,13 +195,20 @@ impl App {
 
     /// Redraw if due. Calls `between` after each band so the caller can
     /// service the link (a whole frame takes longer than the UART FIFO lasts).
-    pub fn draw(&mut self, panel: &mut Panel, gw: &mut GatewayLink<'_>, now: u64, mut between: impl FnMut(&mut GatewayLink<'_>)) {
+    pub fn draw(
+        &mut self,
+        panel: &mut Panel,
+        gw: &mut GatewayLink<'_>,
+        ext: &Ext,
+        now: u64,
+        mut between: impl FnMut(&mut GatewayLink<'_>),
+    ) {
         self.ui.tick(now);
         if now.saturating_sub(self.last_frame) < FRAME_MS {
             return;
         }
         self.last_frame = now;
-        self.fill_state(gw, now);
+        self.fill_state(gw, ext, now);
         if self.lit.is_some_and(|(_, t)| now.saturating_sub(t) > 300) {
             self.lit = None;
         }
@@ -146,9 +228,16 @@ impl App {
         self.frames_drawn += 1;
     }
 
-    fn fill_state(&mut self, gw: &GatewayLink<'_>, now: u64) {
-        let ctx = self.tracker.context(now, None);
+    fn fill_state(&mut self, gw: &GatewayLink<'_>, ext: &Ext, now: u64) {
+        let ctx = self.tracker.context(now, ext.utc_ms);
+        // Before fill_from_tracker: it clears a fix the tracker has no
+        // position for.
+        self.state.gps = ext.gps;
         screen::from_tracker::fill_from_tracker(self.tracker, &ctx, &mut self.state);
+        self.state.sd = ext.sd;
+        // No battery sense on this board (the BAT connector's voltage is not
+        // wired to a GPIO): report USB power, as a bench S3 does.
+        self.state.power = screen::Power::Usb { battery_pct: None };
         self.state.hub_uptime_s = (now / 1000) as u32;
         self.state.nodes.clear();
         self.state.assigned.clear();
@@ -174,6 +263,21 @@ impl App {
                 drops: n.dropped,
                 uptime_s: n.uptime_s,
             });
+        }
+        // The ADSBee as a node, and the aircraft line.
+        if let Some((a, up)) = ext.adsb {
+            let _ = self.state.nodes.push(NodeStatus {
+                kind: NodeKind::Adsb,
+                alive: a.alive,
+                frames_per_s: a.frames_per_s.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+                rid_found: 0,
+                drops: a.errors,
+                uptime_s: up,
+            });
+            let _ = self.state.assigned.push(None);
+            self.state.aircraft = Some(screen::from_tracker::aircraft_summary(self.tracker.aircraft(), &ctx));
+        } else {
+            self.state.aircraft = None;
         }
         let _ = (links::BAUD, Rgb565::BLACK);
     }

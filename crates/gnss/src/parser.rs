@@ -2,6 +2,8 @@
 
 use crate::fix::Fix;
 use crate::nmea;
+use crate::quectel::{self, Reply};
+use crate::sky::SkyView;
 use crate::ubx::{self, MonVer, ValGet};
 
 /// Largest UBX payload the parser will accept. Larger "frames" are treated as garbage so a
@@ -36,6 +38,8 @@ pub enum Event {
     MonVer(MonVer),
     /// Reply to a CFG-VALGET poll.
     ValGet(ValGet),
+    /// A Quectel `$PAIR001` acknowledgement or `$PQTM...` reply (LC29H).
+    Quectel(Reply),
 }
 
 /// Counters for diagnostics (wrapping).
@@ -89,6 +93,11 @@ impl Parser {
     /// Diagnostic counters.
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Satellites per constellation and band (from NMEA GSV/GSA; empty on a UBX-only link).
+    pub fn sky(&self) -> &SkyView {
+        &self.nmea.sky
     }
 
     /// Forget any partial frame (call after reconfiguring the link, e.g. a baud change).
@@ -201,12 +210,17 @@ impl Parser {
                     }
                 }
                 Step::Line(total) => {
-                    let fix = nmea::verify(&self.buf[..total])
-                        .and_then(|body| self.nmea.accept(body));
+                    let ev = nmea::verify(&self.buf[..total]).and_then(|body| {
+                        if quectel::is_quectel(body) {
+                            quectel::decode(body).map(Event::Quectel)
+                        } else {
+                            self.nmea.accept(body).map(Event::Fix)
+                        }
+                    });
                     self.consume(total);
                     self.stats.frames_ok = self.stats.frames_ok.wrapping_add(1);
-                    if let Some(fix) = fix {
-                        return Some(Event::Fix(fix));
+                    if let Some(ev) = ev {
+                        return Some(ev);
                     }
                 }
             }
