@@ -585,6 +585,44 @@ limits as a setting, access control on the server, and the legal line from Phase
 export; editing, deleting or reordering any record in the log, the upload or the bundle makes the
 verifier fail and say where; and a cold-start with no GPS is visibly marked in the records.
 
+### Phase 14: Our own aircraft-signal decoding: ADS-B, Mode S, UAT, and FLARM-family (added 2026-11-15)
+Goal: decode crewed-aircraft location signals ourselves instead of trusting the ADSBee's summary,
+and add the light-aircraft/glider systems (FLARM and its open relatives) that ADS-B misses.
+
+**14a. Mode S / ADS-B decoder in Rust (`crates/modes`), no new hardware.**
+- Feed: the ADSBee's raw frame output (raw hex or Beast binary, whichever its firmware offers)
+  instead of its CSBee summary. Our code then does everything above the radio: CRC-24 parity and
+  address recovery, 1-2 bit error correction on DF17/18, CPR global and local position, velocity,
+  identification, Mode C/Gillham altitude, squawk (DF5/21), comm-B (DF20/21, the common BDS
+  registers), all-call (DF11), TIS-B and ADS-R (DF18).
+- Cross-check against the ADSBee's own decode on the same frames; a mismatch is logged.
+- Host tests against hand-made and published example frames; then live on the laptop with the
+  ADSBee, then on the P4 (ADSBee UART, Phase 6 wiring).
+- Mode A/C replies (no address) are only visible to a raw demodulator: see 14c.
+
+**14b. UAT 978 MHz** (US general aviation below 18,000 ft): same decoder approach (Reed-Solomon
+FEC, basic and long ADS-B messages). Needs a 978 receiver: the ADSBee 1090U variant, or 14c. Ours
+has no working 978 radio.
+
+**14c. Raw demodulation ourselves (optional, later).** An RTL-SDR on the P4's USB 2.0 host port at
+2-2.4 MS/s, with our own 1090 pulse demodulator (and 978 for UAT). Large job (a Rust USB host
+driver for the RTL2832U on the P4). Laptop first with the same code, the P4 only if it earns it.
+
+**14d. FLARM family on 868 / 902-928 MHz.**
+- **FLARM**: gliders, light aircraft and many helicopters in Europe; used in the US too (US band
+  902-928 MHz). Its air protocol is proprietary and obfuscated or encrypted depending on the
+  version; FLARM Technology has objected to third-party decoding. **Legal review before decoding
+  FLARM content**; presence/energy detection is the safe default (same line as Phase 9).
+- **Open relatives, decode freely:** OGN tracker protocol, FANET (LoRa), and ADS-L (EASA's open
+  standard for light aircraft and drones, SRD860 band). Check which have any US use.
+- Radio: the Phase 9 LR2021 (GFSK and LoRa, 150-960 MHz) can receive all of these, one channel
+  plan at a time, so a FLARM-family job is another role for that node; an SX1262 board can too.
+- **Done when:** a decoded FLARM-family position from a real transmitter, or recordings, reaches
+  the tracker, and the legal decision is written down.
+
+Outputs for all of 14: aircraft on the screen, SD log, USB JSON, phone page and CoT, with the source
+(ADS-B, Mode S, UAT, FLARM, OGN, FANET, ADS-L); Phase 12's low-flying check uses them too.
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
