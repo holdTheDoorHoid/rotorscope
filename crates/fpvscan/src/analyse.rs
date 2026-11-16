@@ -76,6 +76,13 @@ impl Scratch {
     pub fn psd(&self) -> &[u64; GROUPS] {
         &self.psd
     }
+
+    /// The FM discriminator series of the last analysis of `n` samples
+    /// (2.5 MS/s, mean removed), for the 2.4 GHz sub-line check in
+    /// [`crate::band`].
+    pub fn demod(&self, n: usize) -> &[i32] {
+        &self.d[..(n.saturating_sub(1) / DECIM).min(MAX_D)]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

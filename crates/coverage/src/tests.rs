@@ -117,12 +117,34 @@ fn fpv_channels_are_the_signals_table() {
 }
 
 #[test]
+fn fpv_sweep_is_both_bands_within_reach() {
+    let mut want: std::vec::Vec<u32> = [
+        [2410u32, 2430, 2450, 2470, 2370, 2390, 2490, 2510],
+        [2414, 2432, 2450, 2468, 2411, 2433, 2453, 2473],
+    ]
+    .iter()
+    .flatten()
+    .map(|m| m * 10)
+    .collect();
+    want.sort();
+    want.dedup();
+    assert_eq!(want, FPV_CHANNELS_24);
+    let sw = fpv_sweep();
+    assert_eq!(sw.len(), 15 + 31, "15 at 2.4 GHz, the 31 reachable at 5.8");
+    assert!(sw.windows(2).all(|w| w[0] < w[1]));
+    assert!(sw.iter().all(|&f| f < 26_000 || f <= FPV_C5_MAX));
+    // Two nodes: each inside the 24-hop plan.
+    assert!(base_plan(Fpv, 2, 0).len() <= 23 && base_plan(Fpv, 2, 1).len() <= 23);
+}
+
+#[test]
 fn splits_cover_everything_once() {
     for k in 2..=6 {
         let mut fpv: std::vec::Vec<u32> = (0..k).flat_map(|i| base_plan(Fpv, k, i)).map(|h| h.0).collect();
         fpv.sort();
-        if k <= FPV_CHANNELS.len() {
-            assert_eq!(fpv, FPV_CHANNELS, "fpv k={k}");
+        let want = fpv_sweep();
+        if k <= want.len() {
+            assert_eq!(fpv[..], want[..], "fpv k={k}");
         }
         let mut w24: std::vec::Vec<u32> = (1..k).flat_map(|i| base_plan(Wifi24, k, i)).map(|h| h.0).collect();
         w24.sort();
@@ -156,7 +178,7 @@ fn every_plan_fits() {
             }
         }
     }
-    assert_eq!(base_plan(Fpv, 2, 0).len() + base_plan(Fpv, 2, 1).len(), FPV_CHANNELS.len());
+    assert_eq!(base_plan(Fpv, 2, 0).len() + base_plan(Fpv, 2, 1).len(), fpv_sweep().len());
 }
 
 #[test]

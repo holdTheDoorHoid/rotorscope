@@ -16,11 +16,11 @@ node that is a gateway never gets one.
 | 2 | Bluetooth Remote ID | Its own built-in plan |
 | 3 | Wi-Fi 5 GHz | Channel 149 most of the time, short visits to 153, 157, 161, 165 and 36, 40, 44, 48 |
 | 4 | DJI DroneID | 5756.5, 5776.5, 5796.5 MHz, then 2414.5, 2429.5, 2444.5, 2459.5, 2399.5 MHz, 700 ms on each (a DroneID burst comes every ~640 ms, so one dwell always catches one) |
-| 5 | Analog FPV / RF scan | Its own built-in sweep |
+| 5 | Analog FPV / RF scan | Its own built-in sweep (2.4 GHz analog video channels, then every 5.8 GHz channel it reaches) |
 | 6 | Second DroneID | Splits the bands: the first keeps 5.8 GHz, the second takes the 2.4 GHz list |
 | 7 | Second Wi-Fi 5 GHz | Splits: the first parks on 149, the second sweeps 36-48 and 153-165 (100 ms each) |
 | 8 | Second Wi-Fi 2.4 GHz | Splits: the first parks on 6, the second sweeps 1-5 and 7-13 (80 ms each) |
-| 9 | Second FPV | Splits the 47 FPV channels (bands A, B, E, F, R, L) in half |
+| 9 | Second FPV | Splits the 46 FPV channels a C5 reaches (15 at 2.4 GHz, 31 at 5.8 GHz) in half |
 | 10 | Second Bluetooth | A duplicate: Bluetooth has no channels to split |
 
 More nodes than lines: each keeps whatever job it has (more Bluetooth and

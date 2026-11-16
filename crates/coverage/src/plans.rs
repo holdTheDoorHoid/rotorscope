@@ -72,6 +72,26 @@ pub const FPV_CHANNELS: &[u32] = &[
     58400, 58430, 58450, 58470, 58600, 58650, 58660, 58800, 58850, 59050, 59170, 59250, 59450,
 ];
 pub const FPV_MS: u16 = 60;
+/// 2.4 GHz analog video channels (docs/SIGNALS.md section 3b: the 20 MHz
+/// grid 2370-2510 and the 18 MHz camera grid 2411-2473), 100 kHz units,
+/// sorted. A C5 reaches all of them.
+pub const FPV_CHANNELS_24: &[u32] = &[
+    23700, 23900, 24100, 24110, 24140, 24300, 24320, 24330, 24500, 24530, 24680, 24700, 24730, 24900, 25100,
+];
+/// Highest 5.8 GHz carrier a raw-capture C5 reaches (`fpvscan::channels::
+/// REACH_MAX_MHZ`), 100 kHz units. Channels above it need an RX5808.
+pub const FPV_C5_MAX: u32 = 58100;
+/// Most channels in [`fpv_sweep`].
+pub const FPV_SWEEP_MAX: usize = 64;
+
+/// What FPV nodes split between them: every 2.4 GHz channel, then the
+/// 5.8 GHz channels a C5 can reach (31 of 47; sending the others would
+/// only be dropped by the node and unbalance the split). 46 in all, so two
+/// nodes get 23 each, inside the 24-hop plan limit. One node runs the same
+/// list as its built-in sweep (`fpvscan::band::sweep`).
+pub fn fpv_sweep() -> heapless::Vec<u32, FPV_SWEEP_MAX> {
+    FPV_CHANNELS_24.iter().chain(FPV_CHANNELS.iter().filter(|&&f| f <= FPV_C5_MAX)).copied().collect()
+}
 
 // ------------------------------------------------------- ESP-NOW nodes --
 
@@ -133,7 +153,7 @@ pub fn base_plan(role: NodeRole, k: usize, idx: usize) -> Plan {
         },
         NodeRole::Fpv => {
             if k > 1 {
-                push_all(&mut p, part(FPV_CHANNELS, k, idx).iter().map(|&f| (f, FPV_MS)));
+                push_all(&mut p, part(&fpv_sweep(), k, idx).iter().map(|&f| (f, FPV_MS)));
             }
         }
         NodeRole::Ble | NodeRole::Gateway => {}

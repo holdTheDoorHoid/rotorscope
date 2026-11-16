@@ -19,14 +19,24 @@
 //! in its FM-demodulated signal, which OFDM does not have, and it is
 //! recognised positively by its 3.2 µs (or 12.8 µs, 802.11ax) cyclic prefix.
 //!
+//! **2.4 GHz** ([`channels24`], [`band`], [`dsss`]): the same scanner walks
+//! the 2.4 GHz analog video plans too. There the band is far busier (Wi-Fi
+//! channels 1-13, Bluetooth hopping, microwave ovens), so it gets its own
+//! noise floor, an 802.11b DSSS recogniser, and inside the ISM band only a
+//! confirmed line rate (or a recognised OFDM family) is reported. The
+//! firmware uses [`band`], which on 5.8 GHz is exactly the 5.8 GHz path.
+//!
 //! Everything per sample is integer (`i16` samples, `i32` products, `i64`
 //! sums). [`Scratch`] holds all working memory (about 26 KiB): put it in a
 //! `static` or PSRAM on the chip.
 #![cfg_attr(not(test), no_std)]
 
 pub mod analyse;
+pub mod band;
 pub mod channels;
+pub mod channels24;
 pub mod classify;
+pub mod dsss;
 pub mod meter;
 
 pub use analyse::{Analysis, Scratch, analyse};
@@ -57,3 +67,5 @@ pub fn db_x10(v: u64) -> i32 {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests24;
