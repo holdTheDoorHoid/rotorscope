@@ -106,7 +106,8 @@ The hub's `Command::Assign` (through the gateway, or the `assign` console comman
 same fields) sets role and plan. Idempotent: the same role and plan id change nothing. Plans are
 `(centre in 100 kHz units, dwell ms)`. Empty plan = built-in: DroneID 5756.5 / 5776.5 / 5796.5 /
 2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 700 ms each (the LO sits on the whole MHz below,
-+0.5 MHz off the DC spike); FPV every reachable channel, 60 ms each. Entries outside the C5's reach
++0.5 MHz off the DC spike); FPV every reachable channel of both bands (15 at 2.4 GHz, then 31 at
+5.8 GHz), 60 ms each. Entries outside the C5's reach
 are dropped. Roles this image cannot do (Wi-Fi, BLE) are refused and the node keeps its job;
 switching images is the multi-image layout's business. Console: `role droneid|fpv` (holds that job
 against hub assignments until `role auto`, for bench work), `hop on|off`
@@ -123,13 +124,27 @@ inflates the probe level (the meter sees raw 4-bit samples) and made flat noise 
 wide, continuous signal at 37 MHz from the last calibration. A channel loud by 8 dB or more
 is analysed (`crates/fpvscan`, scratch in internal RAM: about 13.6 KiB of heap): FM line rate (AnalogVideo), cyclic prefix at 66.7 µs (LteStyle),
 3.2 / 12.8 µs (Wi-Fi: printed, never sent to the hub), 6.4 µs (WifiNarrow), wide flat continuous
-on the HDZero grid (Hdzero), else continuous = FpvCarrier, bursty = Energy (printed, not sent: on 5.8 GHz it is nearly always Wi-Fi that missed the capture). Console: one `fpv` line
+on the HDZero grid (Hdzero), else continuous = FpvCarrier, bursty = Energy (printed, not sent: on 5.8 GHz it is nearly always Wi-Fi that missed the capture). 2.4 GHz channels: see below. Console: one `fpv` line
 per non-quiet channel, a `sweep` line per sweep.
 
 Reach: carriers 5181–5810 MHz (LO 5180–5800, a channel above 5801 sits up to +10 MHz in the
 capture): 31 of the 47 distinct channels. **Skipped** (above reach; an RX5808 covers them):
 5820 F5, 5825 A3, 5828 B6, 5840 F6, 5843 R6, 5845 A2, 5847 B7, 5860 F7, 5865 A1, 5866 B8,
 5880 F8/R7, 5885 E5, 5905 E6, 5917 R8, 5925 E7, 5945 E8.
+
+**2.4 GHz** (2026-11-15, `fpvscan::band`, docs/SIGNALS.md 3b): all 15 analog video channels
+(2370–2510 MHz, FuriousFPV-style bands `2.4A` and `2.4B`) are inside the measured 2.4 GHz reach (LO
+2200–2650), tuned the same way (LO = carrier − 1 MHz). Nothing in the capture path is 5 GHz-only:
+`phy_set_chanfreq` takes any whole MHz, the DC re-measurement already handles the 2.4 GHz tables
+(and re-runs on every band change; 4–5 ms there), and the BBTOP low-pass code is the same analog
+branch. Differences handled: one noise floor per band (2.4 GHz noise is a few dB higher at the same
+gain index), an 802.11b DSSS check and a line-shape check (`dsss`, `sub_line`, `half_r` in the
+`fpv` line, 2.4 GHz only), and inside 2400–2500 MHz unconfirmed continuous energy is `energy`
+(not sent), not `fpv_carrier`. `fpv` lines carry `"band":"2g4"|"5g8"`; `sweep` lines add
+`floor_2g4`. **Not yet checked on air**: the gain stays at 83 on both bands (2.4 GHz `gain_max` is
+81; DroneID already runs 2.4 GHz at 83 with DC within ±16 codes and noise 64–84 codes RMS, a
+little above the clip window's sweet spot), and the extra 2.4 GHz analysis time (~3 ms DSSS fold
++ the line-shape lags) is unmeasured.
 
 ### Hub link: the ESP-NOW uplink (feature `espnow`, `cargo fw-now`)
 

@@ -280,6 +280,18 @@ Decided 2026-11-09 (see RESEARCH.md "Expansion research"):
    - The C5 can't time-share its radio between receiving video and running Wi-Fi.
    - Realistic route if wanted later: run stock C5VRX as a separate GPL binary on its own C5. Capture its digital video pins with an S3 (LCD_CAM), compress to JPEG in software, and serve to phones. That gives roughly 10–30 fps at 160×120–320×240 (unverified).
    - An ESP32-P4 only makes sense here, and only as a separate video module written in ESP-IDF C.
+4. **2.4 GHz analog video (2026-11-15, branch `fpv-24ghz`): built, synthetic-only.**
+   - The C5 FPV job now also sweeps the 15 common 2.4 GHz analog video channels (2370–2510 MHz;
+     the 20 MHz and 18 MHz grids, docs/SIGNALS.md 3b). All are inside the C5's measured 2.4 GHz
+     reach (2200–2650 MHz). One sweep = 15 + 31 channels, ~2.8 s; two FPV nodes split them.
+   - Same line-rate confirmation, plus 2.4 GHz-only guards: its own noise floor, an 802.11b DSSS
+     recogniser, a line-shape check (inverter microwave ovens can fake a line rate), and inside
+     2400–2500 MHz only confirmed video is reported.
+   - Tested on synthetic signals only: PAL/NTSC video (with audio subcarrier, under Wi-Fi and
+     Bluetooth), OFDM Wi-Fi on channels 1/6/11, DSSS, Bluetooth hopping, ovens, noise.
+   - **Untested on air.** To validate: a cheap 2.4 GHz analog camera / AV sender (4-channel
+     2414–2468 kit) or a 2.4 GHz FPV VTX near a C5 in FPV mode; also one capture of ordinary
+     2.4 GHz Wi-Fi to confirm the noise floor, gain (83 vs `gain_max` 81) and analysis time.
 
 ### Phase 8: LoRa mesh backhaul (several units sharing detections)
 - Use a **stock Meshtastic or MeshCore board** (SX1262; Heltec V3/V4, XIAO + Wio-SX1262), wired to the hub's serial port as a modem.

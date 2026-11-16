@@ -175,7 +175,7 @@ pub struct Radio {
     /// FPV: level meter for this dwell, floor across the sweep, and whether
     /// the capture bank holds this dwell's window.
     meter: fpvscan::Meter,
-    floor: fpvscan::FloorTracker,
+    floors: fpvscan::band::Floors,
     fpv_cap: bool,
     fpv_scratch: Option<&'static mut fpvscan::Scratch>,
     pub fpv_verbose: bool,
@@ -244,7 +244,7 @@ impl Radio {
             cur_freq: s.mhz as u32 * 10 + 5,
             events: HVec::new(),
             meter: fpvscan::Meter::new(),
-            floor: fpvscan::FloorTracker::new(),
+            floors: fpvscan::band::Floors::new(),
             fpv_cap: false,
             fpv_scratch: None,
             fpv_verbose: false,
@@ -1140,7 +1140,7 @@ impl Radio {
         for &(f, ms) in plan {
             let ok = match role {
                 NodeRole::DroneId => droneid_freq_ok(f),
-                _ => fpvscan::channels::reachable(((f + 5) / 10) as u16),
+                _ => fpvscan::band::reachable(((f + 5) / 10) as u16),
             };
             if ok && ms > 0 {
                 let _ = p.push((f, ms));
@@ -1150,7 +1150,8 @@ impl Radio {
             match role {
                 NodeRole::DroneId => p.extend_from_slice(&DRONEID_PLAN).ok(),
                 _ => {
-                    for &mhz in fpvscan::channels::sweep() {
+                    // Both bands: 2.4 GHz analog video, then 5.8 GHz.
+                    for &mhz in fpvscan::band::sweep() {
                         let _ = p.push((mhz as u32 * 10, fpvscan::channels::DWELL_MS));
                     }
                     Some(())
@@ -1180,7 +1181,7 @@ impl Radio {
             self.s.trig
         };
         self.trig.reset();
-        self.floor.reset();
+        self.floors.reset();
         self.sweep = SweepStats { t0_us: now_us(), ..SweepStats::default() };
         self.events.clear();
     }
@@ -1218,7 +1219,7 @@ impl Radio {
         let (f, ms) = self.plan[self.hop_idx];
         self.cur_freq = f;
         let (lo, tol) = match self.role {
-            NodeRole::Fpv => (fpvscan::channels::lo_for(((f + 5) / 10) as u16).0, FPV_DCAL_MHZ),
+            NodeRole::Fpv => (fpvscan::band::lo_for(((f + 5) / 10) as u16).0, FPV_DCAL_MHZ),
             // The whole MHz below the burst centre: +0.5 MHz off the DC spike.
             _ => ((f / 10) as u16, 0),
         };
@@ -1269,15 +1270,22 @@ impl Radio {
             }
         }
         let mhz = ((self.cur_freq + 5) / 10) as u16;
-        let floor = self.floor.update(&self.meter);
+        // One floor per band: the receiver's noise differs between them.
+        let floor = self.floors.update(mhz, &self.meter);
         let d = self.meter.dwell(floor);
         let t0 = now_us();
-        let a = match (&mut self.fpv_scratch, self.fpv_cap && d.snr_db >= fpvscan::classify::STRONG_DB) {
-            (Some(sc), true) => Some(fpvscan::analyse(&capture()[..self.c16_len], sc)),
-            _ => None,
+        let (a, extra) = match (&mut self.fpv_scratch, self.fpv_cap && d.snr_db >= fpvscan::classify::STRONG_DB) {
+            (Some(sc), true) => {
+                let x = &capture()[..self.c16_len];
+                let a = fpvscan::analyse(x, sc);
+                // 2.4 GHz only (DSSS and line-shape checks); zero on 5.8.
+                let e = fpvscan::band::extra(x, sc, &a, mhz);
+                (Some(a), e)
+            }
+            _ => (None, fpvscan::band::Extra::default()),
         };
         let us = (now_us() - t0) as u32;
-        let kind = fpvscan::classify(&d, a.as_ref(), mhz);
+        let kind = fpvscan::band::classify(&d, a.as_ref(), &extra, mhz);
         self.sweep.n += 1;
         self.sweep.kinds[kind_index(kind)] += 1;
         if a.is_some() {
@@ -1285,12 +1293,15 @@ impl Radio {
             self.sweep.analyse_us_max = self.sweep.analyse_us_max.max(us);
         }
         if kind != fpvscan::Kind::Quiet || self.fpv_verbose {
-            let (band, ch) = fpvscan::channels::label(mhz).unwrap_or((b'?', 0));
+            let band = fpvscan::band::Band::of(mhz);
             let mut line = Line::new();
+            let _ = match fpvscan::band::label(mhz) {
+                Some(l) => write!(line, r#"{{"t":"fpv","mhz":{mhz},"ch":"{l}","band":"{}""#, band.name()),
+                None => write!(line, r#"{{"t":"fpv","mhz":{mhz},"ch":"?","band":"{}""#, band.name()),
+            };
             let _ = write!(
                 line,
-                r#"{{"t":"fpv","mhz":{mhz},"ch":"{}{ch}","lo":{},"snr_db":{},"duty":{},"floor":{},"probes":{},"kind":"{}""#,
-                band as char,
+                r#","lo":{},"snr_db":{},"duty":{},"floor":{},"probes":{},"kind":"{}""#,
                 self.s.mhz,
                 d.snr_db,
                 d.duty_pct,
@@ -1312,6 +1323,9 @@ impl Radio {
                     Dec1(a.flat_x10 as i32),
                     a.centroid_khz
                 );
+                if band == fpvscan::band::Band::G24 {
+                    let _ = write!(line, r#","dsss":{},"sub_line":{},"half_r":{}"#, extra.dsss, extra.sub_line, extra.half_r);
+                }
             }
             println!("{}}}", line.as_str());
         }
@@ -1334,10 +1348,11 @@ impl Radio {
         let mut line = Line::new();
         let _ = write!(
             line,
-            r#"{{"t":"sweep","channels":{},"ms":{},"floor":{},"analysed":{},"analyse_us_max":{}"#,
+            r#"{{"t":"sweep","channels":{},"ms":{},"floor":{},"floor_2g4":{},"analysed":{},"analyse_us_max":{}"#,
             sw.n,
             (now_us() - sw.t0_us) / 1000,
-            Dec1(self.floor.get().unwrap_or(0)),
+            Dec1(self.floors.get(fpvscan::band::Band::G58).unwrap_or(0)),
+            Dec1(self.floors.get(fpvscan::band::Band::G24).unwrap_or(0)),
             sw.analysed,
             sw.analyse_us_max
         );

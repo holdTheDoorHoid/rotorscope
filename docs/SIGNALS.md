@@ -60,10 +60,59 @@ verdicts, 0 analog video, nothing sent to the RF table (as designed with no vide
   mistaken for a video transmitter.
 - **Reach:** a C5 reaches 31 of the 47 distinct channels (carriers 5181–5810 MHz; list in firmware/node-sdr/README.md). Anything above about 5820 MHz needs an RX5808
   module (about $6). That covers the top of bands A, B, E, F and R.
-- **Also exist:** analog video at 1.2–1.3 GHz (**Can't**), and 2.4 GHz analog video (a C5 can reach
-  it; not built).
+- **Also exist:** analog video at 1.2–1.3 GHz (**Can't**), and 2.4 GHz analog video (section 3b).
 - **Testing:** in the US, a 25 mW video transmitter needs an amateur radio licence. We can test
   with one if you have that licence, at an FPV meet-up, or from recordings.
+
+## 3b. Analog video, 2.4 GHz (FPV, toy drones, wireless cameras)
+
+No single plan like 5.8 GHz's bands. Two grids cover nearly every transmitter (researched
+2026-11-15; sources below). FuriousFPV's Stealth Long Range 2.4 GHz VTX carries both, as its bands
+A and B, so we use its letters (shown as `2.4A1`, `2.4B1`, ...).
+
+| Band | Channels 1–8 | Who uses it | Status |
+|---|---|---|---|
+| 2.4 A (20 MHz grid) | 2410, 2430, 2450, 2470, 2370, 2390, 2490, 2510 | ImmersionRC 2.4 GHz VTX, LawMate, HobbyKing "MG" 8-channel modules, FuriousFPV band A. Flite Test's chart lists 2410/2430/2450/2470 as the usual 4-channel "other TX" plan | **Built** (synthetic tests only) |
+| 2.4 B (18 MHz grid) | 2414, 2432, 2450, 2468, 2411, 2433, 2453, 2473 | First four: the classic 4-channel wireless-camera / AV-sender plan (Fat Shark 2.4, CCTV kits, GM2400, toy and spy cameras). 8-channel clones (e.g. Chuangyan) add A's 2370/2390/2490/2510 instead of B5–B8 | **Built** (synthetic tests only) |
+
+- **15 distinct channels.** 4 of them, **2370, 2390, 2490, 2510**, lie outside the 2400–2483.5 MHz
+  ISM band (no Wi-Fi or Bluetooth there; 2370/2390 are in the 13 cm amateur band, which is where
+  amateur TV lives). 2470 and 2473 sit inside but their ~17 MHz-wide signal spills past 2483.5.
+  US-market units are often locked to one or two in-band channels (LawMate US: 2410 or 2430;
+  FuriousFPV FCC version: 12 of its 16), ex-US versions unlock all eight.
+- **Signal:** FM, video deviation about 2.8–4 MHz, audio on a 6.0 or 6.5 MHz FM subcarrier; Carson's
+  rule gives about 17–18 MHz occupied, matching the 18–20 MHz channel spacing. Same PAL/NTSC line
+  rate as 5.8 GHz, so the same 15.6/15.7 kHz line-rate test confirms it.
+- **Reach:** all 15. The C5's raw capture is measured at LO 2200–2650 MHz, so everything from about
+  2200 to 2660 MHz is tunable: the whole 2.4 GHz ISM band, the amateur band below it and the
+  out-of-band video channels above it. The node's built-in FPV sweep is now the 15 channels at
+  2.4 GHz followed by the 31 reachable at 5.8 GHz (46 dwells of 60 ms, about 2.8 s a sweep); two FPV
+  nodes split those 46 in half.
+- **Rejecting the rest of the band** (`crates/fpvscan/src/band.rs`): a separate noise floor for
+  2.4 GHz; OFDM Wi-Fi (channels 1/6/11 seen from the neighbouring video channels) by its cyclic
+  prefix as on 5.8 GHz; 802.11b DSSS by its 1 µs Barker structure (`dsss.rs`); a line-rate match
+  that also repeats at a half, third or quarter line, or is a smooth sinusoid, is not video
+  (inverter microwave ovens). Inside 2400–2500 MHz only confirmed video (or a recognised OFDM
+  family) is reported: loud continuous energy without a line rate there is a microwave oven or
+  streaming Wi-Fi far more often than a drone. Outside it (2370, 2390, 2510) a continuous carrier
+  is still reported. Bluetooth hops are never reported (tests).
+- **Testing:** a cheap 2.4 GHz analog camera/AV sender (a 4-channel 2414–2468 kit) on the bench, or
+  a 2.4 GHz FPV VTX. Transmitting video needs the usual licence or Part 15 limits; we only receive.
+
+Sources: FuriousFPV Stealth Long Range 2.4 GHz manual (band A/B table,
+[PDF](https://img.banggood.com/file/products/20180720043731UsermanualStealthLongRange2.4GHz.pdf));
+[HobbyKing 2.4 GHz MG-500mW 8ch](https://hobbyking.com/en_us/2-4ghz-mg-500mw-8ch-a-v-transmitter-module.html)
+(2410/2430/2450/2470/2370/2390/2490/2510, 2.8 MHz deviation, 6.5 MHz audio);
+[ImmersionRC 700 mW 2.4 GHz](https://www.getfpv.com/immersionrc-2-4ghz-700mw-a-v-transmitter-int-l-version.html)
+and [LawMate 1000 mW 2.4 GHz](https://www.getfpv.com/2-4ghz-lawmate-1000mw-video-transmitter-international-version.html)
+(same eight; US units locked to 2410/2430);
+[Chuangyan 2.4G 8ch](https://www.racer.lt/item/chuangyan-digital-tx-3w-2-4g-8ch-fm-av-vtx-transmitter-receiver-module-with-antenna-for-fpv-system-33743.html)
+(2414/2432/2450/2468/2370/2390/2490/2510);
+[Flite Test video TX/RX chart](https://flitetest.com/articles/Video_TX_RX_Frequency_Chart) (Fat Shark
+2.4: 2414/2432/2450/2468); [GM2400 manual](https://manuals.online/gadmei/transceiver/gm2400/user-manual/1zvmk);
+[hamtv.com FM ATV](https://hamtv.com/FMATV.html) (4 MHz deviation, ~17 MHz by Carson's rule, 6.0/6.5 MHz
+sound on 2400 MHz). Vendor pages, not a standard: check a specific unit's manual before relying on a
+channel.
 
 ## 4. Digital FPV
 
