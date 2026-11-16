@@ -428,6 +428,24 @@ Decided 2026-11-09 (see RESEARCH.md "Autel, Skydio and digital FPV").
    It reports a family ("LTE-style video link", "HDZero", "narrow Wi-Fi"), not a brand, until
    recordings let us separate brands. The DJI DroneID check (Phase 10) is what confirms "DJI".
    Build it on the host first against public recordings (RFUAV), then tune on our own.
+   - **DJI link fingerprints: BUILT 2026-11-15, tested on synthetic signals only** (branch
+     `dji-fingerprint`; numbers, sources and limits in docs/DJI-LINKS.md). New `crates/djilink`
+     (no_std, fixed point, 12.6 KiB scratch) runs after fpvscan on the same capture: bursts, a
+     78 kHz spectrum, and the cyclic prefix folded at the symbol period (finds a 0.45 ms, 1.1 MHz
+     controller burst that fpvscan's whole-capture test cannot). Link protocol 7 adds `DjiVideo`,
+     `DjiO4Video` (5.170-5.250 GHz, which only O4 DJI products use), `DjiFpvAirUnit` (whole-MHz
+     DJI FPV channels) and `DjiController` (narrow 15 kHz OFDM bursts, confirmed on two hop
+     centres); tracker, screen, JSON and CSV show them. Wired into node-sdr's FPV job; builds,
+     not flashed.
+   - **Untested:** everything on real signals. Known limits: "DJI" vs Autel (same LTE-like shape)
+     and DJI FPV vs Walksnail (same channel plan) are not separable yet; O3 vs O4 only by the
+     5.1 GHz band; the sweep does not visit 5.1 GHz yet (four extra hops listed in
+     `djilink::plan::O4_BAND_SWEEP_MHZ`); 20 MHz signals are usually cut by the capture edge, so
+     their centre (and the air-unit test) is unknown; on-chip run time unmeasured.
+   - **To validate:** RFUAV `DJI MINI4 PRO.rar` (4.95 GB) first, then `DJI AVATA2.rar`,
+     `DJI FPV COMBO.rar`, `DAUTEL EVO NANO.rar` (owner approval needed; list in DJI-LINKS.md),
+     plus one bench session with an OcuSync drone armed (props off) and an O3/O4 air unit on a
+     manual channel.
 3. **11c. Channels above 5800 MHz** (HDZero R6–R8, DJI/Walksnail CH6–8) are outside the C5's
    measured raw-capture range. The Phase 7 RX5808 covers them as signal strength on known
    centres.
