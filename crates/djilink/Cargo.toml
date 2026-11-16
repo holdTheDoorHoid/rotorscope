@@ -1,0 +1,13 @@
+[package]
+name = "djilink"
+description = "no_std, fixed-point, receive-only fingerprints of DJI OcuSync / O4 video downlinks, controller uplinks and FPV air units from 20 MS/s raw captures (presence only, never content)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+droneid = { path = "../droneid", default-features = false }
+
+[dev-dependencies]
+rawcap = { path = "../rawcap" }
+fpvscan = { path = "../fpvscan" }

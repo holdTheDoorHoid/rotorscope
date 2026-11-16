@@ -473,6 +473,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "djilink"
+version = "0.1.0"
+dependencies = [
+ "droneid",
+ "fpvscan",
+ "rawcap",
+]
+
+[[package]]
 name = "droneid"
 version = "0.1.0"
 dependencies = [
