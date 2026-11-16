@@ -30,7 +30,11 @@ use serde::{Deserialize, Serialize};
 ///   `firmware/hub-p4/WEBHEAD.md`). Appended likewise; nodes never send them.
 /// - 6: adds [`Frame::Flags`] (hub to web head: possible FAA rule violations,
 ///   PLAN.md Phase 12). Appended likewise.
-pub const PROTOCOL_VERSION: u8 = 6;
+/// - 7: [`RfKind`] gains `DjiVideo`, `DjiO4Video`, `DjiFpvAirUnit` and
+///   `DjiController` (PLAN.md Phase 11b, `crates/djilink`). Appended, so
+///   every v6 `Rf` frame encodes exactly as before; a v6 hub counts an `Rf`
+///   frame carrying a new kind as corrupt and carries on.
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -144,6 +148,20 @@ pub enum RfKind {
     WifiNarrow,
     /// Unclassified energy above the floor.
     Energy,
+    /// Protocol 7. DJI-style video downlink (OcuSync drone or O3/O4 air
+    /// unit), generation not determined: 15 kHz OFDM with DJI's 4.7 µs
+    /// prefix, 9 MHz or wider. Autel's LTE-based links share the shape.
+    DjiVideo,
+    /// Protocol 7. The same on 5.170-5.250 GHz, a band only O4 products use
+    /// for video (Autel EVO Lite/Max also file it).
+    DjiO4Video,
+    /// Protocol 7. The same on a whole-MHz DJI FPV (V1/Vista) channel;
+    /// Walksnail reportedly shares the channel plan.
+    DjiFpvAirUnit,
+    /// Protocol 7. DJI controller uplink: narrow (1.1/2.2 MHz) 15 kHz OFDM
+    /// bursts, confirmed hopping between centres. `freq` is the latest
+    /// burst's centre.
+    DjiController,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -609,6 +627,41 @@ mod tests {
         assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5, 10, 10, 11, 11, 12]);
         assert_eq!(NodeRole::Fpv as u8, 3);
         assert_eq!(NodeRole::Gateway.bit(), 1 << 5);
+    }
+
+    /// Protocol 7 appended four `RfKind`s; the six older ones keep their
+    /// postcard indices, so a v6 `Rf` frame encodes byte for byte as before.
+    #[test]
+    fn protocol_7_rf_kinds_append_only() {
+        let kinds = [
+            RfKind::AnalogVideo,
+            RfKind::FpvCarrier,
+            RfKind::Hdzero,
+            RfKind::LteStyle,
+            RfKind::WifiNarrow,
+            RfKind::Energy,
+            RfKind::DjiVideo,
+            RfKind::DjiO4Video,
+            RfKind::DjiFpvAirUnit,
+            RfKind::DjiController,
+        ];
+        let mut buf = [0u8; MAX_FRAME];
+        let mut dec = Decoder::new();
+        for (i, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(postcard::to_slice(&kind, &mut buf).unwrap(), [i as u8]);
+            let f = Frame::Rf(RfSighting {
+                kind,
+                freq: 57_945,
+                width_khz: 18_000,
+                snr_db: 14,
+                duty_pct: 90,
+                line_hz: 0,
+                uptime_us: 1,
+            });
+            let mut got = None;
+            dec.feed(encode(&f, &mut buf).unwrap(), |r| got = Some(r));
+            assert_eq!(got, Some(Ok(f)));
+        }
     }
 
     #[test]

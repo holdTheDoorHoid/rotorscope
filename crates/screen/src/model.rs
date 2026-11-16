@@ -381,6 +381,10 @@ pub enum EmitterKind {
     WifiNarrow,
     #[default]
     Energy,
+    DjiVideo,
+    DjiO4Video,
+    DjiFpvAirUnit,
+    DjiController,
 }
 
 impl EmitterKind {
@@ -393,6 +397,10 @@ impl EmitterKind {
             EmitterKind::LteStyle => "LTE-style",
             EmitterKind::WifiNarrow => "Narrow WiFi",
             EmitterKind::Energy => "Energy",
+            EmitterKind::DjiVideo => "DJI video",
+            EmitterKind::DjiO4Video => "DJI O4 vid",
+            EmitterKind::DjiFpvAirUnit => "DJI FPV air",
+            EmitterKind::DjiController => "DJI control",
         }
     }
 }

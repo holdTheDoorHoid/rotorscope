@@ -561,7 +561,8 @@ struct RfLine {
     id: EmitterId,
     state: TrackState,
     /// `link::RfKind` name: `"AnalogVideo"`, `"FpvCarrier"`, `"Hdzero"`,
-    /// `"LteStyle"`, `"WifiNarrow"` or `"Energy"`.
+    /// `"LteStyle"`, `"WifiNarrow"`, `"Energy"`, `"DjiVideo"`,
+    /// `"DjiO4Video"`, `"DjiFpvAirUnit"` or `"DjiController"`.
     kind: link::RfKind,
     label: &'static str,
     /// Whether this kind raises the new-signal alert (never for Energy).

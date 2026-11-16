@@ -514,6 +514,33 @@ fn rf_emitters_are_keyed_by_kind_and_frequency() {
     assert_eq!(tr.emitters().len(), 3);
 }
 
+/// Protocol 7's DJI kinds: a hopping controller stays one emitter across its
+/// hop set, the video kinds key like any other, and all of them alert once.
+#[test]
+fn dji_kinds_key_alert_and_label() {
+    let mut tr: Tracker = Tracker::default();
+    let c = tr.ingest_rf(5, &rf(RfKind::DjiController, 57461), 100);
+    assert_eq!(tr.ingest_rf(5, &rf(RfKind::DjiController, 57821), 200), c);
+    assert_eq!(tr.ingest_rf(5, &rf(RfKind::DjiController, 58401), 300), c);
+    // Another band is another controller.
+    assert_ne!(tr.ingest_rf(5, &rf(RfKind::DjiController, 24291), 300), c);
+    let v = tr.ingest_rf(5, &rf(RfKind::DjiVideo, 57685), 300);
+    let o4 = tr.ingest_rf(5, &rf(RfKind::DjiO4Video, 52100), 300);
+    let fpv = tr.ingest_rf(5, &rf(RfKind::DjiFpvAirUnit, 57700), 300);
+    assert_ne!(v, fpv);
+    // Video kinds do not hop: 10 MHz away is another link.
+    assert_ne!(tr.ingest_rf(5, &rf(RfKind::DjiVideo, 57785), 300), v);
+    let mut alerts = std::vec::Vec::new();
+    while let Some(k) = tr.take_new_signal(300) {
+        alerts.push(k);
+    }
+    assert_eq!(alerts.len(), 6, "{alerts:?}");
+    assert!(alerts.contains(&SignalKey::Emitter(o4)));
+    assert_eq!(signals::rf_label(RfKind::DjiO4Video), "DJI O4 video");
+    assert_eq!(signals::rf_label(RfKind::DjiController), "DJI controller");
+    assert_eq!(tr.get_emitter(c).unwrap().sightings, 3);
+}
+
 #[test]
 fn energy_never_alerts_and_video_alerts_once() {
     let mut tr: Tracker = Tracker::default();
