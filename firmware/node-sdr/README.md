@@ -127,6 +127,19 @@ is analysed (`crates/fpvscan`, scratch in internal RAM: about 13.6 KiB of heap):
 on the HDZero grid (Hdzero), else continuous = FpvCarrier, bursty = Energy (printed, not sent: on 5.8 GHz it is nearly always Wi-Fi that missed the capture). 2.4 GHz channels: see below. Console: one `fpv` line
 per non-quiet channel, a `sweep` line per sweep.
 
+**DJI link fingerprints** (`crates/djilink`, `src/radio/dji.rs`, docs/DJI-LINKS.md; written
+2026-11-15, **not yet run on a chip**). The same capture then goes through `djilink` unless
+`fpvscan` found analog video or HDZero: bursts, a 78 kHz spectrum and the cyclic prefix folded
+at the symbol period. Verdicts: DjiVideo, DjiO4Video (5.170-5.250 GHz), DjiFpvAirUnit (a
+whole-MHz DJI FPV channel), DjiController (narrow 15 kHz OFDM bursts, reported only once bursts
+have shown on two centres within 3 s, rate-limited as one emitter), else LteStyle. A dwell
+whose loudest 1 % of probes are 8 dB up is analysed even when its 90th percentile is not (short
+controller bursts). Each probe's level also goes into a 1.5 KiB per-dwell timeline (burst
+length, period, duty). Scratch 12.6 KiB of heap, internal RAM; check the boot `mem` line on
+first flash. The `fpv` line gains `dji`, `dji_cp` [metric, threshold, prefix samples], `dji_w`
+[-3/-10/-20 dB widths kHz], `dji_c` (centre kHz from the LO), `dji_clip`, `dji_bursts`,
+`dji_on`, `dji_long_us`, `tl` [bursts, burst µs, period µs, duty %] and `dji_us` (time taken).
+
 Reach: carriers 5181–5810 MHz (LO 5180–5800, a channel above 5801 sits up to +10 MHz in the
 capture): 31 of the 47 distinct channels. **Skipped** (above reach; an RX5808 covers them):
 5820 F5, 5825 A3, 5828 B6, 5840 F6, 5843 R6, 5845 A2, 5847 B7, 5860 F7, 5865 A1, 5866 B8,

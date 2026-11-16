@@ -342,6 +342,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "djilink"
+version = "0.1.0"
+dependencies = [
+ "droneid",
+]
+
+[[package]]
 name = "docsplay"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1458,6 +1465,7 @@ version = "0.1.0"
 dependencies = [
  "airlink",
  "critical-section",
+ "djilink",
  "droneid",
  "embassy-executor",
  "embassy-sync 0.7.2",

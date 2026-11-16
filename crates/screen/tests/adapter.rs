@@ -285,3 +285,35 @@ fn fills_droneid_and_signals() {
     fill_from_tracker(&tr2, &tr2.context(1_500, None), &mut st);
     assert_eq!(st.drones[0].id.as_str(), "O4 2414.5");
 }
+
+/// Protocol 7: the DJI link kinds reach the signals page with short labels.
+#[test]
+fn dji_link_kinds_reach_the_screen() {
+    use link::{RfKind, RfSighting};
+    let cases = [
+        (RfKind::DjiVideo, 57685, EmitterKind::DjiVideo),
+        (RfKind::DjiO4Video, 52100, EmitterKind::DjiO4Video),
+        (RfKind::DjiFpvAirUnit, 57350, EmitterKind::DjiFpvAirUnit),
+        (RfKind::DjiController, 57461, EmitterKind::DjiController),
+    ];
+    let mut tr: Tracker = Tracker::default();
+    for (i, (kind, freq, _)) in cases.iter().enumerate() {
+        let s = RfSighting {
+            kind: *kind,
+            freq: *freq,
+            width_khz: 18_000,
+            snr_db: 30 - i as i8,
+            duty_pct: 90,
+            line_hz: 0,
+            uptime_us: 0,
+        };
+        tr.ingest_rf(3, &s, 1_000);
+    }
+    let mut st = UiState::default();
+    fill_from_tracker(&tr, &tr.context(1_500, None), &mut st);
+    assert_eq!(st.total_emitters, 4);
+    for (e, (_, _, want)) in st.emitters.iter().zip(cases.iter()) {
+        assert_eq!(e.kind, *want);
+        assert!(e.kind.label().len() <= 11, "{}", e.kind.label());
+    }
+}

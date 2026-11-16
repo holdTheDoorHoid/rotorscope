@@ -8,7 +8,7 @@
 //! **Alerts.** [`crate::Tracker::take_new_signal`] hands out each entry
 //! once, like `take_new_drone`, but only for what is almost certainly a
 //! drone: confirmed analog video, HDZero, LTE-style and narrow Wi-Fi links,
-//! and Wi-Fi drones. Plain [`RfKind::Energy`] and an unconfirmed
+//! the DJI link fingerprints (`crates/djilink`), and Wi-Fi drones. Plain [`RfKind::Energy`] and an unconfirmed
 //! [`RfKind::FpvCarrier`] (a Wi-Fi access point on an FPV channel looks the
 //! same) never alert.
 //!
@@ -32,11 +32,23 @@ pub const MAX_NODES: usize = 16;
 /// the same emitter, or half the occupied width if that is wider.
 pub const SAME_EMITTER: u32 = 20;
 
+/// A hopping controller moves across this much (100 kHz units, 150 MHz:
+/// more than DJI's 5.8 GHz hop set, less than the gap between bands) and is
+/// still one emitter.
+pub const HOP_SPAN: u32 = 1500;
+
 /// Whether a kind is worth a "new signal" alert.
 pub const fn rf_alerts(kind: RfKind) -> bool {
     matches!(
         kind,
-        RfKind::AnalogVideo | RfKind::Hdzero | RfKind::LteStyle | RfKind::WifiNarrow
+        RfKind::AnalogVideo
+            | RfKind::Hdzero
+            | RfKind::LteStyle
+            | RfKind::WifiNarrow
+            | RfKind::DjiVideo
+            | RfKind::DjiO4Video
+            | RfKind::DjiFpvAirUnit
+            | RfKind::DjiController
     )
 }
 
@@ -49,6 +61,10 @@ pub const fn rf_label(kind: RfKind) -> &'static str {
         RfKind::LteStyle => "LTE-style link",
         RfKind::WifiNarrow => "Narrow Wi-Fi",
         RfKind::Energy => "Energy",
+        RfKind::DjiVideo => "DJI video",
+        RfKind::DjiO4Video => "DJI O4 video",
+        RfKind::DjiFpvAirUnit => "DJI FPV air unit",
+        RfKind::DjiController => "DJI controller",
     }
 }
 
@@ -87,7 +103,12 @@ impl Emitter {
     }
 
     fn same(&self, s: &RfSighting) -> bool {
-        let tol = SAME_EMITTER.max(u32::from(self.width_khz.max(s.width_khz)) / 200);
+        // A controller hops: every centre in one band is the same one.
+        let tol = if s.kind == RfKind::DjiController {
+            HOP_SPAN
+        } else {
+            SAME_EMITTER.max(u32::from(self.width_khz.max(s.width_khz)) / 200)
+        };
         self.kind == s.kind && self.freq.abs_diff(s.freq) <= tol
     }
 }

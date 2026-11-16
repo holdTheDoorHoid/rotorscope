@@ -23,6 +23,8 @@ use link::{DroneIdRecord, DroneIdSighting, NodeRole, RfKind, RfSighting};
 
 use crate::{engine, phy, ring, route};
 
+mod dji;
+
 /// Something for the hub, drained by `main` after every call into the radio.
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -179,6 +181,8 @@ pub struct Radio {
     fpv_cap: bool,
     fpv_scratch: Option<&'static mut fpvscan::Scratch>,
     pub fpv_verbose: bool,
+    /// FPV: DJI link fingerprints (`crates/djilink`, `radio/dji.rs`).
+    dji: dji::Dji,
     sweep: SweepStats,
     /// A hardware-in-the-loop run is in progress (events are marked).
     hil: bool,
@@ -248,6 +252,7 @@ impl Radio {
             fpv_cap: false,
             fpv_scratch: None,
             fpv_verbose: false,
+            dji: dji::Dji::new(),
             sweep: SweepStats::default(),
             hil: false,
             hil_cap_crc: 0,
@@ -414,6 +419,7 @@ impl Radio {
             if window_ok(self.next_block, self.next_block + cfg.probe as u64, now, NODE_BYTES) {
                 if self.role == NodeRole::Fpv {
                     self.meter.feed(p_ac);
+                    self.dji.timeline.feed(p_ac);
                     // One capture per dwell is enough; later rises only count.
                     let r = self.trig.feed(self.next_block, p);
                     if !self.fpv_cap && self.pending.is_none() {
@@ -1274,7 +1280,10 @@ impl Radio {
         let floor = self.floors.update(mhz, &self.meter);
         let d = self.meter.dwell(floor);
         let t0 = now_us();
-        let (a, extra) = match (&mut self.fpv_scratch, self.fpv_cap && d.snr_db >= fpvscan::classify::STRONG_DB) {
+        // Also analyse a dwell whose loudest probes are strong though its
+        // 90th percentile is not: short bursts, e.g. a hopping controller.
+        let bursty = self.dji.timeline.loud_x10(floor) >= fpvscan::classify::STRONG_DB as i32 * 10;
+        let (a, extra) = match (&mut self.fpv_scratch, self.fpv_cap && (d.snr_db >= fpvscan::classify::STRONG_DB || bursty)) {
             (Some(sc), true) => {
                 let x = &capture()[..self.c16_len];
                 let a = fpvscan::analyse(x, sc);
@@ -1286,13 +1295,14 @@ impl Radio {
         };
         let us = (now_us() - t0) as u32;
         let kind = fpvscan::band::classify(&d, a.as_ref(), &extra, mhz);
+        let dji = self.dji_judge(kind, floor, a.is_some());
         self.sweep.n += 1;
         self.sweep.kinds[kind_index(kind)] += 1;
         if a.is_some() {
             self.sweep.analysed += 1;
             self.sweep.analyse_us_max = self.sweep.analyse_us_max.max(us);
         }
-        if kind != fpvscan::Kind::Quiet || self.fpv_verbose {
+        if kind != fpvscan::Kind::Quiet || self.fpv_verbose || dji.as_ref().is_some_and(|j| j.verdict.is_some()) {
             let band = fpvscan::band::Band::of(mhz);
             let mut line = Line::new();
             let _ = match fpvscan::band::label(mhz) {
@@ -1327,9 +1337,17 @@ impl Radio {
                     let _ = write!(line, r#","dsss":{},"sub_line":{},"half_r":{}"#, extra.dsss, extra.sub_line, extra.half_r);
                 }
             }
+            if let Some(j) = &dji {
+                j.log(&mut line);
+            }
             println!("{}}}", line.as_str());
         }
-        if let Some(k) = rf_kind(kind).filter(|_| kind.reported()) {
+        if let Some((k, freq, width_khz, hopping)) = dji.and_then(|j| j.report) {
+            let s = RfSighting { kind: k, freq, width_khz, snr_db: d.snr_db, duty_pct: d.duty_pct, line_hz: 0, uptime_us: now_us() };
+            // A hopping controller is one emitter: rate-limit it as one
+            // (channel 0), not once per channel it hops through.
+            let _ = self.events.push(Event::Rf { s, mhz: if hopping { 0 } else { mhz } });
+        } else if let Some(k) = rf_kind(kind).filter(|_| kind.reported()) {
             let s = RfSighting {
                 kind: k,
                 freq: self.cur_freq,
