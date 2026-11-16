@@ -74,6 +74,30 @@ impl Timeline {
         }
     }
 
+    /// How far (tenths of a dB) the loudest 1% of probes stand over
+    /// `floor_x10`: a short-burst transmitter (a controller hopping through
+    /// this window for a tenth of the dwell) is loud here while the dwell's
+    /// 90th-percentile level, which `fpvscan` judges by, is still the floor.
+    pub fn loud_x10(&self, floor_x10: i32) -> i32 {
+        let n = self.n as usize;
+        if n == 0 {
+            return i32::MIN;
+        }
+        let mut hist = [0u16; 256];
+        for &c in &self.lv[..n] {
+            hist[c as usize] += 1;
+        }
+        let want = n.div_ceil(100);
+        let mut acc = 0;
+        for c in (0..256).rev() {
+            acc += hist[c] as usize;
+            if acc >= want {
+                return BASE_X10 + STEP_X10 * c as i32 - floor_x10;
+            }
+        }
+        i32::MIN
+    }
+
     /// Bursts against `floor_x10` (tenths of a dB, probe units: what
     /// `fpvscan::FloorTracker::update` returns).
     pub fn stats(&self, floor_x10: i32) -> TimelineStats {

@@ -648,6 +648,9 @@ fn timeline_shapes() {
     let s = t.stats(floor);
     assert!(s.bursts >= 10 && s.duty_pct <= 12, "{s:?}");
     assert!((480..=540).contains(&s.burst_us) && (4_900..=5_100).contains(&s.period_us), "{s:?}");
+    // Its bursts are 10% of the dwell: the 90th percentile is the floor,
+    // the loudest 1% are not.
+    assert!(t.loud_x10(floor) >= 140, "{}", t.loud_x10(floor));
 
     // Video: on all the time.
     t.reset();

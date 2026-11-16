@@ -39,6 +39,7 @@ espnow = ["esp-radio/esp-now", "dep:airlink"]
 rawcap  = { path = "../../crates/rawcap", default-features = false }
 droneid = { path = "../../crates/droneid", default-features = false }
 fpvscan = { path = "../../crates/fpvscan" }
+djilink = { path = "../../crates/djilink" }
 link    = { path = "../../crates/link" }
 airlink = { path = "../../crates/airlink", optional = true }
 heapless = "0.8"

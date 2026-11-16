@@ -187,6 +187,8 @@ async fn main(spawner: Spawner) -> ! {
         // analysis took 100 ms (2026-11-14), the ring stopped all that time.
         let sc = core::mem::size_of::<fpvscan::Scratch>();
         radio.set_fpv_scratch(alloc::boxed::Box::leak(new_scratch()));
+        // DJI link fingerprints (crates/djilink): 12.6 KiB, internal RAM too.
+        radio.set_dji_scratch(alloc::boxed::Box::leak(new_dji_scratch()));
         let at = psram_used.next_multiple_of(64);
         if !psram_ptr.is_null() && at + console::STAGE_LEN <= psram_size {
             let stage = at;
@@ -381,6 +383,11 @@ fn new_radio() -> alloc::boxed::Box<radio::Radio> {
 #[inline(never)]
 fn new_scratch() -> alloc::boxed::Box<fpvscan::Scratch> {
     alloc::boxed::Box::new(fpvscan::Scratch::new())
+}
+
+#[inline(never)]
+fn new_dji_scratch() -> alloc::boxed::Box<djilink::Scratch> {
+    alloc::boxed::Box::new(djilink::Scratch::new())
 }
 
 #[inline(never)]
