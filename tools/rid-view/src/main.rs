@@ -16,6 +16,7 @@ mod ble;
 #[cfg(all(feature = "ble", target_os = "linux"))]
 mod bluez;
 mod demo;
+mod dragonsync;
 mod http;
 mod input;
 mod parse;
@@ -63,6 +64,19 @@ OPTIONS:
     --cot udp://HOST:PORT    Send TAK Cursor-on-Target for each drone and
                              operator once a second, e.g. udp://239.2.3.1:6969
                              (ATAK's default multicast). Off by default.
+    --dragonsync BIND        Publish drones to DragonSync (WarDragon's TAK/MQTT
+                             bridge) as ZeroMQ JSON, e.g. tcp://0.0.0.0:4230.
+                             Point DragonSync's zmq_host/zmq_port at it. Off
+                             by default; no default port, so it never lands
+                             on a WarDragon's own 4224.
+    --dragonsync-signals BIND
+                             Publish signal alerts (analog FPV video, DJI
+                             links, open FPV links) on a second port, e.g.
+                             tcp://0.0.0.0:4231. Point DragonSync's
+                             fpv_zmq_host/fpv_zmq_port at it and set
+                             fpv_enabled = true. Must differ from
+                             --dragonsync's. Link identifiers stay hidden
+                             without --show-link-ids.
     --adsbee PORT            Read crewed aircraft from an ADSBee 1090: its
                              USB console (after AT+PROTOCOL_OUT=CONSOLE,CSBEE),
                              a USB-UART on its COMMS_UART pins, or a recorded
@@ -122,6 +136,8 @@ struct Options {
     own: Option<(f64, f64, Option<f64>)>,
     log: Option<String>,
     cot: Option<String>,
+    dragonsync: Option<String>,
+    dragonsync_signals: Option<String>,
     demo: bool,
     once: bool,
     demo_secs: u64,
@@ -143,6 +159,8 @@ fn parse_args() -> Result<Options, String> {
         own: None,
         log: None,
         cot: None,
+        dragonsync: None,
+        dragonsync_signals: None,
         demo: false,
         once: false,
         demo_secs: 10,
@@ -181,6 +199,8 @@ fn parse_args() -> Result<Options, String> {
             }
             "--log" => o.log = Some(value("--log")?),
             "--cot" => o.cot = Some(value("--cot")?),
+            "--dragonsync" => o.dragonsync = Some(value("--dragonsync")?),
+            "--dragonsync-signals" => o.dragonsync_signals = Some(value("--dragonsync-signals")?),
             "--demo" => o.demo = true,
             "--once" => o.once = true,
             "--demo-secs" => {
@@ -221,6 +241,12 @@ fn parse_args() -> Result<Options, String> {
     }
     if o.once && !(o.ble.is_empty() && o.sniffle.is_empty()) && o.duration.is_none() {
         o.duration = Some(10);
+    }
+    if (o.dragonsync.is_some() || o.dragonsync_signals.is_some()) && o.once {
+        return Err("--dragonsync publishes live; it cannot be used with --once".into());
+    }
+    if o.dragonsync.is_some() && o.dragonsync == o.dragonsync_signals {
+        return Err("--dragonsync and --dragonsync-signals need different ports".into());
     }
     if !["1m", "coded", "alt"].contains(&o.sniffle_mode.to_ascii_lowercase().as_str()) {
         return Err(format!(
@@ -421,6 +447,7 @@ struct Outputs {
     logged_wifi: HashMap<tracker::WifiDroneId, u64>,
     cot: Option<Cot>,
     cot_error_shown: bool,
+    dragon: Option<dragonsync::DragonSync>,
 }
 
 impl Outputs {
@@ -529,6 +556,9 @@ impl Outputs {
                     view.note(&hhmmss(utc_now()), format!("CoT send failed: {e}"));
                 }
             }
+        }
+        if let Some(d) = &mut self.dragon {
+            d.tick(tr, ctx);
         }
         if json_out {
             let mut out = std::io::stdout().lock();
@@ -687,7 +717,23 @@ fn run(o: Options) -> Result<(), String> {
         logged_wifi: HashMap::new(),
         cot: o.cot.as_deref().map(Cot::open).transpose()?,
         cot_error_shown: false,
+        dragon: None,
     };
+    if o.dragonsync.is_some() || o.dragonsync_signals.is_some() {
+        let bind = |what: &str, ep: &Option<String>| {
+            ep.as_deref()
+                .map(|e| dragonsync::Bus::bind(what, e))
+                .transpose()
+        };
+        let drones = bind("--dragonsync", &o.dragonsync)?;
+        let signals = bind("--dragonsync-signals", &o.dragonsync_signals)?;
+        for (what, b) in [("drones", &drones), ("signal alerts", &signals)] {
+            if let Some(b) = b {
+                eprintln!("rid-view: DragonSync {what} published on {}", b.endpoint);
+            }
+        }
+        outputs.dragon = Some(dragonsync::DragonSync::new(drones, signals));
+    }
     if let Some(path) = &o.log {
         let mut f = std::fs::OpenOptions::new()
             .create(true)

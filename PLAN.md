@@ -215,7 +215,7 @@ ahead.
 ### Phase 4: Hub prototype on dev boards
 - Merge and dedupe tracks, GPS, distance and bearing, screen, SD log, phone web page over the
   hotspot, USB JSON.
-- Fixed-sensor extras: TAK CoT, MQTT.
+- Fixed-sensor extras: TAK CoT, MQTT. Laptop output for the WarDragon ecosystem: `rid-view --dragonsync` (ZeroMQ JSON that DragonSync subscribes to).
 - Check whether the hub's hotspot hurts the sniffers.
 - **Done when:** a breadboard unit shows a test drone on the screen and phone, with distance and
   direction, and logs it.

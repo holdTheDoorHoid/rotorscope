@@ -116,3 +116,101 @@ RID_TEST_LAT=40.0 RID_TEST_LON=-75.2 cargo run --release -p rid-ble-beacon -- hc
   controllers send at a fixed power, so the tool prints that it cannot lower it.
 - **Stopping.** Ctrl-C or `--secs` withdraws the advert. If the process dies, BlueZ drops the
   advert by itself.
+
+## Feeding WarDragon / DragonSync (`--dragonsync`)
+
+[DragonSync](https://github.com/alphafox02/DragonSync) is the TAK/MQTT bridge on a
+[WarDragon](https://github.com/alphafox02/WarDragon) kit. It subscribes over ZeroMQ to JSON from
+its detection sources. `rid-view` can be one more source, so a laptop running Rotorscope's radios
+shows up in ATAK, MQTT or Lattice through an existing WarDragon setup. Pure Rust (the `zeromq`
+crate), no libzmq. Off by default, receive-only like the rest of Rotorscope.
+
+```bash
+rid-view /dev/ttyACM0 --own-pos 39.9526,-75.1652 \
+    --dragonsync tcp://0.0.0.0:4230 \
+    --dragonsync-signals tcp://0.0.0.0:4231
+```
+
+There are two sockets because DragonSync reads two streams. **There are no default ports**, so
+this never lands on the 4224/4226 of a WarDragon running on the same machine; pick any free
+ones. The two must differ.
+
+| Option | What it carries | DragonSync reads it as |
+|---|---|---|
+| `--dragonsync BIND` | one JSON array per drone update | the drone stream (`zmq_port`, WarDragon's 4224) |
+| `--dragonsync-signals BIND` | one JSON array per radio-signal alert | the FPV/signal stream (`fpv_zmq_port`, WarDragon's 4226) |
+
+`BIND` is `tcp://HOST:PORT` (`tcp://127.0.0.1:4230` if DragonSync is on the same machine,
+`0.0.0.0` to let other machines connect). Each option can be used alone.
+
+### DragonSync settings
+
+In DragonSync's `config.ini` (the `[SETTINGS]` section; names from its
+`docs/config-reference.md`), on the machine that runs DragonSync:
+
+```ini
+# drones: point the main stream at rid-view's --dragonsync port
+zmq_host = 192.168.1.50      # the laptop running rid-view (127.0.0.1 if the same machine)
+zmq_port = 4230
+
+# signal alerts: turn the FPV stream on and point it at --dragonsync-signals
+fpv_enabled = true
+fpv_zmq_host = 192.168.1.50
+fpv_zmq_port = 4231
+fpv_confirm_only = true      # the default: only alerts rid-view calls "confirm" are shown
+```
+
+DragonSync has one `zmq_host`/`zmq_port` for drones, so it listens to either a WarDragon's own
+detector or rid-view, not both. To get both, run a second DragonSync, or use WarDragon's
+`droneid-go` to forward. `zmq_status_port` (4225, the kit's GPS and health) is not something
+`rid-view` sends; with nothing there DragonSync has no kit position. That is why signal alerts
+carry `--own-pos` (or the position set from the `--http` page): without a position the alert has
+no location and DragonSync can only place it from the kit's GPS.
+
+### What is sent
+
+- **Drones** (Remote ID and DJI DroneID, merged by the tracker as everywhere else): Basic ID
+  (serial, `ua_type` as DragonSync's number, MAC, RSSI, transport, `frequency_mhz`), Location/Vector
+  (position, geodetic and pressure altitude, height, speed, vertical speed, direction, status,
+  height type, accuracies, timestamp), System (operator position, DJI home point), Operator ID,
+  Self-ID (the DJI model when the aircraft sent none) and Frequency. Units are metres and m/s.
+  Fields we do not have are left out, not zero.
+- **DJI O4 with no serial** (encrypted): `drone-alert-<hex key ID>`, with no position, as
+  DragonSDR sends it. `--hide-droneid-ids` removes it, and any DJI-only serial, as everywhere.
+- **A drone known only by a registration, UTM UUID or session ID** is sent with the true ID type.
+  DragonSync only creates a drone from a serial number; it attaches a registration to a drone it
+  already knows by MAC. So such drones appear in DragonSync only if a serial from the same MAC was
+  also heard.
+- **Not sent:** crewed aircraft (DragonSync has its own ADS-B input), Wi-Fi drones recognised only
+  by maker or network name, plain RF energy, and tracks with no ID at all.
+- **Signal alerts**, `Signal Info.source` and `signal_type`:
+
+  | Rotorscope verdict | `source` | `signal_type` |
+  |---|---|---|
+  | analog FPV video with a measured line rate | `confirm` | `analog_fpv` |
+  | DJI video, O4 video, FPV air unit, controller | `confirm` | `dji_video`, `dji_o4_video`, `dji_fpv_air_unit`, `dji_controller` |
+  | open FPV link (wfb-ng, OpenHD, RubyFPV, DroneBridge) | `confirm` | `wfb_ng`, `openhd`, `rubyfpv`, `dronebridge` |
+  | HDZero, LTE-style, narrow Wi-Fi, unconfirmed FPV carrier, analog video without a line rate | `energy` | `hdzero`, `lte_ofdm`, `wifi_narrow`, `fpv_carrier`, `analog_fpv` |
+
+  DragonSync drops `energy` unless `fpv_confirm_only = false`. Each alert has `center_hz`,
+  bandwidth and SNR when known, and the sensor's own position as the Location block. An open link's
+  RSSI is sent as `rssi` in dBm.
+- **Privacy follows the other outputs.** An open link's identifier (wfb-ng link ID and so on) is
+  left out unless you pass `--show-link-ids`; even then it goes only into the alert's ID and text,
+  never `Signal Info.link_id`, which DragonSync would turn into a tracked drone.
+- **Rate:** at most one message per track per second, and only if the track was heard since the
+  last one. Nothing is repeated to keep a track alive; DragonSync ages drones out by itself.
+- A DJI controller hops, and DragonSync names an alert by its frequency, so a hopping controller
+  appears at the frequency of its latest burst.
+
+`--dragonsync` cannot be combined with `--once`. If a port is in use, `rid-view` says so and exits.
+
+### Checking it
+
+`rid-view --demo --own-pos 39.9526,-75.1652 --dragonsync tcp://127.0.0.1:4230 --dragonsync-signals tcp://127.0.0.1:4231`
+publishes the demo's drones and signals. Any ZeroMQ SUB socket subscribed to `""` receives one JSON
+message per frame, for example in Python: `s = zmq.Context().socket(zmq.SUB); s.connect(...);
+s.setsockopt_string(zmq.SUBSCRIBE, ""); print(s.recv_json())`. The field names and strings were
+read from DragonSync's `core/telemetry_parser.py` and `ingest/signal_ingest.py` and checked by
+running those two parsing functions on the demo's output; a full DragonSync (and a WarDragon) has
+not been run against it.
