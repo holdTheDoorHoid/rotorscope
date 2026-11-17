@@ -10,6 +10,8 @@
 //! assign droneid|fpv <id> [<f100k>:<ms> ...]
 //!                           apply a plan exactly as a hub Command::Assign
 //! fpv verbose on|off        print every FPV dwell, quiet ones too
+//! jam                       jamming watch: counters, each hop's floor
+//! edge on|off               FPV: visit one off-plan channel per round
 //! uplink [now]              uplink counters / open a window now (espnow)
 //! @F <offset hex> <base64>  HIL: write sample bytes into the staging buffer
 //! hil run <len> <crc32 hex> HIL: check the staged bytes and run them through
@@ -57,6 +59,8 @@ pub enum Local {
     Hop(bool),
     Plan,
     FpvVerbose(bool),
+    Jam,
+    Edge(bool),
     /// true = open a window now.
     Uplink(bool),
     Assign(Assignment),
@@ -93,6 +97,8 @@ pub fn parse(line: &str) -> Result<Option<Cmd>, &'static str> {
             Some("verbose") => Local::FpvVerbose(on_off(w.next())?),
             _ => return Err("fpv verbose on|off"),
         },
+        Some("jam") => Local::Jam,
+        Some("edge") => Local::Edge(on_off(w.next())?),
         Some("uplink") => Local::Uplink(w.next() == Some("now")),
         Some("assign") => {
             let r = role(w.next())?;
