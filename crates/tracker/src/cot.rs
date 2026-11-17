@@ -223,6 +223,11 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
             g.distance_m, g.bearing_deg
         )?;
     }
+    // Spoof suspicion (score >= REPORT_MIN) and identity continuity.
+    let summary: heapless::String<192> = render(crate::spoof::Summary(track));
+    if !summary.is_empty() {
+        write!(w, "; Note: {}", Xml(&summary))?;
+    }
     Ok(())
 }
 

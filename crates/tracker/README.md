@@ -13,6 +13,11 @@ tracker.set_own_position(lat, lon, Some(hae_m), now_ms);     // from GPS; omit/c
 tracker.ingest(node, &detection, now_ms);                     // link::Detection, raw messages
 tracker.ingest_messages(&obs, &decoded, errors);            // already-decoded (laptop JSON)
 while let Some(id) = tracker.take_new_drone(now_ms) { beep(id) } // once per drone
+tracker.set_utc(utc_ms, now_ms);                              // when GPS time is known (clock check)
+tracker.set_node_position(node, lat, lon);                    // optional (signal-strength check)
+while let Some(ev) = tracker.take_spoof_flag(now_ms) {        // spoof flags, once each
+    log(SpoofSuspect, &ev.data(), spoof::event_text(&ev, tracker.get(ev.track)));
+}
 tracker.expire(now_ms);                                       // call ~1 Hz
 
 let ctx = tracker.context(now_ms, utc_ms);  // utc_ms: Option<u64>, from GPS time
@@ -78,6 +83,8 @@ the nodes' `{"t":"rid",...}` lines use.
 | `loc_src`, `op_src` | string \| null | Where `loc` / `op` came from: `"RemoteId"`, `"DroneId"` (OcuSync burst) or `"DjiWifi"` (legacy Wi-Fi element); null when absent. Added 2026-11-14 (protocol 4) |
 | `home` | object \| null | DJI home point, `{lat, lon, age_ms}` (DroneID only). Added 2026-11-14 |
 | `dji` | object \| null | What DJI's own broadcasts said; null when none was heard: `product` (DJI code \| null), `model` (name \| null), `ids_shown` (false with `hide_droneid_ids`), `key_id` (O4 session key ID, 8 hex digits; null when not O4 or hidden), `encrypted` (O4: presence only), `undecoded` (the shared track for bursts that did not decode), `ocusync` (`{n, rssi, snr, mhz, age_ms, node}` \| null), `wifi` (`{n, rssi, ch, band, mac, age_ms, node}` \| null). Added 2026-11-14 |
+| `spoof` | object \| null | Spoofing / consistency checks (`spoof` module, `docs/SPOOFING.md`); null when no check fired and no authentication page was heard: `score` (0-100 combined suspicion; below 30 when every flag is weak), `flags` (array of `{check, conf, detail}`: `check` a snake-case name such as `"position_jump"`, `conf` 0-100, `detail` a number whose unit depends on the check), `auth` (authentication pages heard; not verified). Added 2026-11-17 |
+| `cont` | object \| null | The track this one probably continues under a new identity (`continuity` module): `prev` (its id; it may since have expired), `conf` (0-100), `id_changed` (true when the ID changed mid-flight, which is suspicious; false for a new identity between flights). Added 2026-11-17 |
 
 Example:
 
@@ -85,7 +92,7 @@ Example:
 {"t":"track","id":1,"state":"active","ids":[{"type":"SerialNumber","id":"1581F5FKD229400D"}],"ua":"HelicopterOrMultirotor","first_ms":4000,"last_ms":4500,"age_ms":500,"rssi":-83,"links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"band":"2.4","mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"band":"2.4","mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"loc":{"lat":39.948889,"lon":-75.15,"alt_geo":140.0,"alt_baro":130.0,"height":50.0,"height_ref":"AboveTakeoff","speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0}}
 ```
 
-A typical line is about 900 bytes (about 1.1 KB with a `dji` object). The worst case is 2216 bytes, with all seven slots, two IDs, escaped text and both DJI sources. Size buffers with `json::MAX_LINE` (2304; 1792 before protocol 4). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512).
+A typical line is about 900 bytes (about 1.1 KB with a `dji` object). The worst case is 2702 bytes, with all seven slots, two IDs, escaped text, both DJI sources, four spoof flags and a continuity link. Size buffers with `json::MAX_LINE` (2816; 2432 before the `spoof`/`cont` objects, 1792 before protocol 4). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512).
 
 ## Bands (added 2026-11-09)
 

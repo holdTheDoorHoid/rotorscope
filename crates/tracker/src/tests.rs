@@ -585,7 +585,10 @@ fn json_golden() {
         r#""op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"#,
         r#""self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","#,
         r#""own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0},"#,
-        r#""loc_src":"RemoteId","op_src":"RemoteId","home":null,"dji":null}"#,
+        r#""loc_src":"RemoteId","op_src":"RemoteId","home":null,"dji":null,"#,
+        // The made-up serial's length character says 15, and 11 follow:
+        // a weak flag, so the score stays below the report level.
+        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null}"#,
         "\n"
     );
     assert_eq!(got, want);
@@ -793,6 +796,20 @@ fn json_worst_case_fits() {
     });
     t.location_src = Source::DjiWifi;
     t.system_src = Source::DjiWifi;
+    // Every spoof flag slot, with the longest names and details.
+    for c in [
+        Check::IncompleteMessageSet,
+        Check::AddressAlternation,
+        Check::DroneIdDisagrees,
+        Check::AltitudeMismatch,
+    ] {
+        t.spoof.raise(c, 100, i32::MIN);
+    }
+    assert_eq!(t.spoof.flags().len(), spoof::MAX_FLAGS);
+    t.spoof.auth_pages = u16::MAX;
+    t.continuity.previous = Some(TrackId(u32::MAX));
+    t.continuity.link_confidence = 100;
+    t.continuity.identity_changed = false;
     tr.set_own_position(
         89.999_999_9,
         179.999_999_9,
