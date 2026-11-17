@@ -203,8 +203,11 @@ pub fn find(x: &[C16], s: &mut Scratch) -> Bursts {
         out.list.push(Burst {
             start: start as u16,
             len: len as u16,
-            head_cut: start == 0,
-            tail_cut: b == nb,
+            // Within a merge gap of either end counts as cut: a narrow
+            // burst's envelope dips for a block or two (a 1.7 MHz burst
+            // running past the capture's end read as ending 3 µs early).
+            head_cut: start <= MERGE,
+            tail_cut: b + MERGE >= nb,
             centre_khz: None,
             width_khz: 0,
         });

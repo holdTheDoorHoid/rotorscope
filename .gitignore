@@ -8,6 +8,9 @@ target/
 firmware/hub/wifi.local.toml
 # Downloaded test recordings (third-party licences; never commit).
 testdata/
+# rfuav-check outputs (features and summaries of RFUAV recordings; local).
+rfuav-results/
+rfuav-data/
 
 # Local bench boards (per machine) and bench run logs.
 tools/boards.local

@@ -174,6 +174,25 @@ fn nr30() -> Ofdm {
     Ofdm { nfft: 1024, spacing: 30e3, half: 300, cps: vec![72; 14] }
 }
 
+/// O4 video, 10 MHz mode, as measured on the RFUAV Mini 4 Pro recordings
+/// (docs/DJI-LINKS.md, "Validation against RFUAV"): 30 kHz subcarriers
+/// (useful 33.33 µs), about 9.0 MHz occupied (301 subcarriers here), a
+/// regular period of 35.7 µs (prefix 72 of 1024 at 30.72 MS/s = 2.34 µs),
+/// opened by two symbols on another grid (the measured gaps of 44 and 47 µs
+/// before the regular ones: prefixes 330 and 420 here); 16 symbols, 0.6 ms.
+fn o4_video10() -> Ofdm {
+    let mut cps = vec![330, 420];
+    cps.extend([72; 14]);
+    Ofdm { nfft: 1024, spacing: 30e3, half: 150, cps }
+}
+/// O4 controller uplink, as measured: 30 kHz, about 4.4 MHz (145
+/// subcarriers here), one odd head symbol and 11 regular ones (0.43 ms).
+fn o4_uplink() -> Ofdm {
+    let mut cps = vec![82];
+    cps.extend([18; 11]);
+    Ofdm { nfft: 256, spacing: 30e3, half: 72, cps }
+}
+
 /// One packet of `o` at its own rate, unit power.
 fn packet(o: &Ofdm, rng: &mut Rng) -> Sig {
     let mut out = vec![];
@@ -387,7 +406,8 @@ fn video_20mhz_continuous_and_gapped() {
 #[test]
 fn video_10mhz_centre_is_measured() {
     for seed in 0..3u64 {
-        for f in [-4.0e6, -0.5e6, 0.5e6, 1.0e6, 3.5e6] {
+        // Centres on the x.5 raster (5735.5 ... 5743.5).
+        for f in [-4.5e6, -0.5e6, 0.5e6, 1.5e6, 3.5e6] {
             for amp in [350.0, 150.0] {
                 let fe = run(&packets(&dji10(), amp, f, 0.0, seed), seed + 9);
                 show(&format!("dji10 f {f} amp {amp}"), &fe);
@@ -398,6 +418,12 @@ fn video_10mhz_centre_is_measured() {
                 assert!(err.abs() <= 60, "centre off by {err} kHz: {fe:?}");
                 assert_eq!(classify(&fe, &ctx(5740.0)), Some(Verdict::Video));
             }
+        }
+        // Off both DJI rasters (whole MHz, not a V1 channel; x.25): the
+        // RFUAV EVO Nano's (Autel) 15 kHz video-width bursts sit there.
+        for f in [1.0e6, 1.25e6, -2.75e6] {
+            let fe = run(&packets(&dji10(), 300.0, f, 0.0, seed), seed + 19);
+            assert_eq!(classify(&fe, &ctx(5740.0)), Some(Verdict::Ofdm15), "{f}: {fe:?}");
         }
     }
 }
@@ -411,10 +437,13 @@ fn fpv_air_unit_by_whole_mhz_channel() {
     // The same signal 1.5 MHz lower is on the OcuSync x.5 raster (5768.5).
     let fe = run(&packets(&dji10(), 300.0, -0.5e6, 0.0, 4), 5);
     assert_eq!(classify(&fe, &ctx(5769.0)), Some(Verdict::Video));
-    // A 20 MHz link centred in the capture on channel 3 (5735).
+    // A 20 MHz link centred in the capture on channel 3 (5735): its centre
+    // is not trusted for the raster (updated: the RFUAV FPV Combo's 20 MHz
+    // video, truly on 5770.50, measured 5768.4-5770.4 through the C5), so
+    // plain DJI video.
     let fe = run(&packets(&dji20(), 300.0, 0.0, 0.0, 6), 7);
     show("v1 ch3 20 MHz", &fe);
-    assert_eq!(classify(&fe, &ctx(5735.0)), Some(Verdict::FpvAirUnit));
+    assert_eq!(classify(&fe, &ctx(5735.0)), Some(Verdict::Video));
     // Clipped (centre unknown): never an air-unit claim.
     let fe = run(&packets(&dji20(), 300.0, 1.0e6, 0.0, 6), 7);
     assert!(fe.spec.clipped());
@@ -434,10 +463,114 @@ fn o4_band_video() {
     assert_eq!(classify(&fe, &ctx(5794.0)), Some(Verdict::Video));
 }
 
+/// Regression from the RFUAV Mini 4 Pro recordings: O4 video is 30 kHz OFDM
+/// in 0.5-0.6 ms bursts, one per 2.5 ms frame, whose first symbols are off
+/// the prefix grid the burst start predicts. Before the change these were
+/// `Ofdm30` (or nothing, when the misaligned prefix search failed); now
+/// every capture holding most of a burst is O4 video, on any band, and
+/// none is any other DJI kind.
+#[test]
+fn o4_video_measured_shape() {
+    let mut free = 0;
+    for seed in 0..8u64 {
+        for (lo, f, amp) in [(2449.0, 1.5e6, 250.0), (5770.0, -2.0e6, 120.0)] {
+            // One burst wholly inside the capture (the frame's next one is
+            // 2.5 ms later, outside it).
+            let t0 = 0.02e-3 + 0.02e-3 * seed as f64;
+            let fe = run(&bursts(&o4_video10(), amp, &[(t0, f)], seed), seed + 40);
+            show(&format!("o4 video seed {seed} lo {lo}"), &fe);
+            assert!(fe.cp.o4_numerology() && (8_000..=10_000).contains(&fe.spec.w10_khz), "{fe:?}");
+            assert_eq!(classify(&fe, &ctx(lo)), Some(Verdict::O4Video), "{fe:?}");
+            assert!((fe.spec.centre_khz - (f / 1000.0) as i32).abs() < 100, "{fe:?}");
+            free += (!fe.cp.normal30.aligned) as u32;
+        }
+        // Frames at a random phase: never another DJI kind.
+        let sig = packets(&o4_video10(), 250.0, 1.5e6, 2.5e-3 - o4_video10().dur_s(), seed);
+        let v = classify(&run(&sig, seed + 50), &ctx(2449.0));
+        assert!(matches!(v, None | Some(Verdict::O4Video | Verdict::Ofdm30)), "{v:?}");
+    }
+    // The burst start predicts the wrong prefix grid; the free search
+    // finds it (before the change these were all missed).
+    println!("o4 video: {free} of 16 found by the free prefix search");
+    assert!(free >= 8);
+}
+
+/// Regression from the same recordings: the O4 uplink is a 30 kHz, ~4.4 MHz,
+/// 0.4-0.45 ms burst (2.0-8.7 MHz accepted: 6.5 MHz in the Avata 2's 40 MHz
+/// mode); one capture often also holds
+/// the frame's video burst 0.49 ms later, and then the verdict is video
+/// while [`controller_bursts`] still hands the uplink to the hop tracker.
+#[test]
+fn o4_uplink_measured_shape() {
+    use crate::classify::controller_bursts;
+    for seed in 0..6u64 {
+        for (amp, f) in [(250.0, -5.5e6), (120.0, 3.6e6), (250.0, 6.4e6)] {
+            let fe = run(&bursts(&o4_uplink(), amp, &[(0.1e-3 + 0.03e-3 * seed as f64, f)], seed), seed + 60);
+            show(&format!("o4 uplink {amp} {f}"), &fe);
+            assert!(fe.cp.o4_numerology(), "{fe:?}");
+            assert_eq!(classify(&fe, &ctx(2432.0)), Some(Verdict::ControllerBurst), "{fe:?}");
+            let c: Vec<i32> = controller_bursts(&fe).filter_map(|b| b.centre_khz).collect();
+            assert_eq!(c.len(), 1, "{fe:?}");
+            assert!((c[0] - (f / 1000.0) as i32).abs() < 300, "centre {c:?} for {f}");
+        }
+        // Uplink, then the frame's video burst 0.49 ms later.
+        let mut sig = bursts(&o4_uplink(), 250.0, &[(0.05e-3, -6.5e6)], seed);
+        let v = bursts(&o4_video10(), 250.0, &[(0.54e-3, 4.0e6)], seed + 1);
+        for (a, b) in sig.iter_mut().zip(&v) {
+            a.0 += b.0;
+            a.1 += b.1;
+        }
+        let fe = run(&sig, seed + 70);
+        show("o4 uplink + video", &fe);
+        assert_eq!(classify(&fe, &ctx(2440.0)), Some(Verdict::O4Video), "{fe:?}");
+        let c: Vec<i32> = controller_bursts(&fe).filter_map(|b| b.centre_khz).collect();
+        assert!(c.len() == 1 && (c[0] + 6_500).abs() < 300, "{c:?} {fe:?}");
+    }
+}
+
+/// Regression from the RFUAV EVO Nano recording (Autel, 5.8 GHz). Autel's
+/// links use DJI's 15 kHz numerology (useful 66.67 µs, period 71.4 µs,
+/// measured), so only shape and raster tell them apart:
+/// - narrow ~1.7 MHz bursts of 1.31 ms (a 0.33 ms burst without prefix
+///   structure 0.08 ms before), on whole-MHz centres: never a controller
+///   burst, whether the capture starts at the first burst or mid-burst;
+/// - ~10 MHz bursts stepping 8.85 MHz every 40 ms over ten centres, eight
+///   of them on neither DJI raster: LTE-style there, not DJI video.
+#[test]
+fn autel_evo_nano_measured_shapes_are_not_dji() {
+    use crate::classify::controller_bursts;
+    // 113 subcarriers at 15 kHz (1.7 MHz), 18 symbols with LTE prefixes.
+    let data = Ofdm { nfft: 256, spacing: 15e3, half: 56, cps: [20].into_iter().chain([18; 17]).collect() };
+    let pre = Ofdm { nfft: 256, spacing: 15e3, half: 56, cps: vec![0; 5] };
+    for seed in 0..4u64 {
+        for f in [-5.0e6, 2.0e6] {
+            for t0 in [0.1e-3, -0.2e-3] {
+                let mut sig = bursts(&pre, 250.0, &[(t0, f)], seed);
+                let d = bursts(&data, 250.0, &[(t0 + 0.41e-3, f)], seed + 1);
+                for (a, b) in sig.iter_mut().zip(&d) {
+                    a.0 += b.0;
+                    a.1 += b.1;
+                }
+                let fe = run(&sig, seed + 80);
+                show(&format!("autel narrow t0 {t0} f {f}"), &fe);
+                let v = classify(&fe, &ctx(5745.0));
+                assert!(!matches!(v, Some(Verdict::ControllerBurst)), "{v:?}: {fe:?}");
+                assert_eq!(controller_bursts(&fe).count(), 0, "{fe:?}");
+            }
+        }
+    }
+    // Wide bursts at the measured centres (survey means; LO 1 MHz under each).
+    for (k, c) in [5733.14, 5741.95, 5751.27, 5760.09, 5768.95, 5777.84, 5786.78, 5795.97].into_iter().enumerate() {
+        let fe = run(&packets(&dji10(), 300.0, 1.0e6, 0.0, k as u64), k as u64 + 90);
+        assert_eq!(classify(&fe, &ctx(c - 1.0)), Some(Verdict::Ofdm15), "{c}: {fe:?}");
+    }
+}
+
 #[test]
 fn droneid_burst_is_not_video() {
     for seed in 0..4u64 {
-        for (amp, t0, f) in [(300.0, 0.05e-3, 0.5e6), (150.0, 0.12e-3, -1.0e6)] {
+        // Centres on the x.5 raster, as DroneID's (5756.5, 5754.5).
+        for (amp, t0, f) in [(300.0, 0.05e-3, 0.5e6), (150.0, 0.12e-3, -1.5e6)] {
             let fe = run(&bursts(&droneid_burst(), amp, &[(t0, f)], seed), seed);
             show(&format!("droneid amp {amp}"), &fe);
             assert!(fe.cp.dji_numerology(), "{fe:?}");
@@ -459,7 +592,9 @@ fn controller_bursts_os2_and_o3() {
         for (name, o) in [("os2", uplink_os2()), ("o3", uplink_o3())] {
             for amp in [300.0, 120.0] {
                 for f in [-7.0e6, -2.12e6, 0.88e6, 5.3e6] {
-                    let t0 = 0.08e-3 + 0.05e-3 * seed as f64;
+                    // The whole burst inside the capture (a cut one no
+                    // longer counts: its length is unknown).
+                    let t0 = 0.08e-3 + 0.03e-3 * seed as f64;
                     let fe = run(&bursts(&o, amp, &[(t0, f)], seed), seed + 3);
                     show(&format!("{name} amp {amp} f {f}"), &fe);
                     worst = worst.min(fe.cp.normal15.metric - fe.cp.normal15.thr);
@@ -576,8 +711,12 @@ fn hobby_rc_hopping_is_not_a_dji_controller() {
     println!("FSK: largest 15 kHz metric over its threshold: {worst}");
 }
 
+/// The extended prefix stays family-only. 30 kHz OFDM of video width was
+/// family-only too (`Ofdm30`, "not DJI by any public record") until the
+/// RFUAV Mini 4 Pro recordings showed O4's video and uplink are exactly
+/// that (docs/DJI-LINKS.md, "Validation against RFUAV"); it is now O4 video.
 #[test]
-fn extended_prefix_and_30khz_are_family_only() {
+fn extended_prefix_is_family_only_and_30khz_video_is_o4() {
     for seed in 0..3u64 {
         let fe = run(&packets(&lte_extended(), 300.0, 0.5e6, 0.0, seed), seed);
         show("lte extended", &fe);
@@ -589,7 +728,7 @@ fn extended_prefix_and_30khz_are_family_only() {
         show("nr30", &fe);
         assert!(fe.cp.normal30.detected, "{fe:?}");
         assert!(!fe.cp.normal15.detected, "{fe:?}");
-        assert_eq!(classify(&fe, &ctx(5745.0)), Some(Verdict::Ofdm30));
+        assert_eq!(classify(&fe, &ctx(5745.0)), Some(Verdict::O4Video));
 
         // DJI's normal prefix reads as about 4.7 µs (94 samples).
         let fe = run(&packets(&dji10(), 300.0, 0.0, 0.0, seed), seed);
