@@ -266,7 +266,10 @@ signals shaped to the measured numbers.
 - DroneID: O4 encrypted records (INFP-10/11), CRC-valid on both paths, at 5741.5, 5751.5, 5756.5,
   5761.5, 5771.5, 5776.5, 5791.5 and 5796.5 MHz: **a 5 MHz raster**, wider than the centres listed
   in `plan::DRONEID_KHZ` (5741.5/5756.5/5776.5/5796.5, +5816.5). The node's DroneID LOs still
-  decoded the others at +-5 MHz offsets inside their 20 MHz captures. 15 kHz DroneID-shaped bursts
+  decoded the others at +-5 MHz offsets inside their 20 MHz captures. **Added 2026-11-17:** the DroneID plan
+  (node-sdr `DRONEID_PLAN`, coverage `DRONEID_58`) now hops every 10 MHz from 5746.5 to 5816.5,
+  so every channel of the 5 MHz raster from 5741.5 to 5816.5 lands whole in a capture
+  (verified on c5b: all 13 hops tuned, including LO 5806 and 5816, normal floors, 0 DMA errors). 15 kHz DroneID-shaped bursts
   at 5746.2 did not decode.
 - Three of the four packs are weak (reference SNR 9, 2 and 1 dB): through the C5 model their video
   stands ~5 dB over the receiver's noise, under the node's 8 dB analysis gate, so most dwells are

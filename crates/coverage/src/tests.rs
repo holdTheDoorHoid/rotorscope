@@ -91,10 +91,14 @@ fn single_node_plans_match_todays_firmware() {
     assert!(p.iter().step_by(2).all(|&h| h == (149, 150)));
     let visits: std::vec::Vec<u32> = p.iter().skip(1).step_by(2).map(|h| h.0).collect();
     assert_eq!(visits, [153, 157, 161, 165, 36, 40, 44, 48]);
-    // One DroneID node alternates the 5.8 list and the 2.4 list, 700 ms each.
+    // One DroneID node walks the 5.8 list then the 2.4 list, 700 ms each:
+    // node-sdr's DRONEID_PLAN exactly (this used to miss 5816.5).
     let p = base_plan(DroneId, 1, 0);
     let f: std::vec::Vec<u32> = p.iter().map(|h| h.0).collect();
-    assert_eq!(f, [57565, 57765, 57965, 24145, 24295, 24445, 24595, 23995]);
+    assert_eq!(
+        f,
+        [57465, 57565, 57665, 57765, 57865, 57965, 58065, 58165, 24145, 24295, 24445, 24595, 23995]
+    );
     const { assert!(DRONEID_MS > 640, "a burst every ~640 ms must land in one dwell") };
     assert!(base_plan(Ble, 1, 0).is_empty());
     assert!(base_plan(Fpv, 1, 0).is_empty(), "one FPV node: built-in sweep");
@@ -503,5 +507,26 @@ fn commands_fit_the_link() {
         let mut buf = [0u8; link::MAX_FRAME];
         let n = link::encode_command(&link::Command::Assign(d.assignment.clone()), &mut buf).unwrap().len();
         assert!(n <= 200, "{n} bytes");
+    }
+}
+
+/// Every channel of DroneID's 5 MHz raster at 5.8 GHz (5741.5-5816.5, as
+/// the Avata 2 recording used) sits whole inside some DroneID dwell: the
+/// node tunes the whole MHz below a hop, so a hop covers its own channel
+/// (+0.5 MHz) and the one 5 MHz lower (-4.5 MHz). A ~9 MHz burst needs its
+/// centre within -5.5..+5.5 MHz of that LO in a 20 MHz capture.
+#[test]
+fn droneid_58_covers_the_5_mhz_raster() {
+    for ch in (57415..=58165).step_by(50) {
+        let ok = DRONEID_58.iter().any(|&h| {
+            let lo = h - 5; // whole MHz below, 100 kHz units
+            let off = ch as i32 - lo as i32;
+            (-55..=55).contains(&off)
+        });
+        assert!(ok, "{ch} not covered");
+    }
+    // The published O4 schedule's 5.8 GHz channels are hops themselves.
+    for c in [57565, 57765, 57965, 58165] {
+        assert!(DRONEID_58.contains(&c));
     }
 }

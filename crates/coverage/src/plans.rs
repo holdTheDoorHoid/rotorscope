@@ -56,7 +56,11 @@ pub const WIFI5_SWEEP_MS: u16 = 100;
 
 /// DJI OcuSync DroneID burst centres, 100 kHz units. A burst repeats about
 /// every 640 ms, so 700 ms on a frequency catches at least one.
-pub const DRONEID_58: &[u32] = &[57565, 57765, 57965];
+/// 5.8 GHz: every 10 MHz from 5746.5 to 5816.5; each dwell also covers the
+/// channel 5 MHz below its own, so together they cover DroneID's 5 MHz
+/// raster (5741.5-5816.5; Avata 2 recording, docs/DJI-LINKS.md). Must match
+/// `firmware/node-sdr` `DRONEID_PLAN`.
+pub const DRONEID_58: &[u32] = &[57465, 57565, 57665, 57765, 57865, 57965, 58065, 58165];
 pub const DRONEID_24: &[u32] = &[24145, 24295, 24445, 24595, 23995];
 pub const DRONEID_MS: u16 = 700;
 

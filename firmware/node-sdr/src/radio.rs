@@ -39,15 +39,26 @@ pub type Hop = (u32, u16);
 pub type Plan = HVec<Hop, 48>;
 
 /// The built-in DroneID plan (crates/coverage DRONEID_58 + DRONEID_24, 700 ms
-/// each: a burst comes every ~640 ms, so one dwell catches one). All seven
-/// O4 channels of the published schedule (5816.5 MHz added 2026-11-16,
-/// docs/DRONEID-O4.md), plus 2459.5 MHz (listed by King-Of-Knights) and
-/// 2399.5 MHz. The O4 follower (`droneid::follow`) visits predicted
-/// channels between these hops.
-pub const DRONEID_PLAN: [Hop; 9] = [
+/// each: a burst comes every ~640 ms, so one dwell catches one).
+///
+/// 5.8 GHz: hops every 10 MHz from 5746.5 to 5816.5. Each hop tunes the
+/// whole MHz below it, so the hop's own channel lands at +0.5 MHz and the
+/// channel 5 MHz lower at -4.5 MHz, both whole inside the 20 MHz capture.
+/// Together they cover DroneID's 5 MHz raster from 5741.5 to 5816.5: the
+/// Avata 2 recording (RFUAV, docs/DJI-LINKS.md) sent O4 DroneID at 5741.5,
+/// 5751.5, 5756.5, 5761.5, 5771.5, 5776.5, 5791.5 and 5796.5, more than the
+/// published seven-channel schedule (which 5756.5/5776.5/5796.5/5816.5
+/// still cover, docs/DRONEID-O4.md). 2.4 GHz: the schedule's three, plus
+/// 2459.5 (King-Of-Knights) and 2399.5. The O4 follower (`droneid::follow`)
+/// visits predicted channels between these hops.
+pub const DRONEID_PLAN: [Hop; 13] = [
+    (57465, 700),
     (57565, 700),
+    (57665, 700),
     (57765, 700),
+    (57865, 700),
     (57965, 700),
+    (58065, 700),
     (58165, 700),
     (24145, 700),
     (24295, 700),
@@ -58,8 +69,8 @@ pub const DRONEID_PLAN: [Hop; 9] = [
 
 /// DroneID burst centres the receiver accepts in an assignment: the C5's
 /// measured reach, 2200-2650 and 5180-5800 MHz LO (100 kHz units), plus
-/// O4's 5816.5 MHz channel (LO 5816 MHz, above the measured range: not yet
-/// verified on a chip).
+/// the 5806.5 and 5816.5 MHz hops (LO 5806 / 5816 MHz, above the measured
+/// range: not yet verified on a chip).
 fn droneid_freq_ok(f: u32) -> bool {
     (22_000..=26_500).contains(&f) || (51_800..=58_170).contains(&f)
 }
