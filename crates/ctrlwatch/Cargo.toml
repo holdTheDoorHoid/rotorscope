@@ -1,0 +1,17 @@
+[package]
+name = "ctrlwatch"
+description = "no_std detection of drone / RC control links (ExpressLRS, mLRS, SiK, OpenLRSng and energy signatures of closed systems) for the LR2021 node; receive-only"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+heapless.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+ctrlwatch = { path = ".", features = ["serde"] }
