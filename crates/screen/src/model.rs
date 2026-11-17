@@ -523,9 +523,27 @@ pub struct UiState {
     pub flags: Option<FlagsView>,
     /// Attacks and jamming the hub sees right now (link protocol 9).
     pub threats: Threats,
+    /// The most serious drone / crewed-aircraft pair (tracker `conflict`).
+    pub conflict: Option<ConflictView>,
 }
 
-/// Attacks and jamming in progress, for the status bar.
+/// A drone close to a crewed aircraft, for the status bar and health page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConflictView {
+    /// 1 advisory, 2 caution, 3 warning.
+    pub level: u8,
+    /// The drone (its `DroneView::key`).
+    pub drone: u32,
+    /// Callsign, or the ICAO address in hex.
+    pub aircraft: String<8>,
+    pub range_m: f32,
+    /// Aircraft height minus drone height, metres.
+    pub dz_m: Option<f32>,
+    /// Pairs at caution or worse (this one included).
+    pub count: u8,
+}
+
+/// Attacks and jamming, summarised for the status bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Threats {
     /// Active attacks of any kind (deauth floods, fake networks, jamming...).

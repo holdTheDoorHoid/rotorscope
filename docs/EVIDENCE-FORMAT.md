@@ -86,6 +86,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
 | 21 | link_forgery | claimed station address (6), count (u32) (reserved; forged ESP-NOW packets currently arrive as `threat` kind 15) |
+| 22 | aircraft_conflict | level (1: 1 advisory, 2 caution, 3 warning), drone track id (u32), aircraft address (u32), aircraft source (1); text: the pair, distance, height difference, predicted closest approach |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 

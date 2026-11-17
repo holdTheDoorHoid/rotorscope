@@ -67,6 +67,7 @@ pub mod spoof;
 mod text;
 pub mod site;
 pub mod threats;
+pub mod conflict;
 
 use heapless::Vec;
 use rid::Transport;
@@ -788,6 +789,8 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     /// Attacks and jamming (protocol 9) and the hub's deaf-node check.
     threats: threats::ThreatTable,
     deaf: threats::DeafWatch,
+    /// Drone / crewed-aircraft pairs already announced.
+    conflict_watch: conflict::ConflictWatch,
     /// UTC and node positions for the spoofing checks.
     spoof_cfg: spoof::SpoofConfig,
     next_id: u32,
@@ -812,6 +815,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             nodes: signals::NodeTable::new(),
             threats: threats::ThreatTable::new(),
             deaf: threats::DeafWatch::new(),
+            conflict_watch: conflict::ConflictWatch::new(),
             spoof_cfg: spoof::SpoofConfig {
                 utc_offset_ms: None,
                 nodes: [None; spoof::MAX_NODE_POS],
@@ -1129,6 +1133,20 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.aircraft.get(key)
     }
 
+    /// Drones close to crewed aircraft, most serious first (see
+    /// [`conflict`]).
+    pub fn conflicts(&self, now_ms: u64) -> heapless::Vec<conflict::Conflict, { conflict::MAX_CONFLICTS }> {
+        let ctx = self.context(now_ms, None);
+        conflict::find(self.tracks.iter(), self.aircraft.all(), &ctx)
+    }
+
+    /// The next drone / aircraft pair to announce (buzzer, screen, log):
+    /// once per pair and level, again after [`conflict::REALERT_MS`].
+    pub fn take_new_conflict(&mut self, now_ms: u64) -> Option<conflict::Conflict> {
+        let current = self.conflicts(now_ms);
+        self.conflict_watch.take_new(&current, now_ms)
+    }
+
     /// Aircraft heard within [`aircraft::AIRCRAFT_STALE_MS`].
     pub fn active_aircraft_count(&self, now_ms: u64) -> usize {
         self.aircraft.active_count(now_ms)
@@ -1170,6 +1188,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
 mod tests;
 #[cfg(test)]
 mod tests_aircraft;
+#[cfg(test)]
+mod tests_conflict;
 #[cfg(test)]
 mod tests_openlinks;
 #[cfg(test)]

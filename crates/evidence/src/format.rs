@@ -230,6 +230,12 @@ pub enum EventCode {
     /// authentication on the ESP-NOW link. Data: claimed station address
     /// (6), count (u32).
     LinkForgery = 21,
+    /// A drone close to a crewed aircraft (tracker `conflict`), once per
+    /// pair and level. Data: level (1: 1 advisory, 2 caution, 3 warning),
+    /// drone track id (u32), aircraft address (u32), aircraft source (1,
+    /// `adsb::Source` index). Text: the pair, distance, height difference
+    /// and predicted closest approach.
+    AircraftConflict = 22,
 }
 
 impl EventCode {
@@ -257,6 +263,7 @@ impl EventCode {
             19 => GnssSpoofing,
             20 => SpoofSuspect,
             21 => LinkForgery,
+            22 => AircraftConflict,
             _ => return None,
         })
     }
@@ -284,6 +291,7 @@ impl EventCode {
             GnssSpoofing => "gnss_spoofing",
             SpoofSuspect => "spoof_suspect",
             LinkForgery => "link_forgery",
+            AircraftConflict => "aircraft_conflict",
         }
     }
 }

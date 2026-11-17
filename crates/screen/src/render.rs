@@ -103,7 +103,12 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     // them): an inverse box, like a missing GPS fix. The bar has no room
     // for both.
     x += 8;
-    let threat = if s.threats.jammed {
+    // A drone close to a crewed aircraft outranks everything: someone may
+    // need to look up now.
+    let near = s.conflict.as_ref().is_some_and(|c| c.level >= 2);
+    let threat = if near {
+        Some("AIRCRAFT")
+    } else if s.threats.jammed {
         Some("JAMMED")
     } else if s.threats.active > 0 {
         Some("ATTACK")
@@ -1328,6 +1333,24 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             }
             text(d, &b, x, y, F_BODY, p.fg)?;
         }
+    }
+    if let Some(c) = &s.conflict {
+        y += 17;
+        text(d, "NEAR", 4, y + 2, F_SMALL, p.dim)?;
+        let mut b: String<48> = String::new();
+        let _ = write!(
+            b,
+            "drone {} from {}",
+            draw::distance_short(c.range_m).as_str(),
+            c.aircraft
+        );
+        if let Some(z) = c.dz_m {
+            let ft = (z * 3.28084) as i32;
+            let _ = write!(b, " {ft:+}ft");
+        }
+        let col = if c.level >= 2 { p.accent } else { p.fg };
+        // This line takes the page hint's place.
+        return text(d, &b, 70, y, F_BODY, col).map(drop);
     }
     text(d, "UP/DN: pages", 4, HEIGHT - 12, F_SMALL, p.dim).map(drop)
 }

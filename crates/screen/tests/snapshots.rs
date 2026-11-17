@@ -630,6 +630,21 @@ fn threat_warnings() {
 }
 
 #[test]
+fn health_conflict() {
+    // A drone 240 m from a helicopter that is 30 m above it: the status bar
+    // shows AIRCRAFT (ahead of jamming) and the health page says which.
+    let mut st = with_aircraft();
+    st.threats = Threats { active: 0, jammed: true, muted: 0 };
+    let mut name = heapless::String::new();
+    name.push_str("N911PH").unwrap();
+    st.conflict = Some(ConflictView { level: 3, drone: 1, aircraft: name, range_m: 240.0, dz_m: Some(30.0), count: 1 });
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("health_conflict", &ui, &st);
+}
+
+#[test]
 fn page_toast() {
     let st = five_drones(true);
     let mut ui = Ui::default();

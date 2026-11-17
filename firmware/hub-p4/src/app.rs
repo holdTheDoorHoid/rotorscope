@@ -121,6 +121,23 @@ impl App {
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
+        self.announce_conflicts(ev, now);
+    }
+
+    /// Drones close to crewed aircraft: one evidence event and one console
+    /// line per pair and level (again after `conflict::REALERT_MS`).
+    fn announce_conflicts(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
+        while let Some(c) = self.tracker.take_new_conflict(now) {
+            let Some(drone) = self.tracker.get(c.drone) else { continue };
+            let text = tracker::conflict::describe(&c, drone, self.tracker.get_aircraft(c.aircraft));
+            let mut data = [0u8; 10];
+            data[0] = c.level as u8;
+            data[1..5].copy_from_slice(&c.drone.0.to_le_bytes());
+            data[5..9].copy_from_slice(&c.aircraft.icao.to_le_bytes());
+            data[9] = c.aircraft.source as u8;
+            ev.event(evidence::format::EventCode::AircraftConflict, text.as_bytes(), &data);
+            crate::println!("hub-p4: AIRCRAFT {}", text);
+        }
     }
 
     /// Drone tracks whose broadcasts look forged or replayed: one evidence
@@ -405,8 +422,10 @@ impl App {
             });
             let _ = self.state.assigned.push(None);
             self.state.aircraft = Some(screen::from_tracker::aircraft_summary(self.tracker.aircraft(), &ctx));
+            self.state.conflict = screen::from_tracker::conflict_view(&self.tracker.conflicts(now), self.tracker.aircraft());
         } else {
             self.state.aircraft = None;
+            self.state.conflict = None;
         }
         let _ = (links::BAUD, Rgb565::BLACK);
     }

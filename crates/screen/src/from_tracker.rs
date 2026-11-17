@@ -345,3 +345,29 @@ fn put_text<const N: usize, const M: usize>(out: &mut String<M>, f: &FixedStr<N>
         }
     }
 }
+
+/// The most serious drone / crewed-aircraft pair, for the status bar and
+/// health page (`conflicts` from `Tracker::conflicts`, most serious first).
+pub fn conflict_view(conflicts: &[tracker::conflict::Conflict], aircraft: &[tracker::AircraftTrack]) -> Option<ConflictView> {
+    let c = conflicts.first()?;
+    let mut name: String<8> = String::new();
+    match aircraft.iter().find(|a| a.key == c.aircraft) {
+        Some(a) if !a.callsign.is_empty() => {
+            let _ = name.push_str(a.callsign.as_str());
+        }
+        Some(a) => {
+            let _ = name.push_str(tracker::aircraft::icao_hex(a).as_str());
+        }
+        None => {
+            let _ = core::fmt::Write::write_fmt(&mut name, format_args!("{:06X}", c.aircraft.icao));
+        }
+    }
+    Some(ConflictView {
+        level: c.level as u8,
+        drone: c.drone.0,
+        aircraft: name,
+        range_m: c.range_m,
+        dz_m: c.dz_m,
+        count: conflicts.iter().filter(|c| c.level >= tracker::conflict::Level::Caution).count().min(255) as u8,
+    })
+}
