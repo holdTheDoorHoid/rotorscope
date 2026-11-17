@@ -522,7 +522,7 @@ struct AircraftLine<'a> {
     t: &'static str,
     /// Six upper-case hex digits.
     icao: heapless::String<6>,
-    /// `"1090"` or `"978"` (UAT).
+    /// `"1090"`, `"978"` (UAT), `"OGN"` or `"FLARM"`.
     src: &'static str,
     /// UAT address qualifier (2, 3 = relayed by a TIS-B ground station).
     aq: u8,
@@ -595,6 +595,8 @@ pub fn aircraft_line(
         src: match a.key.source {
             adsb::Source::ModeS => "1090",
             adsb::Source::Uat => "978",
+            adsb::Source::Ogn => "OGN",
+            adsb::Source::Flarm => "FLARM",
         },
         aq: a.address_qualifier,
         state: ctx.aircraft_state(a),

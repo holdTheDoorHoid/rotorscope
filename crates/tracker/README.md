@@ -208,7 +208,7 @@ bytes each). A hub built without an ADSBee uses `A = 0` and pays nothing.
 |---|---|---|
 | `t` | `"aircraft"` | |
 | `icao` | string | Six upper-case hex digits |
-| `src` | `"1090"` \| `"978"` | Receiver (978 = UAT, ADSBee 1090U) |
+| `src` | `"1090"` \| `"978"` \| `"OGN"` \| `"FLARM"` | Receiver (978 = UAT; OGN and FLARM from the 902-928 MHz decoders) |
 | `aq` | int | UAT address qualifier (2, 3 = relayed by TIS-B); 0 for 1090 |
 | `state` | `"active"` \| `"stale"` | By the aircraft thresholds above |
 | `call` | string \| null | Callsign (flight ID) |
@@ -229,7 +229,7 @@ bytes each). A hub built without an ADSBee uses `A = 0` and pays nothing.
 
 Aircraft rows share the columns too: `track` is `ICAO-<hex>`, `uas_id` the
 callsign with `id_type` `Callsign`, `ua_type` the category name,
-`transports` `Adsb1090` or `Uat978`, `drone_lat`/`drone_lon` the position,
+`transports` `Adsb1090`, `Uat978`, `OGN` or `FLARM`, `drone_lat`/`drone_lon` the position,
 `drone_alt_m` the geometric altitude, `speed_mps`, `rssi_dbm`, `dist_m`,
 `brg_deg`, and the last column `baro_alt_m` the pressure altitude.
 

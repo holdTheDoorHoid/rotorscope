@@ -35,10 +35,7 @@ fn seal(mut w: Buf<'_>) -> Option<usize> {
 /// [`MAX_LINE`] bytes).
 pub fn aircraft(a: &Aircraft, buf: &mut [u8]) -> Option<usize> {
     let mut w = Buf { buf, len: 0 };
-    let tag = match a.source {
-        Source::ModeS => 'A',
-        Source::Uat => 'U',
-    };
+    let tag = char::from(a.source.tag());
     let call = if a.callsign.is_empty() {
         "?"
     } else {
@@ -63,7 +60,7 @@ pub fn aircraft(a: &Aircraft, buf: &mut [u8]) -> Option<usize> {
         a.gnss_vrate_fpm
     )
     .ok()?;
-    if a.source == Source::Uat {
+    if a.source != Source::ModeS {
         write!(w, "{},", a.uat_emergency).ok()?;
     }
     write!(

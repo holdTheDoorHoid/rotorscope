@@ -12,7 +12,7 @@
 //!
 //! ADS-B aircraft ([`aircraft_row`]) share them too: `track` is
 //! `ICAO-<hex>`, `uas_id` the callsign (`id_type` `Callsign`), `ua_type` the
-//! emitter category, `transports` `Adsb1090` or `Uat978`, `drone_lat`/
+//! emitter category, `transports` `Adsb1090`, `Uat978`, `OGN` or `FLARM`, `drone_lat`/
 //! `drone_lon`/`drone_alt_m` the aircraft's position and geometric altitude,
 //! and the last column, `baro_alt_m`, its pressure altitude. (For drones
 //! `baro_alt_m` is the Remote ID pressure altitude, or DJI's barometric
@@ -232,6 +232,8 @@ pub fn aircraft_row(
             match a.key.source {
                 adsb::Source::ModeS => "Adsb1090",
                 adsb::Source::Uat => "Uat978",
+                adsb::Source::Ogn => "OGN",
+                adsb::Source::Flarm => "FLARM",
             },
             Opt(pos.map(|p| p.lat), 7),
             Opt(pos.map(|p| p.lon), 7),
