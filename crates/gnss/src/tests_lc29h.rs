@@ -287,16 +287,21 @@ fn lc29h_boot_sequence() {
         ("gll-off", seal("PAIR062,1,0")),
         ("vtg-off", seal("PAIR062,5,0")),
         ("pps", seal("PQTMCFGPPS,W,1,1,100,3,1,0")),
+        ("jamming-detect", seal("PAIR391,1")),
     ];
     assert_eq!(got.len(), want.len());
     for (g, w) in got.iter().zip(want.iter()) {
         assert_eq!(g.0, w.0);
         assert_eq!(g.1, w.1);
     }
+    assert!(steps[..7].iter().all(|c| !c.optional));
+    assert!(steps[7].optional, "a module without PAIR391 still configures");
+    assert_eq!(steps[7].confirmed_by(&Event::Quectel(Reply::PairAck { cmd: 391, result: AckResult::Unsupported })), Some(false));
     let no_gsv: Vec<QuectelCommand> =
-        Lc29hSequence::new(Lc29hOptions { gsv: false, pps_width_ms: 5000 }).collect();
+        Lc29hSequence::new(Lc29hOptions { gsv: false, pps_width_ms: 5000, jamming_detect: false }).collect();
     assert_eq!(no_gsv[3].bytes(), seal("PAIR062,3,0").as_bytes());
     assert_eq!(no_gsv[6].bytes(), seal("PQTMCFGPPS,W,1,1,999,3,1,0").as_bytes(), "width clamped");
+    assert_eq!(no_gsv.len(), 7, "no PAIR391 when not asked for");
 }
 
 #[test]
@@ -342,8 +347,9 @@ fn module_detection() {
     assert_eq!(Module::QuectelLc29h.name(), "lc29h");
     assert_eq!(Module::Nmea.sequence(ConfigOptions::default(), Lc29hOptions::default()).count(), 0);
     let u: Vec<Step> = Module::UbloxM10.sequence(ConfigOptions::default(), Lc29hOptions::default()).collect();
-    assert_eq!(u.len(), 5);
-    assert_eq!(u[4].baud_after(), Some(115_200));
+    assert_eq!(u.len(), 7);
+    assert_eq!(u[6].baud_after(), Some(115_200));
+    assert!(u[4].optional() && u[5].optional() && !u[6].optional());
 }
 
 #[test]

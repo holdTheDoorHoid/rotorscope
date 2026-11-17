@@ -52,10 +52,11 @@ impl Module {
         }
     }
 
-    /// The boot configuration for this module.
+    /// The boot configuration for this module, with the integrity messages switched on
+    /// ([`ConfigSequence::with_integrity`], [`Lc29hOptions::jamming_detect`]).
     pub fn sequence(self, ubx: ConfigOptions, quectel: Lc29hOptions) -> Steps {
         match self {
-            Module::UbloxM10 => Steps::Ubx(ConfigSequence::with_options(ubx)),
+            Module::UbloxM10 => Steps::Ubx(ConfigSequence::with_options(ubx).with_integrity(true)),
             Module::QuectelLc29h => Steps::Quectel(Lc29hSequence::new(quectel)),
             Module::Nmea => Steps::None,
         }
@@ -98,6 +99,15 @@ impl Step {
         match self {
             Step::Ubx(f) => f.name,
             Step::Quectel(c) => c.name,
+        }
+    }
+
+    /// A refusal (NAK, or no answer) is not a configuration failure: the step switches on
+    /// something this firmware may not have (the integrity messages). Log it and go on.
+    pub fn optional(&self) -> bool {
+        match self {
+            Step::Ubx(f) => f.optional,
+            Step::Quectel(c) => c.optional,
         }
     }
 

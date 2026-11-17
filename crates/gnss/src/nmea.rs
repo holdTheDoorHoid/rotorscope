@@ -5,6 +5,7 @@
 //! sentence is flushed as a `Fix` when the first sentence of the next epoch shows up.
 
 use crate::fix::{Fix, FixType, Source, UtcTime};
+use crate::sats::Collector;
 use crate::sky::SkyView;
 
 /// XOR of every byte between `$` and `*`.
@@ -264,11 +265,13 @@ pub(crate) struct Pending {
     rmc: Option<Rmc>,
     /// Satellites per constellation and band, from GSV and GSA.
     pub(crate) sky: SkyView,
+    /// Satellites one by one, from GSV (and from UBX NAV-SAT, written by the parser).
+    pub(crate) sats: Collector,
 }
 
 impl Pending {
     pub(crate) const fn new() -> Self {
-        Pending { key: 0, gga: None, rmc: None, sky: SkyView::new() }
+        Pending { key: 0, gga: None, rmc: None, sky: SkyView::new(), sats: Collector::new() }
     }
 
     /// Feed a checksum-verified sentence body. Returns a fix when an epoch completes (or a
@@ -285,6 +288,7 @@ impl Pending {
         match &head[2..] {
             b"GSV" => {
                 self.sky.gsv(f);
+                self.sats.gsv(f);
                 return None;
             }
             b"GSA" => {
@@ -339,6 +343,7 @@ impl Pending {
         self.gga = None;
         self.rmc = None;
         self.sky.next_epoch();
+        self.sats.publish();
         fix
     }
 }

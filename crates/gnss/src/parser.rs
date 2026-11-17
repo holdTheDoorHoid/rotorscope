@@ -4,12 +4,13 @@ use crate::fix::Fix;
 use crate::nmea;
 use crate::quectel::{self, Reply};
 use crate::sky::SkyView;
-use crate::ubx::{self, MonVer, ValGet};
+use crate::sats::SatTable;
+use crate::ubx::{self, MonRf, MonVer, NavClock, NavStatus, ValGet};
 
 /// Largest UBX payload the parser will accept. Larger "frames" are treated as garbage so a
 /// false `B5 62` in noise cannot swallow real data. NAV-PVT is 92; a MON-VER with many
-/// extension strings is under 300.
-pub const MAX_UBX_PAYLOAD: usize = 392;
+/// extension strings is under 300; NAV-SAT is 8 + 12 per satellite, so 776 holds 64.
+pub const MAX_UBX_PAYLOAD: usize = 8 + 12 * crate::sats::MAX_SATS;
 /// Longest NMEA sentence including `$`, checksum and CR LF (NMEA 0183 limit).
 pub const MAX_NMEA_LEN: usize = 82;
 
@@ -38,8 +39,15 @@ pub enum Event {
     MonVer(MonVer),
     /// Reply to a CFG-VALGET poll.
     ValGet(ValGet),
-    /// A Quectel `$PAIR001` acknowledgement or `$PQTM...` reply (LC29H).
+    /// A Quectel `$PAIR001` acknowledgement or `$PQTM...` reply (LC29H), or its `$PAIRSPF`
+    /// jamming status.
     Quectel(Reply),
+    /// UBX-NAV-STATUS (carries the u-blox spoofing detector state).
+    NavStatus(NavStatus),
+    /// UBX-NAV-CLOCK (receiver clock bias and drift).
+    NavClock(NavClock),
+    /// UBX-MON-RF (jamming state, AGC, CW jamming indicator).
+    MonRf(MonRf),
 }
 
 /// Counters for diagnostics (wrapping).
@@ -98,6 +106,11 @@ impl Parser {
     /// Satellites per constellation and band (from NMEA GSV/GSA; empty on a UBX-only link).
     pub fn sky(&self) -> &SkyView {
         &self.nmea.sky
+    }
+
+    /// The satellites of the last complete epoch, one by one (from UBX-NAV-SAT or NMEA GSV).
+    pub fn sats(&self) -> &SatTable {
+        &self.nmea.sats.done
     }
 
     /// Forget any partial frame (call after reconfiguring the link, e.g. a baud change).
@@ -202,6 +215,10 @@ impl Parser {
                     self.stats.bytes_dropped = self.stats.bytes_dropped.wrapping_add(d as u32);
                 }
                 Step::Ubx(total) => {
+                    if (self.buf[2], self.buf[3]) == (ubx::CLS_NAV, ubx::ID_NAV_SAT) {
+                        self.nmea.sats.nav_sat(&self.buf[6..total - 2]);
+                        self.stats.frames_ok = self.stats.frames_ok.wrapping_add(1);
+                    }
                     let ev = decode_ubx(self.buf[2], self.buf[3], &self.buf[6..total - 2]);
                     self.consume(total);
                     if let Some(ev) = ev {
@@ -232,6 +249,9 @@ fn decode_ubx(class: u8, id: u8, p: &[u8]) -> Option<Event> {
     use ubx::*;
     match (class, id) {
         (CLS_NAV, ID_NAV_PVT) => nav_pvt_to_fix(p).map(Event::Fix),
+        (CLS_NAV, ID_NAV_STATUS) => decode_nav_status(p).map(Event::NavStatus),
+        (CLS_NAV, ID_NAV_CLOCK) => decode_nav_clock(p).map(Event::NavClock),
+        (CLS_MON, ID_MON_RF) => decode_mon_rf(p).map(Event::MonRf),
         (CLS_ACK, ID_ACK_ACK) if p.len() >= 2 => Some(Event::Ack { class: p[0], id: p[1] }),
         (CLS_ACK, ID_ACK_NAK) if p.len() >= 2 => Some(Event::Nak { class: p[0], id: p[1] }),
         (CLS_MON, ID_MON_VER) => decode_mon_ver(p).map(Event::MonVer),

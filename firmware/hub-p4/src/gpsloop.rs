@@ -8,7 +8,9 @@
 //!   hub's probe and configuration commands really leave UART1 and come back
 //!   through the pads. `gpsloop`: a Quectel LC29H(AA) at 115200 that answers
 //!   `$PQTMVERNO`, ACKs `$PAIR062` and `$PQTMCFGPPS`, and sends a dual-band
-//!   NMEA 4.10 epoch (GGA, GSA x4, GSV, RMC) every second. `gpsloop-m10`: a
+//!   NMEA 4.10 epoch (GGA, GSA x4, GSV, RMC) every second. It also ACKs
+//!   `$PAIR391,1` (jamming detector) and then adds `$PAIRSPF,1` (no jamming)
+//!   to every epoch, so the integrity monitor's Quectel input is exercised. `gpsloop-m10`: a
 //!   u-blox MAX-M10S as shipped, NMEA at **9600**, that answers MON-VER,
 //!   ACKs every CFG-VALSET, follows the baud change to 115200 and then sends
 //!   UBX NAV-PVT, so the hub's baud hunt is exercised too.
@@ -45,6 +47,8 @@ pub struct Loop {
     next_epoch: Instant,
     pps_off: Option<Instant>,
     pps_configured: bool,
+    /// LC29H: `PAIR391,1` received; `$PAIRSPF` every epoch.
+    jam_detect: bool,
     /// M10: NMEA still on, UBX NAV-PVT on, current baud.
     nmea_on: bool,
     pvt_on: bool,
@@ -78,6 +82,7 @@ impl Loop {
             next_epoch: Instant::now() + esp_hal::time::Duration::from_millis(1000),
             pps_off: None,
             pps_configured: M10,
+            jam_detect: false,
             nmea_on: true,
             pvt_on: false,
             baud,
@@ -197,6 +202,9 @@ impl Loop {
         } else if let Some(args) = body.strip_prefix("PQTMCFGPPS,W,") {
             self.pps_configured = args.starts_with("1,1,");
             self.sentence("PQTMCFGPPS,OK");
+        } else if let Some(arg) = body.strip_prefix("PAIR391,") {
+            self.jam_detect = arg == "1";
+            self.sentence("PAIR001,391,0");
         } else if let Some(cmd) = body.strip_prefix("PAIR").and_then(|r| r.get(..3)) {
             let mut b: heapless::String<24> = heapless::String::new();
             let _ = core::fmt::Write::write_fmt(&mut b, format_args!("PAIR001,{cmd},3"));
@@ -308,6 +316,9 @@ impl Loop {
             let _ = write!(b, "GNRMC,{t},V,,,,,,,{d},,,N,V");
         }
         self.sentence(&b);
+        if self.jam_detect {
+            self.sentence("PAIRSPF,1");
+        }
     }
 
     fn nav_pvt(&mut self, fixed: bool) {

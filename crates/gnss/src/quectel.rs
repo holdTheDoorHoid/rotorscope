@@ -22,6 +22,12 @@
 //!   second). Supported by the AA variant. The default mode before configuration was not
 //!   confirmed, which is why [`Lc29hSequence`] sets it explicitly.
 //!
+//! * `$PAIR391,<1|0>` (`PAIR_TEST_JAMMING_DETECT`, section 2.4.32) switches the jamming
+//!   detector on or off. While on, the module prints `$PAIRSPF,<status>` (L1) and, when it
+//!   tracks L5, `$PAIRSPF5,<status>` once a second; status 0 unknown, 1 no jamming, 2 warning,
+//!   3 critical ([`Reply::Jamming`]). No variant restriction is noted for it. The
+//!   specification has **no spoofing detector** and no AGC or clock-bias output.
+//!
 //! Settings are written to RAM only (no `PAIR513` save): the hub configures the module on every
 //! boot, so nothing in the module's flash is ever changed.
 
@@ -178,6 +184,14 @@ pub enum Reply {
     },
     /// `$PQTMCFGPPS,OK,1,...`: reply to a PPS read.
     Pps(PpsConfig),
+    /// `$PAIRSPF,<status>` (L1) or `$PAIRSPF5,<status>` (L5), sent once a second while the
+    /// jamming detector (`PAIR391,1`) is on.
+    Jamming {
+        /// True for `PAIRSPF5` (the L5 band).
+        l5: bool,
+        /// 0 unknown, 1 no jamming, 2 warning, 3 critical.
+        status: u8,
+    },
 }
 
 fn num(f: &[u8]) -> Option<u32> {
@@ -208,6 +222,10 @@ pub(crate) fn decode(body: &[u8]) -> Option<Reply> {
         let cmd = num(f[1])?;
         let res = num(f[2])?;
         return Some(Reply::PairAck { cmd: cmd.min(u32::from(u16::MAX)) as u16, result: AckResult::from_code(res) });
+    }
+    if head == b"PAIRSPF" || head == b"PAIRSPF5" {
+        let status = num(f.get(1)?)?;
+        return Some(Reply::Jamming { l5: head == b"PAIRSPF5", status: status.min(255) as u8 });
     }
     let name = head.strip_prefix(b"PQTM")?;
     if name == b"VERNO" && f.len() >= 4 && f[1] != b"ERROR" {
@@ -255,6 +273,9 @@ pub struct QuectelCommand {
     pub name: &'static str,
     /// What the module answers with.
     pub expect: Expect,
+    /// A refusal is not a failure: the hub logs it and carries on (a feature this firmware
+    /// may lack).
+    pub optional: bool,
     buf: [u8; MAX_COMMAND],
     len: usize,
 }
@@ -262,7 +283,7 @@ pub struct QuectelCommand {
 impl QuectelCommand {
     /// Build from the sentence body (no `$`, no checksum), e.g. `"PAIR062,0,1"`.
     pub fn new(name: &'static str, body: &str, expect: Expect) -> Self {
-        let mut c = QuectelCommand { name, expect, buf: [0; MAX_COMMAND], len: 0 };
+        let mut c = QuectelCommand { name, expect, optional: false, buf: [0; MAX_COMMAND], len: 0 };
         c.len = command(&mut c.buf, body).unwrap_or(0);
         c
     }
@@ -317,13 +338,17 @@ pub struct Lc29hOptions {
     /// PPS pulse width, ms (1..=999). Default 100.
     pub pps_width_ms: u16,
     /// Keep GSV on (satellites in view per constellation and band, for the health view).
-    /// Default true. GSV is the bulk of the NMEA output (~1 KB/s on a dual-band sky).
+    /// Default true. GSV is the bulk of the NMEA output (~1 KB/s on a dual-band sky). The
+    /// integrity monitor needs it for its C/N0 checks.
     pub gsv: bool,
+    /// Switch on the module's jamming detector (`PAIR391,1`, `$PAIRSPF` once a second).
+    /// Default true.
+    pub jamming_detect: bool,
 }
 
 impl Default for Lc29hOptions {
     fn default() -> Self {
-        Lc29hOptions { pps_width_ms: 100, gsv: true }
+        Lc29hOptions { pps_width_ms: 100, gsv: true, jamming_detect: true }
     }
 }
 
@@ -333,7 +358,9 @@ impl Default for Lc29hOptions {
 /// Steps: GGA, RMC and GSA every fix (GSA gives the 2D/3D mode and satellites used), GSV per
 /// [`Lc29hOptions::gsv`], GLL and VTG off (they repeat GGA/RMC), then 1PPS on: every second,
 /// active high, [`Lc29hOptions::pps_width_ms`] wide, **only with a 3D fix** (so an edge always
-/// belongs to a trustworthy UTC second). The fix rate stays at the 1 Hz default (changing it
+/// belongs to a trustworthy UTC second). Last, if [`Lc29hOptions::jamming_detect`], the
+/// jamming detector (`PAIR391,1`), an **optional** step: a refusal leaves the rest in place.
+/// The fix rate stays at the 1 Hz default (changing it
 /// needs a save and restart on this module). RAM only; nothing is saved to the module's flash.
 #[derive(Clone, Copy, Debug)]
 pub struct Lc29hSequence {
@@ -390,6 +417,12 @@ impl Iterator for Lc29hSequence {
                 body.push_u32(u32::from(o.pps_width_ms.clamp(1, 999)));
                 body.push_str(",3,1,0");
                 ("pps", Expect::Pqtm("CFGPPS"))
+            }
+            7 if o.jamming_detect => {
+                self.idx += 1;
+                let mut c = QuectelCommand::new("jamming-detect", "PAIR391,1", Expect::PairAck(391));
+                c.optional = true;
+                return Some(c);
             }
             _ => return None,
         };

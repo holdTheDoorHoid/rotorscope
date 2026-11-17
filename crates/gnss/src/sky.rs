@@ -111,7 +111,7 @@ pub enum Band {
 }
 
 impl Band {
-    fn of(sys: System, signal: u32) -> Band {
+    pub(crate) fn of(sys: System, signal: u32) -> Band {
         match (sys, signal) {
             (_, 0) => Band::L1,
             (System::Gps, 1..=3) | (System::Qzss, 1..=3) => Band::L1,
