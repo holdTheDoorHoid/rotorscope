@@ -272,17 +272,35 @@ pub enum ThreatKind {
     BleSpam,
     /// Noise floor raised across a wide span (barrage jamming).
     /// `level` = rise above the learned floor, dB.
+    /// Raw-capture nodes (`crates/jamwatch`): `level` is the median rise of
+    /// the raised hops, `freq`/`width_khz` the span of raised hops plus one
+    /// capture's passband, `count` the raised hops, `detail` = percent of
+    /// the band's recent hops raised.
     JamBroadband,
     /// A strong unmodulated or narrow tone sitting on a band.
+    /// Raw-capture nodes: `freq` = the tone (latest seen), `detail` = how
+    /// many distinct tone frequencies (1 MHz apart) were seen in the window.
     JamTone,
     /// A carrier sweeping across the band (chirp jammer). `detail` = sweep
     /// rate, MHz per second.
+    /// Raw-capture nodes: the median rate over the dwells that saw it;
+    /// `level` = how far its loudest probes stand over the floor.
     JamSweep,
     /// Strong pulsed or reactive interference (on only part of the time).
+    /// Raw-capture nodes: `detail` = median percent of probes loud (the
+    /// duty cycle), `level` = the pulses' rise over the floor, dB.
     JamPulsed,
     /// The node can hear almost nothing it normally hears while the band is
     /// loud: it is effectively blind. `detail` = percent of the usual
     /// frame rate still arriving.
+    /// Raw-capture nodes (`node-sdr`, `crates/jamwatch`) measure the floor,
+    /// not a frame rate: `detail` = estimated percent of free-space
+    /// detection range left, `100 * 10^(-level / 20)` where `level` = the
+    /// median floor rise (dB) over the band's recent hops (hops holding a
+    /// recognised link excluded; a clipping front end counts as 20 dB).
+    /// Sent when that median reaches 12 dB (25 % of range left or less),
+    /// whatever the cause. `freq`/`width_khz` = the band's hops plus one
+    /// capture's passband.
     Blinded,
     /// Frames claiming to come from one of our own nodes failed
     /// authentication (ESP-NOW gateway): someone is injecting fake nodes or
