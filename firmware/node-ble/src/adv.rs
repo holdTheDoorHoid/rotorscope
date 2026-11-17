@@ -20,6 +20,20 @@ pub const QUEUE_LEN: usize = 16;
 
 pub static REPORTS: Channel<CriticalSectionRawMutex, Report, QUEUE_LEN> = Channel::new();
 
+/// Pairing pop-up spam detector (`wifiwatch::ble`). Every advert is
+/// classified on the spot (a walk of at most one advert's bytes); pairing
+/// adverts are recorded here and the stats task reports spam once a second.
+pub static SPAM: critical_section::Mutex<RefCell<wifiwatch::ble::BleWatch>> =
+    critical_section::Mutex::new(RefCell::new(wifiwatch::ble::BleWatch::new()));
+
+/// Record `data` if it is a pairing pop-up advert. Cheap for everything else.
+fn pairing(addr: &[u8; 6], rssi: i8, data: &[u8]) {
+    if let Some(fam) = wifiwatch::ble::classify(data) {
+        let now = uptime_us();
+        critical_section::with(|cs| SPAM.borrow_ref_mut(cs).record(addr, rssi, fam, now));
+    }
+}
+
 /// One advert that passed the Remote ID pre-check, copied out of the HCI
 /// buffer (which the host reuses as soon as the handler returns).
 #[derive(Clone)]
@@ -212,6 +226,11 @@ impl ScanHandler {
         };
 
         let addr = display_addr(r.addr.raw());
+        // Spam adverts are short legacy PDUs. Skip only the later fragments
+        // of a Remote ID chain being reassembled (not AD structure starts).
+        if !self.pending.borrow().matches(&addr, r.adv_sid) {
+            pairing(&addr, r.rssi, r.data);
+        }
         let mut p = self.pending.borrow_mut();
         match r.event_kind.data_status() {
             LeExtAdvDataStatus::Complete => {
@@ -299,6 +318,7 @@ impl EventHandler for ScanHandler {
             };
             bump(&COUNTERS.adv);
             bump(&COUNTERS.old_reports);
+            pairing(&display_addr(r.addr.raw()), r.rssi, r.data);
             if looks_like_rid(r.data) {
                 enqueue(&fresh(Transport::BleLegacy, display_addr(r.addr.raw()), r.rssi, r.data, false));
             }
