@@ -416,6 +416,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             }
             DroneIdRecord::Detected => self.dji_track_where(now_ms, |t| t.dji.undecoded),
         };
+        let env = self.spoof_env(now_ms);
         let t = &mut self.tracks[i];
         if t.uas_ids.is_empty() && t.dji.serial.is_none() && t.dji.key_id.is_none() {
             t.dji.undecoded = true;
@@ -453,6 +454,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 pilot: rad_e7_position(pilot_lat_raw, pilot_lon_raw),
                 home: rad_e7_position(home_lat_raw, home_lon_raw),
             };
+            if let Some(p) = fix.position {
+                crate::spoof::droneid_position(t, p, node, s.rssi, &env, now_ms);
+            }
             t.apply_dji(&fix, crate::Source::DroneId, now_ms);
             if product_type != 0 {
                 t.dji.product_type = Some(product_type);
@@ -523,6 +527,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         l.rssi = rssi;
         l.channel = channel;
         l.mac = mac;
+        crate::spoof::dji_wifi_frame(t, &mac);
         if node < 8 {
             t.nodes |= 1 << node;
         }

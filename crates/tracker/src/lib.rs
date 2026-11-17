@@ -55,6 +55,7 @@
 #![no_std]
 
 pub mod aircraft;
+pub mod continuity;
 pub mod cot;
 pub mod csv;
 pub mod dji;
@@ -62,6 +63,7 @@ pub mod geo;
 pub mod json;
 pub mod openlinks;
 pub mod signals;
+pub mod spoof;
 mod text;
 
 use heapless::Vec;
@@ -71,10 +73,12 @@ use rid::message::{
 };
 
 pub use aircraft::{AircraftGeometry, AircraftKey, AircraftTrack};
+pub use continuity::Continuity;
 pub use dji::{DjiInfo, DjiLink, O4Decrypted, O4Seen, O4State, Source};
 pub use geo::RangeBearing;
 pub use openlinks::{LinkTrack, LinkTrackId};
 pub use signals::{Emitter, EmitterId, NodeInfo, SignalKey, WifiDrone, WifiDroneId};
+pub use spoof::{Check, Flag, SpoofEvent, SpoofState};
 pub use text::FormatError;
 
 /// Basic IDs kept per track: F3411 allows a UA to send up to two (one per
@@ -384,6 +388,10 @@ pub struct Track {
     pub home: Option<Stamped<rid::message::LatLon>>,
     /// What DJI's own broadcasts said (default when never heard).
     pub dji: DjiInfo,
+    /// Spoofing / consistency flags (see [`spoof`]).
+    pub spoof: SpoofState,
+    /// Link to the track this one probably continues (see [`continuity`]).
+    pub continuity: Continuity,
     announced: bool,
 }
 
@@ -406,6 +414,8 @@ impl Track {
             system_src: Source::RemoteId,
             home: None,
             dji: DjiInfo::default(),
+            spoof: SpoofState::default(),
+            continuity: Continuity::default(),
             announced: false,
         }
     }
@@ -635,6 +645,8 @@ impl Track {
         self.first_seen_ms = self.first_seen_ms.min(other.first_seen_ms);
         self.last_seen_ms = self.last_seen_ms.max(other.last_seen_ms);
         self.decode_errors = self.decode_errors.saturating_add(other.decode_errors);
+        self.spoof.absorb(&other.spoof);
+        self.continuity.absorb(&other.continuity);
         // Whoever was alerted on already, the drone has been announced.
         self.announced |= other.announced;
     }
@@ -771,6 +783,8 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     wifi_drones: signals::WifiDroneTable,
     /// Per-node role and plan, from Hello and Status frames.
     nodes: signals::NodeTable,
+    /// UTC and node positions for the spoofing checks.
+    spoof_cfg: spoof::SpoofConfig,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -791,6 +805,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             emitters: signals::EmitterTable::new(),
             wifi_drones: signals::WifiDroneTable::new(),
             nodes: signals::NodeTable::new(),
+            spoof_cfg: spoof::SpoofConfig {
+                utc_offset_ms: None,
+                nodes: [None; spoof::MAX_NODE_POS],
+            },
             next_id: 1,
             own: None,
             config,
@@ -879,14 +897,24 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         let obs = Observation::from_detection(det, node, now_ms);
         let mut msgs: Vec<Message, { rid::MAX_PACK }> = Vec::new();
         let mut errors = 0u32;
+        let mut auth_errors = 0u8;
         for raw in &det.messages {
             match rid::message::decode(raw) {
                 // Capacity equals the detection's, so this cannot overflow.
                 Ok(m) => drop(msgs.push(m)),
-                Err(_) => errors += 1,
+                Err(_) => {
+                    errors += 1;
+                    if rid::message::message_kind(raw) == Some(rid::message::kind::AUTH) {
+                        auth_errors += 1;
+                    }
+                }
             }
         }
-        self.ingest_decoded(&obs, &msgs, errors)
+        let r = self.ingest_decoded(&obs, &msgs, errors);
+        if let Some(t) = r.track().and_then(|id| self.tracks.iter_mut().find(|t| t.id == id)) {
+            spoof::auth_decode_errors(t, auth_errors);
+        }
+        r
     }
 
     /// Feed already-decoded messages, for sources that do not carry raw
@@ -946,19 +974,33 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             .copied()
             .min_by_key(|&i| (self.tracks[i].first_seen_ms, self.tracks[i].id))
             .or_else(|| by_mac.filter(|&i| self.tracks[i].compatible_with(&ids)));
+        // A recently heard track on this address whose ID contradicts the
+        // frame's: one transmitter, several IDs (see `spoof`).
+        let mac_conflict = by_mac
+            .filter(|&i| {
+                !ids.is_empty()
+                    && !self.tracks[i].compatible_with(&ids)
+                    && now.saturating_sub(self.tracks[i].last_seen_ms) < spoof::SHARED_MAC_WINDOW_MS
+            })
+            .map(|i| self.tracks[i].id);
 
+        let created = primary.is_none();
         let primary = match primary {
             Some(p) => self.merge_into(p, by_id.iter().copied().chain(by_mac), &ids),
             None => self.create(now),
         };
 
+        let env = self.spoof_env(now);
+        spoof::before_frame(&mut self.tracks, primary, obs, msgs, mac_conflict, created, &env);
         let t = &mut self.tracks[primary];
         t.observe(obs);
         t.decode_errors = t.decode_errors.saturating_add(errors);
         for m in msgs {
             t.apply(m, now);
         }
-        Ingested::Track(t.id)
+        let id = t.id;
+        spoof::after_frame(&mut self.tracks, primary, &env, now);
+        Ingested::Track(id)
     }
 
     /// The most recently heard track whose last MAC on this medium is `mac`.
