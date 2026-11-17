@@ -25,6 +25,14 @@
 //! A keyed gateway accepts keyed nodes only. Built without a key it runs
 //! open, as before, and says so at boot and in its `Hello` to the hub.
 //!
+//! Time (link protocol 11): the hub's `Command::TimeSync`, about once a
+//! second, goes to every aero node (one that has said it is `NodeRole::Aero`
+//! or that the hub assigned that role) as its own command packet, unicast,
+//! with no retry or ACK bookkeeping (the next one is a second away). Its
+//! `utc_ms` is advanced by the time it spent here, from UART receipt to the
+//! moment each packet is handed to the radio, so queueing here does not
+//! skew the node's clock. The `To` + `Assign` path is unchanged.
+//!
 //! This board transmits (the beacons); see docs/ESPNOW.md.
 #![no_std]
 #![no_main]
@@ -88,11 +96,24 @@ struct Node {
     /// Replay state and the echo its commands need (keyed builds).
     auth: auth::Peer,
     last_sync_ms: Option<u64>,
+    /// It has said it is an aero node (Hello / Status role Aero, or sent
+    /// AeroStatus / Air frames): it gets the hub's `TimeSync`.
+    aero: bool,
 }
 
 impl Node {
     fn new(mac: [u8; 6], rssi: i8) -> Self {
-        Node { mac, seq: Default::default(), frames: 0, bytes: 0, rssi, last_ms: 0, auth: Default::default(), last_sync_ms: None }
+        Node {
+            mac,
+            seq: Default::default(),
+            frames: 0,
+            bytes: 0,
+            rssi,
+            last_ms: 0,
+            auth: Default::default(),
+            last_sync_ms: None,
+            aero: false,
+        }
     }
 }
 
@@ -155,6 +176,8 @@ enum Job {
     Command([u8; 6]),
     /// Send this node a sync beacon echoing `(session, counter)`.
     Sync([u8; 6], u32, u32),
+    /// Send the latest [`TIME`] to every aero node.
+    TimeSync,
 }
 static KICK: Channel<CriticalSectionRawMutex, Job, 16> = Channel::new();
 static HUB_BYTES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -162,6 +185,18 @@ static HUB_CMDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::
 static HUB_CORRUPT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// `Assign`s with no `To` before them (or for a full node table).
 static HUB_ORPHANS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// The hub's latest `TimeSync`: UTC ms, when its bytes arrived here, PPS.
+static TIME: Mutex<RefCell<Option<(u64, Instant, bool)>>> = Mutex::new(RefCell::new(None));
+/// `TimeSync`s from the hub; packets sent to aero nodes (radio-ACKed or
+/// not); and syncs that found no aero node to go to.
+static HUB_SYNCS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TIME_SENT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TIME_UNACKED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TIME_NOBODY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Command-packet sequence numbers for `TimeSync`: bit 15 set, so they
+/// never equal a queued command's (which count up from 0 per node). A node
+/// drops a command packet whose sequence equals the one before it.
+static TIME_SEQ: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -265,6 +300,10 @@ async fn air_tx(manager: EspNowManager, mut sender: EspNowSender, mut auth: Opti
                 send_command(&manager, &mut sender, &mut auth, me, mac).await;
                 continue;
             }
+            Ok(Job::TimeSync) => {
+                send_time(&manager, &mut sender, &mut auth, me).await;
+                continue;
+            }
             Ok(Job::Sync(mac, session, counter)) => {
                 // Only keyed gateways queue syncs.
                 if let Some(a) = auth.as_mut() {
@@ -359,6 +398,53 @@ async fn send_command(manager: &EspNowManager, sender: &mut EspNowSender, auth: 
     });
 }
 
+/// The hub's latest `TimeSync` to every aero node, once each, unicast (a
+/// keyed node needs its session echoed). `utc_ms` is advanced by the time
+/// since its bytes reached us, just before each packet is sealed and sent.
+async fn send_time(manager: &EspNowManager, sender: &mut EspNowSender, auth: &mut Option<auth::Gateway>, me: [u8; 6]) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let Some((utc_ms, rx_at, pps)) = critical_section::with(|cs| TIME.borrow_ref_mut(cs).take()) else { return };
+    let mut to: heapless::Vec<([u8; 6], Option<(u32, u32)>, u16), MAX_NODES> = heapless::Vec::new();
+    critical_section::with(|cs| {
+        let down = DOWN.borrow_ref(cs);
+        for n in NODES.borrow_ref(cs).iter() {
+            let d = down.iter().find(|d| d.mac == n.mac);
+            if n.aero || d.is_some_and(|d| d.role == Some(link::NodeRole::Aero)) {
+                let _ = to.push((n.mac, n.auth.echo, d.map_or(0, |d| d.seq)));
+            }
+        }
+    });
+    if to.is_empty() {
+        TIME_NOBODY.fetch_add(1, Relaxed);
+        return;
+    }
+    for (mac, echo, cmd_seq) in to {
+        if auth.is_some() && echo.is_none() {
+            continue; // not heard this boot: it could not check the packet
+        }
+        let mut seq = 0x8000 | (TIME_SEQ.fetch_add(1, Relaxed) & 0x7FFF);
+        if seq == cmd_seq {
+            seq = 0x8000 | (TIME_SEQ.fetch_add(1, Relaxed) & 0x7FFF);
+        }
+        ensure_peer(manager, mac);
+        let utc_ms = utc_ms + Instant::now().saturating_duration_since(rx_at).as_millis();
+        let mut enc = [0u8; 24];
+        let Ok(frame) = link::encode_command(&link::Command::TimeSync { utc_ms, pps }, &mut enc) else { continue };
+        let mut buf = [0u8; airlink::HEADER + 24 + auth::TRAILER];
+        let Some(len) = airlink::command(&mut buf, seq, frame).map(<[u8]>::len) else { continue };
+        let mut n = len;
+        if let Some(a) = auth.as_mut() {
+            let st = stamp(a, echo);
+            let Some(sealed) = auth::seal(&a.key, &me, &mut buf, len, st) else { continue };
+            n = sealed;
+        }
+        TIME_SENT.fetch_add(1, Relaxed);
+        if sender.send_async(&mac, &buf[..n]).await.is_err() {
+            TIME_UNACKED.fetch_add(1, Relaxed);
+        }
+    }
+}
+
 /// Read the hub's command stream; queue each `To` + `Assign` for its node.
 #[embassy_executor::task]
 async fn hub_commands(mut rx: UartRx<'static, esp_hal::Async>) {
@@ -376,8 +462,16 @@ async fn hub_commands(mut rx: UartRx<'static, esp_hal::Async>) {
             }
         };
         HUB_BYTES.fetch_add(n as u32, Relaxed);
+        let rx_at = Instant::now();
         dec.feed(&buf[..n], |r| match r {
             Ok(link::Command::To { node }) => to = Some(node),
+            // Protocol 11: for every aero node (`send_time`); `to` is left
+            // as it is (a TimeSync is never addressed).
+            Ok(link::Command::TimeSync { utc_ms, pps }) => {
+                HUB_SYNCS.fetch_add(1, Relaxed);
+                critical_section::with(|cs| *TIME.borrow_ref_mut(cs) = Some((utc_ms, rx_at, pps)));
+                let _ = KICK.try_send(Job::TimeSync);
+            }
             Ok(cmd @ link::Command::Assign(_)) => {
                 HUB_CMDS.fetch_add(1, Relaxed);
                 let Some(mac) = to.take() else {
@@ -545,6 +639,8 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
         let mut via = [0u8; 16];
         let Ok(via) = link::encode(&link::Frame::Via { node: src, rssi }, &mut via) else { continue };
         let via: &[u8] = via;
+        // Whether this node says it is an aero node (it then gets time syncs).
+        let mut aero = false;
         for frame in pkt.payload.split_inclusive(|&b| b == 0) {
             if frame.last() != Some(&0) {
                 break; // a truncated tail: never relay half a frame
@@ -555,6 +651,13 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
                     if matches!(f, link::Frame::Detection(_)) {
                         DETECTIONS.fetch_add(1, Relaxed);
                     }
+                    aero |= matches!(
+                        f,
+                        link::Frame::Hello { role: link::NodeRole::Aero, .. }
+                            | link::Frame::Status { role: link::NodeRole::Aero, .. }
+                            | link::Frame::AeroStatus(_)
+                            | link::Frame::Air(_)
+                    );
                 }
                 Err(_) => {
                     CORRUPT.fetch_add(1, Relaxed);
@@ -563,6 +666,13 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
             if write_all(&mut hub, via).await.is_err() || write_all(&mut hub, frame).await.is_err() {
                 UART_DROPPED.fetch_add(1, Relaxed);
             }
+        }
+        if aero {
+            critical_section::with(|cs| {
+                if let Some(n) = NODES.borrow_ref_mut(cs).iter_mut().find(|n| n.mac == src) {
+                    n.aero = true;
+                }
+            });
         }
     }
 }
@@ -663,7 +773,7 @@ async fn stats() {
         let nodes = critical_section::with(|cs| NODES.borrow_ref(cs).clone());
         let rej = critical_section::with(|cs| REJECTS.borrow_ref(cs).totals);
         println!(
-            r#"{{"t":"gw","up_ms":{now},"key":"{}","beacons":{},"decoded":{},"detections":{},"corrupt":{},"foreign":{},"uart_dropped":{},"nodes":{},"hub_bytes":{},"hub_cmds":{},"hub_corrupt":{},"hub_orphans":{},"bad_tag":{},"replay":{},"unauth":{},"stale":{},"auth_dups":{},"syncs":{},"threats":{},"unverified":{}}}"#,
+            r#"{{"t":"gw","up_ms":{now},"key":"{}","beacons":{},"decoded":{},"detections":{},"corrupt":{},"foreign":{},"uart_dropped":{},"nodes":{},"hub_bytes":{},"hub_cmds":{},"hub_corrupt":{},"hub_orphans":{},"bad_tag":{},"replay":{},"unauth":{},"stale":{},"auth_dups":{},"syncs":{},"threats":{},"unverified":{},"hub_syncs":{},"time_sent":{},"time_unacked":{},"time_nobody":{},"aero_nodes":{}}}"#,
             auth::KEY_ID,
             BEACONS.load(Relaxed),
             DECODED.load(Relaxed),
@@ -683,7 +793,12 @@ async fn stats() {
             AUTH_DUPS.load(Relaxed),
             SYNCS.load(Relaxed),
             THREATS.load(Relaxed),
-            UNVERIFIED.load(Relaxed)
+            UNVERIFIED.load(Relaxed),
+            HUB_SYNCS.load(Relaxed),
+            TIME_SENT.load(Relaxed),
+            TIME_UNACKED.load(Relaxed),
+            TIME_NOBODY.load(Relaxed),
+            nodes.iter().filter(|n| n.aero).count()
         );
         let down = critical_section::with(|cs| DOWN.borrow_ref(cs).clone());
         for d in &down {
