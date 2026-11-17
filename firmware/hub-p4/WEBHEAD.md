@@ -149,3 +149,37 @@ stays on 2.4 GHz channel 11. What it would take: flash a spare C5 (not
 c5a/b/c, which are nodes and the gateway), wire P4 GPIO31 -> C5 GPIO3 +
 ground, and measure RAM and heap on the board (never run as a hub yet).
 Its USB-Serial-JTAG console works the same.
+
+## Deauth protection on the hotspot (802.11w / PMF), checked 2026-11-17
+
+Question: can a deauthentication flood knock phones off the web head's
+hotspot? Protected Management Frames (802.11w, "PMF") make a phone ignore
+forged deauth/disassoc frames, but only if PMF was negotiated when it joined.
+
+What esp-radio does today (1.0.0-beta.1, the crates.io copy the hub uses, and
+the same in `firmware/patches/esp-radio`): `apply_ap_config` in
+`src/wifi/mod.rs` hard-codes `pmf_cfg: { capable: true, required: false }`.
+`AccessPointConfig` has no field for it, so the hub cannot change it without
+a patched esp-radio. So:
+
+* **WPA2 hotspot (the default build):** PMF is *offered*. A phone that also
+  supports PMF should negotiate it and then ignore forged deauths; one that
+  does not still joins, unprotected. Whether current iOS / Android phones
+  actually negotiate it with this AP is **not verified** (needs a capture of
+  the association, or a deauth test against a joined phone on the bench).
+* **`open-hotspot` bench build:** no PMF at all (an open network has no keys
+  to protect frames with). Never deploy it.
+
+To make PMF **required** (phones without it could no longer join):
+1. Simplest: switch the hotspot to WPA3 (`AuthenticationMethodConfig::Wpa3Personal`
+   or `Wpa2Wpa3Personal` in `firmware/hub/src/hotspot.rs`). WPA3-SAE always
+   uses PMF, and the transition mode keeps WPA2-only phones working (without
+   PMF). Costs: SAE handshakes are slower on the S3 and need heap; test that
+   phones still join quickly.
+2. Or patch esp-radio's `apply_ap_config` to set `required: true` (another
+   change to carry in `firmware/patches/esp-radio`, which the hub does not use
+   yet).
+
+Either is a change to `firmware/hub`, left for the owner's decision. The
+Wi-Fi nodes' deauth detection (`ThreatKind::Deauth`) still reports a flood
+whatever the hotspot does.

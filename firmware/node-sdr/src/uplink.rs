@@ -22,7 +22,14 @@
 //!
 //! Outside a window nothing here runs and no frame is queued to the MAC.
 //! Cost per window: see README.md "Hub link" (measured on c5b).
+//!
+//! Built with the kit key (`tools/link.key`, docs/ESPNOW.md "Securing the
+//! link"), batches are sealed and only gateway packets with a good tag and a
+//! fresh stamp are believed (`airlink::auth`): a forged or replayed `Assign`
+//! cannot retune the capture. Without a key it runs open, as before, and says
+//! so at boot.
 
+use airlink::auth;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use esp_println::println;
 use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
@@ -69,6 +76,13 @@ pub struct Counters {
     pub us_total: u64,
     pub us_max: u32,
     pub us_last: u32,
+    /// Gateway packets not taken (keyed builds), by reason.
+    pub auth: auth::NodeRejects,
+}
+
+/// A fresh random session per boot (hardware RNG; true random with the radio on).
+fn rng() -> u32 {
+    esp_hal::rng::Rng::new().random()
 }
 
 pub struct Uplink {
@@ -80,12 +94,26 @@ pub struct Uplink {
     batch_tries: u8,
     last_us: u64,
     last_cmd_seq: Option<u16>,
+    /// Keyed builds: session, counter and gateway epoch; `None` = open.
+    auth: Option<auth::Node>,
+    me: [u8; 6],
     pub c: Counters,
 }
 
 impl Uplink {
     pub fn new(now: EspNow) -> Self {
+        let auth = auth::Key::kit().map(|k| auth::Node::new(k, rng));
+        if auth.is_some() {
+            println!(r#"{{"t":"uplink","auth":"{}"}}"#, auth::KEY_TAG);
+        } else {
+            println!(
+                r#"{{"t":"warn","what":"link_key","auth":"{}","note":"built WITHOUT a link key: ESP-NOW reports and hub commands are not authenticated (docs/ESPNOW.md 'Securing the link')"}}"#,
+                auth::KEY_TAG
+            );
+        }
         Uplink {
+            auth,
+            me: esp_radio::wifi::Interface::station().mac_address(),
             now,
             gw: None,
             gw_seen_us: 0,
@@ -108,6 +136,18 @@ impl Uplink {
     fn drain_rx(&mut self, hub: &mut Hub, assign: &mut Option<Assignment>) {
         while let Some(got) = self.now.receive() {
             let Some(p) = airlink::parse(got.data()) else { continue };
+            if p.kind == airlink::Kind::Frames {
+                continue; // another node's batch
+            }
+            // Keyed: tag and freshness before anything else looks at it.
+            let v = auth::node_accept(self.auth.as_mut(), &got.info.src_address, got.data(), p.kind);
+            // A genuine beacon of another epoch (the gateway rebooted) still
+            // names our gateway: sending to it earns the sync that moves us
+            // to its new epoch. Nothing else is taken from it.
+            let beacon_ok = p.kind == airlink::Kind::Beacon && auth::proves_gateway(v);
+            if !self.c.auth.take(v) && !beacon_ok {
+                continue;
+            }
             match p.kind {
                 airlink::Kind::Beacon => {
                     self.c.beacons += 1;
@@ -190,9 +230,15 @@ impl Uplink {
                 let f = hub.pop().unwrap_or_default();
                 self.batch.push(&f);
             }
-            if !self.batch.is_empty() {
+            // Keyed: no stamp until a gateway epoch is known (or after a
+            // counter wrap, until a newer gateway clock): try next window.
+            let stamp = self.auth.as_mut().map(|a| a.next_up());
+            if !self.batch.is_empty() && stamp != Some(None) {
                 let frames = self.batch.frames();
-                let pkt = self.batch.packet(self.seq);
+                let pkt = match (&self.auth, stamp.flatten()) {
+                    (Some(a), Some(st)) => self.batch.sealed(self.seq, &a.key, &self.me, st),
+                    _ => self.batch.packet(self.seq),
+                };
                 self.c.sent += 1;
                 match with_timeout(SEND_TIMEOUT, self.now.send_async(&gw, pkt)).await {
                     Ok(Ok(())) => {
@@ -252,7 +298,7 @@ impl Uplink {
     pub fn print(&self) {
         let c = &self.c;
         println!(
-            r#"{{"t":"uplink","gw":{},"windows":{},"sent":{},"acked":{},"failed":{},"frames":{},"dropped":{},"beacons":{},"cmd_pkts":{},"no_gw":{},"relock_bad":{},"restart_err":{},"us_last":{},"us_max":{},"us_avg":{}}}"#,
+            r#"{{"t":"uplink","gw":{},"windows":{},"sent":{},"acked":{},"failed":{},"frames":{},"dropped":{},"beacons":{},"cmd_pkts":{},"no_gw":{},"relock_bad":{},"restart_err":{},"us_last":{},"us_max":{},"us_avg":{},"auth_rej":[{},{},{},{}]}}"#,
             self.gw.is_some(),
             c.windows,
             c.sent,
@@ -267,7 +313,11 @@ impl Uplink {
             c.restart_err,
             c.us_last,
             c.us_max,
-            if c.windows > 0 { c.us_total / c.windows as u64 } else { 0 }
+            if c.windows > 0 { c.us_total / c.windows as u64 } else { 0 },
+            c.auth.by_reason[0],
+            c.auth.by_reason[1],
+            c.auth.by_reason[2],
+            c.auth.by_reason[3]
         );
     }
 }

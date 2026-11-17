@@ -21,14 +21,20 @@
 //!   can drop a retry it already has. Nodes built before this kind existed
 //!   do not parse it and ignore it.
 //!
-//! Nothing here is secret or authenticated: the same detections a node hears
-//! anyone nearby can hear. A forged packet could inject a fake track; see
-//! docs/ESPNOW.md for why that is accepted for now.
+//! Nothing here is secret: the same detections a node hears anyone nearby can
+//! hear. With a kit key configured (`tools/link.key`, see [`auth`]) every
+//! packet is sealed with a tag and a freshness stamp ([`auth::VERSION_AUTH`]),
+//! so forged and replayed packets are rejected both ways; without one the link
+//! is unauthenticated, as before (docs/ESPNOW.md, "Securing the link").
 #![cfg_attr(not(test), no_std)]
+
+pub mod auth;
+mod hmac;
 
 /// First two bytes of every packet.
 pub const MAGIC: [u8; 2] = *b"RS";
-/// Bump on any incompatible change.
+/// Bump on any incompatible change. Version 1 is the unauthenticated packet;
+/// [`auth::VERSION_AUTH`] (2) is the same packet sealed with a trailer.
 pub const VERSION: u8 = 1;
 /// Header: magic (2), version (1), kind (1), sequence (2, little-endian).
 pub const HEADER: usize = 6;
@@ -36,8 +42,11 @@ pub const HEADER: usize = 6;
 /// the same Espressif blobs, which support v2. Past ~1 KB the airtime at the
 /// 1 Mbit/s default rate (~8 ms) starts to cost the sender real listening time.
 pub const MAX_PACKET: usize = 1024;
-/// Largest batch payload.
-pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER;
+/// Largest batch payload. Room for the [`auth::TRAILER`] is always kept, so
+/// a batch can be sealed or not without repacking.
+pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER - auth::TRAILER;
+/// A beacon before sealing: header plus the channel.
+pub const BEACON_LEN: usize = HEADER + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -47,20 +56,30 @@ pub enum Kind {
     Command = 3,
 }
 
-/// A parsed packet. `payload` is the bytes after the header.
+/// A parsed packet. `payload` is the bytes after the header (and before the
+/// trailer of a sealed packet).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Packet<'a> {
     pub kind: Kind,
     pub seq: u16,
     pub payload: &'a [u8],
+    /// Version [`auth::VERSION_AUTH`]: it carries a stamp and tag, NOT yet
+    /// checked. A receiver with a key calls [`auth::verify`] before using it.
+    pub sealed: bool,
 }
 
 /// Parse a received ESP-NOW payload. `None` for anything that is not ours
 /// (other ESP-NOW users share the air) or is from another protocol version.
+/// Both unauthenticated and sealed packets parse; the tag is not checked here.
 pub fn parse(data: &[u8]) -> Option<Packet<'_>> {
-    if data.len() < HEADER || data[..2] != MAGIC || data[2] != VERSION {
+    if data.len() < HEADER || data[..2] != MAGIC {
         return None;
     }
+    let (sealed, end) = match data[2] {
+        VERSION => (false, data.len()),
+        auth::VERSION_AUTH if data.len() >= HEADER + auth::TRAILER => (true, data.len() - auth::TRAILER),
+        _ => return None,
+    };
     let kind = match data[3] {
         1 => Kind::Beacon,
         2 => Kind::Frames,
@@ -68,7 +87,7 @@ pub fn parse(data: &[u8]) -> Option<Packet<'_>> {
         _ => return None,
     };
     let seq = u16::from_le_bytes([data[4], data[5]]);
-    Some(Packet { kind, seq, payload: &data[HEADER..] })
+    Some(Packet { kind, seq, payload: &data[HEADER..end], sealed })
 }
 
 fn header(buf: &mut [u8], kind: Kind, seq: u16) {
@@ -80,10 +99,11 @@ fn header(buf: &mut [u8], kind: Kind, seq: u16) {
 
 /// Gateway beacon: header plus the gateway's channel, so a node that heard it
 /// on a neighbouring channel (2.4 GHz channels overlap) knows where to send.
-pub fn beacon(buf: &mut [u8; HEADER + 1], seq: u16, channel: u8) -> &[u8] {
+/// `buf` needs [`BEACON_LEN`] bytes, plus [`auth::TRAILER`] to seal it.
+pub fn beacon(buf: &mut [u8], seq: u16, channel: u8) -> &[u8] {
     header(buf, Kind::Beacon, seq);
     buf[HEADER] = channel;
-    &buf[..]
+    &buf[..BEACON_LEN]
 }
 
 /// The channel a beacon announces.
@@ -93,11 +113,11 @@ pub fn beacon_channel(p: &Packet<'_>) -> Option<u8> {
 
 /// A command packet for one node: header plus `frames`, one or more whole
 /// COBS command frames. `None` if `frames` is not whole frames or does not
-/// fit in `buf`.
+/// fit in `buf` (leave [`auth::TRAILER`] more to seal it).
 pub fn command<'a>(buf: &'a mut [u8], seq: u16, frames: &[u8]) -> Option<&'a [u8]> {
     let whole = frames.last() == Some(&0);
     let len = HEADER + frames.len();
-    if !whole || len > buf.len() || len > MAX_PACKET {
+    if !whole || len > buf.len() || len > MAX_PACKET - auth::TRAILER {
         return None;
     }
     header(buf, Kind::Command, seq);
@@ -144,7 +164,7 @@ impl Batch {
 
     /// Whether `frame` (one COBS frame with its trailing zero) still fits.
     pub fn fits(&self, frame: &[u8]) -> bool {
-        self.len + frame.len() <= MAX_PACKET
+        self.len + frame.len() <= HEADER + MAX_PAYLOAD
     }
 
     /// Append one whole frame. Returns false, unchanged, if it does not fit
@@ -165,6 +185,15 @@ impl Batch {
     pub fn packet(&mut self, seq: u16) -> &[u8] {
         header(&mut self.buf, Kind::Frames, seq);
         &self.buf[..self.len]
+    }
+
+    /// The packet sealed by `src` (this node's address) with `stamp`
+    /// ([`auth::Node::next_up`]). Like [`Batch::packet`] otherwise.
+    pub fn sealed(&mut self, seq: u16, key: &auth::Key, src: &[u8; 6], stamp: auth::Stamp) -> &[u8] {
+        header(&mut self.buf, Kind::Frames, seq);
+        // Always fits: MAX_PAYLOAD leaves room for the trailer.
+        let n = auth::seal(key, src, &mut self.buf, self.len, stamp).unwrap_or(self.len);
+        &self.buf[..n]
     }
 
     pub fn clear(&mut self) {
@@ -218,7 +247,7 @@ mod tests {
         assert_eq!(b.frames(), 2);
         let pkt = b.packet(0x1234).to_vec();
         let p = parse(&pkt).unwrap();
-        assert_eq!(p, Packet { kind: Kind::Frames, seq: 0x1234, payload: &[1, 2, 3, 0, 9, 0] });
+        assert_eq!(p, Packet { kind: Kind::Frames, seq: 0x1234, payload: &[1, 2, 3, 0, 9, 0], sealed: false });
         b.clear();
         assert!(b.is_empty());
     }
@@ -238,7 +267,7 @@ mod tests {
 
     #[test]
     fn beacon_round_trip() {
-        let mut buf = [0u8; HEADER + 1];
+        let mut buf = [0u8; BEACON_LEN];
         let pkt = beacon(&mut buf, 3, 6).to_vec();
         let p = parse(&pkt).unwrap();
         assert_eq!(p.kind, Kind::Beacon);
@@ -249,7 +278,8 @@ mod tests {
     fn rejects_foreign_packets() {
         assert!(parse(b"").is_none());
         assert!(parse(b"XX\x01\x02\x00\x00").is_none());
-        assert!(parse(b"RS\x02\x02\x00\x00").is_none(), "other version");
+        assert!(parse(b"RS\x03\x02\x00\x00").is_none(), "other version");
+        assert!(parse(b"RS\x02\x02\x00\x00").is_none(), "sealed but no room for a trailer");
         assert!(parse(b"RS\x01\x09\x00\x00").is_none(), "unknown kind");
     }
 

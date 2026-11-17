@@ -12,7 +12,9 @@ first choice, but its factory firmware has no ESP-NOW support (see
 `crates/airlink`: a 6-byte header (`RS`, version 1, kind, sequence number),
 then as many whole `link` frames as fit (they are already COBS-delimited, so
 the gateway just splits on the zero bytes). Up to 1024 bytes per packet
-(ESP-NOW v2; both ends report version 2).
+(ESP-NOW v2; both ends report version 2). With a kit key (see "Securing the
+link" below) the header says version 2 and every packet ends in a 28-byte
+trailer: a freshness stamp and an authentication tag.
 
 * **Gateway beacon**, broadcast every 500 ms on its channel (2.4 GHz ch 6).
   Nodes learn the gateway's address from it.
@@ -92,8 +94,10 @@ and hand each `Assign` to their `role` module:
 
 Downlink is new transmitting by the gateway, but only to our own nodes and
 only when the hub has something to say (a few short packets every 5 s per
-node). Like the uplink it is not authenticated: someone nearby could send a
-node a fake assignment and make it listen elsewhere. See "Trade-offs" below.
+node). Without a kit key it is not authenticated: someone nearby could send a
+node a fake assignment and make it listen elsewhere. With one, a node takes
+only commands that carry a good tag and echo its own random session (see
+"Securing the link").
 
 ## Which nodes can use it
 
@@ -110,14 +114,137 @@ node a fake assignment and make it listen elsewhere. See "Trade-offs" below.
   ESP-NOW node and the gateway (its beacons) can be seen by anyone scanning,
   and their MAC addresses are fixed. That is why this is a build option, not
   the default.
-* **Not authenticated.** Anyone nearby could send packets that the gateway
-  relays as a fake node, and so inject a fake track. ESP-NOW's own encryption
-  allows only about 6-7 encrypted peers (Biscuit Shop's "Secure" mode caps at 6
-  nodes for what looks like this reason). If needed, a per-packet MAC with a
-  shared key in our own header has no peer limit.
+* **Authenticated only with a kit key.** Without one (the default until you
+  make a key), anyone nearby can send packets that the gateway relays as a
+  fake node (a fake track, or a real node's reports drowned out), or send a
+  node a fake assignment (blind it). Boards built without a key say so at
+  boot, and the gateway tells the hub in its `Hello` ("gw OPEN no key").
+  With a key, every packet both ways carries a 96-bit HMAC-SHA256 tag and a
+  freshness stamp in our own trailer; forged and replayed packets are dropped
+  and the gateway reports them to the hub as an attack (`ForgedLink`). This
+  is our own MAC rather than ESP-NOW's encryption, which allows only about
+  6-7 encrypted peers (Biscuit Shop's "Secure" mode caps at 6 nodes for what
+  looks like this reason); ours has no peer limit. Nothing is encrypted:
+  detections are what anyone nearby can hear anyway.
+* **The key is in every board's flash.** Someone who steals a node can read
+  the key out of it. If a board is lost, make a new key and reflash the whole
+  kit (below); the old key then opens nothing.
+* **Jamming still works.** A key stops forgery and replay, not someone
+  drowning channel 6 in noise; that shows up as jamming and as nodes going
+  quiet on the hub.
 * The Biscuit Shop (CodeHedge) publishes no ESP-NOW details: its C5 "Nodes"
   report to a "Manager", but the protocol, packet format and source are
   closed. Nothing here is taken from it.
+
+## Securing the link
+
+One secret key per kit, shared by the gateway and every ESP-NOW node. It is
+a small file on your computer, `tools/link.key`, that never goes into git
+(the repository is public; `.gitignore` already excludes it). The build
+bakes it into each board.
+
+**Rule: all or nothing.** A gateway built with the key talks only to nodes
+built with the same key, and a node built with the key talks only to a
+gateway built with it. A mixed kit does not half-work: a node without the
+key is ignored by a keyed gateway (and reported as an attack, reason
+"unauthenticated"), and a keyed node never finds an unkeyed gateway. When
+you add the key, reflash **every** ESP-NOW board.
+
+### 1. Make the key (once per kit)
+
+From the repository folder:
+
+```sh
+cargo run -p link-key -- new
+```
+
+It writes `tools/link.key` and prints the key's **ID**, eight letters and
+digits like `59507916`. The ID names the key without giving it away; write
+it down. Back the file up somewhere private (a password manager, a USB stick
+in a drawer). Never paste the file's contents anywhere. To see the ID again
+later: `cargo run -p link-key -- id`.
+
+### 2. Flash every board
+
+Build and flash exactly as before; the build finds `tools/link.key` by
+itself and prints `ESP-NOW link key <ID>` while compiling.
+
+* Gateway: `cd firmware/gateway && cargo fw`, then
+  `tools/dev-board.sh firmware/gateway/target/riscv32imac-unknown-none-elf/release/gateway 60 c5c`.
+* Each multi-image node: `tools/flash-node.sh <board>`. It builds node-wifi
+  and node-ble with the key and refuses to flash if the node-sdr image was
+  built with a different key (or none): rebuild that one first
+  (`cd firmware/node-sdr/c5 && cargo fw-now`, then pass its ELF in
+  `NODE_SDR_ELF`).
+
+`tools/dev-board.sh` prints the key ID of each image it flashes, and a
+**WARNING** if an image has no key or a different one from `tools/link.key`.
+
+Builds in another checkout of the repository need the file there too, or
+`ROTORSCOPE_LINK_KEY_FILE=/path/to/link.key` in front of the command.
+`ROTORSCOPE_LINK_KEY_FILE=none` builds an open (unauthenticated) image on
+purpose.
+
+### 3. Check it worked
+
+* **At boot**, on each board's USB log: the gateway's first line ends in
+  `"key":"link-key:<ID>"`; each node prints `{"t":"uplink","auth":"link-key:<ID>"}`.
+  The ID must be the same on every board. A board built without the key
+  prints a `"t":"warn"` line saying `built WITHOUT a link key` instead.
+* **Once a second**, the gateway's `"t":"gw"` line has `"key":"<ID>"` and
+  counters `bad_tag`, `replay`, `unauth`, `stale` (rejected packets) and
+  `syncs`. On a healthy kit the four reject counters stay at 0 (a few
+  `stale` right after the gateway restarts are normal).
+* **Nodes still report**: the hub keeps showing every ESP-NOW node, and the
+  gateway's `"t":"node"` lines keep counting packets. A node that shows up
+  only as rejects was built without the key, or with an old one.
+* **On the hub**, the gateway's own `Hello` says `gw key <ID>` (or
+  `gw OPEN no key`); rejected packets arrive as `Threat` frames of kind
+  `forged_link` naming the claimed node, at most once a second.
+
+### 4. If a board is lost or you think the key leaked
+
+`cargo run -p link-key -- new --force`, then reflash the gateway and every
+node. Boards with the old key go deaf to the kit (that is the point).
+
+### How it works (for reviewers)
+
+`crates/airlink/src/auth.rs` holds the whole scheme and its tests:
+
+* **Tag**: HMAC-SHA256 under the 32-byte kit key, truncated to 12 bytes, over
+  the sender's MAC address and the whole packet (header, payload, stamp).
+  The sender's address is covered, so a genuine packet from one node cannot
+  be replayed as another node's.
+* **Stamp** (16 bytes): gateway epoch (random per gateway boot), gateway
+  clock (+1 per gateway packet), node session (random per node boot), node
+  counter (+1 per transmission).
+* **Uplink replay protection**: the gateway takes a node packet only if its
+  epoch is the current one and `(clock, counter)` is above the last one taken
+  from that address. A node that reboots can only send after hearing a gateway
+  packet sent after its boot, so its first `(clock, 0)` is above everything
+  from its previous life: no flash writes needed.
+* **Downlink replay protection**: a command echoes the node's session and
+  newest counter, so it can only have been made during this node boot, after
+  that packet; the node takes only increasing `(echoed counter, clock)`.
+  Broadcast beacons carry no echo and never move a node to another epoch.
+* **Resync**: a node packet with a good tag but a stale epoch (the gateway
+  rebooted) or an old counter is answered with a sync, a beacon sent to that
+  node echoing its session, at most once a second per node.
+* **Wrap**: the node counter is 32 bits; at the end it starts a new session
+  and waits for a newer gateway clock. The gateway restarts (new epoch) if
+  its own 32-bit clock ever runs out (decades).
+* **Cost**: 28 bytes per packet (about 0.22 ms of air at 1 Mbit/s), and a
+  software SHA-256 of the packet (the C5 runs one 64-byte block in an
+  estimated 15-20 us; about 40 us for a beacon, 60-150 us for a typical
+  batch, 0.35 ms for a full 1 KB one). The C5 has a SHA accelerator if this
+  ever matters.
+* **Reports**: `link::ThreatKind::ForgedLink`, `detail` 1 bad tag, 2 replay,
+  3 unauthenticated, 4 stale (see its doc comment).
+
+Not verified on hardware yet (2026-11-17): everything above passes host
+tests and all four images build with and without a key; the radio behaviour
+(syncs after a gateway restart, node image switches, the threat report on the
+hub) needs a bench run.
 
 ## Bench results (2026-11-14, c5a node, c5c gateway, c5b test beacon, ~1 m)
 
