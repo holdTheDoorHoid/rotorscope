@@ -325,6 +325,9 @@ pub mod frame_kind {
     pub const RF: u8 = 4;
     pub const DJI_WIFI: u8 = 5;
     pub const WIFI_DRONE: u8 = 6;
+    /// Link protocol 11: one raw aircraft frame from an aero node
+    /// (`link::Frame::Air`: 1090 ES, UAT, FLARM or OGN), band `RF`.
+    pub const AIRCRAFT: u8 = 7;
 }
 
 /// Detection body: band.

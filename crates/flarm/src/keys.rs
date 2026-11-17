@@ -74,6 +74,19 @@ impl Keys {
     /// Parse a key file (see the module docs for the format).
     pub fn parse(text: &str) -> Result<Keys, KeyError> {
         let mut words = [[0u32; 8]; 5];
+        // Whatever the outcome, the words read so far are wiped.
+        let r = Self::parse_into(text, &mut words).map(|()| Keys {
+            table: words[0],
+            mix: words[1][0],
+            xor: words[2][0],
+            v7_word: words[3][0],
+            v7_xxtea: [words[4][0], words[4][1], words[4][2], words[4][3]],
+        });
+        wipe(words.as_flattened_mut());
+        r
+    }
+
+    fn parse_into(text: &str, words: &mut [[u32; 8]; 5]) -> Result<(), KeyError> {
         let mut seen = [false; 5];
         for (i, raw) in text.lines().enumerate() {
             let line_no = i + 1;
@@ -114,12 +127,28 @@ impl Keys {
         if let Some(k) = seen.iter().position(|s| !s) {
             return Err(KeyError::Missing(NAMES[k].0));
         }
-        Ok(Keys {
-            table: words[0],
-            mix: words[1][0],
-            xor: words[2][0],
-            v7_word: words[3][0],
-            v7_xxtea: [words[4][0], words[4][1], words[4][2], words[4][3]],
-        })
+        Ok(())
+    }
+}
+
+/// Overwrite key words with zeros in a way the compiler cannot drop as a
+/// dead store (no `zeroize` dependency for five arrays).
+fn wipe(words: &mut [u32]) {
+    for w in words.iter_mut() {
+        // SAFETY: `w` is a valid, aligned, exclusive reference.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// The keys are wiped when dropped, so a hub that discards them (a new key
+/// file, a reboot path) leaves no copy behind in that memory.
+impl Drop for Keys {
+    fn drop(&mut self) {
+        wipe(&mut self.table);
+        wipe(core::slice::from_mut(&mut self.mix));
+        wipe(core::slice::from_mut(&mut self.xor));
+        wipe(core::slice::from_mut(&mut self.v7_word));
+        wipe(&mut self.v7_xxtea);
     }
 }
