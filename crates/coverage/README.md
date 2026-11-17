@@ -18,8 +18,8 @@ node that is a gateway never gets one.
 | 4 | DJI DroneID | 5756.5, 5776.5, 5796.5 MHz, then 2414.5, 2429.5, 2444.5, 2459.5, 2399.5 MHz, 700 ms on each (a DroneID burst comes every ~640 ms, so one dwell always catches one) |
 | 5 | Analog FPV / RF scan | Its own built-in sweep (2.4 GHz analog video channels, then every 5.8 GHz channel it reaches) |
 | 6 | Second DroneID | Splits the bands: the first keeps 5.8 GHz, the second takes the 2.4 GHz list |
-| 7 | Second Wi-Fi 5 GHz | Splits: the first parks on 149, the second sweeps 36-48 and 153-165 (100 ms each) |
-| 8 | Second Wi-Fi 2.4 GHz | Splits: the first parks on 6, the second sweeps 1-5 and 7-13 (80 ms each) |
+| 7 | Second Wi-Fi 5 GHz | Splits: the first parks on 149, the second sweeps 36-48, 153-165 and 169-177 (100 ms each) |
+| 8 | Second Wi-Fi 2.4 GHz | Splits: the first parks on 6, the second sweeps 1-5 and 7-14 (80 ms each) |
 | 9 | Second FPV | Splits the 46 FPV channels a C5 reaches (15 at 2.4 GHz, 31 at 5.8 GHz) in half |
 | 10 | Second Bluetooth | A duplicate: Bluetooth has no channels to split |
 
@@ -27,6 +27,13 @@ More nodes than lines: each keeps whatever job it has (more Bluetooth and
 Wi-Fi nodes just add more chances to hear a packet; a third DroneID, Wi-Fi or
 FPV node takes a share of the sweep). The list and every channel table are
 at the top of `src/plans.rs`; change them there.
+
+**Scouting.** Whatever its plan, every Wi-Fi node leaves it for 105 ms every
+3 s to visit one channel of its band(s) the plan skips, round robin
+(`plans::scout_channel`): 2.4 GHz 1-14, 5 GHz 36-177 including the DFS
+channels and 169-177. Nothing can hide on a channel the plan skips (a drone's
+network, an evil twin, a beacon flood); it costs 3.5% of air time. The node
+does this on its own; the hub's plans do not change.
 
 ## Keeping things calm
 

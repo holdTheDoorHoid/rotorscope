@@ -530,3 +530,28 @@ fn droneid_58_covers_the_5_mhz_raster() {
         assert!(DRONEID_58.contains(&c));
     }
 }
+
+#[test]
+fn scouting_visits_what_the_plan_skips() {
+    let ch = |p: &[(u32, u16)]| p.iter().map(|h| h.0 as u8).collect::<std::vec::Vec<u8>>();
+    // 2.4 GHz alone: 6, 1, 11 in the plan; the other eleven, 12-14 included.
+    let p = ch(WIFI24_ALONE);
+    let got: std::vec::Vec<u8> = (0..11).filter_map(|n| scout_channel(p.iter().copied(), n)).collect();
+    assert_eq!(got, [2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14]);
+    assert_eq!(scout_channel(p.iter().copied(), 11), Some(2), "round robin");
+    // 5 GHz alone: everything but the plan's own channels, DFS and UNII-4 included.
+    let p = ch(&base_plan(Wifi5, 1, 0));
+    let got: std::vec::Vec<u8> = (0..SCOUT_5.len()).filter_map(|n| scout_channel(p.iter().copied(), n)).collect();
+    for c in [52, 64, 100, 144, 169, 173, 177] {
+        assert!(got.contains(&c), "{c}");
+    }
+    assert!(got.iter().all(|c| !p.contains(c)));
+    assert!(got.iter().all(|&c| c > 14), "a 5 GHz plan scouts 5 GHz only");
+    // A plan that covers its band has nothing to scout.
+    assert_eq!(scout_channel(SCOUT_24.iter().copied(), 0), None);
+    assert_eq!(scout_channel(core::iter::empty(), 0), None);
+    // Sweeps reach 12-14 and UNII-4.
+    assert!(WIFI24_SWEEP.ends_with(&[12, 13, 14]));
+    assert!(WIFI5_SWEEP.ends_with(&[169, 173, 177]));
+    assert!(SCOUT_MS as u32 * 100 / SCOUT_EVERY_MS <= 4, "scouting costs at most 4% of air time");
+}
