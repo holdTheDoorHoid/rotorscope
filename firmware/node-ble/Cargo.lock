@@ -1635,11 +1635,14 @@ dependencies = [
 name = "node-common"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
+ "embassy-time",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "heapless 0.8.0",
  "link",
  "nodeimage",
+ "wirebus",
 ]
 
 [[package]]
@@ -2441,6 +2444,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wirebus"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "link",
+ "postcard",
 ]
 
 [[package]]

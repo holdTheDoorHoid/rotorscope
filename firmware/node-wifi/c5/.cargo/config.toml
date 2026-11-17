@@ -8,6 +8,9 @@ fw24 = "build --release --features esp32c5,band24 --target-dir ../target-band24"
 # Same, reporting over ESP-NOW to the gateway instead of the UART:
 #   -> ../target-espnow/riscv32imac-unknown-none-elf/release/node-wifi
 fw24-now = "build --release --features esp32c5,band24,espnow --target-dir ../target-espnow"
+# Same, on the wired bus (many nodes on one hub UART; docs/WIREBUS.md):
+#   -> ../target-bus/riscv32imac-unknown-none-elf/release/node-wifi
+fw24-bus = "build --release --features esp32c5,band24,wirebus --target-dir ../target-bus"
 # tools/flash-node.sh puts this build in slot ota_0 of a multi-image node.
 
 [build]

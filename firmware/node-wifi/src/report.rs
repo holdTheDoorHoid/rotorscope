@@ -10,9 +10,9 @@ use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 use esp_hal::Async;
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 use esp_hal::uart::{UartRx, UartTx};
 use heapless::Vec;
 use rid::{MAX_PACK, RawMessage, Transport};
@@ -466,7 +466,7 @@ fn to_hub(frame: &link::Frame) {
 }
 
 /// A wired node's hub commands, on the hub UART's RX pin (`chip::hub_rx_pin!`).
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 #[embassy_executor::task]
 pub async fn hub_reader(mut uart: UartRx<'static, Async>) {
     let mut dec = link::CommandDecoder::new();
@@ -483,7 +483,7 @@ pub async fn hub_reader(mut uart: UartRx<'static, Async>) {
 }
 
 /// Owns the hub UART and writes queued frames out.
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 #[embassy_executor::task]
 pub async fn hub_writer(mut uart: UartTx<'static, Async>) {
     loop {

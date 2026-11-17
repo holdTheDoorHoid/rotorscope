@@ -18,7 +18,7 @@ use esp_backtrace as _;
 use esp_hal::Async;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 use esp_hal::uart::{self, Uart, UartRx, UartTx};
 use esp_hal::usb::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
 use esp_radio::ble::controller::BleConnector;
@@ -102,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
         images.slots.iter().map(|s| s.image.map(nodeimage::Image::project)).collect();
 
     // UART: the hub side (wired builds). TX to the hub, RX for its commands.
-    #[cfg(not(feature = "espnow"))]
+    #[cfg(not(any(feature = "espnow", feature = "wirebus")))]
     {
         #[cfg(feature = "esp32s3")]
         let (hub_tx, hub_rx) = (peripherals.GPIO17, peripherals.GPIO18);
@@ -116,6 +116,18 @@ async fn main(spawner: Spawner) -> ! {
             .split();
         spawner.spawn(uart_task(tx).unwrap());
         spawner.spawn(uart_rx_task(rx).unwrap());
+    }
+
+    // The wired bus (docs/WIREBUS.md): TX open-drain on D9 (GPIO9), RX on D7
+    // (GPIO12), served from an interrupt-mode executor so polls are answered
+    // within the hub's window whatever the BLE host is doing.
+    #[cfg(feature = "wirebus")]
+    {
+        let exec = alloc::boxed::Box::leak(alloc::boxed::Box::new(esp_rtos::embassy::InterruptExecutor::new(
+            peripherals.FROM_CPU_INTR2,
+        )));
+        let bus = exec.start(esp_hal::interrupt::Priority::Priority2);
+        bus.spawn(bus_task(peripherals.UART1, peripherals.GPIO9, peripherals.GPIO12).unwrap());
     }
 
     // ESP-NOW: Wi-Fi parked on the gateway's channel, sharing the radio with
@@ -228,7 +240,42 @@ async fn usb_task(mut tx: UsbSerialJtagTx<'static, Async>) {
     }
 }
 
-#[cfg(not(feature = "espnow"))]
+/// The wired-bus node: whole hub frames from the `out::UART` pipe, `Assign`s
+/// to `role`.
+#[cfg(feature = "wirebus")]
+#[embassy_executor::task]
+async fn bus_task(
+    uart: esp_hal::peripherals::UART1<'static>,
+    tx: esp_hal::peripherals::GPIO9<'static>,
+    rx: esp_hal::peripherals::GPIO12<'static>,
+) -> ! {
+    // Made here: an async UART is bound to the executor that polls it.
+    let uart = node_common::bus::uart(uart, tx, rx);
+    // `out::emit` writes each frame whole under a critical section, so the
+    // pipe only ever holds whole frames: read up to the next zero.
+    let mut outbox = node_common::bus::Staged::new(|v: &mut node_common::bus::Unit| {
+        let mut b = [0u8; 1];
+        while let Ok(1) = out::UART.try_read(&mut b) {
+            if v.push(b[0]).is_err() {
+                v.clear();
+            }
+            if b[0] == 0 {
+                if v.len() > 1 {
+                    return true;
+                }
+                v.clear();
+            }
+        }
+        v.clear();
+        false
+    });
+    node_common::bus::run(uart, &mut outbox, &mut |a| {
+        let _ = role::COMMANDS.try_send(a);
+    })
+    .await
+}
+
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 #[embassy_executor::task]
 async fn uart_rx_task(mut rx: UartRx<'static, Async>) {
     let mut dec = link::CommandDecoder::new();
@@ -243,7 +290,7 @@ async fn uart_rx_task(mut rx: UartRx<'static, Async>) {
     }
 }
 
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 #[embassy_executor::task]
 async fn uart_task(mut tx: UartTx<'static, Async>) {
     let mut buf = [0u8; 256];
@@ -372,6 +419,13 @@ async fn stats_task() {
         for s in &spam {
             out::json_line(&out::ThreatLine::new(s), &mut line);
             out::hub_frame(&link::Frame::Threat(s.clone()));
+        }
+        #[cfg(feature = "wirebus")]
+        {
+            let mut l: heapless::String<322> = heapless::String::new();
+            let _ = l.push_str(&node_common::bus::json_line());
+            let _ = l.push('\n');
+            out::emit(&out::USB, l.as_bytes(), &COUNTERS.usb_drops);
         }
         let d = |f: fn(&Snapshot) -> u32| f(&cur).wrapping_sub(f(&prev));
         let stats = StatsLine {

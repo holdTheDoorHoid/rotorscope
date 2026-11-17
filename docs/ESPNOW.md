@@ -1,5 +1,9 @@
 # ESP-NOW node link (experimental)
 
+Since 2026-11-17 (PLAN.md Phase 5a) the default way to connect nodes is the
+wired bus (docs/WIREBUS.md): no radio transmission and no listening time
+lost. ESP-NOW stays an opt-in build for a node that cannot be wired.
+
 A node that cannot be wired to the hub can send its reports over ESP-NOW to a
 **gateway**: one XIAO ESP32-C5 (`firmware/gateway`) wired to a hub UART. The
 gateway relays every node's frames on that one UART, so the hub sees one more

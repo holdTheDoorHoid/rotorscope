@@ -30,6 +30,7 @@ mod app;
 #[cfg(feature = "benchlog")]
 mod bench;
 mod bb;
+mod bus;
 mod civil;
 mod console;
 mod display;
@@ -129,6 +130,8 @@ mod selftest {
                         *assign += 1;
                         *last = Some((a.role, a.id, a.plan.len()));
                     }
+                    // Bus polls, join slots and grants (protocol 10).
+                    Ok(_) => {}
                     Err(_) => *bad += 1,
                 });
             }
@@ -244,7 +247,11 @@ fn main() -> ! {
     });
 
     let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28(), p.GPIO27);
-    println!("hub-p4: gateway link on UART3 RX GPIO28, TX GPIO27 at {} baud", links::BAUD);
+    println!(
+        "hub-p4: node link on UART3 RX GPIO28, TX GPIO27 at {} baud: {}",
+        links::BAUD,
+        if bus::BUS_DEFAULT { "wired bus (an ESP-NOW gateway is recognised and read as before)" } else { "gateway / point-to-point only" }
+    );
     let mut down = downlink::Downlink::new();
     // The web head (WEBHEAD.md): UART2 TX on GPIO31. The bench self-tests
     // `selftest` and `gpsloop` need UART2 themselves, so they build without it.

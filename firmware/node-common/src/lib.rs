@@ -17,6 +17,9 @@
 //! changes a node's role at most once a minute.
 #![no_std]
 
+#[cfg(feature = "wirebus")]
+pub mod bus;
+
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
     self, AppPartitionSubType, DataPartitionSubType, FlashStorage, PARTITION_TABLE_MAX_LEN, PartitionType,

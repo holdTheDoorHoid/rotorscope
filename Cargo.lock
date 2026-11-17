@@ -2748,6 +2748,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wirebus"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "link",
+ "postcard",
+ "rid",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

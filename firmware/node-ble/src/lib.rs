@@ -16,6 +16,11 @@
 //! its own task.
 #![no_std]
 
+#[cfg(all(feature = "wirebus", feature = "espnow"))]
+compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one");
+#[cfg(all(feature = "wirebus", not(feature = "esp32c5")))]
+compile_error!("`wirebus` pins are set for the XIAO ESP32-C5 only");
+
 pub mod adv;
 pub mod logger;
 pub mod out;

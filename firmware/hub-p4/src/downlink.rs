@@ -40,7 +40,9 @@ impl Downlink {
                 can: n.can,
                 role: n.role,
                 plan: n.plan,
-                relayed: true,
+                // Over ESP-NOW (needs channel-6 visits to hear us), unless
+                // the node is on the wired bus.
+                relayed: !crate::bus::on_bus(&n.mac),
                 last_heard_ms: n.last_ms,
             });
         }
