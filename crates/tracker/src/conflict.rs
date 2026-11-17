@@ -196,6 +196,8 @@ pub fn source_name(s: adsb::Source) -> &'static str {
     match s {
         adsb::Source::ModeS => "ADS-B",
         adsb::Source::Uat => "UAT",
+        adsb::Source::Ogn => "OGN",
+        adsb::Source::Flarm => "FLARM",
     }
 }
 
