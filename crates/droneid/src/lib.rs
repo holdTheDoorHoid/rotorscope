@@ -29,11 +29,27 @@
 //!   gains about 8 dB.
 //! - The inner record: OcuSync 2 flight information ([`payload::FlightInfo`]),
 //!   a second plaintext record type (selector 0x11), and O4's encrypted
-//!   `CRYP` / `INFP` records, of which only the cleartext key ID and header
-//!   are reported. **No decryption and no key handling, ever** (PLAN.md,
-//!   Phase 10). The O4 parsing is built from the published layout and is
-//!   untested on real signals.
+//!   `CRYP` / `INFP` records. An O4 record counts only after every
+//!   structural check of the spec ([`payload::O4Checks`]: logical-object
+//!   boundary, CRC-16, marker, exact core length, zero padding); then its
+//!   cleartext type and key ID (a per-session identifier) are reported and
+//!   the raw object stays available ([`payload::Encrypted::core`]). This
+//!   crate never decrypts and holds no keys (PLAN.md, Phase 10).
+//!   [`o4plain`] is the plug-in point for a separate decryption layer: it
+//!   checks and reads CRYP / INFP plaintext bytes handed to it, with no
+//!   cryptography of its own.
+//! - O4's seven-channel publication schedule: [`follow`] predicts the next
+//!   channel of each followed session so a single-tuner node can be there.
 //!
+//! # Verification against the O4 spec
+//! `vectors.rs` (tests) rebuilds the published O4 transmit chain for the
+//! spec's verification input: the five bit-level stages (CRC-24A, turbo,
+//! rate matching, scrambling) reproduce the published SHA-256 digests
+//! exactly; the two floating-point stages (frequency and time domain) do
+//! not, although every value follows the spec's formulas, and the reason is
+//! unknown (no generator is published). The waveform then decodes through
+//! the C5 capture model. Details in docs/DRONEID-O4.md.
+
 //! # Numerics
 //! Written for an ESP32-C5 (RV32IMAC, 240 MHz, no FPU, 384 KB RAM):
 //! - Samples are `i16` complex. Every per-sample loop (NCO mixing,
@@ -60,8 +76,9 @@
 //! Protocol facts come from the NDSS 2023 paper and its receiver
 //! (RUB-SysSec/DroneSecurity, read for facts only), proto17/dji_droneid's
 //! notes, anarkiwi/samples2djidroneid's field table, and
-//! EdwardBlair/dji-droneid-spec (O4 records, PHY constants, the scrambler
-//! example used as a test vector). Coding facts are 3GPP TS 36.211/36.212. No
+//! EdwardBlair/dji-droneid-spec (O4 records, PHY constants, channel
+//! schedule, the SHA-256 stage digests used as test vectors; no licence, so
+//! facts only). Coding facts are 3GPP TS 36.211/36.212. No
 //! third-party code is included.
 //!
 //! # Privacy
@@ -72,17 +89,21 @@
 
 pub mod crc;
 pub mod fft;
+pub mod follow;
 #[cfg(feature = "std")]
 pub mod host;
 pub mod math;
 pub mod ratematch;
 pub mod payload;
+pub mod o4plain;
 pub mod resample;
 pub mod rx;
 pub mod zc;
 pub mod scramble;
 #[cfg(test)]
 mod synth;
+#[cfg(test)]
+mod vectors;
 pub mod turbo;
 #[cfg(test)]
 mod testutil;

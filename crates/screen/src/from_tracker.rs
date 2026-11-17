@@ -251,10 +251,10 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
                 v.id_kind = IdKind::Presence;
                 let what = match t.dji.key_id {
                     Some(k) if !ctx.config.hide_droneid_ids => {
-                        let _ = write!(v.id, "O4 {:02x}{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3]);
+                        let _ = write!(v.id, "DJI O4 {:02x}{:02x}{:02x}{:02x}", k[0], k[1], k[2], k[3]);
                         None
                     }
-                    Some(_) => Some("O4"),
+                    Some(_) => Some("DJI O4"),
                     None if t.dji.undecoded => Some("DroneID"),
                     None => Some("DJI"),
                 };
@@ -269,6 +269,10 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
     }
     if let Some(m) = t.dji.product_name() {
         let _ = v.model.push_str(m);
+    } else if let Some(st) = t.dji.o4.state() {
+        // O4 has no readable model; show what the record types suggest
+        // (model-dependent, hence the question mark).
+        let _ = v.model.push_str(st.short());
     }
     if let Some(s) = &t.self_id {
         put_text(&mut v.self_id, &s.value.description);

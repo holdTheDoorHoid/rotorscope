@@ -18,7 +18,12 @@
 //! [`DjiInfo::serial`] (never output) and still matches.
 //!
 //! An O4 record is encrypted: only its 4-byte session key ID is readable.
-//! It links the records of one flight, so it keys a presence-only track. A
+//! It links the records of one flight (CRYP and INFP alike), so it keys a
+//! presence-only track, labelled `DJI O4 <key id>`. Which record types were
+//! heard gives a coarse state ([`O4State`]): on the one model studied (DJI
+//! Mini 5 Pro, EdwardBlair/dji-droneid-spec) CRYP packets start after a GNSS
+//! fix and INFP packets after takeoff. Other models may differ, so the
+//! state is always shown as model-dependent. A
 //! burst that matched DroneID but did not decode carries nothing at all, so
 //! every such burst joins one shared presence-only track.
 //!
@@ -99,8 +104,86 @@ pub struct DjiInfo {
     pub key_id: Option<[u8; 4]>,
     /// The shared track for DroneID bursts that did not decode.
     pub undecoded: bool,
+    /// O4 record types heard on this track.
+    pub o4: O4Seen,
     pub ocusync: DjiLink,
     pub wifi: DjiLink,
+}
+
+/// Counts of each O4 record type heard (protocol 8 nodes report the type;
+/// older nodes' `Encrypted` records count in none of them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct O4Seen {
+    pub cryp: u32,
+    pub infp10: u32,
+    pub infp11: u32,
+    pub last_cryp_ms: u64,
+    pub last_infp_ms: u64,
+}
+
+/// What the O4 record types suggest. **Model-dependent**: observed on a
+/// DJI Mini 5 Pro only (CRYP after GNSS fix, INFP after takeoff).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum O4State {
+    /// Only CRYP records: GPS locked, maybe still on the ground.
+    GpsLocked,
+    /// INFP records: probably flying.
+    ProbablyFlying,
+}
+
+impl O4State {
+    /// Text for screens and logs; says it is a model-dependent guess.
+    pub fn label(self) -> &'static str {
+        match self {
+            O4State::GpsLocked => "GPS locked (CRYP seen; model-dependent)",
+            O4State::ProbablyFlying => "probably flying (INFP seen; model-dependent)",
+        }
+    }
+    /// A short form for small screens.
+    pub fn short(self) -> &'static str {
+        match self {
+            O4State::GpsLocked => "GPS lock?",
+            O4State::ProbablyFlying => "flying?",
+        }
+    }
+}
+
+impl O4Seen {
+    pub fn heard(&self) -> bool {
+        self.cryp > 0 || self.infp10 > 0 || self.infp11 > 0
+    }
+    pub fn state(&self) -> Option<O4State> {
+        if self.infp10 > 0 || self.infp11 > 0 {
+            Some(O4State::ProbablyFlying)
+        } else if self.cryp > 0 {
+            Some(O4State::GpsLocked)
+        } else {
+            None
+        }
+    }
+    fn count(&mut self, kind: link::O4Kind, now: u64) {
+        match kind {
+            link::O4Kind::Cryp => {
+                self.cryp = self.cryp.saturating_add(1);
+                self.last_cryp_ms = now;
+            }
+            link::O4Kind::Infp10 => {
+                self.infp10 = self.infp10.saturating_add(1);
+                self.last_infp_ms = now;
+            }
+            link::O4Kind::Infp11 => {
+                self.infp11 = self.infp11.saturating_add(1);
+                self.last_infp_ms = now;
+            }
+        }
+    }
+    fn absorb(&mut self, o: &O4Seen) {
+        self.cryp = self.cryp.saturating_add(o.cryp);
+        self.infp10 = self.infp10.saturating_add(o.infp10);
+        self.infp11 = self.infp11.saturating_add(o.infp11);
+        self.last_cryp_ms = self.last_cryp_ms.max(o.last_cryp_ms);
+        self.last_infp_ms = self.last_infp_ms.max(o.last_infp_ms);
+    }
 }
 
 impl DjiInfo {
@@ -126,6 +209,7 @@ impl DjiInfo {
         self.product_type = self.product_type.or(other.product_type);
         self.key_id = self.key_id.or(other.key_id);
         self.undecoded &= other.undecoded;
+        self.o4.absorb(&other.o4);
         self.ocusync.newer(&other.ocusync);
         self.wifi.newer(&other.wifi);
     }
@@ -315,10 +399,13 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 // A record with an unreadable serial: no identity to key on.
                 None => self.dji_track_where(now_ms, |t| t.dji.undecoded),
             },
-            DroneIdRecord::Encrypted { key_id } => {
+            DroneIdRecord::Encrypted { key_id } | DroneIdRecord::O4 { key_id, .. } => {
                 let k = *key_id;
                 let i = self.dji_track_where(now_ms, |t| t.dji.key_id == Some(k));
                 self.tracks[i].dji.key_id = Some(k);
+                if let DroneIdRecord::O4 { kind, .. } = &s.record {
+                    self.tracks[i].dji.o4.count(*kind, now_ms);
+                }
                 i
             }
             DroneIdRecord::Detected => self.dji_track_where(now_ms, |t| t.dji.undecoded),

@@ -779,6 +779,7 @@ fn json_worst_case_fits() {
         product_type: Some(69),
         key_id: Some([0xff; 4]),
         undecoded: false,
+        o4: dji::O4Seen { cryp: u32::MAX, infp10: u32::MAX, infp11: u32::MAX, last_cryp_ms: u64::MAX, last_infp_ms: u64::MAX },
         ocusync: wide,
         wifi: wide,
     };

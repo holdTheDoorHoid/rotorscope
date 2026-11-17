@@ -371,7 +371,13 @@ pub fn signal_step(center: (f64, f64), t_ms: u64) -> Vec<(u8, link::Frame)> {
                 rssi: (-86.0 - wobble).round() as i8,
                 snr_db: 7,
                 uptime_us: t_ms * 1000,
-                record: DroneIdRecord::Encrypted { key_id: O4_KEY },
+                // Protocol 8: the record type and the (made-up, all-zero)
+                // logical object travel with the key ID.
+                record: DroneIdRecord::O4 {
+                    kind: if n % 3 == 0 { link::O4Kind::Cryp } else { link::O4Kind::Infp10 },
+                    key_id: O4_KEY,
+                    object: core::iter::repeat_n(0u8, 138).collect(),
+                },
             }),
         ));
     }

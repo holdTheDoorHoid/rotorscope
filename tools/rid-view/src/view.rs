@@ -162,13 +162,19 @@ fn display_id(t: &Track, hide_dji: bool) -> String {
     }
 }
 
+/// " (GPS locked ...)" / " (probably flying ...)" when O4 record types were
+/// heard; model-dependent, and the label says so.
+fn o4_state(d: &tracker::DjiInfo) -> String {
+    d.o4.state().map_or(String::new(), |s| format!(" ({})", s.label()))
+}
+
 /// A name for a DJI DroneID track with no shown ID.
 fn dji_label(t: &Track, hidden: bool) -> String {
     let d = &t.dji;
     let mhz = d.freq_mhz().map_or(String::new(), |f| format!(" {f:.1}"));
     match d.key_id {
-        Some(k) if !hidden => format!("O4 {:02x}{:02x}{:02x}{:02x}{mhz}", k[0], k[1], k[2], k[3]),
-        Some(_) => format!("O4{mhz}"),
+        Some(k) if !hidden => format!("DJI O4 {:02x}{:02x}{:02x}{:02x}{mhz}{}", k[0], k[1], k[2], k[3], o4_state(d)),
+        Some(_) => format!("DJI O4{mhz}{}", o4_state(d)),
         None if d.undecoded => format!("DroneID?{mhz}"),
         None if hidden && d.serial.is_some() => format!("DJI (ID hidden){mhz}"),
         None => format!("DJI{mhz}"),

@@ -281,6 +281,57 @@ fn hidden_droneid_identity_still_merges() {
     assert_eq!(v["dji"]["encrypted"], true);
 }
 
+fn o4(kind: link::O4Kind, key: [u8; 4]) -> DroneIdSighting {
+    DroneIdSighting {
+        freq: 58165,
+        rssi: -66,
+        snr_db: 11,
+        uptime_us: 1,
+        record: DroneIdRecord::O4 { kind, key_id: key, object: [0x5a; 135].into_iter().collect() },
+    }
+}
+
+#[test]
+fn o4_cryp_and_infp_share_a_session_track_with_a_state() {
+    use crate::O4State;
+    let mut tr: Tracker = Tracker::default();
+    let k = [0xde, 0xad, 0xbe, 0xef];
+    let a = tr.ingest_droneid(0, &o4(link::O4Kind::Cryp, k), 100);
+    let t = tr.get(a).unwrap();
+    assert_eq!(t.dji.o4.state(), Some(O4State::GpsLocked));
+    let ctx = tr.context(100, None);
+    let v = json_of(t, &ctx);
+    assert_eq!(v["dji"]["o4"]["state"], "GpsLocked");
+    assert_eq!(v["dji"]["o4"]["model_dependent"], true);
+    assert_eq!(v["dji"]["key_id"], "deadbeef");
+    // INFP of the same session joins the track and moves the state on.
+    let b = tr.ingest_droneid(0, &o4(link::O4Kind::Infp10, k), 740);
+    let c = tr.ingest_droneid(0, &o4(link::O4Kind::Infp11, k), 1380);
+    assert_eq!((a, a), (b, c));
+    // An older node's `Encrypted` record of the same session joins too.
+    assert_eq!(tr.ingest_droneid(0, &encrypted(k, 57565), 1400), a);
+    let t = tr.get(a).unwrap();
+    assert_eq!((t.dji.o4.cryp, t.dji.o4.infp10, t.dji.o4.infp11), (1, 1, 1));
+    assert_eq!(t.dji.o4.state(), Some(O4State::ProbablyFlying));
+    assert!(O4State::ProbablyFlying.label().contains("model-dependent"));
+    let ctx = tr.context(1400, None);
+    let v = json_of(t, &ctx);
+    assert_eq!(v["dji"]["o4"]["state"], "ProbablyFlying");
+    assert_eq!(v["dji"]["o4"]["infp10"], 1);
+    let mut buf = [0u8; csv::MAX_ROW];
+    let n = csv::row(t, &ctx, &mut buf).unwrap();
+    assert!(s(&buf, n).contains(",deadbeef,O4Session,"), "{}", s(&buf, n));
+    // Hidden IDs: no key in JSON or CSV, the state still shown.
+    let mut tr2: Tracker = Tracker::new(crate::Config { hide_droneid_ids: true, ..crate::Config::default() });
+    let h = tr2.ingest_droneid(0, &o4(link::O4Kind::Infp10, k), 5);
+    let ctx = tr2.context(5, None);
+    let v = json_of(tr2.get(h).unwrap(), &ctx);
+    assert_eq!(v["dji"]["key_id"], serde_json::Value::Null);
+    assert_eq!(v["dji"]["o4"]["state"], "ProbablyFlying");
+    let n = csv::row(tr2.get(h).unwrap(), &ctx, &mut buf).unwrap();
+    assert!(!s(&buf, n).contains("deadbeef"));
+}
+
 #[test]
 fn o4_records_are_presence_tracks_keyed_by_key_id() {
     let mut tr: Tracker = Tracker::default();

@@ -200,6 +200,18 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
                 }
                 link::DroneIdRecord::Encrypted { key_id } => write!(w, " encrypted key_id={:02x}{:02x}{:02x}{:02x}", key_id[0], key_id[1], key_id[2], key_id[3]),
                 link::DroneIdRecord::Detected => write!(w, " detected"),
+                // The raw object stays in the evidence record (the frame
+                // itself); the summary names it only.
+                link::DroneIdRecord::O4 { kind, key_id, object } => write!(
+                    w,
+                    " o4 {} key_id={:02x}{:02x}{:02x}{:02x} object={}B",
+                    kind.name(),
+                    key_id[0],
+                    key_id[1],
+                    key_id[2],
+                    key_id[3],
+                    object.len()
+                ),
             }
         }
         Frame::Rf(r) => write!(

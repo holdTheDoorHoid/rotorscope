@@ -77,8 +77,21 @@ struct Dji<'a> {
     encrypted: bool,
     /// The shared track for bursts that did not decode.
     undecoded: bool,
+    /// O4 record types heard (protocol 8 nodes), and what they suggest:
+    /// `GpsLocked` (CRYP only) or `ProbablyFlying` (INFP), model-dependent.
+    o4: Option<O4J>,
     ocusync: Option<Ocu>,
     wifi: Option<DjiWifiJ<'a>>,
+}
+
+#[derive(Serialize)]
+struct O4J {
+    cryp: u32,
+    infp10: u32,
+    infp11: u32,
+    state: Option<crate::dji::O4State>,
+    /// Always true: the state is inferred from one model's behaviour.
+    model_dependent: bool,
 }
 
 #[derive(Serialize)]
@@ -129,6 +142,13 @@ fn dji_json<'a>(t: &'a Track, ctx: &Context) -> Option<Dji<'a>> {
         key_id: d.key_id.filter(|_| shown).map(key_hex),
         encrypted: d.key_id.is_some(),
         undecoded: d.undecoded,
+        o4: d.o4.heard().then(|| O4J {
+            cryp: d.o4.cryp,
+            infp10: d.o4.infp10,
+            infp11: d.o4.infp11,
+            state: d.o4.state(),
+            model_dependent: true,
+        }),
         ocusync: d.ocusync.heard().then(|| Ocu {
             n: d.ocusync.count,
             rssi: d.ocusync.rssi,
@@ -241,9 +261,9 @@ struct Own {
 /// i.e. every transport plus 5 GHz beacon and NAN, two IDs, DJI DroneID and
 /// Wi-Fi DroneID too, every field at its longest; see the test). Kept tight
 /// because the hub holds several of these in static task state without
-/// PSRAM. (1792 before protocol 4 added the `dji` object; worst case now
-/// 2216 bytes.)
-pub const MAX_LINE: usize = 2304;
+/// PSRAM. (1792 before protocol 4 added the `dji` object; 2304 before
+/// protocol 8 added `dji.o4`; worst case now 2329 bytes.)
+pub const MAX_LINE: usize = 2432;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.
 pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {

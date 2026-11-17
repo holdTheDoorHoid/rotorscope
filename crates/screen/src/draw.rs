@@ -484,7 +484,9 @@ pub fn short_id(dv: &DroneView, n: usize) -> Buf {
     if id.is_empty() {
         let _ = b.push_str("?");
     } else if dv.id_kind == IdKind::Presence {
-        // "O4 01020304 5756.5", "DroneID 2414.5": the start says what it is.
+        // "DJI O4 01020304 5756.5", "DroneID 2414.5": the start says what
+        // it is. Short lists drop the "DJI " so the session ID survives.
+        let id = if id.chars().count() > n { id.strip_prefix("DJI ").unwrap_or(id) } else { id };
         for c in id.chars().take(n) {
             let _ = b.push(c);
         }

@@ -76,9 +76,11 @@ fn record_json(p: &Parsed, redacted: bool) -> Value {
             "type": "o4_encrypted",
             "crc16_ok": crc16,
             "record": e.kind.name(),
-            "key_id": e.key_id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            "key_id": hide(e.key_id.iter().map(|b| format!("{b:02x}")).collect::<String>()),
             "declared_len": e.declared_len,
             "layout_ok": e.layout_ok,
+            "valid": e.valid(),
+            "first_failure": e.checks.first_failure(),
             "note": if e.kind == EncKind::Cryp { "session key record (not decrypted)" } else { "encrypted telemetry (not decrypted)" },
         }),
         Record::Info11 { serial, len } => json!({
