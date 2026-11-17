@@ -219,5 +219,6 @@ pub fn role_name(r: NodeRole) -> &'static str {
         NodeRole::Fpv => "fpv",
         NodeRole::DroneId => "droneid",
         NodeRole::Gateway => "gateway",
+        NodeRole::Aero => "aero",
     }
 }

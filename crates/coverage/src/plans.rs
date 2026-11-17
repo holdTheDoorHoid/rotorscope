@@ -228,7 +228,7 @@ pub fn base_plan(role: NodeRole, k: usize, idx: usize) -> Plan {
                 push_all(&mut p, part(&fpv_sweep(), k, idx).iter().map(|&f| (f, FPV_MS)));
             }
         }
-        NodeRole::Ble | NodeRole::Gateway => {}
+        NodeRole::Ble | NodeRole::Gateway | NodeRole::Aero => {}
     }
     p
 }
