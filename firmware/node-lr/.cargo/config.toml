@@ -1,0 +1,18 @@
+# ESP32-C3 (RISC-V, no atomics extension: riscv32imc). Build from this
+# directory:
+#   cargo build --release                      -> wired UART to the hub
+#   cargo build --release --features espnow    -> ESP-NOW to the gateway
+#   cargo build --release --features wirebus   -> the wired bus (docs/WIREBUS.md)
+# Never flashed by any script in this repository yet (no hardware in hand).
+[alias]
+fw     = "build --release"
+fw-now = "build --release --features espnow --target-dir target-espnow"
+fw-bus = "build --release --features wirebus --target-dir target-bus"
+
+[build]
+target = "riscv32imc-unknown-none-elf"
+# Frame pointers make esp-backtrace's panic backtraces usable on RISC-V.
+rustflags = ["-C", "force-frame-pointers"]
+
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3"

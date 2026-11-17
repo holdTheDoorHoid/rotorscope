@@ -18,10 +18,13 @@ bench = false
 [features]
 esp32s3 = ["esp-hal/esp32s3", "esp-bootloader-esp-idf/esp32s3"]
 esp32c5 = ["esp-hal/esp32c5", "esp-bootloader-esp-idf/esp32c5"]
+# The aero node (firmware/node-lr) on an ESP32-C3: wired bus only (it holds a
+# single image, so `Images` is not used there).
+esp32c3 = ["esp-hal/esp32c3", "esp-bootloader-esp-idf/esp32c3"]
 # The wired-bus node (crates/wirebus, docs/WIREBUS.md): many nodes on one hub
 # UART, polled by the hub. `src/bus.rs`; used by node-wifi, node-ble and
 # node-sdr when they are built with their own `wirebus` feature.
-wirebus = ["dep:wirebus", "dep:embassy-time", "dep:critical-section"]
+wirebus = ["dep:wirebus", "dep:embassy-time", "dep:critical-section", "dep:portable-atomic"]
 
 [dependencies]
 link      = { path = "../../crates/link" }
@@ -32,3 +35,4 @@ heapless = { version = "0.8", features = ["serde"] }
 wirebus  = { path = "../../crates/wirebus", optional = true }
 embassy-time     = { version = "0.5.0", optional = true }
 critical-section = { version = "1.2.0", optional = true }
+portable-atomic  = { version = "1", default-features = false, optional = true }

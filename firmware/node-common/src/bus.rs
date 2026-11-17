@@ -34,7 +34,9 @@
 //! sees the hub's next command before it starts and stays silent.
 
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+// portable-atomic: the ESP32-C3 (node-lr) has no atomic read-modify-write
+// instructions; on the C5 it is the native atomics.
+use portable_atomic::{AtomicU32, Ordering::Relaxed};
 
 use critical_section::Mutex;
 use embassy_time::{Instant, with_deadline};
@@ -182,6 +184,17 @@ async fn send(tx: &mut UartTx<'_, Async>, mut bytes: &[u8]) {
 /// The node end of the bus, forever. `outbox` is the image's hub queue;
 /// `on_assign` gets each `Assign` addressed to this node (`To` + `Assign`).
 pub async fn run(uart: Uart<'static, Async>, outbox: &mut impl Outbox, on_assign: &mut impl FnMut(Assignment)) -> ! {
+    run_with_time(uart, outbox, on_assign, &mut |_| {}).await
+}
+
+/// [`run`], also handing over each `TimeSync` broadcast (protocol 11) with
+/// its arrival time (`embassy_time` microseconds, the clock `now_us` reads).
+pub async fn run_with_time(
+    uart: Uart<'static, Async>,
+    outbox: &mut impl Outbox,
+    on_assign: &mut impl FnMut(Assignment),
+    on_time: &mut impl FnMut(wirebus::TimeSyncRx),
+) -> ! {
     let seed = esp_hal::rng::Rng::new().random();
     let (mut rx, mut tx) = uart.split();
     let mut node = Node::new(NodeConfig::new(), station_mac(), seed, 0);
@@ -215,6 +228,9 @@ pub async fn run(uart: Uart<'static, Async>, outbox: &mut impl Outbox, on_assign
                     break;
                 }
             }
+        }
+        if let Some(t) = node.take_time_sync() {
+            on_time(t);
         }
         if ready {
             if let Some(a) = node.answer() {
