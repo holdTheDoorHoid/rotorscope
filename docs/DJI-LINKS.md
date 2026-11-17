@@ -190,7 +190,7 @@ signals shaped to the measured numbers.
 - The archive stores members in name order (`0-1s`, `1-2s`, `10-11s`, `2-3s` ...): stream them in
   time order. Some packs have gaps (Avata 2 `VTSBW=10` has no `4-5s`).
 - Centres used: Mini 4 Pro 2450 MHz (both packs: 2.4 GHz only), EVO Nano 5770, Avata 2
-  5760/5765/5760/5760 (10/20/40/60), FPV Combo 5760 (and see below).
+  5760/5765/5760/5760 (10/20/40/60), FPV Combo 5760 (10/20/40).
 
 ### Method (`tools/rfuav-check`)
 
