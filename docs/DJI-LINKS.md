@@ -318,7 +318,7 @@ All centred 5760 MHz.
 ## Test results (synthetic signals)
 
 `cargo test -p djilink`: 22 tests (19 before the RFUAV validation; three regression tests added
-from its measurements, and four existing tests updated where the recordings proved their
+from its measurements, and five existing tests updated where the recordings proved their
 assumption wrong, as noted). Signals are built per symbol by inverse FFT at each system's
 own rate (30.72 MS/s / 2048 for 20 MHz video, 15.36 / 1024 for 10 MHz video and DroneID,
 1.92 / 128 and 3.84 / 256 for the uplinks) with the documented prefixes, interpolated to 40 MS/s,
@@ -329,7 +329,9 @@ plus the C5's receiver noise, quantised to 4 bits by the real `rawcap` window an
   within 60 kHz on 10 MHz signals. (Updated: the 10 MHz centres are now on the x.5 raster, and
   the same signal on a whole MHz or x.25 is `Ofdm15`: Autel's video-width bursts sit there.)
 - On a V1 channel (5770.0) `DjiFpvAirUnit`; 1.5 MHz lower (5768.5, x.5 raster) `DjiVideo`; a
-  clipped 20 MHz signal never gets an air-unit claim.
+  clipped 20 MHz signal never gets an air-unit claim. (Updated: a 20 MHz signal centred on 5735.0
+  inside the capture is now `DjiVideo` too: an 18 MHz signal's measured centre is not trusted for
+  the raster.)
 - 5.2 GHz band (10, 20 and a 15 kHz model of 40 MHz): `DjiO4Video`; the 40 MHz model on 5.8 GHz:
   `DjiVideo`.
 - DroneID bursts: DroneID, not video (unless the dwell is busy). (Updated: the second burst's
