@@ -56,7 +56,7 @@ pub const REPORT_MIN: u8 = 30;
 /// A reported flag is reported again when its confidence rises this much.
 pub const REREPORT_STEP: u8 = 20;
 /// Nodes whose position can be set ([`crate::Tracker::set_node_position`]).
-pub const MAX_NODE_POS: usize = 8;
+pub const MAX_NODE_POS: usize = 17;
 /// Without a node position, a node is assumed to be at most this far from
 /// the hub (an ESP-NOW node can be a few hundred metres away).
 pub const NODE_SPREAD_M: f64 = 300.0;
@@ -1480,7 +1480,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.spoof_cfg.utc_offset_ms = None;
     }
 
-    /// Where node `node` (0-7) is, for the signal-strength check. Without
+    /// Where node `node` (0-16: 0 a wired node, 1-16 relayed ones) is, for the signal-strength check. Without
     /// it a node is assumed within [`NODE_SPREAD_M`] of the hub.
     pub fn set_node_position(&mut self, node: u8, lat: f64, lon: f64) {
         if let Some(n) = self.spoof_cfg.nodes.get_mut(usize::from(node)) {

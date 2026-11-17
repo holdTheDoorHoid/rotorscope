@@ -608,12 +608,13 @@ fn settings() {
 }
 
 #[test]
-fn settings_hub_moved() {
-    let st = base(true);
+fn settings_actions() {
+    let mut st = base(true);
+    st.threats = Threats { active: 2, jammed: false, muted: 1 };
     let mut ui = Ui::default();
-    press(&mut ui, &st, &[Button::Up, Button::Select, Button::Up, Button::Select]);
-    assert!(ui.hub_moved_done());
-    shot("settings_hub_moved", &ui, &st);
+    // Settings page, edit, up to the last row (Nodes at hub), up to Alarms.
+    press(&mut ui, &st, &[Button::Up, Button::Select, Button::Up, Button::Up]);
+    shot("settings_actions", &ui, &st);
 }
 
 #[test]
@@ -622,7 +623,7 @@ fn threat_warnings() {
     // read as all clear.
     let mut st = base(true);
     st.gps.integrity = GpsIntegrity::Spoofing;
-    st.threats = Threats { active: 2, jammed: true };
+    st.threats = Threats { active: 2, jammed: true, muted: 0 };
     let mut ui = Ui::default();
     press(&mut ui, &st, &[Button::Down]);
     shot("threat_warnings", &ui, &st);

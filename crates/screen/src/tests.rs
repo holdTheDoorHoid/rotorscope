@@ -202,17 +202,31 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     ui.button(Button::Select, &s);
     assert!(!ui.settings().buzzer);
     ui.button(Button::Down, &s);
-    assert!(!ui.hub_moved_done());
+    assert_eq!(ui.done_row(), None);
     ui.button(Button::Select, &s); // hub moved
-    assert!(ui.hub_moved_done());
-    assert!(ui.take_hub_moved());
-    assert!(!ui.take_hub_moved(), "taken once");
+    assert_eq!(ui.done_row(), Some(3));
+    assert_eq!(ui.take_request(), Some(Request::HubMoved));
+    assert_eq!(ui.take_request(), None, "taken once");
+    ui.button(Button::Down, &s);
+    ui.button(Button::Select, &s); // alarms: nothing sounding, nothing muted
+    assert_eq!(ui.take_request(), None);
+    let mut loud = s.clone();
+    loud.threats.active = 2;
+    ui.button(Button::Select, &loud);
+    assert_eq!(ui.take_request(), Some(Request::MuteAlarms));
+    let mut quiet = s.clone();
+    quiet.threats.muted = 2;
+    ui.button(Button::Select, &quiet);
+    assert_eq!(ui.take_request(), Some(Request::UnmuteAlarms));
+    ui.button(Button::Down, &s);
+    ui.button(Button::Select, &s); // nodes at hub
+    assert_eq!(ui.take_request(), Some(Request::NodesAtHub));
     ui.button(Button::Down, &s);
     assert_eq!(ui.settings_row(), 0, "rows wrap");
     ui.button(Button::Back, &s);
     assert_eq!(ui.mode(), Mode::Browse);
     assert_eq!(ui.page(), Page::Settings);
-    assert!(!ui.hub_moved_done(), "cleared on leaving");
+    assert_eq!(ui.done_row(), None, "cleared on leaving");
 }
 
 #[test]

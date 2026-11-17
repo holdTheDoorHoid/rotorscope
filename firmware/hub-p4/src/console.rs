@@ -23,6 +23,7 @@
 //!   `p` set own position to the test point (manual source)
 //!   `c` clear the manual own position
 //!   `m` hub moved: forget the GPS home the spoofing checks learned
+//!   `L` type one site line (node position, mute an alarm; `tracker::site`)
 //!   `h` / `?` help
 
 use core::cell::RefCell;

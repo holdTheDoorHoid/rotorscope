@@ -47,6 +47,7 @@ mod report;
 mod rgb;
 mod sd;
 mod sdbb;
+mod site;
 mod touch;
 mod uartring;
 mod webhead;
@@ -311,6 +312,9 @@ fn main() -> ! {
     ev.ctx.uptime_ms = app::now_ms();
     ev.boot((chip.major, chip.minor));
     let mut note: Option<heapless::String<120>> = None;
+    // Console `L`: one site-file line being typed (node position / mute).
+    let mut site_line: Option<heapless::String<120>> = None;
+    let mut site = site::Site::default();
 
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
@@ -356,11 +360,16 @@ fn main() -> ! {
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
-        command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut note, ms);
+        let mut lines = Lines { note: &mut note, site: &mut site_line };
+        if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut lines, ms) {
+            let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
+            site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev);
+        }
         ev.tick(ms);
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
             app.housekeeping(&gps, ms);
+            site.apply(&mut app, &gw);
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
@@ -372,8 +381,15 @@ fn main() -> ! {
             report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, faa, ms);
         }
         app.touch(&mut i2c, ms);
-        if app.take_hub_moved() {
-            forget_gps_home(&mut gps, &mut ev, "screen");
+        match app.take_request() {
+            Some(screen::Request::HubMoved) => forget_gps_home(&mut gps, &mut ev, "screen"),
+            Some(screen::Request::MuteAlarms) => site.mute_active(&mut app, ms, &mut sdlog, &mut ev, site::From::Screen),
+            Some(screen::Request::UnmuteAlarms) => site.unmute_all(&mut app, &mut sdlog, &mut ev, site::From::Screen),
+            Some(screen::Request::NodesAtHub) => {
+                let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
+                site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen);
+            }
+            None => {}
         }
         let utc = gps.utc_ms(ms);
         sd::set_clock(utc, ms);
@@ -392,6 +408,9 @@ fn main() -> ! {
             });
         }
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
+        if let Some(text) = sdlog.take_site() {
+            site.load(text, &mut app);
+        }
         if let Some(k) = sdlog.take_o4_key() {
             let fp = k.fingerprint();
             app.o4.set_key(k);
@@ -545,16 +564,38 @@ fn forget_gps_home(gps: &mut gps::Gps, ev: &mut evlog::Evidence, from: &str) {
     println!("hub-p4: {}", t);
 }
 
+/// Console text being typed: an evidence note (`n`) or a site line (`L`).
+struct Lines<'a> {
+    note: &'a mut Option<heapless::String<120>>,
+    site: &'a mut Option<heapless::String<120>>,
+}
+
+/// Returns a finished site line (console `L`) for the caller to apply.
 fn command(
     app: &mut app::App,
     gps: &mut gps::Gps,
     faa: &faa::Faa,
     ev: &mut evlog::Evidence,
     sdlog: &mut sd::Logger,
-    note: &mut Option<heapless::String<120>>,
+    lines: &mut Lines<'_>,
     now: u64,
-) {
-    let Some(c) = console::read_command() else { return };
+) -> Option<heapless::String<120>> {
+    let c = console::read_command()?;
+    if let Some(n) = lines.site.as_mut() {
+        match c {
+            b'\r' | b'\n' => return lines.site.take(),
+            0x1b => {
+                *lines.site = None;
+                println!("hub-p4: cmd site line cancelled");
+            }
+            c if c.is_ascii() && !c.is_ascii_control() => {
+                let _ = n.push(c as char);
+            }
+            _ => {}
+        }
+        return None;
+    }
+    let note = &mut *lines.note;
     if let Some(n) = note.as_mut() {
         match c {
             b'\r' | b'\n' => {
@@ -574,7 +615,7 @@ fn command(
             }
             _ => {}
         }
-        return;
+        return None;
     }
     ev.set_context(app, gps, now);
     match c {
@@ -628,10 +669,15 @@ fn command(
         }
         b'b' => faa.bench(),
         b'm' => forget_gps_home(gps, ev, "console"),
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, m=hub moved (forget the GPS home), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
+        b'L' => {
+            *lines.site = Some(heapless::String::new());
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all");
+        }
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, m=hub moved (forget the GPS home), L=site line (node position / mute alarm), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }
+    None
 }
 
 /// `fakedrone`: the made-up drone flies over PHL's runways, inside the

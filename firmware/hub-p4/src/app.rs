@@ -259,9 +259,9 @@ impl App {
         self.announce_new(now);
     }
 
-    /// The operator chose "Hub moved" on the settings page (once).
-    pub fn take_hub_moved(&mut self) -> bool {
-        self.ui.take_hub_moved()
+    /// The action the operator chose on the settings page (once).
+    pub fn take_request(&mut self) -> Option<screen::Request> {
+        self.ui.take_request()
     }
 
     /// Redraw at once (e.g. the own position changed).
@@ -362,6 +362,7 @@ impl App {
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
+            muted: self.tracker.threats().iter().filter(|t| t.muted && t.active(now)).count().min(255) as u8,
         };
         // No battery sense on this board (the BAT connector's voltage is not
         // wired to a GPIO): report USB power, as a bench S3 does.

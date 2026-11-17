@@ -47,7 +47,7 @@ pub use band::{BAND_ROWS, Band, render_banded};
 pub use model::*;
 pub use render::{BAR_H, HEIGHT, WIDTH, render};
 pub use theme::Palette;
-pub use ui::{Alert, Button, ButtonDecoder, Buzz, Mode, Page, Settings, Theme, Ui};
+pub use ui::{Alert, Button, ButtonDecoder, Buzz, Mode, Page, Request, Settings, Theme, Ui};
 
 #[cfg(test)]
 mod tests;

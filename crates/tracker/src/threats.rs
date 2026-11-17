@@ -90,6 +90,9 @@ pub struct Threat {
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
     pub reports: u32,
+    /// Matches one of the operator's mute rules: kept and logged, but no
+    /// alert, no badge and not counted as jamming.
+    pub muted: bool,
     pub(crate) announced: bool,
 }
 
@@ -124,15 +127,72 @@ impl Threat {
     }
 }
 
+// ----------------------------------------------------------------- mutes --
+
+/// Mute rules held. Each muted alarm takes one.
+pub const MAX_MUTES: usize = 24;
+
+/// An operator's "this alarm is a known false one" rule (for example a
+/// venue that really runs an open network named like its secured one).
+/// Zero / empty fields match anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mute {
+    pub kind: ThreatKind,
+    pub ssid: heapless::String<32>,
+    pub source: [u8; 6],
+    pub target: [u8; 6],
+    /// Jamming only: centre, 100 kHz units; matches within
+    /// [`SAME_JAM_BAND`]. 0 = any.
+    pub freq: u32,
+}
+
+impl Mute {
+    pub fn matches(&self, t: &Threat) -> bool {
+        let mac = |rule: &[u8; 6], v: &[u8; 6]| *rule == [0; 6] || rule == v;
+        self.kind == t.kind
+            && (self.ssid.is_empty() || self.ssid == t.ssid)
+            && mac(&self.source, &t.source)
+            && mac(&self.target, &t.target)
+            && (self.freq == 0 || self.freq.abs_diff(t.freq) <= SAME_JAM_BAND)
+    }
+
+    /// The narrowest rule that silences `t` and things exactly like it.
+    pub fn for_threat(t: &Threat) -> Self {
+        let mut m = Mute { kind: t.kind, ssid: heapless::String::new(), source: [0; 6], target: [0; 6], freq: 0 };
+        if t.kind.is_jamming() {
+            m.freq = t.freq;
+            return m;
+        }
+        match t.kind {
+            // Named things: the name and the transmitter.
+            ThreatKind::EvilTwin | ThreatKind::Karma | ThreatKind::AttackTool => {
+                m.ssid = t.ssid.clone();
+                m.source = t.source;
+            }
+            ThreatKind::ForgedLink => m.source = t.source,
+            // Floods: the victim (random sources change all the time).
+            _ => m.target = t.target,
+        }
+        m
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ThreatTable {
     v: Vec<Threat, MAX_THREATS>,
     next_id: u32,
+    mutes: Vec<Mute, MAX_MUTES>,
 }
 
 impl ThreatTable {
     pub const fn new() -> Self {
-        Self { v: Vec::new(), next_id: 1 }
+        Self { v: Vec::new(), next_id: 1, mutes: Vec::new() }
+    }
+
+    fn remute(&mut self) {
+        for t in self.v.iter_mut() {
+            t.muted = self.mutes.iter().any(|m| m.matches(t));
+        }
     }
 
     pub fn all(&self) -> &[Threat] {
@@ -173,6 +233,7 @@ impl ThreatTable {
                     first_seen_ms: now_ms,
                     last_seen_ms: now_ms,
                     reports: 0,
+                    muted: false,
                     announced: false,
                 });
                 self.v.len() - 1
@@ -195,6 +256,7 @@ impl ThreatTable {
         }
         t.last_seen_ms = t.last_seen_ms.max(now_ms);
         t.reports = t.reports.saturating_add(1);
+        t.muted = self.mutes.iter().any(|m| m.matches(t));
         t.id
     }
 
@@ -359,9 +421,41 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.threats.all().iter().find(|t| t.id == id)
     }
 
-    /// Threats still being reported.
+    /// Threats still being reported, muted ones left out.
     pub fn active_threats(&self, now_ms: u64) -> impl Iterator<Item = &Threat> {
-        self.threats.all().iter().filter(move |t| t.active(now_ms))
+        self.threats.all().iter().filter(move |t| t.active(now_ms) && !t.muted)
+    }
+
+    /// Add a mute rule (ignored if already there or the list is full;
+    /// returns whether it was added).
+    pub fn mute(&mut self, m: Mute) -> bool {
+        let tt = &mut self.threats;
+        let added = !tt.mutes.contains(&m) && tt.mutes.push(m).is_ok();
+        tt.remute();
+        added
+    }
+
+    /// Mute every alarm active right now; returns the rules added (for the
+    /// hub to save).
+    pub fn mute_active(&mut self, now_ms: u64) -> Vec<Mute, MAX_THREATS> {
+        let rules: Vec<Mute, MAX_THREATS> = self.active_threats(now_ms).map(Mute::for_threat).collect();
+        let mut added = Vec::new();
+        for m in rules {
+            if self.mute(m.clone()) {
+                let _ = added.push(m);
+            }
+        }
+        added
+    }
+
+    /// Drop every mute rule.
+    pub fn unmute_all(&mut self) {
+        self.threats.mutes.clear();
+        self.threats.remute();
+    }
+
+    pub fn mutes(&self) -> &[Mute] {
+        &self.threats.mutes
     }
 
     /// Whether any node is jammed or blinded right now: the detector may be
@@ -371,10 +465,15 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     }
 
     /// The next threat to alert on, exactly once each.
+    /// Muted threats are never handed out.
     pub fn take_new_threat(&mut self, _now_ms: u64) -> Option<ThreatId> {
-        let t = self.threats.v.iter_mut().find(|t| !t.announced)?;
-        t.announced = true;
-        Some(t.id)
+        loop {
+            let t = self.threats.v.iter_mut().find(|t| !t.announced)?;
+            t.announced = true;
+            if !t.muted {
+                return Some(t.id);
+            }
+        }
     }
 
     /// Normal and current frame rate of a node (frames/s), once learned.
@@ -393,6 +492,7 @@ struct ThreatLine<'a> {
     label: &'static str,
     jamming: bool,
     active: bool,
+    muted: bool,
     by_hub: bool,
     node: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -434,6 +534,7 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         label: t.label(),
         jamming: t.kind.is_jamming(),
         active: t.active(ctx.now_ms),
+        muted: t.muted,
         by_hub: t.by_hub,
         node: t.node,
         ch: (t.channel != 0).then_some(t.channel),
@@ -593,6 +694,36 @@ mod tests {
             assert!(tr.ingest_node_stats(3, (i + 1) * 1_000_000, 0, t).is_none());
         }
         assert!(tr.threats().is_empty());
+    }
+
+    #[test]
+    fn muted_alarms_stay_listed_but_quiet() {
+        let mut tr: Tracker = Tracker::default();
+        let mut twin = sighting(ThreatKind::EvilTwin, 0, 0);
+        twin.ssid = heapless::String::try_from("CafeWiFi").unwrap();
+        tr.ingest_threat(1, &twin, 1_000);
+        tr.ingest_threat(2, &sighting(ThreatKind::JamBroadband, 0, 24_370), 1_000);
+        assert!(tr.take_new_threat(1_000).is_some());
+        assert!(tr.take_new_threat(1_000).is_some());
+        assert!(tr.partly_blind(1_000));
+        let added = tr.mute_active(1_000);
+        assert_eq!(added.len(), 2);
+        assert_eq!(tr.active_threats(1_000).count(), 0);
+        assert!(!tr.partly_blind(1_000));
+        assert_eq!(tr.threats().len(), 2, "kept for the record");
+        // The same twin again: still muted, no new alert. A different name
+        // or jamming on the other band is not.
+        tr.ingest_threat(3, &twin, 2_000);
+        assert!(tr.take_new_threat(2_000).is_none());
+        let mut other = twin.clone();
+        other.ssid = heapless::String::try_from("Other").unwrap();
+        tr.ingest_threat(1, &other, 2_000);
+        tr.ingest_threat(2, &sighting(ThreatKind::JamBroadband, 0, 58_000), 2_000);
+        assert_eq!(tr.active_threats(2_000).count(), 2);
+        assert!(tr.mute_active(2_000).len() == 2 && tr.mute_active(2_000).is_empty(), "no duplicate rules");
+        tr.unmute_all();
+        assert_eq!(tr.active_threats(2_000).count(), 5, "the twin heard by node 3 too");
+        assert!(tr.mutes().is_empty());
     }
 
     #[test]

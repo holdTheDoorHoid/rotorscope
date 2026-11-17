@@ -533,6 +533,8 @@ pub struct Threats {
     /// A node is jammed or deaf: the detector may be missing drones, so an
     /// empty list must not read as "all clear".
     pub jammed: bool,
+    /// Alarms the operator muted (still logged).
+    pub muted: u8,
 }
 
 impl UiState {

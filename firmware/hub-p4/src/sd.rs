@@ -212,7 +212,20 @@ pub struct Logger {
     o4_key: Option<djicrypt::PrivateKey>,
     /// What the key file check found, for the status line.
     pub o4_key_state: &'static str,
+    /// Bytes of `ROTORSCP/SITE.TXT` read into [`SITE_BUF`] at mount,
+    /// until the main loop takes them.
+    site: Option<usize>,
 }
+
+/// The site file's text. Static, not on the stack: the main task's stack
+/// has no room for 8 KB.
+static mut SITE_BUF: [u8; SITE_MAX] = [0; SITE_MAX];
+
+/// Node positions and muted alarms (`tracker::site`). The hub only ever
+/// appends to it, so hand edits are never lost.
+const SITE_NAME: &str = "SITE.TXT";
+/// Longest site file read (later lines win; a longer file is read up to here).
+pub const SITE_MAX: usize = 8192;
 
 /// The owner's O4 DroneID private key (64 hex digits) in the log folder.
 /// Never in the repository; see docs/DRONEID-O4.md "Decryption".
@@ -259,12 +272,58 @@ impl Logger {
             max_ev_what: "",
             o4_key: None,
             o4_key_state: "none",
+            site: None,
         }
     }
 
     /// The O4 key read from the card, once (the decryptor keeps it).
     pub fn take_o4_key(&mut self) -> Option<djicrypt::PrivateKey> {
         self.o4_key.take()
+    }
+
+    /// The site file read at mount, once.
+    pub fn take_site(&mut self) -> Option<&'static [u8]> {
+        let n = self.site.take()?;
+        // SAFETY: only this Logger (one, owned by the main loop) touches
+        // SITE_BUF, and only at mount, after the previous text was used.
+        Some(unsafe { &(&*core::ptr::addr_of!(SITE_BUF))[..n] })
+    }
+
+    /// Read `ROTORSCP/SITE.TXT` if present.
+    fn load_site(&mut self) {
+        let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
+        let f = match vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(embedded_sdmmc::Error::NotFound) => {
+                println!("hub-p4: no {DIR}/{SITE_NAME}: no node positions or muted alarms yet");
+                return;
+            }
+            Err(e) => {
+                println!("hub-p4: {DIR}/{SITE_NAME} open failed: {e:?}");
+                return;
+            }
+        };
+        // SAFETY: see `take_site`.
+        let buf = unsafe { &mut *core::ptr::addr_of_mut!(SITE_BUF) };
+        let mut n = 0;
+        while n < SITE_MAX {
+            match vm.read(f, &mut buf[n..]) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => n += k,
+            }
+        }
+        let _ = vm.close_file(f);
+        println!("hub-p4: {DIR}/{SITE_NAME} read ({n} bytes)");
+        self.site = Some(n);
+    }
+
+    /// Append `text` (whole lines) to `ROTORSCP/SITE.TXT`, creating it.
+    /// Returns false when there is no card or the write failed.
+    pub fn append_site(&mut self, text: &str) -> bool {
+        let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return false };
+        let Ok(f) = vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadWriteCreateOrAppend) else { return false };
+        let ok = vm.write(f, text.as_bytes()).is_ok();
+        vm.close_file(f).is_ok() && ok
     }
 
     /// Read `ROTORSCP/O4KEY.TXT` if present. Only a fingerprint of the
@@ -545,6 +604,7 @@ impl Logger {
                     self.pack_file = None;
                 }
                 self.load_o4_key();
+                self.load_site();
             }
             Err(e) => {
                 if let embedded_sdmmc::Error::FormatError(_) = e {

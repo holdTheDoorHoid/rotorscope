@@ -119,7 +119,21 @@ impl Default for Settings {
 }
 
 /// Rows on the settings page, in order.
-pub const SETTINGS_ROWS: usize = 4;
+pub const SETTINGS_ROWS: usize = 6;
+
+/// An action chosen on the settings page, for the hub to carry out
+/// ([`Ui::take_request`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// "Hub moved": forget the GPS home the spoofing checks learned.
+    HubMoved,
+    /// "Alarms": mute every attack/jamming alarm sounding now.
+    MuteAlarms,
+    /// "Alarms" when none sounds: drop every mute.
+    UnmuteAlarms,
+    /// "Nodes at hub": every node stands where the hub is.
+    NodesAtHub,
+}
 
 /// A request for the buzzer, taken by the hub with [`Ui::take_buzz`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,10 +171,10 @@ pub struct Ui {
     /// Drone key under the cursor (Pick/Detail).
     cursor: Option<u32>,
     settings_row: usize,
-    /// "Hub moved" was chosen: a request for the hub (taken once) and the
-    /// row's "Relearning" text until the settings are left.
-    hub_moved: bool,
-    hub_moved_done: bool,
+    /// An action row was chosen: the request for the hub (taken once), and
+    /// which row says "done" until the settings are left.
+    request: Option<Request>,
+    done_row: Option<usize>,
     alert: Option<Alert>,
     settings: Settings,
     buzz: Option<Buzz>,
@@ -183,8 +197,8 @@ impl Ui {
             mode: Mode::Browse,
             cursor: None,
             settings_row: 0,
-            hub_moved: false,
-            hub_moved_done: false,
+            request: None,
+            done_row: None,
             alert: None,
             settings,
             buzz: None,
@@ -208,15 +222,14 @@ impl Ui {
             _ => None,
         }
     }
-    /// The operator chose "Hub moved": forget the GPS home the hub learned
-    /// (true once per choice).
-    pub fn take_hub_moved(&mut self) -> bool {
-        core::mem::take(&mut self.hub_moved)
+    /// The action the operator chose on the settings page, once.
+    pub fn take_request(&mut self) -> Option<Request> {
+        self.request.take()
     }
 
-    /// "Hub moved" was chosen during this visit to the settings.
-    pub fn hub_moved_done(&self) -> bool {
-        self.hub_moved_done
+    /// The action row chosen during this visit to the settings, if any.
+    pub fn done_row(&self) -> Option<usize> {
+        self.done_row
     }
 
     pub fn settings_row(&self) -> usize {
@@ -348,10 +361,10 @@ impl Ui {
                     self.settings_row = (self.settings_row + SETTINGS_ROWS - 1) % SETTINGS_ROWS
                 }
                 Button::Down => self.settings_row = (self.settings_row + 1) % SETTINGS_ROWS,
-                Button::Select => self.change_setting(),
+                Button::Select => self.change_setting(state),
                 Button::Back => {
                     self.mode = Mode::Browse;
-                    self.hub_moved_done = false;
+                    self.done_row = None;
                 }
             },
         }
@@ -389,7 +402,7 @@ impl Ui {
         self.cursor = Some(state.drones[usize::from(order[next as usize])].key);
     }
 
-    fn change_setting(&mut self) {
+    fn change_setting(&mut self, state: &UiState) {
         let s = &mut self.settings;
         match self.settings_row {
             0 => {
@@ -400,9 +413,18 @@ impl Ui {
             }
             1 => s.brightness = s.brightness % 5 + 1,
             2 => s.buzzer = !s.buzzer,
-            _ => {
-                self.hub_moved = true;
-                self.hub_moved_done = true;
+            row => {
+                let r = match row {
+                    3 => Some(Request::HubMoved),
+                    4 if state.threats.active > 0 => Some(Request::MuteAlarms),
+                    4 if state.threats.muted > 0 => Some(Request::UnmuteAlarms),
+                    4 => None,
+                    _ => Some(Request::NodesAtHub),
+                };
+                if r.is_some() {
+                    self.request = r;
+                    self.done_row = Some(row);
+                }
             }
         }
     }

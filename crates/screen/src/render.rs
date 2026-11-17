@@ -48,7 +48,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
             Page::Signals => signals(s, p, d)?,
             Page::Flags => flags_page(s, p, d)?,
             Page::Health => health(s, p, d)?,
-            Page::Settings => settings(ui, p, d)?,
+            Page::Settings => settings(ui, s, p, d)?,
         },
     }
     status_bar(s, p, d)?;
@@ -1336,12 +1336,24 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
 // Settings
 // ---------------------------------------------------------------------------
 
-fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, p: &Palette, d: &mut D) -> Res<D::Error> {
+fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
     let y0 = BAR_H + 4;
     text(d, "SETTINGS", 4, y0, F_BAR, p.fg)?;
     let st = ui.settings();
     let editing = ui.mode() == Mode::Edit;
-    let rows: [(&str, &str); 4] = [
+    let done = |row: usize| ui.done_row() == Some(row);
+    let mut alarms: String<20> = String::new();
+    let t = s.threats;
+    let _ = if done(4) {
+        write!(alarms, "Done")
+    } else if t.active > 0 {
+        write!(alarms, "Mute {} now", t.active)
+    } else if t.muted > 0 {
+        write!(alarms, "Unmute {}", t.muted)
+    } else {
+        write!(alarms, "None sounding")
+    };
+    let rows: [(&str, &str); 6] = [
         (
             "Theme",
             match st.theme {
@@ -1353,21 +1365,18 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, p: &Palette, d: &mut D) -> R
         ("Buzzer", if st.buzzer { "On" } else { "Off (muted)" }),
         // The hub learns where it stands and treats a GPS position far from
         // there as faked: after moving it on purpose, reset that.
-        (
-            "Hub moved",
-            if ui.hub_moved_done() {
-                "Relearning"
-            } else {
-                "Reset GPS"
-            },
-        ),
+        ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" }),
+        // Known false alarms (a venue's real open network...): mute them.
+        ("Alarms", alarms.as_str()),
+        // A wired or bench kit: every node stands at the hub.
+        ("Nodes at hub", if done(5) { "Placed" } else { "Place all here" }),
     ];
-    let mut y = y0 + 26;
+    let mut y = y0 + 22;
     for (i, (k, v)) in rows.iter().enumerate() {
         let sel = editing && ui.settings_row() == i;
         let (fg, bg) = if sel { (p.bg, p.fg) } else { (p.fg, p.bg) };
         if sel {
-            fill(d, 0, y - 4, WIDTH, 28, p.fg)?;
+            fill(d, 0, y - 3, WIDTH, 26, p.fg)?;
             text(d, ">", 6, y, F_LARGE, fg)?;
         }
         text(d, k, 24, y, F_LARGE, fg)?;
@@ -1385,7 +1394,7 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, p: &Palette, d: &mut D) -> R
             text(d, v, 170, y, F_LARGE, fg)?;
         }
         let _ = bg;
-        y += 34;
+        y += 30;
     }
     let hint = if editing {
         "UP/DN choose  SEL change  hold SEL done"
