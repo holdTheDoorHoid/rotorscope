@@ -1,7 +1,8 @@
 # Aircraft signals beyond 1090 MHz: UAT, FLARM and its open relatives
 
 Research for PLAN.md Phase 14b, 14c and 14d (2026-11-15). Plain-language summary first, then
-the detail and sources. Nothing here is built yet; 14a (our own 1090 MHz decoder) is.
+the detail and sources. 14a (our own 1090 MHz decoder) is built; so, since 2026-11-17, are the
+UAT, OGN and FLARM decoders (see [Built](#built-2026-11-17)), not yet tried on real radio frames.
 
 ## Summary
 
@@ -14,10 +15,10 @@ the detail and sources. Nothing here is built yet; 14a (our own 1090 MHz decoder
 - **FLARM** (gliders, some helicopters and light aircraft) is common in Europe, rare in the
   US. In the US it hops across 902-928 MHz. In May 2026 FLARM published its radio protocol
   (the "FLARM FAMP Public Protocol") with a free licence for **non-commercial, receive-only**
-  use; commercial use needs a paid licence. If Rotorscope units are ever sold, decoding FLARM
-  content falls under "commercial". **Default: presence/energy only**, as Phase 9. Decode only
-  if the owner and a lawyer read the licence's Annex 1 and decide otherwise. We have not
-  implemented any FLARM decryption and should not.
+  use; commercial use needs a paid licence. **The owner reports having permission to use the
+  FLARM legacy keys (2026-11-17)**, so Rotorscope now decodes FLARM legacy packets (receive
+  only, cargo feature `legacy`, off by default). The keys are **not** in the repository and
+  never will be: they are loaded from a file at run time (see below). **Never transmit FLARM.**
 - **OGN tracker protocol, FANET, ADS-L** are open, but almost unused in the US. ADS-L is
   European by design (868 MHz only). All three can be received by an LR2021 or an SX1262.
 - **Recommendation:** build **UAT first** (biggest US payoff, open format, cheap hardware).
@@ -105,14 +106,140 @@ OGN and kept "OGN's decoding staying interoperable through all major updates" [1
 FLARM's no-tracking flag. That is an arrangement with one non-commercial project, not a general
 permission.
 
-**Legal default for Rotorscope (recommended, for the owner to decide):**
-1. **Presence only by default**: count energy and packets on the FLARM channels, no content.
-   This is the same line as Phase 9's control-link detection and needs no licence.
-2. **Content decoding only under the FFPP licence, and only if** the owner and a lawyer read
-   Annex 1 and conclude that Rotorscope's use is "non-commercial, receive-only". A kit sold at
-   conventions is very likely commercial; then FLARM's commercial licence is the route
-   (licensing@flarm.com).
-3. **Never** implement decryption from reverse-engineered keys, never transmit FLARM.
+**Decision for Rotorscope (owner, 2026-11-17):** the owner reports having permission to use
+the FLARM legacy keys, and asked for FLARM legacy decoding. It is built (`crates/flarm`,
+feature `legacy`), with these rules:
+1. **Receive only. Never transmit FLARM.** The crate has no transmit path; the encoders in its
+   tests exist only to make test vectors and are never in a firmware build.
+2. **The keys are never published.** The permission covers using the keys, not publishing
+   them, and the repository is public. No key constant is in the source; they are read at run
+   time from `ROTORSCP/FLARMKEY.TXT` on the hub's SD card (format below), and are never
+   committed, printed, logged, or sent between boards (the same rule as the O4 key).
+3. **Off by default.** The hub opts in with the `legacy` feature and a key file; without the
+   file, FLARM stays presence-only as before.
+4. If Rotorscope units are ever sold, re-check the commercial terms (FLARM's FFPP licence and
+   the key permission) before shipping FLARM decoding in them.
+
+## Built (2026-11-17)
+
+Three decoders now turn raw radio frames into the same aircraft record the ADSBee and our
+1090 MHz decoder produce, so these aircraft appear in the existing aircraft table, on the
+screen, in the SD log, USB JSON, the phone page and CoT, labelled **UAT**, **OGN** or
+**FLARM**. They are host-tested only: **no real radio frame has been through them yet**; the
+LR2021 radio node that will deliver the frames is being written separately.
+
+### `crates/uat`: UAT on 978 MHz
+
+**In plain words:** takes one 978 MHz ADS-B message as the radio heard it, repairs up to 6
+damaged bytes (basic message) or 7 (long message) using the message's built-in error-correcting
+code, throws it away if it is worse than that, and reads out who the aircraft is, where, how
+high, how fast, which way, climbing or descending, its call sign or squawk, its type and any
+emergency.
+
+- Input: the bytes after the 36-bit sync word, parity included. Capture 48 bytes every time:
+  the decoder tries a long frame, then a basic one (as dump978).
+- Reed-Solomon RS(30,18) and RS(48,34) over GF(256) (polynomial 0x187, first root alpha^120),
+  written fresh. Stricter than dump978's library: an error "found" in the unused (shortened)
+  part of the code rejects the frame. A rejected frame is left untouched.
+- Payload: header (24-bit address, address qualifier), state vector (latitude/longitude,
+  barometric or geometric altitude, north/east velocity or ground speed and track, vertical
+  rate, TIS-B site), mode status (call sign, or squawk when the CSID bit says so; emitter
+  category; emergency; UAT version), auxiliary state vector (the second altitude).
+- Ground uplink (FIS-B weather) is not decoded.
+- Hub API:
+  ```rust
+  uat::decode(frame: &mut [u8]) -> Result<uat::Decoded, uat::Error>  // >= 30 bytes, 48 ideal
+  uat::Decoded::aircraft(&self) -> adsb::Aircraft                      // Source::Uat
+  uat::correct_adsb_frame(frame: &mut [u8]) -> Result<(FrameKind, u8), Error>
+  ```
+- 22 host tests (frames built by a test-only encoder; error correction at every count up to
+  the limit, rejection beyond it, noise rejection, every field).
+
+### `crates/flarm`, module `ogn`: OGN trackers
+
+**In plain words:** OGN trackers are open-source glider/paraglider beacons. This checks the
+packet's 48 parity checks (any failure: thrown away), undoes the published "whitening"
+scramble, and reads position, GPS and pressure altitude, climb, speed, heading, aircraft type
+and address type. Encrypted packets (only their owner can read them) and status packets are
+skipped, as SoftRF does.
+
+- Input: the 26 bytes after Manchester decoding (20 data + 6 LDPC parity), as SoftRF's driver
+  delivers them.
+- Hub API: `flarm::ogn::decode(packet: &[u8]) -> Result<flarm::Decoded, flarm::ogn::Error>`;
+  `Decoded.aircraft` is the `adsb::Aircraft` (`Source::Ogn`), with the address type, aircraft
+  type, stealth flag and relay count beside it.
+- OGN has no air/ground bit; "airborne" is judged by speed against FLARM's per-type thresholds.
+  OGN altitude is GPS height above mean sea level (about 30 m different from the ellipsoid
+  height the record nominally holds; harmless for "how high").
+- 13 host tests (packets built by a test-only encoder using the OGN code's generator table,
+  checked against its separate parity-check table).
+
+### `crates/flarm`, module `legacy` (feature `legacy`): FLARM
+
+**In plain words:** FLARM boxes scramble their packets with keys that change with the time and
+the aircraft's address, and send only the low digits of their position. With the key file, the
+hub's GPS time and its own position, this unscrambles FLARM version 6 and 7 position packets
+(as the open-source SoftRF does) and reads address, position, height, speed, direction, climb,
+aircraft type, and the "don't track me" and "stealth" flags.
+
+- Input: the 24 payload bytes after Manchester decoding, or 26 with the CRC (then checked).
+- Needs the receiver's UTC time and position (`flarm::legacy::Receiver`). A wrong time gives
+  a wrong key: v6 then usually fails its parity bit; v7 has no check of its own, so do not feed
+  v7 packets in without a GNSS time.
+- Aircraft that set **no-track** should be shown on the unit but not logged or relayed off it
+  (OGN honours the same flag). `Decoded.no_track` carries it; the hub decides.
+- Hub API:
+  ```rust
+  let keys = flarm::Keys::parse(&text)?;              // text of ROTORSCP/FLARMKEY.TXT
+  flarm::legacy::decode(packet: &[u8], keys: &flarm::Keys, rx: &flarm::legacy::Receiver)
+      -> Result<flarm::Decoded, flarm::legacy::Error>  // Source::Flarm
+  ```
+- 14 host tests with **made-up keys** (algorithm round trips through a test-only port of
+  SoftRF's encoder), plus one real-key test that runs only when `FLARM_KEYS_FILE` names a key
+  file (it passed locally on 2026-11-17 with keys extracted from a SoftRF checkout).
+
+### FLARMKEY.TXT (the key file)
+
+```text
+# FLARM legacy keys. Never commit, print, log or relay this file.
+key1 = w0 w1 w2 w3 w4 w5 w6 w7    # 8 words
+key2 = w
+key3 = w
+key4 = w
+key5 = w0 w1 w2 w3                # 4 words
+```
+
+Each `w` is a 32-bit word in hex (optional `0x`), separated by spaces or commas; `#` starts a
+comment; every name exactly once. The names are SoftRF's `LEGACY_KEY1`..`LEGACY_KEY5`.
+
+- Make it with `cargo run -p flarm-keys -- <SoftRF checkout>`: writes `tools/flarm.keys`
+  (git-ignored, readable only by you), never prints a value, and refuses to write anywhere git
+  would not ignore. Copy it to the hub's SD card as `ROTORSCP/FLARMKEY.TXT`.
+- **Rules:** the keys are never committed (`tools/flarm.keys`, `FLARMKEY.TXT` and
+  `*.flarmkeys` are in `.gitignore`), never printed or logged (`flarm::Keys` prints as
+  `Keys(<redacted>)`, parse errors name only line numbers), and never sent between boards.
+
+### Not ported from SoftRF, and why
+
+- OGN **encrypted** packets: only the owner's key can open them; SoftRF skips them too.
+- OGN **status/meteo** packets and the OGN relay logic: no aircraft position in them.
+- OGN **soft-decision LDPC repair**: SoftRF accepts only packets with zero failed checks; so
+  do we.
+- SoftRF's v7 **timestamp check** is disabled in SoftRF (`#if 0`); we follow it. FLARM v6/v7
+  **interleaving** and **time slots** are transmit-side; nothing transmit-side is ported.
+- **ADS-L, FANET, P3I** protocols: not asked for here; ADS-L would reuse `modes::crc`.
+- dump978's **uplink** (FIS-B) decoding, and Phil Karn's LGPL Reed-Solomon library (ours is
+  written fresh).
+
+### Credit
+
+Ported under Rotorscope's GPL-3.0-or-later, with thanks:
+- **dump978** by Oliver Jowett (GPL-2.0-or-later), as carried in SoftRF: UAT field layout and
+  frame-type logic.
+- **SoftRF** by Linar Yusupov (GPL-3.0-or-later), <https://github.com/lyusupov/SoftRF>:
+  `OGNTP.cpp`, `Legacy.cpp` (legacy decoder by Stanislaw Pusep).
+- **OGN tracker** library by Pawel Jalocha (GPL-3.0), as carried in SoftRF: packet layout,
+  variable-resolution codes, whitening and the LDPC tables.
 
 ## Open relatives
 

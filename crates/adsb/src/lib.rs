@@ -20,6 +20,10 @@
 //! `#U:` one heard on 978 MHz (UAT, ADSBee 1090U only). Units are the
 //! ADSBee's: feet, knots, feet per minute, degrees, dBm.
 //!
+//! **Our own extension.** `#O:` (OGN) and `#F:` (FLARM) lines carry
+//! aircraft decoded by Rotorscope's `flarm` crate between our own boards,
+//! with exactly the `#U:` field layout. No ADSBee prints them.
+//!
 //! # Checksum
 //! The last field is a CRC-16 of every byte from the `#` up to and including
 //! the comma before it, printed as 1-4 upper-case hex digits without leading
@@ -59,7 +63,7 @@ pub const DEFAULT_BAUD: u32 = 115_200;
 /// Why a line was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// Not a CSBee line: no `#A:`, `#U:` or `#S:` prefix. On the USB console
+    /// Not a CSBee line: no `#A:`, `#U:`, `#O:`, `#F:` or `#S:` prefix. On the USB console
     /// this is normal (log messages, AT replies); on the UART it is noise.
     NotCsbee,
     /// Longer than [`MAX_LINE`].
@@ -89,8 +93,38 @@ pub enum Report {
 pub enum Source {
     /// 1090 MHz Mode S / ADS-B (`#A:` lines).
     ModeS,
-    /// 978 MHz UAT (`#U:` lines; ADSBee 1090U only).
+    /// 978 MHz UAT (`#U:` lines from an ADSBee 1090U, or our own `uat`
+    /// decoder).
     Uat,
+    /// OGN tracker protocol on 868 / 902-928 MHz (our `flarm::ogn`
+    /// decoder). `#O:` lines are Rotorscope's own extension of CSBee for
+    /// passing these between our boards; an ADSBee never prints them.
+    Ogn,
+    /// FLARM on 868 / 902-928 MHz (our `flarm::legacy` decoder). `#F:`
+    /// lines are Rotorscope's own extension, as for [`Source::Ogn`].
+    Flarm,
+}
+
+impl Source {
+    /// The short label shown wherever the source is displayed.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Source::ModeS => "1090",
+            Source::Uat => "UAT",
+            Source::Ogn => "OGN",
+            Source::Flarm => "FLARM",
+        }
+    }
+
+    /// The CSBee line tag: `A`, `U`, or our own `O` / `F`.
+    pub const fn tag(self) -> u8 {
+        match self {
+            Source::ModeS => b'A',
+            Source::Uat => b'U',
+            Source::Ogn => b'O',
+            Source::Flarm => b'F',
+        }
+    }
 }
 
 /// Bit numbers in [`Aircraft::flags`]. Bits 0-7 and 23-29 mean the same on
@@ -291,7 +325,8 @@ pub struct Aircraft {
     pub speed_kt: i32,
     pub baro_vrate_fpm: i32,
     pub gnss_vrate_fpm: i32,
-    /// UAT emergency/priority status (0 = none). Always 0 for Mode S.
+    /// UAT emergency/priority status (0 = none). Always 0 for Mode S. For
+    /// OGN, 1 when the packet's emergency bit is set.
     pub uat_emergency: u8,
     /// Integrity and accuracy (SIL, GVA, NACp, NACv, NICbaro, NIC) packed.
     pub nicnac: u16,
@@ -320,7 +355,9 @@ impl Aircraft {
     }
 
     /// UAT address qualifier (0 = ADS-B with ICAO address, 1 = self-assigned,
-    /// 2/3 = TIS-B, 4 = surface vehicle, 5 = beacon). 0 for Mode S.
+    /// 2/3 = TIS-B, 4 = surface vehicle, 5 = beacon). 0 for Mode S. For OGN
+    /// and FLARM, the address type (0 = random, 1 = ICAO, 2 = FLARM,
+    /// 3 = OGN / anonymous).
     pub fn address_qualifier(&self) -> u8 {
         ((self.icao >> 24) & 0x0f) as u8
     }
@@ -458,7 +495,7 @@ pub fn parse(line: &[u8]) -> Result<Report, Error> {
         return Err(Error::TooLong);
     }
     let tag = match line {
-        [b'#', t @ (b'A' | b'U' | b'S'), b':', ..] => *t,
+        [b'#', t @ (b'A' | b'U' | b'O' | b'F' | b'S'), b':', ..] => *t,
         _ => return Err(Error::NotCsbee),
     };
     if !line.iter().all(|b| (0x20..=0x7e).contains(b)) {
@@ -496,10 +533,12 @@ pub fn parse(line: &[u8]) -> Result<Report, Error> {
             uptime_s: f.num()?,
         }),
         _ => {
-            let source = if tag == b'A' {
-                Source::ModeS
-            } else {
-                Source::Uat
+            // `#O:` and `#F:` (our own) use the `#U:` layout.
+            let source = match tag {
+                b'A' => Source::ModeS,
+                b'U' => Source::Uat,
+                b'O' => Source::Ogn,
+                _ => Source::Flarm,
             };
             let icao = f.hex()?;
             if icao > 0x0fff_ffff {
@@ -517,7 +556,7 @@ pub fn parse(line: &[u8]) -> Result<Report, Error> {
             let speed_kt = f.num()?;
             let baro_vrate_fpm = f.num()?;
             let gnss_vrate_fpm = f.num()?;
-            let uat_emergency = if source == Source::Uat { f.num()? } else { 0 };
+            let uat_emergency = if source != Source::ModeS { f.num()? } else { 0 };
             let nicnac = f.hex()?;
             let acdims = f.hex()?;
             let version = f.num()?;

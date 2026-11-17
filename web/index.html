@@ -822,7 +822,7 @@ function aircraftCards() {
     o.push(`<div class="trk${stale ? ' stale' : ''}">` +
       `<div class="r1"><span class="id mono">${esc(a.call || a.icao)}</span><span class="mut">${esc(a.label)}</span>${tags}</div>` +
       `<div class="r2">${where}<span>Alt ${altText}</span></div>` +
-      `<div class="r3"><span class="mono">${esc(a.icao)}${a.src === '978' ? ' UAT' : ''}</span>` +
+      `<div class="r3"><span class="mono">${esc(a.icao)}${({'978': ' UAT', OGN: ' OGN', FLARM: ' FLARM'})[a.src] || ''}</span>` +
       (a.squawk ? `<span>sq ${esc(a.squawk)}</span>` : '') +
       (a.spd_kt != null ? `<span>${imp() ? a.spd_kt + ' kt' : fmtSpd(a.spd_kt * 0.514444)}</span>` : '') +
       `<span>heard ${ago(a.age_ms)}</span>` +

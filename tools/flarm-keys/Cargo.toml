@@ -1,0 +1,10 @@
+[package]
+name = "flarm-keys"
+description = "Extract the FLARM legacy key constants from a SoftRF checkout into tools/flarm.keys (git-ignored; never committed, printed or relayed)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Only to check the file it writes parses.
+flarm = { path = "../../crates/flarm", features = ["legacy"] }

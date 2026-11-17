@@ -1,0 +1,16 @@
+[package]
+name = "uat"
+description = "no_std UAT (978 MHz) ADS-B decoder: Reed-Solomon RS(30,18)/RS(48,34) correction, basic/long frame detection, header, state vector, mode status and auxiliary state vector"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# The decoded aircraft is the same record the CSBee parser and `modes` give,
+# so the hub's tracker, screen, logs and web-head feed take it unchanged.
+adsb.workspace = true
+# atan2 and sqrt without std.
+libm = "0.2"
+
+[dev-dependencies]
+adsb = { workspace = true, features = ["encode"] }

@@ -439,3 +439,26 @@ fn splitter_skips_blank_lines_and_flags_console_text() {
     let got = split_all(&[b"\r\n\r\n  \r\nINFO: hello\r\n", HELI.as_bytes()]);
     assert_eq!(got, [Err(Error::NotCsbee), parse(HELI.as_bytes())]);
 }
+
+#[test]
+fn ogn_and_flarm_lines_are_our_own_extension_with_the_uat_layout() {
+    for (src, tag) in [(Source::Ogn, "O"), (Source::Flarm, "F")] {
+        let mut a = aircraft(UAT);
+        a.source = src;
+        a.icao = 0x0200_ABCD; // address type 2 (FLARM)
+        a.uat_emergency = 0;
+        let mut buf = [0u8; MAX_LINE];
+        let n = encode::aircraft(&a, &mut buf).unwrap();
+        let line = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(line.starts_with(&std::format!("#{tag}:200ABCD,")), "{line}");
+        let b = aircraft(line);
+        assert_eq!(b, a);
+        assert_eq!(b.address_qualifier(), 2);
+        assert_eq!(b.icao24(), 0xABCD);
+        assert!(!b.military());
+    }
+    assert_eq!(Source::ModeS.label(), "1090");
+    assert_eq!(Source::Uat.label(), "UAT");
+    assert_eq!(Source::Ogn.label(), "OGN");
+    assert_eq!(Source::Flarm.label(), "FLARM");
+}

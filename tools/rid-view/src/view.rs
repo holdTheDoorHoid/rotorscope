@@ -569,8 +569,8 @@ impl View {
             if let Some(id) = same_drone(a, tr.tracks(), ctx) {
                 note.push(format!("= drone #{}", id.0));
             }
-            if a.key.source == adsb::Source::Uat {
-                note.push("UAT".into());
+            if a.key.source != adsb::Source::ModeS {
+                note.push(a.key.source.label().into());
             }
             let _ = writeln!(
                 s,

@@ -345,8 +345,11 @@ pub fn aircraft_event(
             )?;
         }
         write!(w, "<remarks>ADS-B {}", IcaoHex(a.key.icao))?;
-        if a.key.source == adsb::Source::Uat {
-            w.write_str(" (UAT)")?;
+        match a.key.source {
+            adsb::Source::ModeS => {}
+            adsb::Source::Uat => w.write_str(" (UAT)")?,
+            adsb::Source::Ogn => w.write_str(" (OGN)")?,
+            adsb::Source::Flarm => w.write_str(" (FLARM)")?,
         }
         write!(w, "; {}", a.kind().label())?;
         if let Some(s) = a.squawk {

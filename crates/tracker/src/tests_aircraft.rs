@@ -289,7 +289,8 @@ fn aircraft_line_worst_case_fits() {
     let mut tr: Tracker = Tracker::default();
     tr.set_own_position(-89.123_456_789, -179.123_456_789, Some(-12_345.678_9), 0);
     let mut r = report(0xFFFFFF, 0.0, i32::MIN, i8::MIN);
-    r.source = Source::Uat;
+    // FLARM has the longest source label ("FLARM" in JSON and CSV).
+    r.source = Source::Flarm;
     r.icao = 0x0FFF_FFFF;
     r.lat_deg = -89.123_456_789_012_3;
     r.lon_deg = -179.123_456_789_012_3;

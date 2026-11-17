@@ -34,3 +34,10 @@ O4KEY.TXT
 # ESP-NOW link key (per kit, made by `cargo run -p link-key -- new`): never commit.
 tools/link.key
 *.linkkey
+
+# FLARM legacy keys: the owner may use them (2026-11-17) but they are never
+# published. Made by `cargo run -p flarm-keys` from a SoftRF checkout; on the
+# hub they live on the SD card as ROTORSCP/FLARMKEY.TXT.
+tools/flarm.keys
+FLARMKEY.TXT
+*.flarmkeys

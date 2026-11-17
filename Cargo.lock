@@ -837,6 +837,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
+name = "flarm"
+version = "0.1.0"
+dependencies = [
+ "adsb",
+ "flarm",
+ "libm",
+]
+
+[[package]]
+name = "flarm-keys"
+version = "0.1.0"
+dependencies = [
+ "flarm",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2461,6 +2477,14 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "uat"
+version = "0.1.0"
+dependencies = [
+ "adsb",
+ "libm",
+]
 
 [[package]]
 name = "uds_windows"

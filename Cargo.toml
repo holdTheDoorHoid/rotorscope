@@ -10,11 +10,11 @@ members = [
     "crates/wifidrone", "crates/wifiwatch", "crates/jamwatch",
     "crates/sdnative", "crates/wirebus",
     "crates/airspace", "crates/faarules", "crates/modes",
-    "crates/evidence", "crates/djicrypt",
+    "crates/evidence", "crates/djicrypt", "crates/uat", "crates/flarm",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rfuav-check", "tools/rawcap-pull", "tools/droneid-hil",
     "tools/cc26xx-flash", "tools/airspace-pack", "tools/modes-live",
     "tools/evidence-verify", "tools/evidence-server",
-    "tools/link-key",
+    "tools/link-key", "tools/flarm-keys",
 ]
 
 [workspace.package]
