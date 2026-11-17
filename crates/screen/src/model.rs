@@ -283,6 +283,8 @@ pub enum NodeKind {
     DroneId,
     /// An ESP-NOW gateway relaying other nodes.
     Gateway,
+    /// An LR2021 radio node (aircraft signals, control links).
+    Lr,
 }
 
 impl NodeKind {
@@ -296,6 +298,7 @@ impl NodeKind {
             NodeKind::Adsb => "ADS",
             NodeKind::DroneId => "DID",
             NodeKind::Gateway => "GW",
+            NodeKind::Lr => "LR",
         }
     }
     /// Health-screen label.
@@ -308,6 +311,7 @@ impl NodeKind {
             NodeKind::Adsb => "ADS-B",
             NodeKind::DroneId => "DroneID",
             NodeKind::Gateway => "Gateway",
+            NodeKind::Lr => "LR radio",
         }
     }
 }

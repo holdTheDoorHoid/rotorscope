@@ -698,6 +698,15 @@ driver for the RTL2832U on the P4). Laptop first with the same code, the P4 only
 - **Done when:** a decoded FLARM-family position from a real transmitter, or recordings, reaches
   the tracker, and the legal decision is written down.
 
+**14b/14d node side, BUILT 2026-11-17 (branch `node-lr`), not yet on hardware:** a
+receive-only LR2021 + ESP32-C3 "aero node" (`firmware/node-lr`) that the hub switches between
+1090 MHz ES, 978 MHz UAT and FLARM/OGN on 902-928 MHz, following the FLARM/OGN hops with the
+hub's GPS time (`Command::TimeSync`), and sends raw frames (`Frame::Air`, link protocol 11) for
+the hub to decode. Settings ported from SoftRF, hop plan from the OGN tracker (`crates/aerohop`,
+`crates/lr2021cfg`, 36 host tests). It never transmits on any aviation band. Waiting for an LR2021
+board (Phase 9); hub-side decoding of `Frame::Air` and the UAT/FLARM/OGN decoders are separate
+work. Plain-language guide, wiring and the unconfirmed chip details: docs/AERO-NODE.md.
+
 Outputs for all of 14: aircraft on the screen, SD log, USB JSON, phone page and CoT, with the source
 (ADS-B, Mode S, UAT, FLARM, OGN, FANET, ADS-L); Phase 12's low-flying check uses them too.
 

@@ -1,0 +1,70 @@
+# The aero node: a receive-only Semtech LR2021 on SPI, attached to an
+# ESP32-C3, hearing 1090 MHz extended squitter, 978 MHz UAT, or FLARM / OGN
+# trackers followed through their hops (docs/AERO-NODE.md). It never
+# transmits on any of those bands: there is no transmit path to the LR2021
+# at all (crates/lr2021cfg has no transmit command). Its only transmissions
+# are its link to the hub (ESP-NOW with `espnow`, or a wire).
+[package]
+name         = "node-lr"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.88"
+license      = "GPL-3.0-or-later"
+publish      = false
+
+[[bin]]
+name = "node-lr"
+path = "src/main.rs"
+test = false
+bench = false
+
+# Firmware is its own workspace (different target from crates/*).
+[workspace]
+
+[features]
+default = []
+# Report to the hub over ESP-NOW through the gateway (crates/airlink,
+# docs/ESPNOW.md), keyed with tools/link.key when it exists (else open, and
+# the node says so at boot). Wi-Fi sits on the gateway's channel 6.
+espnow = ["dep:esp-radio", "esp-radio/wifi", "esp-radio/esp-now", "esp-rtos/esp-radio", "dep:airlink"]
+# The wired bus (crates/wirebus, docs/WIREBUS.md): TX open-drain, see
+# src/board.rs. Not with `espnow`.
+wirebus = ["dep:node-common", "node-common/wirebus"]
+
+[dependencies]
+link      = { path = "../../crates/link" }
+lr2021cfg = { path = "../../crates/lr2021cfg" }
+aerohop   = { path = "../../crates/aerohop" }
+airlink   = { path = "../../crates/airlink", optional = true }
+node-common = { path = "../node-common", optional = true, features = ["esp32c3"] }
+heapless  = { version = "0.8", features = ["serde"] }
+
+esp-hal                = { version = "~1.2.2", features = ["esp32c3", "unstable"] }
+esp-rtos               = { version = "0.4.0", features = ["esp32c3", "embassy", "esp-alloc"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c3"] }
+esp-alloc              = { version = "0.11.0", features = ["esp32c3"] }
+# custom-halt: reboot after a panic (see `custom_halt` in main.rs).
+esp-backtrace          = { version = "0.20.0", default-features = false, features = ["esp32c3", "panic-handler", "println", "custom-halt"] }
+esp-println            = { version = "0.18.0", default-features = false, features = ["esp32c3", "jtag-serial", "critical-section"] }
+# Same pin as the other nodes (beta.2 is yanked). Only for ESP-NOW.
+esp-radio              = { version = "=1.0.0-beta.1", optional = true, features = ["esp32c3", "esp-alloc", "unstable"] }
+
+embassy-executor = { version = "0.10.0" }
+embassy-time     = { version = "0.5.0" }
+embassy-sync     = { version = "0.7" }
+embedded-io-async = "0.7"
+critical-section = "1.2.0"
+# riscv32imc has no atomic read-modify-write instructions: counters go
+# through portable-atomic (esp-hal enables its single-core mode on the C3).
+portable-atomic  = { version = "1", default-features = false }
+static_cell      = "2.1.1"
+postcard         = { version = "1", default-features = false, features = ["heapless"] }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+debug         = 2
+lto           = "fat"
+opt-level     = "s"

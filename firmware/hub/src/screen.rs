@@ -168,6 +168,7 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
             link::NodeRole::Fpv => NodeKind::Fpv,
             link::NodeRole::DroneId => NodeKind::DroneId,
             link::NodeRole::Gateway => NodeKind::Gateway,
+            link::NodeRole::Aero => NodeKind::Lr,
         };
         let _ = st.nodes.push(screen::NodeStatus {
             kind,

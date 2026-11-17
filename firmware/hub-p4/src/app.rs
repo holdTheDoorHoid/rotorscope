@@ -394,6 +394,7 @@ impl App {
                 Some(link::NodeRole::Fpv) => NodeKind::Fpv,
                 Some(link::NodeRole::DroneId) => NodeKind::DroneId,
                 Some(link::NodeRole::Gateway) => NodeKind::Gateway,
+                Some(link::NodeRole::Aero) => NodeKind::Lr,
                 _ => NodeKind::Wifi24,
             };
             let _ = self.state.assigned.push(n.assigned.map(|(role, plan)| screen::Assigned {

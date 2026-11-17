@@ -101,5 +101,6 @@ pub fn label(r: NodeRole) -> &'static str {
         NodeRole::Fpv => "FPV",
         NodeRole::DroneId => "DroneID",
         NodeRole::Gateway => "Gateway",
+        NodeRole::Aero => "LR radio",
     }
 }

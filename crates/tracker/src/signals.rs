@@ -437,6 +437,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 ..
             } => drop(self.ingest_dji_wifi(node, *channel, *rssi, *mac, element, now_ms)),
             Frame::WifiDrone(s) => drop(self.ingest_wifi_drone(node, s, now_ms)),
+            // Protocol 11: raw aircraft frames are decoded by the hub (it
+            // holds the GPS time and the FLARM keys) and arrive here as
+            // `ingest_aircraft`; the aero node's status is link bookkeeping.
+            Frame::Air(_) | Frame::AeroStatus(_) => {}
             Frame::Status { role, can, plan } => {
                 self.ingest_status(node, *role, *can, *plan, now_ms)
             }

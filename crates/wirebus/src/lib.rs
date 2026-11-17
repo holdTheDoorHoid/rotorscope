@@ -41,7 +41,7 @@ mod sim;
 mod tests;
 
 pub use master::{BusStats, Event, Master, MasterConfig, NodeStats};
-pub use node::{Node, NodeConfig, NodeCounters, Outbox};
+pub use node::{Node, NodeConfig, NodeCounters, Outbox, TimeSyncRx};
 
 /// Default line speed. The XIAO ESP32-C5 and the ESP32-P4 both run 921600
 /// cleanly over short wires; RS-485 transceivers keep it over long ones.

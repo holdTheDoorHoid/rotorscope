@@ -244,6 +244,24 @@ fn assign_only_for_the_named_node() {
     assert_eq!(got, [a]);
 }
 
+/// Protocol 11: `TimeSync` is a broadcast, taken with or without a `To`,
+/// stamped with the arrival time; only the latest is kept.
+#[test]
+fn time_sync_is_a_broadcast() {
+    let (_, mut n) = joined_pair();
+    let mut q = Q::default();
+    assert_eq!(n.take_time_sync(), None);
+    let mut bytes = cmd(&Command::TimeSync { utc_ms: 1_000, pps: false });
+    bytes.extend(cmd(&Command::TimeSync { utc_ms: 2_000, pps: true }));
+    n.on_rx(77, &bytes, &mut q, &mut |_| panic!("not an assign"));
+    assert_eq!(n.take_time_sync(), Some(TimeSyncRx { at_us: 77, utc_ms: 2_000, pps: true }));
+    assert_eq!(n.take_time_sync(), None);
+    let mut bytes = cmd(&Command::To { node: [9; 6] });
+    bytes.extend(cmd(&Command::TimeSync { utc_ms: 3_000, pps: false }));
+    n.on_rx(90, &bytes, &mut q, &mut |_| {});
+    assert_eq!(n.take_time_sync().map(|t| t.utc_ms), Some(3_000));
+}
+
 #[test]
 fn stale_poll_is_not_answered() {
     let (mut m, mut n) = joined_pair();

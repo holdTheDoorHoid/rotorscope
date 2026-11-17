@@ -50,7 +50,14 @@ use serde::{Deserialize, Serialize};
 ///   command encodes exactly as before; a v9 node ignores the new commands
 ///   (its decoder reports them as corrupt) and a v9 hub counts the new frames
 ///   as corrupt and carries on.
-pub const PROTOCOL_VERSION: u8 = 10;
+/// - 11: aircraft signals from a receive-only LR2021 node (`firmware/node-lr`,
+///   docs/AERO-NODE.md). Adds [`Frame::Air`] (one raw 1090ES / UAT / FLARM /
+///   OGN frame) and [`Frame::AeroStatus`] (node to hub), [`Command::TimeSync`]
+///   (hub to node: UTC for hopping) and [`NodeRole::Aero`], whose
+///   [`Assignment::plan`] entries are [`AeroMode`] codes. All appended, so
+///   every v10 frame, command and role encodes exactly as before; a v10 hub
+///   counts the new frames as corrupt and a v10 node ignores `TimeSync`.
+pub const PROTOCOL_VERSION: u8 = 11;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -75,6 +82,11 @@ pub enum NodeRole {
     DroneId,
     /// Protocol 4. An ESP-NOW gateway: relays other nodes, listens to nothing itself.
     Gateway,
+    /// Protocol 11. Aircraft signals on an LR2021 radio (receive only):
+    /// 1090 MHz extended squitter, 978 MHz UAT, or FLARM / OGN trackers
+    /// followed through their frequency hops. The plan picks which
+    /// ([`AeroMode`]). Sends [`Frame::Air`] and [`Frame::AeroStatus`].
+    Aero,
 }
 
 impl NodeRole {
@@ -97,6 +109,59 @@ pub struct Assignment {
     /// Changes whenever the hub changes the plan, echoed in [`Frame::Status`]
     /// so the hub knows the node has applied it.
     pub id: u16,
+}
+
+/// Protocol 11. What an [`NodeRole::Aero`] node listens to: one
+/// [`Assignment::plan`] entry is `(AeroMode::code(), dwell_ms)`. Several
+/// entries are visited in order, each for its dwell, and repeated (e.g.
+/// 1090 and 978 MHz time-shared on one radio); a single entry, or a dwell of
+/// 0, stays. An empty plan is the node's built-in default (1090 MHz).
+///
+/// Codes: single-frequency modes are their frequency in 100 kHz units, as
+/// in raw-capture plans (10900 = 1090 MHz extended squitter, 9780 = 978 MHz
+/// UAT). Hopping modes set bit 31, carry the region in bits 0-7 (SoftRF's
+/// `RF_BAND_*` numbers: 1 Europe, 2 USA/Canada, 3 Australia/South America,
+/// ...) and bit 8 = follow OGN trackers' channel instead of FLARM's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AeroMode {
+    Es1090,
+    Uat978,
+    /// Follow FLARM's (or, with `ogn`, OGN trackers') hops in `band`.
+    /// Needs UTC from [`Command::TimeSync`]; without it the node parks on
+    /// one channel and says so in [`Frame::AeroStatus`].
+    FlarmHop { band: u8, ogn: bool },
+}
+
+impl AeroMode {
+    pub const ES1090_CODE: u32 = 10_900;
+    pub const UAT978_CODE: u32 = 9_780;
+    pub const HOP_FLAG: u32 = 1 << 31;
+    pub const HOP_OGN: u32 = 1 << 8;
+
+    pub const fn code(self) -> u32 {
+        match self {
+            AeroMode::Es1090 => Self::ES1090_CODE,
+            AeroMode::Uat978 => Self::UAT978_CODE,
+            AeroMode::FlarmHop { band, ogn } => Self::HOP_FLAG | if ogn { Self::HOP_OGN } else { 0 } | band as u32,
+        }
+    }
+
+    /// `None` for a code this protocol version does not define.
+    pub const fn from_code(code: u32) -> Option<AeroMode> {
+        match code {
+            Self::ES1090_CODE => Some(AeroMode::Es1090),
+            Self::UAT978_CODE => Some(AeroMode::Uat978),
+            c if c & Self::HOP_FLAG != 0 && c & !(Self::HOP_FLAG | Self::HOP_OGN | 0xFF) == 0 => {
+                Some(AeroMode::FlarmHop { band: c as u8, ogn: c & Self::HOP_OGN != 0 })
+            }
+            _ => None,
+        }
+    }
+
+    /// A plan entry: this mode for `dwell_ms` (0 = for good).
+    pub const fn entry(self, dwell_ms: u16) -> (u32, u16) {
+        (self.code(), dwell_ms)
+    }
 }
 
 /// Protocol 4. Hub-to-node messages, framed exactly like [`Frame`] (postcard +
@@ -128,6 +193,13 @@ pub enum Command {
     /// address `addr` for this `epoch`. `check` is `wirebus::crc` over the
     /// other fields (a garbled grant must never bind the wrong node).
     Address { mac: [u8; 6], addr: u8, epoch: u16, check: u16 },
+    /// Protocol 11: "it is now `utc_ms`" (Unix milliseconds), about once a
+    /// second, for nodes that need UTC (FLARM / OGN hopping, [`AeroMode`]).
+    /// The node takes the command's arrival as that instant. `pps`: the
+    /// hub's UTC is anchored to a GPS PPS edge. On the wired bus and through
+    /// a gateway it is a broadcast (no [`Command::To`] needed); a node
+    /// that does not use it ignores it.
+    TimeSync { utc_ms: u64, pps: bool },
 }
 
 /// Protocol 4. One DJI OcuSync DroneID burst, decoded on the node. Raw units
@@ -416,6 +488,78 @@ pub struct ThreatSighting {
     pub uptime_us: u64,
 }
 
+/// Protocol 11. Which aircraft signal a [`Frame::Air`] carries, and so what
+/// its `raw` bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AirProto {
+    /// 1090 MHz Mode S extended squitter: the 14-byte DF17 frame, parity
+    /// included, CRC-checked on the node (syndrome 0).
+    Es1090,
+    /// 978 MHz UAT: the 48 bytes after the sync word as received (a long
+    /// ADS-B frame with its Reed-Solomon parity, or a short frame and what
+    /// followed it), not corrected; the hub runs the Reed-Solomon decoder.
+    Uat978,
+    /// FLARM (SoftRF's "Legacy"): the 26 Manchester-decoded bytes (24
+    /// payload, still scrambled, then the CRC-16), CRC-checked on the node.
+    Flarm,
+    /// OGN tracker (OGNTP): the 26 Manchester-decoded bytes (20 payload, 6
+    /// LDPC parity), not checked on the node.
+    Ogn,
+}
+
+/// Longest [`AirFrame::raw`].
+pub const MAX_AIR_RAW: usize = 64;
+
+/// Protocol 11. One aircraft frame heard by an aero node, raw.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AirFrame {
+    pub proto: AirProto,
+    /// Frequency the radio was tuned to, kHz.
+    pub freq_khz: u32,
+    /// Packet RSSI, dBm.
+    pub rssi: i8,
+    /// The node's estimate of UTC at reception (Unix ms) from
+    /// [`Command::TimeSync`]; `None` if it has no time.
+    pub utc_ms: Option<u64>,
+    /// Node uptime at reception.
+    pub uptime_us: u64,
+    pub raw: Vec<u8, MAX_AIR_RAW>,
+}
+
+/// Protocol 11. How an aero node knows the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AeroTime {
+    /// No [`Command::TimeSync`] for 10 s (or ever).
+    Unknown,
+    /// Synced to the hub, whose clock is not PPS-anchored.
+    Hub,
+    /// Synced to the hub, whose clock is PPS-anchored.
+    HubPps,
+}
+
+/// Protocol 11. An aero node's state, sent with every Hello and whenever it
+/// changes (mode, time state, parking).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AeroStatus {
+    /// The [`AeroMode::code`] running now (0: none, the radio is down).
+    pub mode: u32,
+    /// Where the radio is (or was last) tuned, kHz.
+    pub freq_khz: u32,
+    pub time: AeroTime,
+    /// A hopping mode that is NOT hopping: no time, so parked on
+    /// `freq_khz`, hearing only the slots that happen to use it.
+    pub parked: bool,
+    /// The LR2021 answered at boot (version read back). False: no radio, or
+    /// it stopped answering; nothing is being received.
+    pub radio_ok: bool,
+    /// Times the 1090 MHz receive watchdog restarted reception.
+    pub rx_restarts: u32,
+    /// Packets dropped by the node's checks (CRC, Manchester, length), total.
+    pub rejected: u32,
+    /// [`Frame::Air`] not sent because of the rate limit, total.
+    pub rate_dropped: u32,
+}
+
 /// Protocol 5. A GPS receiver's state, as a hub reports it to a web head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GnssState {
@@ -600,6 +744,10 @@ pub enum Frame {
     /// `addr`, `seq` and `more`. The hub keeps an answer's frames only when
     /// the CRC matches.
     BusDone { addr: u8, seq: u8, more: bool, crc: u16 },
+    /// Protocol 11: one aircraft frame from an aero node.
+    Air(AirFrame),
+    /// Protocol 11: an aero node's state.
+    AeroStatus(AeroStatus),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -884,6 +1032,147 @@ mod tests {
         // A v9 decoder (no bus variants) sees these as corrupt and resyncs:
         // modelled by feeding a tag past the last v9 command.
         assert!(postcard::from_bytes::<Command>(&[5]).is_err());
+    }
+
+    fn air(proto: AirProto, n: usize, fill: u8) -> AirFrame {
+        AirFrame {
+            proto,
+            freq_khz: u32::MAX,
+            rssi: i8::MIN,
+            utc_ms: Some(u64::MAX),
+            uptime_us: u64::MAX,
+            raw: core::iter::repeat_n(fill, n).collect(),
+        }
+    }
+
+    /// Protocol 11 appended `Frame::Air` (16), `Frame::AeroStatus` (17),
+    /// `Command::TimeSync` (5) and `NodeRole::Aero` (6). Every v10 frame and
+    /// command encodes byte for byte as before: the FNV-1a hash of all the
+    /// v10 samples and commands below was taken from the v10 code.
+    #[test]
+    fn protocol_11_aero_append_only() {
+        let mut buf = [0u8; 1024];
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        for mut f in samples() {
+            // The sample Hello carries the current version; hash it as v10 sent it.
+            if let Frame::Hello { protocol, .. } = &mut f {
+                *protocol = 10;
+            }
+            fnv(encode(&f, &mut buf).unwrap());
+        }
+        for c in commands() {
+            fnv(encode_command(&c, &mut buf).unwrap());
+        }
+        assert_eq!(h, 0x4dee_7867_75cb_0a74, "a v10 frame or command changed encoding");
+        // Spot checks, worked by hand.
+        let st = Frame::Status { role: NodeRole::Gateway, can: 1, plan: 2 };
+        assert_eq!(postcard::to_slice(&st, &mut buf).unwrap(), [5, 5, 1, 2]);
+        let a = Command::Assign(Assignment { role: NodeRole::Ble, plan: [(9780, 500)].into_iter().collect(), id: 3 });
+        assert_eq!(postcard::to_slice(&a, &mut buf).unwrap(), [0, 2, 1, 0xB4, 0x4C, 0xF4, 0x03, 3]);
+
+        // New tags.
+        let f = Frame::Air(air(AirProto::Es1090, 14, 0x8D));
+        assert_eq!(postcard::to_slice(&f, &mut buf).unwrap()[0], 16);
+        let s = Frame::AeroStatus(AeroStatus {
+            mode: AeroMode::FlarmHop { band: 2, ogn: false }.code(),
+            freq_khz: 915_000,
+            time: AeroTime::Unknown,
+            parked: true,
+            radio_ok: true,
+            rx_restarts: 0,
+            rejected: 0,
+            rate_dropped: 0,
+        });
+        assert_eq!(postcard::to_slice(&s, &mut buf).unwrap()[0], 17);
+        let t = Command::TimeSync { utc_ms: 1_763_337_600_123, pps: true };
+        assert_eq!(postcard::to_slice(&t, &mut buf).unwrap()[0], 5);
+        assert_eq!(NodeRole::Aero as u8, 6);
+        assert_eq!(NodeRole::Aero.bit(), 0x40);
+        assert_eq!(postcard::to_slice(&NodeRole::Aero, &mut buf).unwrap(), [6]);
+        for p in 0..4u8 {
+            let _: AirProto = postcard::from_bytes(&[p]).unwrap();
+        }
+        assert!(postcard::from_bytes::<AirProto>(&[4]).is_err());
+
+        // Round trips, through the stream decoders.
+        let mut dec = Decoder::new();
+        for f in [f, s, Frame::Air(AirFrame { utc_ms: None, ..air(AirProto::Ogn, 26, 0) })] {
+            let mut got = None;
+            dec.feed(encode(&f, &mut buf).unwrap(), |r| got = Some(r));
+            assert_eq!(got, Some(Ok(f)));
+        }
+        let mut cdec = CommandDecoder::new();
+        let mut got = None;
+        cdec.feed(encode_command(&t, &mut buf).unwrap(), |r| got = Some(r));
+        assert_eq!(got, Some(Ok(t)));
+        // An Aero assignment with every kind of entry.
+        let modes = [
+            AeroMode::Es1090.entry(0),
+            AeroMode::Uat978.entry(u16::MAX),
+            AeroMode::FlarmHop { band: 2, ogn: true }.entry(10_000),
+            AeroMode::FlarmHop { band: 255, ogn: false }.entry(1),
+        ];
+        let assign = Command::Assign(Assignment { role: NodeRole::Aero, plan: modes.into_iter().collect(), id: 9 });
+        let mut got = None;
+        cdec.feed(encode_command(&assign, &mut buf).unwrap(), |r| got = Some(r));
+        assert_eq!(got, Some(Ok(assign)));
+    }
+
+    /// The largest `Air` frame (64 raw bytes, widest varints) is small
+    /// enough that a dozen fit one ESP-NOW batch, and far below `MAX_FRAME`.
+    #[test]
+    fn largest_air_frame_fits() {
+        let mut buf = [0u8; 1024];
+        let mut worst = 0;
+        for p in [AirProto::Es1090, AirProto::Uat978, AirProto::Flarm, AirProto::Ogn] {
+            for fill in [0x00, 0xFF] {
+                worst = worst.max(encode(&Frame::Air(air(p, MAX_AIR_RAW, fill)), &mut buf).unwrap().len());
+            }
+        }
+        std::println!("largest air frame: {worst} bytes");
+        assert!(worst <= 100, "{worst}");
+        assert!(worst <= MAX_FRAME);
+        // A typical 1090 frame: 14 raw bytes.
+        let es = Frame::Air(AirFrame {
+            proto: AirProto::Es1090,
+            freq_khz: 1_090_000,
+            rssi: -71,
+            utc_ms: Some(1_763_337_600_123),
+            uptime_us: 3_600_000_000,
+            raw: [0x8D; 14].into_iter().collect(),
+        });
+        assert!(encode(&es, &mut buf).unwrap().len() <= 40);
+        let st = Frame::AeroStatus(AeroStatus {
+            mode: u32::MAX,
+            freq_khz: u32::MAX,
+            time: AeroTime::HubPps,
+            parked: true,
+            radio_ok: true,
+            rx_restarts: u32::MAX,
+            rejected: u32::MAX,
+            rate_dropped: u32::MAX,
+        });
+        assert!(encode(&st, &mut buf).unwrap().len() <= 40);
+    }
+
+    #[test]
+    fn aero_mode_codes() {
+        assert_eq!(AeroMode::Es1090.code(), 10_900);
+        assert_eq!(AeroMode::Uat978.code(), 9_780);
+        assert_eq!(AeroMode::FlarmHop { band: 2, ogn: false }.code(), 0x8000_0002);
+        assert_eq!(AeroMode::FlarmHop { band: 1, ogn: true }.code(), 0x8000_0101);
+        for m in [AeroMode::Es1090, AeroMode::Uat978, AeroMode::FlarmHop { band: 3, ogn: true }, AeroMode::FlarmHop { band: 0, ogn: false }] {
+            assert_eq!(AeroMode::from_code(m.code()), Some(m));
+        }
+        for bad in [0, 9_000, 10_901, 0x8000_0200, 0xC000_0002, 0x8001_0002] {
+            assert_eq!(AeroMode::from_code(bad), None, "{bad:#x}");
+        }
     }
 
     #[test]

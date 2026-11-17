@@ -112,6 +112,17 @@ struct Core {
     join_skip: u8,
     last_polled: u64,
     stats: NodeCounters,
+    /// Protocol 11: the latest `TimeSync` (arrival time, UTC ms, PPS), not yet taken.
+    time_sync: Option<TimeSyncRx>,
+}
+
+/// A [`Command::TimeSync`] as it reached this node: `at_us` is the `now`
+/// passed to [`Node::on_rx`] with the bytes that completed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSyncRx {
+    pub at_us: u64,
+    pub utc_ms: u64,
+    pub pps: bool,
 }
 
 pub struct Node {
@@ -150,6 +161,7 @@ impl Node {
                 join_skip: 0,
                 last_polled: 0,
                 stats: NodeCounters::default(),
+                time_sync: None,
             },
         }
     }
@@ -190,6 +202,12 @@ impl Node {
             }
         });
         self.answer()
+    }
+
+    /// The latest `TimeSync` from the hub since the last call, if any.
+    /// It is a broadcast: taken with or without a `To` naming this node.
+    pub fn take_time_sync(&mut self) -> Option<TimeSyncRx> {
+        self.core.time_sync.take()
     }
 
     /// The answer `on_rx` returned, while it is still current.
@@ -318,6 +336,9 @@ impl Core {
                 let slot = self.random() % u32::from(slots.max(1));
                 // An eighth of a slot in, so a slightly early clock still lands inside it.
                 self.join_at = Some(now + u64::from(slot) * u64::from(slot_us) + u64::from(slot_us / 8));
+            }
+            Command::TimeSync { utc_ms, pps } => {
+                self.time_sync = Some(TimeSyncRx { at_us: now, utc_ms, pps });
             }
             Command::Address { mac, addr, epoch, check } => {
                 if check != crc::address_check(&mac, addr, epoch) || !(1..=MAX_ADDR).contains(&addr) {
