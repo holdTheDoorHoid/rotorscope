@@ -259,6 +259,11 @@ impl App {
         self.announce_new(now);
     }
 
+    /// The operator chose "Hub moved" on the settings page (once).
+    pub fn take_hub_moved(&mut self) -> bool {
+        self.ui.take_hub_moved()
+    }
+
     /// Redraw at once (e.g. the own position changed).
     pub fn redraw_now(&mut self) {
         self.last_frame = 0;

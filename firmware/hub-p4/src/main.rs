@@ -356,7 +356,7 @@ fn main() -> ! {
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
-        command(&mut app, &gps, faa, &mut ev, &mut sdlog, &mut note, ms);
+        command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut note, ms);
         ev.tick(ms);
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
@@ -372,6 +372,9 @@ fn main() -> ! {
             report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, faa, ms);
         }
         app.touch(&mut i2c, ms);
+        if app.take_hub_moved() {
+            forget_gps_home(&mut gps, &mut ev, "screen");
+        }
         let utc = gps.utc_ms(ms);
         sd::set_clock(utc, ms);
         if let Some(panel) = panel.as_mut() {
@@ -518,14 +521,33 @@ fn gps_view(app: &app::App, gps: &gps::Gps, now: u64) -> screen::Gps {
         None if gps.status.state == GpsState::Absent => Fix::Absent,
         None => Fix::None,
     };
-    screen::Gps { fix, sats: gps.status.sats.unwrap_or(0) }
+    use gnss::IntegrityState as I;
+    use screen::GpsIntegrity as G;
+    let integrity = match gps.integrity().state {
+        I::Ok => G::Ok,
+        I::SuspectJamming => G::SuspectJamming,
+        I::Jamming => G::Jamming,
+        I::SuspectSpoofing => G::SuspectSpoofing,
+        I::Spoofing => G::Spoofing,
+    };
+    screen::Gps { fix, sats: gps.status.sats.unwrap_or(0), integrity }
 }
 
 /// One console command byte, if any (see `console.rs`). `n` starts an
 /// operator note: the text up to Enter goes into the evidence log.
+/// The operator moved the hub on purpose: forget the GPS home its
+/// spoofing checks learned, so the new place is not taken for a fake.
+fn forget_gps_home(gps: &mut gps::Gps, ev: &mut evlog::Evidence, from: &str) {
+    gps.integrity_forget_home();
+    let mut t: heapless::String<80> = heapless::String::new();
+    let _ = core::fmt::Write::write_fmt(&mut t, format_args!("hub moved: GPS home forgotten, relearning (from {from})"));
+    ev.event(evidence::EventCode::Setting, t.as_bytes(), &[2]);
+    println!("hub-p4: {}", t);
+}
+
 fn command(
     app: &mut app::App,
-    gps: &gps::Gps,
+    gps: &mut gps::Gps,
     faa: &faa::Faa,
     ev: &mut evlog::Evidence,
     sdlog: &mut sd::Logger,
@@ -605,7 +627,8 @@ fn command(
             println!("hub-p4: cmd manual own position cleared");
         }
         b'b' => faa.bench(),
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
+        b'm' => forget_gps_home(gps, ev, "console"),
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, m=hub moved (forget the GPS home), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

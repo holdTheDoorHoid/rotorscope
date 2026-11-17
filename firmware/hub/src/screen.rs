@@ -113,7 +113,7 @@ fn gps_view(hub: &Hub, now: u64) -> screen::Gps {
         None if g.state == GpsState::Absent => Fix::Absent,
         None => Fix::None,
     };
-    screen::Gps { fix, sats: g.sats.unwrap_or(0) }
+    screen::Gps { fix, sats: g.sats.unwrap_or(0), ..Default::default() }
 }
 
 /// Fill `st` from the hub. Does what `screen::from_tracker::fill_from_tracker`

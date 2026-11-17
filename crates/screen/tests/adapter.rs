@@ -126,6 +126,7 @@ fn fills_from_a_tracker() {
         gps: Gps {
             fix: Fix::Fix3D,
             sats: 9,
+            ..Gps::default()
         },
         ..UiState::default()
     };

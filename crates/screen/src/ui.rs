@@ -119,7 +119,7 @@ impl Default for Settings {
 }
 
 /// Rows on the settings page, in order.
-pub const SETTINGS_ROWS: usize = 3;
+pub const SETTINGS_ROWS: usize = 4;
 
 /// A request for the buzzer, taken by the hub with [`Ui::take_buzz`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +157,10 @@ pub struct Ui {
     /// Drone key under the cursor (Pick/Detail).
     cursor: Option<u32>,
     settings_row: usize,
+    /// "Hub moved" was chosen: a request for the hub (taken once) and the
+    /// row's "Relearning" text until the settings are left.
+    hub_moved: bool,
+    hub_moved_done: bool,
     alert: Option<Alert>,
     settings: Settings,
     buzz: Option<Buzz>,
@@ -179,6 +183,8 @@ impl Ui {
             mode: Mode::Browse,
             cursor: None,
             settings_row: 0,
+            hub_moved: false,
+            hub_moved_done: false,
             alert: None,
             settings,
             buzz: None,
@@ -202,6 +208,17 @@ impl Ui {
             _ => None,
         }
     }
+    /// The operator chose "Hub moved": forget the GPS home the hub learned
+    /// (true once per choice).
+    pub fn take_hub_moved(&mut self) -> bool {
+        core::mem::take(&mut self.hub_moved)
+    }
+
+    /// "Hub moved" was chosen during this visit to the settings.
+    pub fn hub_moved_done(&self) -> bool {
+        self.hub_moved_done
+    }
+
     pub fn settings_row(&self) -> usize {
         self.settings_row
     }
@@ -332,7 +349,10 @@ impl Ui {
                 }
                 Button::Down => self.settings_row = (self.settings_row + 1) % SETTINGS_ROWS,
                 Button::Select => self.change_setting(),
-                Button::Back => self.mode = Mode::Browse,
+                Button::Back => {
+                    self.mode = Mode::Browse;
+                    self.hub_moved_done = false;
+                }
             },
         }
     }
@@ -379,7 +399,11 @@ impl Ui {
                 }
             }
             1 => s.brightness = s.brightness % 5 + 1,
-            _ => s.buzzer = !s.buzzer,
+            2 => s.buzzer = !s.buzzer,
+            _ => {
+                self.hub_moved = true;
+                self.hub_moved_done = true;
+            }
         }
     }
 }

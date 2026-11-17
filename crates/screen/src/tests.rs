@@ -28,6 +28,7 @@ fn state(fix: bool, drones: &[DroneView]) -> UiState {
         gps: Gps {
             fix: if fix { Fix::Fix3D } else { Fix::None },
             sats: 8,
+            ..Gps::default()
         },
         ..UiState::default()
     };
@@ -201,10 +202,24 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     ui.button(Button::Select, &s);
     assert!(!ui.settings().buzzer);
     ui.button(Button::Down, &s);
+    assert!(!ui.hub_moved_done());
+    ui.button(Button::Select, &s); // hub moved
+    assert!(ui.hub_moved_done());
+    assert!(ui.take_hub_moved());
+    assert!(!ui.take_hub_moved(), "taken once");
+    ui.button(Button::Down, &s);
     assert_eq!(ui.settings_row(), 0, "rows wrap");
     ui.button(Button::Back, &s);
     assert_eq!(ui.mode(), Mode::Browse);
     assert_eq!(ui.page(), Page::Settings);
+    assert!(!ui.hub_moved_done(), "cleared on leaving");
+}
+
+#[test]
+fn gps_integrity_badges() {
+    assert_eq!(GpsIntegrity::Ok.badge(), None);
+    assert_eq!(GpsIntegrity::Spoofing.badge(), Some("GPS FAKE"));
+    assert_eq!(GpsIntegrity::SuspectJamming.badge(), Some("GPS JAM?"));
 }
 
 #[test]

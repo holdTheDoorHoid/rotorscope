@@ -235,6 +235,33 @@ pub struct Gps {
     pub fix: Fix,
     /// Satellites used in the solution.
     pub sats: u8,
+    /// Signs that the hub's own GPS is being jammed or faked.
+    pub integrity: GpsIntegrity,
+}
+
+/// The hub's verdict on its own GPS (`gnss::integrity` on the P4). While
+/// spoofing is suspected the hub holds its last trusted position and time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GpsIntegrity {
+    #[default]
+    Ok,
+    SuspectJamming,
+    Jamming,
+    SuspectSpoofing,
+    Spoofing,
+}
+
+impl GpsIntegrity {
+    /// Status-bar text, `None` when all is well.
+    pub fn badge(self) -> Option<&'static str> {
+        match self {
+            GpsIntegrity::Ok => None,
+            GpsIntegrity::SuspectJamming => Some("GPS JAM?"),
+            GpsIntegrity::Jamming => Some("GPS JAM"),
+            GpsIntegrity::SuspectSpoofing => Some("GPS FAKE?"),
+            GpsIntegrity::Spoofing => Some("GPS FAKE"),
+        }
+    }
 }
 
 impl Gps {

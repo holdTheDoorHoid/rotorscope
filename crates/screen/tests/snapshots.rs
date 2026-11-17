@@ -109,11 +109,13 @@ fn base(fix: bool) -> UiState {
             Gps {
                 fix: Fix::Fix3D,
                 sats: 11,
+                ..Gps::default()
             }
         } else {
             Gps {
                 fix: Fix::None,
                 sats: 2,
+                ..Gps::default()
             }
         },
         power: Power::Battery { pct: 76 },
@@ -606,6 +608,27 @@ fn settings() {
 }
 
 #[test]
+fn settings_hub_moved() {
+    let st = base(true);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Up, Button::Select, Button::Up, Button::Select]);
+    assert!(ui.hub_moved_done());
+    shot("settings_hub_moved", &ui, &st);
+}
+
+#[test]
+fn threat_warnings() {
+    // GPS faked and a node jammed, with no drones heard: the list must not
+    // read as all clear.
+    let mut st = base(true);
+    st.gps.integrity = GpsIntegrity::Spoofing;
+    st.threats = Threats { active: 2, jammed: true };
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down]);
+    shot("threat_warnings", &ui, &st);
+}
+
+#[test]
 fn page_toast() {
     let st = five_drones(true);
     let mut ui = Ui::default();
@@ -620,6 +643,7 @@ fn status_warnings() {
     st.gps = Gps {
         fix: Fix::Fix2D,
         sats: 4,
+        ..Gps::default()
     };
     st.power = Power::Battery { pct: 9 };
     st.sd = SdLog::Error;

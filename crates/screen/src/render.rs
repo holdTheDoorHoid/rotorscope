@@ -71,51 +71,64 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
 
     // GPS: plain when fixed, an inverse warning box when not.
     let mut x = 3;
-    match s.gps.fix {
-        Fix::Fix2D | Fix::Fix3D => {
-            x = text(d, "GPS", x, y, F_BAR, p.fg)?;
-            let _ = write!(b, "{}", s.gps.sats);
-            x = text(d, &b, x + 4, y, F_BAR, p.fg)?;
-            if s.gps.fix == Fix::Fix2D {
-                x = text(d, "2D", x + 3, y + 2, F_SMALL, p.dim)?;
+    if let Some(badge) = s.gps.integrity.badge() {
+        // The hub's own GPS looks jammed or faked: say so instead of the
+        // satellite count, boxed like a missing fix.
+        x = text_boxed(d, badge, x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+    } else {
+        match s.gps.fix {
+            Fix::Fix2D | Fix::Fix3D => {
+                x = text(d, "GPS", x, y, F_BAR, p.fg)?;
+                let _ = write!(b, "{}", s.gps.sats);
+                x = text(d, &b, x + 4, y, F_BAR, p.fg)?;
+                if s.gps.fix == Fix::Fix2D {
+                    x = text(d, "2D", x + 3, y + 2, F_SMALL, p.dim)?;
+                }
+            }
+            // A typed position: distances work, but it is not a live fix.
+            Fix::Manual => {
+                x = text(d, "POS", x, y, F_BAR, p.fg)?;
+                x = text(d, "MAN", x + 4, y + 2, F_SMALL, p.dim)?;
+            }
+            Fix::None => {
+                x = text_boxed(d, "NO FIX", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+            }
+            Fix::Absent => {
+                x = text_boxed(d, "NO GPS", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
             }
         }
-        // A typed position: distances work, but it is not a live fix.
-        Fix::Manual => {
-            x = text(d, "POS", x, y, F_BAR, p.fg)?;
-            x = text(d, "MAN", x + 4, y + 2, F_SMALL, p.dim)?;
-        }
-        Fix::None => {
-            x = text_boxed(d, "NO FIX", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
-        }
-        Fix::Absent => {
-            x = text_boxed(d, "NO GPS", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
-        }
     }
 
-    // Nodes: a filled dot when alive, a hollow crossed one when not, each
-    // with its label so the meaning never rests on colour. Four or more
-    // (an ADS-B receiver too) are packed closer so the right side fits.
+    // Attacks and jamming outrank node dots (the health page still has
+    // them): an inverse box, like a missing GPS fix. The bar has no room
+    // for both.
     x += 8;
-    let (to_label, gap) = if s.nodes.len() > 3 { (10, 2) } else { (11, 6) };
-    for n in &s.nodes {
-        let c = Point::new(x + 4, BAR_H / 2);
-        if n.alive {
-            circle(d, c, 4, p.fg, true, 1)?;
-        } else {
-            circle(d, c, 4, p.accent, false, 1)?;
-            line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.accent, 1)?;
-        }
-        let col = if n.alive { p.fg } else { p.accent };
-        x = text(d, n.kind.short(), x + to_label, y, F_BAR, col)?;
-        x += gap;
-    }
-
-    // Attacks and jamming: an inverse box, like a missing GPS fix.
-    if s.threats.jammed {
-        x = text_boxed(d, "JAMMED", x + 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+    let threat = if s.threats.jammed {
+        Some("JAMMED")
     } else if s.threats.active > 0 {
-        x = text_boxed(d, "ATTACK", x + 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        Some("ATTACK")
+    } else {
+        None
+    };
+    if let Some(t) = threat {
+        x = text_boxed(d, t, x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+    } else {
+        // Nodes: a filled dot when alive, a hollow crossed one when not, each
+        // with its label so the meaning never rests on colour. Four or more
+        // (an ADS-B receiver too) are packed closer so the right side fits.
+        let (to_label, gap) = if s.nodes.len() > 3 { (10, 2) } else { (11, 6) };
+        for n in &s.nodes {
+            let c = Point::new(x + 4, BAR_H / 2);
+            if n.alive {
+                circle(d, c, 4, p.fg, true, 1)?;
+            } else {
+                circle(d, c, 4, p.accent, false, 1)?;
+                line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.accent, 1)?;
+            }
+            let col = if n.alive { p.fg } else { p.accent };
+            x = text(d, n.kind.short(), x + to_label, y, F_BAR, col)?;
+            x += gap;
+        }
     }
 
     // Right side, from the right edge inwards: time, power, recording.
@@ -564,7 +577,11 @@ fn rows<D: DrawTarget<Color = Rgb565>>(
         text_center(d, "No drones heard yet", WIDTH / 2, top + 30, F_MED, p.dim)?;
         text_center(
             d,
-            if s.threats.jammed { "Jamming: may be missing drones" } else { "Listening on every radio" },
+            if s.threats.jammed {
+                "Jamming: may be missing drones"
+            } else {
+                "Listening on every radio"
+            },
             WIDTH / 2,
             top + 50,
             F_LABEL,
@@ -1324,7 +1341,7 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, p: &Palette, d: &mut D) -> R
     text(d, "SETTINGS", 4, y0, F_BAR, p.fg)?;
     let st = ui.settings();
     let editing = ui.mode() == Mode::Edit;
-    let rows: [(&str, &str); 3] = [
+    let rows: [(&str, &str); 4] = [
         (
             "Theme",
             match st.theme {
@@ -1334,6 +1351,16 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, p: &Palette, d: &mut D) -> R
         ),
         ("Brightness", ""),
         ("Buzzer", if st.buzzer { "On" } else { "Off (muted)" }),
+        // The hub learns where it stands and treats a GPS position far from
+        // there as faked: after moving it on purpose, reset that.
+        (
+            "Hub moved",
+            if ui.hub_moved_done() {
+                "Relearning"
+            } else {
+                "Reset GPS"
+            },
+        ),
     ];
     let mut y = y0 + 26;
     for (i, (k, v)) in rows.iter().enumerate() {

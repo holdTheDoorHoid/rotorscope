@@ -260,7 +260,6 @@ impl Gps {
 
     /// The hub was moved on purpose: forget the learned home and learn the
     /// new place (about 15 minutes of steady fixes).
-    #[allow(dead_code)] // for the screen / web integration
     pub fn integrity_forget_home(&mut self) {
         self.integrity.forget_home();
     }

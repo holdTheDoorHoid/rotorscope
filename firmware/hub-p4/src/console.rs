@@ -22,6 +22,7 @@
 //! Commands (one character, no Enter needed), as on the S3 hub's USB:
 //!   `p` set own position to the test point (manual source)
 //!   `c` clear the manual own position
+//!   `m` hub moved: forget the GPS home the spoofing checks learned
 //!   `h` / `?` help
 
 use core::cell::RefCell;
