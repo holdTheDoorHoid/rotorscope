@@ -234,9 +234,9 @@ signals shaped to the measured numbers.
   6 and 4 bursts in the two 7 s packs, the C5 4-bit path decoding exactly what the clean path did.
 - **Detectors before tuning**: video 0 of 117 dwells on its LOs (djilink said `Ofdm30` on a
   quarter, nothing reportable; `fpvscan` "energy", unreported in the ISM band); controller never
-  confirmed. **After** (3 s replays of the same 4-bit dwells): O4 video on 48/50 and 47/50 dwells
-  (10 MHz mode), 50/50 and 50/50 (20 MHz); controller confirmed in 18 and 7 of 46 sweep phases
-  within the 3 s replayed (about one sweep), median 1.4 s.
+  confirmed. **After** (final rules, 3 s replays of the same 4-bit dwells): O4 video on 46/50
+  and 47/50 dwells (10 MHz mode), 50/50 and 50/50 (20 MHz); controller confirmed in 18 and 7 of
+  46 sweep phases within the 3 s replayed (about one sweep), median 1.4 s.
 
 ### Autel EVO Nano, 5.8 GHz (`DAUTEL EVO NANO.rar`, 12 s)
 
@@ -246,8 +246,10 @@ signals shaped to the measured numbers.
   not used.
 - **Detectors before tuning** (full 12 s, sweep simulation over 46 phases): a "DJI controller"
   confirmed in **46 of 46** phases (median 2 s), 190 "DJI video" and 6 "DJI FPV air unit"
-  reports. **After**: controller confirmed in 6 of 46 phases (after 5-10 s), 114 "DJI video",
-  6 "DJI FPV air unit", 1,250 `LteStyle`.
+  reports. **After** (full 12 s, rules of commit `bea5aad` with the 500 kHz same-channel test):
+  controller confirmed in 6 of 46 phases (after 5-10 s), 114 "DJI video", 6 "DJI FPV air unit",
+  1,250 `LteStyle`. Final rules, 3 s replay: controller never confirmed, 20 "DJI video" against
+  240 `LteStyle` reports.
 - Residuals (Autel still called DJI): standalone 0.29 ms, 1.1 MHz, 15 kHz bursts are exactly an
   OcuSync 2 uplink burst's shape (only a raster rule could separate them: DJI's filed 1.4M-CA
   raster is x.12 on 2 MHz, Autel's centres were whole MHz; not adopted without a DJI 15 kHz uplink
@@ -268,8 +270,10 @@ signals shaped to the measured numbers.
   at 5746.2 did not decode.
 - Three of the four packs are weak (reference SNR 9, 2 and 1 dB): through the C5 model their video
   stands ~5 dB over the receiver's noise, under the node's 8 dB analysis gate, so most dwells are
-  not analysed. Where analysed, the verdicts are right. The 40 MHz pack (SNR 23): O4 video on
-  81-84 of 84 dwells on its LOs, controller confirmed in 46 of 46 sweep phases (median 1.0 s).
+  not analysed. Where analysed, the verdicts are right. The 40 MHz pack (SNR 23, final rules,
+  3 s replay): O4 video on 49 of 50 dwells at LOs 5779-5789; at LO 5770, where the video's lower
+  edge and the 5772.5 uplink share the capture, a controller burst on 50 of 50; controller
+  confirmed in 46 of 46 sweep phases (median 1.0 s).
 
 ### DJI FPV Combo, 5.8 GHz (`DJI FPV COMBO.rar`)
 
