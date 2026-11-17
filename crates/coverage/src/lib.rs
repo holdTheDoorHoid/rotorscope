@@ -102,13 +102,20 @@ pub struct Coordinator {
     /// Ladder roles no live node had in the last run, as a mask of
     /// [`NodeRole::bit`] (what nobody is listening to).
     pub missing: u8,
+    /// What aero (LR2021) nodes are given ([`plans::aero_plan`]); the hub
+    /// sets it before each run.
+    pub aero: plans::AeroSettings,
 }
 
+/// Roles the coordinator hands out. Aero nodes are not on the ladder (no
+/// other node can do their job, and they cannot do another), so an aero
+/// node keeps role Aero and gets [`plans::aero_plan`].
 const ASSIGNABLE: u8 = NodeRole::Wifi24.bit()
     | NodeRole::Wifi5.bit()
     | NodeRole::Ble.bit()
     | NodeRole::Fpv.bit()
-    | NodeRole::DroneId.bit();
+    | NodeRole::DroneId.bit()
+    | NodeRole::Aero.bit();
 
 /// Slot value: slot `s` of `L` is worth `2^(STAY_BITS + L - 1 - s)`, so it
 /// beats every slot below it together; staying in one's role is worth 1, and
@@ -118,7 +125,7 @@ const _: () = assert!(MAX_NODES < 1 << STAY_BITS);
 
 impl Coordinator {
     pub const fn new() -> Self {
-        Self { memory: Vec::new(), missing: 0 }
+        Self { memory: Vec::new(), missing: 0, aero: plans::AeroSettings::new() }
     }
 
     /// Decide every live node's assignment at hub time `now_ms`. Gone nodes
@@ -185,7 +192,12 @@ impl Coordinator {
                 // useful one.
                 _ => match current[i] {
                     Some(c) if n.can & c.bit() != 0 => c,
-                    _ => *ladder.iter().find(|r| n.can & r.bit() != 0).unwrap_or(&NodeRole::Ble),
+                    _ => ladder
+                        .iter()
+                        .copied()
+                        .find(|r| n.can & r.bit() != 0)
+                        .or((n.can & NodeRole::Aero.bit() != 0).then_some(NodeRole::Aero))
+                        .unwrap_or(NodeRole::Ble),
                 },
             };
             let _ = role.push(r);
@@ -220,7 +232,10 @@ impl Coordinator {
         let mut out = Decisions::new();
         for (i, n) in live.iter().enumerate() {
             let r = role[i];
-            let base = plans::base_plan(r, count[r as usize], usize::from(part[i]));
+            let base = match r {
+                NodeRole::Aero => plans::aero_plan(count[r as usize], usize::from(part[i]), &self.aero),
+                _ => plans::base_plan(r, count[r as usize], usize::from(part[i])),
+            };
             let plan = if n.relayed && plans::is_wifi(r) { plans::with_espnow_visits(&base) } else { base };
             let role_changed = current[i] != Some(r);
             let mi = self.memory.iter().position(|m| m.key == n.key);
