@@ -11,9 +11,9 @@
 //! | Verdict | Numerology | Width (-10 dB) | Timing | Where |
 //! |---|---|---|---|---|
 //! | [`Verdict::ControllerBurst`] | 15 kHz | 0.6-3.0 MHz | a whole 0.2-0.8 ms burst, mostly off | anywhere |
-//! | [`Verdict::ControllerBurst`] | 30 kHz | 2.0-6.5 MHz | a whole 0.2-0.8 ms burst, mostly off | anywhere |
+//! | [`Verdict::ControllerBurst`] | 30 kHz | 2.0-8.7 MHz | a whole 0.2-0.8 ms burst, mostly off | anywhere |
 //! | [`Verdict::DroneIdBurst`] | 15 kHz | 8-10.5 MHz (and >= 5 at -3 dB) | one whole 0.45-0.8 ms burst, dwell nearly silent | anywhere |
-//! | [`Verdict::O4Video`] | 30 kHz | >= 7 MHz (and >= 5 at -3 dB) | anything else | anywhere |
+//! | [`Verdict::O4Video`] | 30 kHz | >= 7 MHz and >= 5.5 at -3 dB, or a burst >= 8.8 MHz | anything else | anywhere |
 //! | [`Verdict::O4Video`] | 15 kHz | >= 7 MHz (and >= 5 at -3 dB) | anything else | 5.170-5.250 GHz |
 //! | [`Verdict::Video`] | 15 kHz | >= 7 MHz | | centre on the x.5 MHz raster, or unknown (clipped) |
 //! | [`Verdict::FpvAirUnit`] | 15 kHz | >= 7 MHz | | a whole-MHz DJI FPV channel, off the x.5 raster |
@@ -82,7 +82,16 @@ pub const CTRL_WIDTH_KHZ: core::ops::RangeInclusive<u32> = 600..=3_000;
 /// cuts one), 5.2 MHz mean span in the full-rate survey (RFUAV Mini 4 Pro,
 /// both video modes): about 145 subcarriers at 30 kHz, O3's count at twice
 /// the spacing.
-pub const O4_CTRL_WIDTH_KHZ: core::ops::RangeInclusive<u32> = 2_000..=6_500;
+/// A strong uplink burst in the 40 MHz video mode (RFUAV Avata 2, 6.3-6.7 MHz
+/// mean span in the survey) reads up to 8.5 MHz at -10 dB in the C5 model.
+pub const O4_CTRL_WIDTH_KHZ: core::ops::RangeInclusive<u32> = 2_000..=8_700;
+/// O4 video, a burst's own -10 dB width: the 10 MHz mode reads 8.98-9.14 MHz
+/// (Mini 4 Pro) and wider; an uplink burst at most 8.5 (above).
+pub const O4_VIDEO_BURST_MIN_KHZ: u32 = 8_800;
+/// O4 video, the capture's -3 dB width: 10 MHz mode video 6.1 MHz and up
+/// (10th percentile, Avata 2; 8.3 median on the Mini 4 Pro), uplink-only
+/// captures 2.3-5.0 MHz (Avata 2, 40 MHz mode).
+pub const O4_VIDEO_MIN_W3_KHZ: u32 = 5_500;
 /// Controller burst length (µs), a whole burst inside the capture: 6-7
 /// symbols of 71.4 µs = 0.43-0.5 ms (OcuSync / O3, ICTC 2025); O4 measured
 /// 0.40-0.45 ms (RFUAV Mini 4 Pro). The first guess allowed 1.3 ms; the
@@ -169,7 +178,8 @@ pub fn classify(f: &Features, c: &Context) -> Option<Verdict> {
     // uplink and video share a 2.5 ms frame (uplink, then video 0.49 ms
     // later), so one capture often has both; video wins, and the uplink
     // burst still reaches the hop tracker ([`controller_bursts`]).
-    let video_burst = !b.continuous && b.iter().any(|x| x.width_khz >= VIDEO_MIN_WIDTH_KHZ && x.len_us() >= 100);
+    let video_min = if o4 { O4_VIDEO_BURST_MIN_KHZ } else { VIDEO_MIN_WIDTH_KHZ };
+    let video_burst = !b.continuous && b.iter().any(|x| x.width_khz >= video_min && x.len_us() >= 100);
     if !video_burst && !b.continuous && b.on_pct() <= CTRL_MAX_ON_PCT && c.timeline.is_none_or(|t| t.duty_pct <= 60) {
         let fits = b.iter().any(|x| {
             x.complete()
@@ -187,7 +197,8 @@ pub fn classify(f: &Features, c: &Context) -> Option<Verdict> {
     if o4 {
         // A video burst sharing the capture with a longer uplink burst
         // leaves the averaged spectrum narrow: its own width counts.
-        return Some(if (w >= VIDEO_MIN_WIDTH_KHZ && wide) || video_burst { Verdict::O4Video } else { Verdict::Ofdm30 });
+        let wide_o4 = w >= VIDEO_MIN_WIDTH_KHZ && f.spec.w3_khz >= O4_VIDEO_MIN_W3_KHZ;
+        return Some(if wide_o4 || video_burst { Verdict::O4Video } else { Verdict::Ofdm30 });
     }
     if DRONEID_WIDTH_KHZ.contains(&w) && wide && !b.continuous {
         let whole: usize = b.iter().filter(|x| x.complete() && DRONEID_BURST_US.contains(&x.len_us())).count();

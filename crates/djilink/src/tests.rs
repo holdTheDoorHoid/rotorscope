@@ -493,7 +493,8 @@ fn o4_video_measured_shape() {
 }
 
 /// Regression from the same recordings: the O4 uplink is a 30 kHz, ~4.4 MHz,
-/// 0.4-0.45 ms burst (2.0-6.5 MHz accepted); one capture often also holds
+/// 0.4-0.45 ms burst (2.0-8.7 MHz accepted: 6.5 MHz in the Avata 2's 40 MHz
+/// mode); one capture often also holds
 /// the frame's video burst 0.49 ms later, and then the verdict is video
 /// while [`controller_bursts`] still hands the uplink to the hop tracker.
 #[test]
