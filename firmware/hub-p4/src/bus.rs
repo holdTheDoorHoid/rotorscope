@@ -95,6 +95,12 @@ pub struct Shared {
     pub frames: u32,
     pub ring_full: u32,
     started: bool,
+    /// A `TimeSync` to send when the command queue is next empty: UTC (ms)
+    /// at hub time `at_us`, and whether that time is PPS-anchored. Encoded
+    /// only then, so its `utc_ms` is stamped as the bytes leave.
+    sync: Option<(u64, u64, bool)>,
+    /// `TimeSync` commands written to the wire.
+    pub syncs: u32,
 }
 
 /// The state lives in `.bss` (`STORE`, ~8 KB); `BUS` points at it once set up.
@@ -127,6 +133,8 @@ pub fn init(epoch: u16) {
             frames: 0,
             ring_full: 0,
             started: false,
+            sync: None,
+            syncs: 0,
         });
         BUS.borrow_ref_mut(cs).replace(shared);
     });
@@ -144,6 +152,24 @@ pub fn send(cs: CriticalSection<'_>, bytes: &[u8]) -> bool {
         let _ = s.tx.push_back(x);
     }
     true
+}
+
+/// Protocol 11: send `Command::TimeSync` (a broadcast: every bus node, or
+/// the ESP-NOW gateway, which forwards it to aero nodes) once the command
+/// queue is empty. `utc_ms` is UTC at hub time `at_us`; the time actually
+/// sent is advanced to the moment the frame is written. A newer call
+/// replaces one not yet sent.
+pub fn time_sync(utc_ms: u64, at_us: u64, pps: bool) {
+    critical_section::with(|cs| {
+        if let Some(s) = BUS.borrow_ref_mut(cs).as_mut() {
+            s.sync = Some((utc_ms, at_us, pps));
+        }
+    });
+}
+
+/// `TimeSync` commands sent since boot.
+pub fn syncs() -> u32 {
+    critical_section::with(|cs| BUS.borrow_ref(cs).as_ref().map_or(0, |s| s.syncs))
 }
 
 /// Is this MAC a node on the bus (not a radio relay)?
@@ -303,6 +329,23 @@ fn pump_urgent(s: &mut Shared, uart: &mut Uart<'static, Blocking>, now: u64) {
 /// Commands, whole frames: once a frame is started it is finished before
 /// anything else goes.
 fn pump_commands(s: &mut Shared, uart: &mut Uart<'static, Blocking>, now: u64) {
+    // A pending TimeSync goes only between whole commands (never between
+    // a `To` and its `Assign`) and is stamped now, just before it is
+    // written. Its ~0.15 ms on the wire is below the ms resolution.
+    if s.tx.is_empty()
+        && !s.mid_frame
+        && uart.write_ready()
+        && let Some((utc_ms, at_us, pps)) = s.sync.take()
+    {
+        let utc_ms = utc_ms + now.saturating_sub(at_us) / 1000;
+        let mut buf = [0u8; 24];
+        if let Ok(b) = link::encode_command(&link::Command::TimeSync { utc_ms, pps }, &mut buf) {
+            for &x in b.iter() {
+                let _ = s.tx.push_back(x);
+            }
+            s.syncs += 1;
+        }
+    }
     if s.tx.is_empty() {
         return;
     }

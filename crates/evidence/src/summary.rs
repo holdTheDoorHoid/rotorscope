@@ -87,6 +87,15 @@ pub fn info(f: &Frame) -> Option<FrameInfo> {
             freq_100khz: 0,
             rssi: Some(w.rssi),
         },
+        // Protocol 11: an aero node's raw aircraft frame. Frequency in
+        // 100 kHz units, as the other RF kinds.
+        Frame::Air(a) => FrameInfo {
+            frame_kind: frame_kind::AIRCRAFT,
+            band: rf_band(a.freq_khz / 100),
+            channel: 0,
+            freq_100khz: a.freq_khz / 100,
+            rssi: Some(a.rssi),
+        },
         _ => return None,
     })
 }
@@ -233,6 +242,21 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
         Frame::WifiDrone(d) => {
             write!(w, "wifi_drone maker={} ch{} rssi{} ssid={:?} tx=", d.maker, d.channel, d.rssi, d.ssid.as_str())?;
             mac(w, &d.mac)
+        }
+        // The raw radio bytes are in the record (the frame itself); the
+        // summary names the protocol, so a reader knows how to decode them.
+        Frame::Air(a) => {
+            let proto = match a.proto {
+                link::AirProto::Es1090 => "es1090",
+                link::AirProto::Uat978 => "uat978",
+                link::AirProto::Flarm => "flarm",
+                link::AirProto::Ogn => "ogn",
+            };
+            write!(w, "aircraft {proto} f={}.{:03}MHz rssi{} raw={}B", a.freq_khz / 1000, a.freq_khz % 1000, a.rssi, a.raw.len())?;
+            match a.utc_ms {
+                Some(t) => write!(w, " node_utc_ms={t}"),
+                None => write!(w, " node_utc=none"),
+            }
         }
         _ => write!(w, "not a data frame"),
     }

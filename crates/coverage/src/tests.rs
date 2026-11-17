@@ -2,7 +2,8 @@ use super::*;
 use link::NodeRole::*;
 use plans::*;
 
-const ALL: u8 = ASSIGNABLE;
+/// Every ladder role (aero nodes can do nothing else, and nothing else can).
+const ALL: u8 = ASSIGNABLE & !NodeRole::Aero.bit();
 
 fn node(k: u8, can: u8, role: NodeRole) -> NodeInfo {
     NodeInfo { key: [2, 0, 0, 0, 0, k], can, role: Some(role), plan: 0, relayed: false, last_heard_ms: 0 }
@@ -578,4 +579,80 @@ fn fpv_edge_channels_are_off_the_sweep_and_tunable() {
         assert!(FPV_EDGE.iter().any(|&e| e.abs_diff(f) <= 100), "{f} not covered");
     }
     assert!(FPV_EDGE.iter().any(|&f| f / 10 - 1 > C5_LO_VERIFIED_MAX), "the unverified ones are marked by this constant");
+}
+
+/// Protocol 11: an aero node is assigned role Aero with the default plan:
+/// UAT and FLARM/OGN (US) time-shared, plus 1090 when no ADSBee hears it.
+#[test]
+fn lone_aero_node_default_plan() {
+    use link::AeroMode as M;
+    let nodes = [node(1, Aero.bit(), Aero), node(2, ALL, Wifi24)];
+    let mut c = Coordinator::new();
+    let d = c.run(&nodes, 0);
+    let a = d.iter().find(|d| d.key == nodes[0].key).unwrap();
+    assert_eq!(a.assignment.role, Aero);
+    let want = [
+        M::Es1090.entry(AERO_1090_MS),
+        M::Uat978.entry(AERO_UAT_MS),
+        M::FlarmHop { band: 2, ogn: false }.entry(AERO_FLARM_MS),
+        M::FlarmHop { band: 2, ogn: true }.entry(AERO_OGN_MS),
+    ];
+    assert_eq!(&a.assignment.plan[..], &want[..]);
+    // The Wi-Fi node is unaffected.
+    assert_eq!(d.iter().find(|d| d.key == nodes[1].key).unwrap().assignment.role, Wifi24);
+
+    // With an ADSBee on the hub, 1090 is left to it; a new plan id.
+    c.aero.es1090_elsewhere = true;
+    let d2 = c.run(&nodes, 1000);
+    let a2 = d2.iter().find(|d| d.key == nodes[0].key).unwrap();
+    assert_eq!(&a2.assignment.plan[..], &want[1..]);
+    assert!(a2.plan_changed);
+    assert_ne!(a2.assignment.id, a.assignment.id);
+
+    // Operator override: one mode, stay.
+    c.aero.only = Some(M::Uat978);
+    let d3 = c.run(&nodes, 2000);
+    let a3 = d3.iter().find(|d| d.key == nodes[0].key).unwrap();
+    assert_eq!(&a3.assignment.plan[..], &[M::Uat978.entry(0)][..]);
+}
+
+/// An aero node that never said its role (Status with `can` only) still
+/// becomes Aero, not the Bluetooth fallback.
+#[test]
+fn aero_node_without_role_is_aero() {
+    let mut n = node(1, Aero.bit(), Aero);
+    n.role = None;
+    let d = Coordinator::new().run(&[n], 0);
+    assert_eq!(roles(&d), [Aero]);
+}
+
+/// Several aero nodes split the modes; a single mode per node stays (dwell 0).
+#[test]
+fn aero_nodes_split_the_modes() {
+    use link::AeroMode as M;
+    let s = AeroSettings { es1090_elsewhere: true, ..AeroSettings::new() };
+    let one = |k, i| aero_plan(k, i, &s);
+    assert_eq!(&one(3, 0)[..], &[M::Uat978.entry(0)][..]);
+    assert_eq!(&one(3, 1)[..], &[M::FlarmHop { band: 2, ogn: false }.entry(0)][..]);
+    assert_eq!(&one(3, 2)[..], &[M::FlarmHop { band: 2, ogn: true }.entry(0)][..]);
+    assert_eq!(
+        &one(2, 1)[..],
+        &[M::FlarmHop { band: 2, ogn: false }.entry(AERO_FLARM_MS), M::FlarmHop { band: 2, ogn: true }.entry(AERO_OGN_MS)][..]
+    );
+    // More nodes than modes: duplicates, never an empty plan.
+    for i in 0..5 {
+        assert_eq!(one(5, i).len(), 1);
+    }
+    // Every code is one the node understands.
+    for k in 1..=4 {
+        for i in 0..k {
+            for &(c, _) in &aero_plan(k, i, &AeroSettings::new()) {
+                assert!(M::from_code(c).is_some());
+            }
+        }
+    }
+    let nodes = [node(1, Aero.bit(), Aero), node(2, Aero.bit(), Aero)];
+    let d = Coordinator::new().run(&nodes, 0);
+    assert_eq!(count(&d, Aero), 2);
+    assert_ne!(d[0].assignment.plan, d[1].assignment.plan);
 }

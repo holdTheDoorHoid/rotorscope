@@ -26,6 +26,7 @@ compile_error!("`modesloop` drives the ADSBee pad from UART4, which `gpsloop` an
 compile_error!("`webheadloop` needs the web-head feed on UART2, which `selftest` and `gpsloop` take");
 
 mod adsbee;
+mod aero;
 mod app;
 #[cfg(feature = "benchlog")]
 mod bench;
@@ -253,6 +254,19 @@ fn main() -> ! {
         if bus::BUS_DEFAULT { "wired bus (an ESP-NOW gateway is recognised and read as before)" } else { "gateway / point-to-point only" }
     );
     let mut down = downlink::Downlink::new();
+    // Aero (LR2021) nodes: their frame queue and the 1090 table (the
+    // ADSBee's too with `modes`) in PSRAM (aero.rs).
+    let (air_q, mut aero_es) = aero::split(aero::store(psram));
+    println!(
+        "hub-p4: aero frames queued in {}; 1090 table {}",
+        if air_q.is_some() { "PSRAM" } else { "the link queue (no PSRAM)" },
+        match (aero_es.is_some(), cfg!(feature = "modes")) {
+            (true, true) => "in PSRAM, shared by the ADSBee and aero nodes",
+            (true, false) => "in PSRAM, for aero nodes",
+            (false, _) => "missing (no PSRAM): 1090 frames counted, not decoded",
+        }
+    );
+    gw.air = air_q;
     // The web head (WEBHEAD.md): UART2 TX on GPIO31. The bench self-tests
     // `selftest` and `gpsloop` need UART2 themselves, so they build without it.
     #[cfg(not(any(feature = "selftest", feature = "gpsloop")))]
@@ -288,6 +302,12 @@ fn main() -> ! {
     let adsb_uart = adsb_uart.with_tx(unsafe { esp_hal::peripherals::GPIO30::steal() });
     uartring::adsb_rx::install(adsb_uart);
     let mut adsbee = adsbee::Adsbee::default();
+    // `modes`: the ADSBee's Beast frames and aero nodes' 1090 frames build
+    // one picture in the PSRAM table.
+    #[cfg(feature = "modes")]
+    {
+        adsbee.raw.table = aero_es.take();
+    }
     println!("hub-p4: gps on UART1 RX GPIO48 TX GPIO47 (hunting {:?} baud), PPS GPIO29; adsbee on UART4 RX GPIO30 at {}", gps::BAUDS, adsb::DEFAULT_BAUD);
     #[cfg(feature = "gpsloop")]
     let mut gpsloop = gpsloop::Loop::new(p.UART2);
@@ -360,15 +380,23 @@ fn main() -> ! {
         console::pump();
         gw.poll(ms);
         ev.set_context(&app, &gps, ms);
-        app.ingest(&mut gw, &mut ev, ms);
-        down.tick(&mut gw, ms);
+        {
+            #[cfg(feature = "modes")]
+            let es = adsbee.raw.table.as_deref_mut();
+            #[cfg(not(feature = "modes"))]
+            let es = aero_es.as_deref_mut();
+            // FLARM needs GPS time: `gps.time` is only ever set from the GPS.
+            let mut actx = aero::Ctx { gps_utc_ms: gps.utc_ms(ms), es };
+            app.ingest(&mut gw, &mut ev, &mut actx, ms);
+        }
+        down.tick(&mut gw, adsbee.heard_within(ms, ADSBEE_COVERS_MS), ms);
         gps.tick(ms);
         #[cfg(not(feature = "webheadloop"))]
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
         let mut lines = Lines { note: &mut note, site: &mut site_line };
-        if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut lines, ms) {
+        if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut down, &mut lines, ms) {
             let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
             site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev);
         }
@@ -376,6 +404,15 @@ fn main() -> ! {
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
             app.housekeeping(&gps, ms);
+            // Protocol 11: the hub's UTC to every node that wants it (aero
+            // nodes follow FLARM/OGN hops with it), on the bus or through
+            // the gateway. Stamped again as it is written (bus.rs).
+            if let (Some(a), Some(utc)) = (gps.time, gps.utc_ms(ms)) {
+                bus::time_sync(utc, ms * 1000, a.pps);
+            }
+            #[cfg(not(feature = "modes"))]
+            app.aero.report(aero_es.as_deref_mut(), app.tracker, gw.feed.as_mut(), ms);
+            app.aero.print(if app.aero.has_keys() { "loaded" } else { sdlog.flarm_key_state }, bus::syncs(), ms);
             site.apply(&mut app, &gw);
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
@@ -427,6 +464,10 @@ fn main() -> ! {
                 format_args!("O4 DroneID key installed (public fingerprint {:02x}{:02x}-{:02x}{:02x})", fp[0], fp[1], fp[2], fp[3]),
             );
             ev.event(evidence::format::EventCode::Setting, t.as_bytes(), &fp);
+        }
+        if let Some(k) = sdlog.take_flarm_keys() {
+            app.aero.set_keys(k);
+            ev.event(evidence::format::EventCode::Setting, b"FLARM legacy keys installed from FLARMKEY.TXT (contents never logged)", &[]);
         }
         #[cfg(feature = "gpsloop")]
         gpsloop.tick();
@@ -584,6 +625,7 @@ fn command(
     faa: &faa::Faa,
     ev: &mut evlog::Evidence,
     sdlog: &mut sd::Logger,
+    down: &mut downlink::Downlink,
     lines: &mut Lines<'_>,
     now: u64,
 ) -> Option<heapless::String<120>> {
@@ -675,12 +717,20 @@ fn command(
             println!("hub-p4: cmd manual own position cleared");
         }
         b'b' => faa.bench(),
+        b'a' => {
+            // Aero nodes: auto (the coverage default) or one mode for all.
+            let next = down.cycle_aero();
+            let mut t: heapless::String<80> = heapless::String::new();
+            let _ = core::fmt::Write::write_fmt(&mut t, format_args!("aero plan: {} (command a)", downlink::aero_only_label(next)));
+            ev.event(evidence::EventCode::Setting, t.as_bytes(), &[]);
+            println!("hub-p4: cmd {t}");
+        }
         b'm' => forget_gps_home(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
             println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all");
         }
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, m=hub moved (forget the GPS home), L=site line (node position / mute alarm), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN), m=hub moved (forget the GPS home), L=site line (node position / mute alarm), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }
@@ -737,6 +787,10 @@ fn fake_flight(now: u64) -> [rid::message::Message; 2] {
     ]
 }
 
+/// The ADSBee counts as covering 1090 MHz (aero nodes then leave it out)
+/// when heard this recently. Long, so a short gap does not replan nodes.
+const ADSBEE_COVERS_MS: u64 = 60_000;
+
 /// GPS and ADS-B status for the log, every 5 s.
 fn print_gps_adsb(app: &app::App, gps: &gps::Gps, adsbee: &adsbee::Adsbee, now: u64) {
     use core::sync::atomic::Ordering::Relaxed;
@@ -762,16 +816,17 @@ fn print_gps_adsb(app: &app::App, gps: &gps::Gps, adsbee: &adsbee::Adsbee, now: 
     );
     #[cfg(feature = "modes")]
     {
-        let s = &adsbee.raw.table.stats;
+        let Some(t) = adsbee.raw.table.as_deref() else { return };
+        let s = &t.stats;
         let b = &adsbee.raw.beast.stats;
         println!(
             "hub-p4: modes beast_frames={} broken={} skipped={} used={} bad_crc={} fixed1={} fixed2={} fix2_refused={} unconfirmed={} pos_global={} pos_local={} pos_refused={} zone_mismatch={} tisb={} adsr={} bds={:?} table={} df={:?}",
             b.frames, b.broken, b.skipped, s.used, s.bad_crc, s.fixed_1, s.fixed_2, s.fix_2_refused, s.unconfirmed,
             s.positions_global, s.positions_local, s.positions_refused, s.cpr_zone_mismatch, s.tis_b, s.ads_r, s.bds,
-            adsbee.raw.table.len(), s.by_df
+            t.len(), s.by_df
         );
         // The aircraft with a position, as the decoder has them.
-        for p in adsbee.raw.table.planes() {
+        for p in t.planes() {
             if let Some((lat, lon)) = p.position() {
                 println!(
                     "hub-p4: modes ac {:06X} {} alt={:?} pos={:.5},{:.5} global={}",

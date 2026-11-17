@@ -444,3 +444,47 @@ fn file_numbers() {
     assert_eq!(verify::file_number("ev000003.evl"), Some(3));
     assert_eq!(verify::file_number("EV12.EVL"), None);
 }
+
+/// Protocol 11: an aero node's raw aircraft frame is a data frame: logged
+/// as kind AIRCRAFT on the RF band with its frequency, and its stored bytes
+/// decode back to the same frame and summary (what the verifier checks).
+#[test]
+fn aircraft_frames_are_logged_raw() {
+    let mut raw = heapless::Vec::new();
+    raw.extend_from_slice(&[0x8D, 0x48, 0x40, 0xD6, 0x20, 0x2C, 0xC3, 0x71, 0xC3, 0x2C, 0xE0, 0x57, 0x60, 0x98]).unwrap();
+    let f = link::Frame::Air(link::AirFrame {
+        proto: link::AirProto::Es1090,
+        freq_khz: 1_090_000,
+        rssi: -71,
+        utc_ms: Some(1_763_337_600_123),
+        uptime_us: 5_000_000,
+        raw,
+    });
+    let info = evidence::summary::info(&f).unwrap();
+    assert_eq!(info.frame_kind, evidence::format::frame_kind::AIRCRAFT);
+    assert_eq!(info.band, evidence::format::band::RF);
+    assert_eq!(info.freq_100khz, 10_900);
+    assert_eq!(info.rssi, Some(-71));
+    let mut s = evidence::summary::Summary::new();
+    evidence::summary::write_summary(&f, &mut s).unwrap();
+    assert_eq!(
+        core::str::from_utf8(s.as_bytes()).unwrap(),
+        "aircraft es1090 f=1090.000MHz rssi-71 raw=14B node_utc_ms=1763337600123"
+    );
+    let mut buf = [0u8; link::MAX_FRAME];
+    let bytes = evidence::summary::raw_bytes(&f, &mut buf).unwrap().to_vec();
+    let (i2, s2, f2) = evidence::summary::decode_raw(evidence::format::RAW_LINK_FRAME_V6, &bytes).unwrap();
+    assert_eq!((i2, s2.as_bytes(), f2), (info, s.as_bytes(), f));
+    // AeroStatus is bookkeeping, not a detection.
+    let st = link::Frame::AeroStatus(link::AeroStatus {
+        mode: 9_780,
+        freq_khz: 978_000,
+        time: link::AeroTime::Hub,
+        parked: false,
+        radio_ok: true,
+        rx_restarts: 0,
+        rejected: 0,
+        rate_dropped: 0,
+    });
+    assert!(evidence::summary::info(&st).is_none());
+}

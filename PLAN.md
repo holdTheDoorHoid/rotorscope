@@ -715,8 +715,19 @@ receive-only LR2021 + ESP32-C3 "aero node" (`firmware/node-lr`) that the hub swi
 hub's GPS time (`Command::TimeSync`), and sends raw frames (`Frame::Air`, link protocol 11) for
 the hub to decode. Settings ported from SoftRF, hop plan from the OGN tracker (`crates/aerohop`,
 `crates/lr2021cfg`, 36 host tests). It never transmits on any aviation band. Waiting for an LR2021
-board (Phase 9); hub-side decoding of `Frame::Air` and the UAT/FLARM/OGN decoders are separate
-work. Plain-language guide, wiring and the unconfirmed chip details: docs/AERO-NODE.md.
+board (Phase 9). Plain-language guide, wiring and the unconfirmed chip details: docs/AERO-NODE.md.
+
+**14b/14d hub side, BUILT 2026-11-17 (branch `aero-hub`), not yet on hardware:** the P4 hub
+decodes `Frame::Air` (1090 ES into the `modes` table, shared with the ADSBee under `--features
+modes`; UAT with `crates/uat`; OGN with `flarm::ogn`; FLARM with `flarm::legacy` only when
+`ROTORSCP/FLARMKEY.TXT` is loaded and the hub has GPS time and an own position), and hands the
+aircraft to the tracker and web head like ADSBee aircraft. Every raw frame goes to the evidence
+log. The hub sends `TimeSync` once a second on the wired bus and through the gateway (which
+forwards it to aero nodes over ESP-NOW, re-stamped). A lone aero node gets UAT + FLARM + OGN
+time-shared (+ 1090 when no ADSBee is heard); console `a` overrides. FLARM content decoding is
+the owner's decision (2026-11-17; keys on the card, never in the repository); no-track and
+stealth aircraft are logged like the rest (owner decision 2026-11-17). Waiting for an LR2021
+board. Details: docs/AERO-NODE.md "Hub side".
 
 Outputs for all of 14: aircraft on the screen, SD log, USB JSON, phone page and CoT, with the source
 (ADS-B, Mode S, UAT, FLARM, OGN, FANET, ADS-L); Phase 12's low-flying check uses them too.

@@ -126,6 +126,12 @@ pub struct GatewayLink<'d> {
     pub out: Out,
     /// Frames dropped because `out` was full.
     pub out_full: u32,
+    /// Aero nodes' raw aircraft frames (protocol 11), in their own queue in
+    /// PSRAM (`aero::Store`): they come up to 200 a second and `out` is
+    /// sized for drone detections. `None` (no PSRAM): they share `out`.
+    pub air: Option<&'static mut crate::aero::AirQueue>,
+    /// Aircraft frames dropped because `air` was full.
+    pub air_full: u32,
     /// Bytes written to the TX FIFO, and bytes refused for want of queue room.
     pub tx_bytes: u32,
     pub tx_full: u32,
@@ -163,6 +169,8 @@ impl<'d> GatewayLink<'d> {
             nodes: heapless::Vec::new(),
             out: Out::new(),
             out_full: 0,
+            air: None,
+            air_full: 0,
             tx_bytes: 0,
             tx_full: 0,
             feed: None,
@@ -230,8 +238,8 @@ impl<'d> GatewayLink<'d> {
                 break;
             }
             self.stats.bytes += n as u32;
-            let (stats, nodes, via, out, out_full, feed) =
-                (&mut self.stats, &mut self.nodes, &mut self.via, &mut self.out, &mut self.out_full, &mut self.feed);
+            let (stats, nodes, via, feed) = (&mut self.stats, &mut self.nodes, &mut self.via, &mut self.feed);
+            let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
             self.dec.feed(&buf[..n], |r| {
                 handled += 1;
                 match r {
@@ -241,7 +249,7 @@ impl<'d> GatewayLink<'d> {
                         if let Some(feed) = feed.as_mut() {
                             feed.relay(&f);
                         }
-                        Self::on_frame(stats, nodes, via, out, out_full, now_ms, f)
+                        Self::on_frame(stats, nodes, via, &mut q, now_ms, f)
                     }
                     Err(e) => {
                         match e {
@@ -266,8 +274,7 @@ impl<'d> GatewayLink<'d> {
         stats: &mut LinkStats,
         nodes: &mut heapless::Vec<NodeStats, MAX_RELAYED>,
         via: &mut Option<([u8; 6], i8)>,
-        out: &mut Out,
-        out_full: &mut u32,
+        q: &mut Queues<'_>,
         now_ms: u64,
         f: Frame,
     ) {
@@ -281,8 +288,8 @@ impl<'d> GatewayLink<'d> {
             if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
                 stats.gw_hello = firmware.clone();
             }
-            if is_data(&f) && out.push_back((0, f)).is_err() {
-                *out_full += 1;
+            if is_data(&f) {
+                q.push(0, f);
             }
             return;
         };
@@ -317,8 +324,33 @@ impl<'d> GatewayLink<'d> {
             }
             _ => {}
         }
-        if is_data(&f) && out.push_back((i as u8 + 1, f)).is_err() {
-            *out_full += 1;
+        if is_data(&f) {
+            q.push(i as u8 + 1, f);
+        }
+    }
+}
+
+/// Where `on_frame` puts frames for the main loop.
+struct Queues<'a> {
+    out: &'a mut Out,
+    out_full: &'a mut u32,
+    air: &'a mut Option<&'static mut crate::aero::AirQueue>,
+    air_full: &'a mut u32,
+}
+
+impl Queues<'_> {
+    fn push(&mut self, node: u8, f: Frame) {
+        match (f, self.air.as_deref_mut()) {
+            (Frame::Air(a), Some(q)) => {
+                if q.push_back((node, a)).is_err() {
+                    *self.air_full += 1;
+                }
+            }
+            (f, _) => {
+                if self.out.push_back((node, f)).is_err() {
+                    *self.out_full += 1;
+                }
+            }
         }
     }
 }
@@ -336,5 +368,9 @@ fn is_data(f: &Frame) -> bool {
             // Protocol 9: attacks and jamming from nodes, and forged-link
             // reports from the gateway itself.
             | Frame::Threat(_)
+            // Protocol 11: aero nodes' raw aircraft frames, and their
+            // state (kept per node by `aero.rs`, not logged as evidence).
+            | Frame::Air(_)
+            | Frame::AeroStatus(_)
     )
 }

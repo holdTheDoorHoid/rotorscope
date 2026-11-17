@@ -228,7 +228,80 @@ pub fn base_plan(role: NodeRole, k: usize, idx: usize) -> Plan {
                 push_all(&mut p, part(&fpv_sweep(), k, idx).iter().map(|&f| (f, FPV_MS)));
             }
         }
-        NodeRole::Ble | NodeRole::Gateway | NodeRole::Aero => {}
+        NodeRole::Aero => p = aero_plan(k, idx, &AeroSettings::new()),
+        NodeRole::Ble | NodeRole::Gateway => {}
+    }
+    p
+}
+
+// ------------------------------------------------------------------ Aero --
+//
+// An aero node (LR2021, docs/AERO-NODE.md) hears one aircraft signal at a
+// time. Its plan entries are `(link::AeroMode::code(), dwell ms)`, visited
+// in turn; a single entry (or dwell 0) stays.
+//
+// Default, one node: time-share 978 MHz UAT (US light aircraft below
+// 18,000 ft, which the ADSBee 1090 cannot hear) and FLARM / OGN hopping
+// (gliders, light aircraft, some drones), and add 1090 MHz only when the
+// hub has no ADSBee hearing 1090 already. Several aero nodes split the
+// same list, one or more modes each, so with enough of them each mode has
+// a radio of its own.
+
+/// FLARM/OGN hopping region (SoftRF `RF_BAND_*`): 2 = USA/Canada (902-928
+/// MHz). 1 = Europe (868 MHz), 3 = Australia/South America.
+pub const AERO_REGION: u8 = 2;
+/// Dwells when time-sharing. UAT aircraft send about once a second, FLARM
+/// about once or twice a second, so 10 s catches each nearby aircraft
+/// several times; OGN trackers are rarer in the US and get less.
+pub const AERO_1090_MS: u16 = 10_000;
+pub const AERO_UAT_MS: u16 = 10_000;
+pub const AERO_FLARM_MS: u16 = 10_000;
+pub const AERO_OGN_MS: u16 = 5_000;
+
+/// What the hub tells the coordinator about aero coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AeroSettings {
+    /// Something else (the hub's ADSBee) already hears 1090 MHz: aero
+    /// nodes leave it out.
+    pub es1090_elsewhere: bool,
+    /// Operator override: every aero node stays on this one mode.
+    pub only: Option<link::AeroMode>,
+    /// FLARM/OGN region.
+    pub region: u8,
+}
+
+impl AeroSettings {
+    pub const fn new() -> Self {
+        Self { es1090_elsewhere: false, only: None, region: AERO_REGION }
+    }
+}
+
+impl Default for AeroSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The plan for aero node `idx` of `k`.
+pub fn aero_plan(k: usize, idx: usize, s: &AeroSettings) -> Plan {
+    use link::AeroMode;
+    let mut p = Plan::new();
+    if let Some(m) = s.only {
+        let _ = p.push(m.entry(0));
+        return p;
+    }
+    let all = [
+        (AeroMode::Es1090, AERO_1090_MS),
+        (AeroMode::Uat978, AERO_UAT_MS),
+        (AeroMode::FlarmHop { band: s.region, ogn: false }, AERO_FLARM_MS),
+        (AeroMode::FlarmHop { band: s.region, ogn: true }, AERO_OGN_MS),
+    ];
+    let modes = if s.es1090_elsewhere { &all[1..] } else { &all[..] };
+    let codes: heapless::Vec<u32, 4> = modes.iter().map(|(m, _)| m.code()).collect();
+    let mine = part(&codes, k.max(1), idx);
+    for &c in mine {
+        let dwell = if mine.len() == 1 { 0 } else { modes.iter().find(|(m, _)| m.code() == c).map_or(0, |m| m.1) };
+        let _ = p.push((c, dwell));
     }
     p
 }

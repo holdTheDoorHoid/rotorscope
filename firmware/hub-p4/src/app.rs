@@ -81,6 +81,8 @@ pub struct App {
     /// O4 DroneID decryption; detect-only until the SD card supplies the
     /// owner's key (`sd::Logger::take_o4_key`).
     pub o4: djicrypt::Decryptor<8>,
+    /// Aircraft from aero (LR2021) nodes (`aero.rs`).
+    pub aero: crate::aero::Aero,
 }
 
 impl App {
@@ -100,28 +102,57 @@ impl App {
             manual: None,
             new_drones: heapless::Deque::new(),
             o4: djicrypt::Decryptor::default(),
+            aero: crate::aero::Aero::default(),
         }
     }
 
-    /// Hand queued link frames to the evidence log and the tracker.
-    pub fn ingest(&mut self, gw: &mut GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
-        while let Some((node, f)) = gw.out.pop_front() {
-            let relay = node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| (n.mac, n.rssi));
-            ev.frame(node, relay, &f);
-            self.tracker.ingest_frame(node, &f, now);
-            if let link::Frame::DroneId(link::DroneIdSighting {
-                record: link::DroneIdRecord::O4 { key_id, object, .. },
-                ..
-            }) = &f
-                && self.o4.has_key_or_sessions()
-            {
-                self.decrypt_o4(*key_id, object, ev, now);
-            }
+    /// Hand queued link frames to the evidence log and the tracker; aero
+    /// nodes' aircraft frames (their own queue) to `aero.rs` too.
+    pub fn ingest(&mut self, gw: &mut GatewayLink<'_>, ev: &mut crate::evlog::Evidence, actx: &mut crate::aero::Ctx<'_>, now: u64) {
+        // One loop, so `take` is inlined once (its buffers once on the stack).
+        loop {
+            let (node, f) = match gw.out.pop_front() {
+                Some(x) => x,
+                None => match gw.air.as_deref_mut().and_then(|q| q.pop_front()) {
+                    Some((node, a)) => (node, link::Frame::Air(a)),
+                    None => break,
+                },
+            };
+            self.take(gw, ev, actx, node, f, now);
         }
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
         self.announce_conflicts(ev, now);
+    }
+
+    /// One frame: the evidence log first (raw bytes, always), then whoever
+    /// decodes it. Inlined into the main loop as the loop body was before
+    /// (a frame of its own here would add ~3 KB to every path below it,
+    /// O4 decryption included; the stack is tight).
+    #[inline(never)]
+    fn take(
+        &mut self,
+        gw: &mut GatewayLink<'_>,
+        ev: &mut crate::evlog::Evidence,
+        actx: &mut crate::aero::Ctx<'_>,
+        node: u8,
+        f: link::Frame,
+        now: u64,
+    ) {
+        let relay = node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| (n.mac, n.rssi));
+        ev.frame(node, relay, &f);
+        self.tracker.ingest_frame(node, &f, now);
+        match &f {
+            link::Frame::DroneId(link::DroneIdSighting { record: link::DroneIdRecord::O4 { key_id, object, .. }, .. })
+                if self.o4.has_key_or_sessions() =>
+            {
+                self.decrypt_o4(*key_id, object, ev, now);
+            }
+            link::Frame::Air(a) => self.aero.on_air(a, actx, self.tracker, gw.feed.as_mut(), now),
+            link::Frame::AeroStatus(st) => self.aero.on_status(relay.map_or([0; 6], |r| r.0), st, now),
+            _ => {}
+        }
     }
 
     /// Drones close to crewed aircraft: one evidence event and one console
@@ -397,8 +428,10 @@ impl App {
                 Some(link::NodeRole::Aero) => NodeKind::Lr,
                 _ => NodeKind::Wifi24,
             };
+            // An aero node's line says what its radio is doing right now.
+            let aero = self.aero.status_of(&n.mac).map(crate::aero::screen_label);
             let _ = self.state.assigned.push(n.assigned.map(|(role, plan)| screen::Assigned {
-                role: crate::downlink::label(role),
+                role: aero.unwrap_or(crate::downlink::label(role)),
                 plan,
                 applied: n.applied,
             }));

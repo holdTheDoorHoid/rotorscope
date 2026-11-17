@@ -24,8 +24,8 @@ what has been seen.
   to the hub, like every other node.
 - **FLARM content.** FLARM's own message contents are proprietary and FLARM has objected to
   third-party decoding (PLAN.md 14d). The node does not decode them: it checks FLARM's
-  checksum and passes the scrambled bytes on. Whether the hub decodes them is a separate
-  decision; presence alone (an aircraft with a FLARM is near) needs no decoding.
+  checksum and passes the scrambled bytes on. The hub decodes them only with the owner's key
+  file on its SD card (see "Hub side"); without it, presence is still counted.
 - **Without the hub's time** (no time message for 10 seconds), FLARM/OGN mode cannot follow
   the hops. The node then sits on one channel, still hears the transmissions that happen to
   land there, and tells the hub it is "parked".
@@ -89,6 +89,91 @@ multi-image nodes); flash with `espflash flash --chip esp32c3` once there is a b
 
 Without `tools/link.key` the ESP-NOW build runs unauthenticated and says so at boot (a
 `"what":"link_key"` warning line), exactly like the other nodes.
+
+## Hub side
+
+**Status (2026-11-17): written and built for the P4 hub and the gateway, host-tested, never run
+with an aero node.** Branch `aero-hub`.
+
+### In plain words
+
+- **What the hub does with each signal.**
+  - **1090 MHz ADS-B**: the hub reads it with the same decoder it uses for the ADSBee's raw
+    output. If the hub is built to decode the ADSBee itself (`--features modes`), the aero node
+    and the ADSBee fill one shared aircraft list, so an aircraft heard by both shows once.
+  - **978 MHz UAT**: repaired (up to 6 or 7 damaged bytes) and read; the aircraft appear
+    labelled **UAT**.
+  - **OGN trackers**: checked and read; labelled **OGN**.
+  - **FLARM**: unscrambled only when three things are true: the key file
+    `ROTORSCP/FLARMKEY.TXT` is on the SD card, the hub has the time from its GPS (not "no time"),
+    and the hub knows where it is (GPS, or a position typed in). FLARM's scrambling depends on
+    the time and on the hub's own position, and a wrong time gives a wrong answer with no
+    warning, so without all three the message is counted and not decoded. Labelled **FLARM**.
+- **Everything is kept.** Every message the node sends goes into the evidence log as it came,
+  decoded or not. Every decoded aircraft goes to the screen, the SD log, the JSON lines, the
+  web head and the low-flying checks, exactly like ADSBee aircraft. Aircraft whose owners set
+  FLARM's "no-track" or "stealth" are treated the same (owner decision 2026-11-17: "everything
+  should be logged").
+- **The key file.** Put the FLARM key file (the format `crates/flarm` describes, as written by
+  the laptop tool) on the card as `ROTORSCP/FLARMKEY.TXT`. The hub reads it when the card is
+  mounted, says only "loaded", "bad", "none" or "error", wipes its copy of the file, and never
+  prints, logs or sends the keys to any other board. Never put it in the repository.
+- **Time for the node.** Once a second, when the hub has GPS time, it sends that time to the
+  nodes: on the wired bus, and through the ESP-NOW gateway, which passes it on to every aero
+  node and adds the time it held it, so the node's clock is not late. The time is written into
+  the message at the last moment before it leaves each box.
+- **What the node listens to.** A lone aero node takes turns: 978 MHz UAT for 10 s, FLARM for
+  10 s, OGN trackers for 5 s. If the hub has not heard its ADSBee for a minute, 1090 MHz joins
+  the turns for 10 s (the ADSBee normally covers 1090). Two or more aero nodes split these
+  between them. The console command `a` pins every aero node to one signal (1090, UAT, FLARM or
+  OGN, then back to the turns); it lasts until the hub restarts. US channels are the default
+  (`AERO_REGION` in `crates/coverage/src/plans.rs` for Europe or elsewhere).
+- **On the screen.** The node health page shows each aero node as "LR" with a line saying what
+  its radio is doing: "LR UAT 978", "LR FLARM hop", "LR FLARM parked" (no time, so it cannot
+  follow the hops), "LR no radio" and so on.
+
+### Not verified (needs the hardware)
+
+- Nothing has been decoded from a real aero node; the decoders are tested with built frames
+  and published examples only.
+- Time sync bytes leaving the hub and the gateway can be checked on the bench without a node
+  (see the checklist below); their accuracy at the node cannot.
+
+### Bench checklist (P4 hub, no aero node needed)
+
+1. Boot: the console says `aero frames queued in PSRAM; 1090 table in PSRAM, ...`.
+2. Card with `ROTORSCP/FLARMKEY.TXT`: `FLARM keys loaded from ROTORSCP/FLARMKEY.TXT (contents
+   never shown)`; without it: `no ROTORSCP/FLARMKEY.TXT: FLARM aircraft are counted, not
+   decoded`; a damaged file: `... refused (<reason>)`. The `{"t":"hub"}` line's
+   `"aero":{"keys":...}` says the same (`loaded` / `none` / `bad` / `error`).
+3. With a GPS time (`"utc_src"` not null): `"aero":{..."syncs":N}` grows by one a second. With
+   the gateway attached, its USB JSON `{"t":"gw",...}` shows `hub_syncs` growing at the same
+   rate, and `time_nobody` growing too (no aero node yet). Without GPS time, `syncs` stays still.
+4. Console `a` four times then once more: `cmd aero plan: 1090 ES only`, `UAT 978 only`, `FLARM
+   hop only`, `OGN hop only`, `auto (coverage default)`.
+
+### Technical detail (hub)
+
+- `firmware/hub-p4/src/aero.rs`: decoding, counters, per-node `AeroStatus`, JSON. Frames come
+  from `links.rs` through their own 64-entry queue in PSRAM (`aero::Store` at 6 MB, with the
+  1090 table built in place by `modes::Table::init_in_place`), so a burst while the screen is
+  drawn is not lost; `"lost"` counts any that were.
+- JSON: the hub line gets `"aero":{"keys":"loaded","syncs":N,"es":[f,d,r],"uat":[f,d,r],
+  "ogn":[f,d,r],"flarm":[f,d,r,no_keys,no_time,no_pos],"lost":N,"nodes":N}` with f = frames,
+  d = decoded, r = rejected (decoder refused it; for 1090 also "no table"). One
+  `{"t":"aero","nodes":[{"mac","mode","code","freq_khz","time","parked","radio_ok","restarts",
+  "rejected","rate_dropped","age_ms"}]}` line follows when an aero node has reported. A console
+  line `hub-p4: aero es1090 f/d/r ... time_syncs=N` every 60 s when anything was counted.
+- FLARM time: the node's own reception stamp (`AirFrame::utc_ms`) when it is within 2 s of the
+  hub's GPS time, else the hub's GPS time.
+- Time sync: `bus::time_sync` keeps one pending `TimeSync`; the bus/UART pump encodes it only
+  when the command queue is empty (so never between a `To` and its `Assign`), stamped at that
+  moment. The gateway (`firmware/gateway`) sends it to each aero node as its own command
+  packet (sequence numbers with bit 15 set, so a node never drops it as a repeat of a queued
+  command), unicast, sealed with the node's session echo when keyed, no retries.
+- Coverage: `crates/coverage` `plans::aero_plan` and `Coordinator::aero`. Aero nodes are not on
+  the ladder; they always get role Aero.
+- Evidence: `Frame::Air` is frame kind 7 (`AIRCRAFT`), band RF, frequency in 100 kHz units.
 
 ## Technical detail
 

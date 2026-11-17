@@ -28,6 +28,16 @@ Wi-Fi nodes just add more chances to hear a packet; a third DroneID, Wi-Fi or
 FPV node takes a share of the sweep). The list and every channel table are
 at the top of `src/plans.rs`; change them there.
 
+**Aircraft (aero) nodes.** An LR2021 aero node (docs/AERO-NODE.md) is not on
+the ladder: it can do nothing else and nothing else can do its job. It always
+gets the aircraft job. Alone, it takes turns: 978 MHz UAT for 10 s, FLARM
+(US hopping) for 10 s, OGN trackers (US hopping) for 5 s, and also 1090 MHz
+for 10 s when the hub has no ADSBee hearing 1090 already (the hub says so,
+`Coordinator::aero`). Two or more aero nodes split that list, so each mode
+can get a radio of its own; a node with one mode stays on it. The hub's
+console command `a` can pin every aero node to one mode instead (until
+reboot). Tables: `AERO_*` in `src/plans.rs`.
+
 **Scouting.** Whatever its plan, every Wi-Fi node leaves it for 105 ms every
 3 s to visit one channel of its band(s) the plan skips, round robin
 (`plans::scout_channel`): 2.4 GHz 1-14, 5 GHz 36-177 including the DFS

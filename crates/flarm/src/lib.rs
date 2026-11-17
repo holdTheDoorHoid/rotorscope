@@ -161,8 +161,8 @@ pub struct Decoded {
     /// The sender asks not to be shown on public web pages (OGN "stealth").
     pub stealth: bool,
     /// The sender asks not to be tracked (FLARM "no-track"). OGN honours
-    /// this; the hub should show such an aircraft locally but not log or
-    /// relay it beyond the unit.
+    /// this on its public network; the Rotorscope hub logs, shows and
+    /// relays such aircraft like any other (owner decision 2026-11-17).
     pub no_track: bool,
     /// OGN: times relayed by other trackers (0 = heard directly).
     pub relay_count: u8,
