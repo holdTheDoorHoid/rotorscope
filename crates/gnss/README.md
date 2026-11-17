@@ -2,7 +2,9 @@
 
 GPS driver core for the Rotorscope hub: a u-blox **MAX-M10S** (protocol 34.x, firmware
 SPG 5.10) or a Quectel **LC29H(AA)** (dual-band L1+L5, NMEA + `$PAIR`/`$PQTM` commands),
-detected automatically. `#![no_std]`, no alloc, no unsafe, no dependencies, 59 host tests.
+detected automatically, plus a jamming/spoofing monitor for the receiver itself
+(`integrity`, see `docs/GNSS-INTEGRITY.md`). `#![no_std]`, no alloc, no unsafe, no dependencies,
+84 host tests.
 
 **Status:** the u-blox path is host-tested; the LC29H path is host-tested and both were
 loop-back tested on the P4 hub against an on-chip emulator (`firmware/hub-p4/PARITY.md`).
@@ -55,6 +57,10 @@ because one input byte can release more than one event (see "Resync").
 | `configure_sequence()` / `ConfigSequence::with_options(ConfigOptions)` | Iterator of `ConfigFrame` (`bytes()`, `name`, `baud_after`, `confirmed_by(&Event)`). |
 | `config::keys::*` | The configuration key IDs. |
 | `ddc::*` | I2C address, registers, `bytes_available()`. |
+| `Parser::sats()` -> `SatTable` | The last epoch's satellites one by one (UBX NAV-SAT or NMEA GSV): number, band, elevation, azimuth, C/N0, `plausible`. |
+| `Event::NavStatus` / `NavClock` / `MonRf`, `Reply::Jamming` | u-blox spoofing detector, clock bias/drift, jamming state/AGC/CW; LC29H `$PAIRSPF`. |
+| `ConfigSequence::with_integrity(true)` | Adds the optional `integrity-out` and `itfm` steps (u-blox). `Module::sequence` does this, and `PAIR391,1` on the LC29H. `Step::optional()`: a refusal is not a failure. |
+| `integrity::Monitor` | `on_event(&ev, parser.sats(), now_ms)` per event; `status()` -> `state` (ok / suspect jamming / jamming / suspect spoofing / spoofing), `cause`, `metrics`, `hold()`, `write_reason()`. |
 
 Fields the source cannot provide are `None`: from NMEA there is never `h_acc_m`, `v_acc_m`,
 `pdop`, `time_acc_ns` or `itow_ms`, and `alt_*` appear only with a GGA that has an altitude.

@@ -52,10 +52,11 @@ impl Module {
         }
     }
 
-    /// The boot configuration for this module.
+    /// The boot configuration for this module, with the integrity messages switched on
+    /// ([`ConfigSequence::with_integrity`], [`Lc29hOptions::jamming_detect`]).
     pub fn sequence(self, ubx: ConfigOptions, quectel: Lc29hOptions) -> Steps {
         match self {
-            Module::UbloxM10 => Steps::Ubx(ConfigSequence::with_options(ubx)),
+            Module::UbloxM10 => Steps::Ubx(ConfigSequence::with_options(ubx).with_integrity(true)),
             Module::QuectelLc29h => Steps::Quectel(Lc29hSequence::new(quectel)),
             Module::Nmea => Steps::None,
         }

@@ -232,15 +232,11 @@ pub struct ConfigOptions {
     pub baud: Option<u32>,
     /// PPS pulse width once locked, microseconds. Default 100 000 (100 ms).
     pub pps_len_us: u32,
-    /// Switch on the integrity messages (NAV-SAT, NAV-STATUS, NAV-CLOCK, MON-RF, each once
-    /// per epoch, about 500 bytes/s with 30 satellites) and the interference monitor.
-    /// Default true. Both steps are optional: a NAK does not fail the configuration.
-    pub integrity: bool,
 }
 
 impl Default for ConfigOptions {
     fn default() -> Self {
-        ConfigOptions { layers: LAYER_RAM | LAYER_BBR, baud: Some(115_200), pps_len_us: 100_000, integrity: true }
+        ConfigOptions { layers: LAYER_RAM | LAYER_BBR, baud: Some(115_200), pps_len_us: 100_000 }
     }
 }
 
@@ -282,6 +278,7 @@ impl ConfigFrame {
 #[derive(Clone, Copy, Debug)]
 pub struct ConfigSequence {
     opts: ConfigOptions,
+    integrity: bool,
     idx: u8,
 }
 
@@ -293,7 +290,16 @@ pub fn configure_sequence() -> ConfigSequence {
 impl ConfigSequence {
     /// A sequence with custom options.
     pub fn with_options(opts: ConfigOptions) -> Self {
-        ConfigSequence { opts, idx: 0 }
+        ConfigSequence { opts, integrity: false, idx: 0 }
+    }
+
+    /// Also switch on the integrity messages (NAV-SAT, NAV-STATUS, NAV-CLOCK, MON-RF, each
+    /// once per epoch, about 500 bytes/s with 30 satellites) and the interference monitor, for
+    /// [`crate::integrity::Monitor`]. Off unless asked for ([`crate::Module::sequence`] asks).
+    /// Both steps are optional: a NAK does not fail the configuration.
+    pub fn with_integrity(mut self, on: bool) -> Self {
+        self.integrity = on;
+        self
     }
 }
 
@@ -320,9 +326,9 @@ impl Iterator for ConfigSequence {
     /// 3. `dynmodel`: portable.
     /// 4. `timepulse`: TP1 on, 1 Hz, GNSS-synchronised, aligned to the UTC second, rising
     ///    edge on the second, 100 ms wide once locked and **no pulse before lock**.
-    /// 5. `integrity-out` (only if `opts.integrity`; optional): NAV-SAT, NAV-STATUS,
+    /// 5. `integrity-out` (only [`ConfigSequence::with_integrity`]; optional): NAV-SAT, NAV-STATUS,
     ///    NAV-CLOCK and MON-RF every epoch on UART1 and I2C.
-    /// 6. `itfm` (only if `opts.integrity`; optional): the interference monitor on.
+    /// 6. `itfm` (only [`ConfigSequence::with_integrity`]; optional): the interference monitor on.
     /// 7. `baud` (only if `opts.baud` is set): UART1 baud rate. Last, see `baud_after`.
     fn next(&mut self) -> Option<ConfigFrame> {
         use keys::*;
@@ -370,7 +376,7 @@ impl Iterator for ConfigSequence {
                 ],
                 None,
             ),
-            4 | 5 if !o.integrity => {
+            4 | 5 if !self.integrity => {
                 self.idx = 6;
                 return self.next();
             }

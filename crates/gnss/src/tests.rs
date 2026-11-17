@@ -827,7 +827,7 @@ fn key_ids_match_the_m10_interface_description() {
 
 #[test]
 fn configure_sequence_contents() {
-    let steps: Vec<_> = config::configure_sequence().collect();
+    let steps: Vec<_> = config::configure_sequence().with_integrity(true).collect();
     let names: Vec<_> = steps.iter().map(|s| s.name).collect();
     assert_eq!(names, ["nav-pvt-out", "protocols", "dynmodel", "timepulse", "integrity-out", "itfm", "baud"]);
     let optional: Vec<_> = steps.iter().map(|s| s.optional).collect();
@@ -878,10 +878,12 @@ fn configure_sequence_contents() {
 #[test]
 fn configure_sequence_options() {
     let no_baud = config::ConfigSequence::with_options(ConfigOptions { baud: None, ..Default::default() });
-    assert_eq!(no_baud.count(), 6);
-    let bare = config::ConfigSequence::with_options(ConfigOptions { baud: None, integrity: false, ..Default::default() });
-    assert_eq!(bare.map(|s| s.name).collect::<Vec<_>>(), ["nav-pvt-out", "protocols", "dynmodel", "timepulse"]);
-    let o = ConfigOptions { baud: Some(57_600), layers: config::LAYER_RAM, pps_len_us: 10_000, integrity: false };
+    assert_eq!(no_baud.map(|s| s.name).collect::<Vec<_>>(), ["nav-pvt-out", "protocols", "dynmodel", "timepulse"]);
+    let plain: Vec<_> = config::configure_sequence().map(|s| s.name).collect();
+    assert_eq!(plain, ["nav-pvt-out", "protocols", "dynmodel", "timepulse", "baud"], "integrity off by default");
+    let integ = config::ConfigSequence::with_options(ConfigOptions { baud: None, ..Default::default() }).with_integrity(true);
+    assert_eq!(integ.count(), 6);
+    let o = ConfigOptions { baud: Some(57_600), layers: config::LAYER_RAM, pps_len_us: 10_000 };
     let last = config::ConfigSequence::with_options(o).last().unwrap();
     assert_eq!(last.baud_after, Some(57_600));
     let (_, layers, _, items) = decode_valset(check_frame(last.bytes(), 6, 0x8A));

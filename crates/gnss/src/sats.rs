@@ -178,17 +178,19 @@ impl SatTable {
             st.mean = sum as f32 / n;
             st.var = (sum2 as f32 / n - st.mean * st.mean).max(0.0);
             // Mean of the four strongest: robust to satellites setting into the trees.
-            let mut all = [0u8; MAX_SATS];
-            let mut k = 0;
+            // (Insertion into a sorted top four: no sort routine in the firmware.)
+            let mut top = [0u8; 4];
             for s in self.sats().iter().filter(|s| s.band == band) {
-                if let Some(c) = s.cn0 {
-                    all[k] = c;
-                    k += 1;
+                if let Some(mut c) = s.cn0 {
+                    for t in top.iter_mut() {
+                        if c > *t {
+                            core::mem::swap(&mut c, t);
+                        }
+                    }
                 }
             }
-            all[..k].sort_unstable_by(|a, b| b.cmp(a));
-            let k = k.min(4);
-            st.top4 = all[..k].iter().map(|&v| f32::from(v)).sum::<f32>() / k as f32;
+            let k = usize::from(st.tracked).min(4);
+            st.top4 = top[..k].iter().map(|&v| f32::from(v)).sum::<f32>() / k as f32;
         }
         st
     }
