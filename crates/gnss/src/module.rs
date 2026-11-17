@@ -101,6 +101,15 @@ impl Step {
         }
     }
 
+    /// A refusal (NAK, or no answer) is not a configuration failure: the step switches on
+    /// something this firmware may not have (the integrity messages). Log it and go on.
+    pub fn optional(&self) -> bool {
+        match self {
+            Step::Ubx(f) => f.optional,
+            Step::Quectel(c) => c.optional,
+        }
+    }
+
     /// u-blox baud step: see [`ConfigFrame::baud_after`].
     pub fn baud_after(&self) -> Option<u32> {
         match self {

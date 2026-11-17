@@ -34,6 +34,28 @@ pub mod keys {
     /// for 9600 NMEA).
     pub const UART1_BAUDRATE: u32 = 0x4052_0001;
 
+    /// U1: output rate of UBX-NAV-SAT on I2C (satellites: C/N0, elevation, azimuth).
+    pub const MSGOUT_UBX_NAV_SAT_I2C: u32 = 0x2091_0015;
+    /// U1: output rate of UBX-NAV-SAT on UART1.
+    pub const MSGOUT_UBX_NAV_SAT_UART1: u32 = 0x2091_0016;
+    /// U1: output rate of UBX-NAV-STATUS on I2C (spoofing detector state).
+    pub const MSGOUT_UBX_NAV_STATUS_I2C: u32 = 0x2091_001a;
+    /// U1: output rate of UBX-NAV-STATUS on UART1.
+    pub const MSGOUT_UBX_NAV_STATUS_UART1: u32 = 0x2091_001b;
+    /// U1: output rate of UBX-NAV-CLOCK on I2C (clock bias and drift).
+    pub const MSGOUT_UBX_NAV_CLOCK_I2C: u32 = 0x2091_0065;
+    /// U1: output rate of UBX-NAV-CLOCK on UART1.
+    pub const MSGOUT_UBX_NAV_CLOCK_UART1: u32 = 0x2091_0066;
+    /// U1: output rate of UBX-MON-RF on I2C (jamming state, AGC, CW indicator).
+    pub const MSGOUT_UBX_MON_RF_I2C: u32 = 0x2091_0359;
+    /// U1: output rate of UBX-MON-RF on UART1.
+    pub const MSGOUT_UBX_MON_RF_UART1: u32 = 0x2091_035a;
+
+    /// L: interference (jamming) monitor on. Default off; when on, UBX-MON-RF `jammingState`
+    /// is live (section 4.9.9, CFG-ITFM). Thresholds stay at their defaults
+    /// (`BBTHRESHOLD` 3, `CWTHRESHOLD` 15, dB above the reference spectrum).
+    pub const ITFM_ENABLE: u32 = 0x1041_000d;
+
     /// E1: dynamic platform model (0 = PORT portable, 2 = STAT, 3 = PED, 4 = AUTOMOT, ...).
     pub const NAVSPG_DYNMODEL: u32 = 0x2011_0021;
 
@@ -210,11 +232,15 @@ pub struct ConfigOptions {
     pub baud: Option<u32>,
     /// PPS pulse width once locked, microseconds. Default 100 000 (100 ms).
     pub pps_len_us: u32,
+    /// Switch on the integrity messages (NAV-SAT, NAV-STATUS, NAV-CLOCK, MON-RF, each once
+    /// per epoch, about 500 bytes/s with 30 satellites) and the interference monitor.
+    /// Default true. Both steps are optional: a NAK does not fail the configuration.
+    pub integrity: bool,
 }
 
 impl Default for ConfigOptions {
     fn default() -> Self {
-        ConfigOptions { layers: LAYER_RAM | LAYER_BBR, baud: Some(115_200), pps_len_us: 100_000 }
+        ConfigOptions { layers: LAYER_RAM | LAYER_BBR, baud: Some(115_200), pps_len_us: 100_000, integrity: true }
     }
 }
 
@@ -228,6 +254,8 @@ pub struct ConfigFrame {
     /// [`crate::Parser::reset`], then expect NAV-PVT at the new rate. The ACK for this step
     /// may be lost in the speed change, so confirm it by seeing a valid frame instead.
     pub baud_after: Option<u32>,
+    /// A NAK (or no answer) is not a configuration failure; see [`crate::Step::optional`].
+    pub optional: bool,
     buf: [u8; MAX_CONFIG_FRAME],
     len: usize,
 }
@@ -275,7 +303,7 @@ fn frame(
     items: &[(u32, Value)],
     baud_after: Option<u32>,
 ) -> ConfigFrame {
-    let mut f = ConfigFrame { name, baud_after, buf: [0; MAX_CONFIG_FRAME], len: 0 };
+    let mut f = ConfigFrame { name, baud_after, optional: false, buf: [0; MAX_CONFIG_FRAME], len: 0 };
     // Items are compile-time constants sized to fit; a failure here is a programming error
     // caught by the unit tests.
     f.len = valset(&mut f.buf, layers, items).unwrap_or(0);
@@ -292,7 +320,10 @@ impl Iterator for ConfigSequence {
     /// 3. `dynmodel`: portable.
     /// 4. `timepulse`: TP1 on, 1 Hz, GNSS-synchronised, aligned to the UTC second, rising
     ///    edge on the second, 100 ms wide once locked and **no pulse before lock**.
-    /// 5. `baud` (only if `opts.baud` is set): UART1 baud rate. Last, see `baud_after`.
+    /// 5. `integrity-out` (only if `opts.integrity`; optional): NAV-SAT, NAV-STATUS,
+    ///    NAV-CLOCK and MON-RF every epoch on UART1 and I2C.
+    /// 6. `itfm` (only if `opts.integrity`; optional): the interference monitor on.
+    /// 7. `baud` (only if `opts.baud` is set): UART1 baud rate. Last, see `baud_after`.
     fn next(&mut self) -> Option<ConfigFrame> {
         use keys::*;
         let o = self.opts;
@@ -339,7 +370,35 @@ impl Iterator for ConfigSequence {
                 ],
                 None,
             ),
-            4 => match o.baud {
+            4 | 5 if !o.integrity => {
+                self.idx = 6;
+                return self.next();
+            }
+            4 => {
+                let mut f = frame(
+                    "integrity-out",
+                    o.layers,
+                    &[
+                        (MSGOUT_UBX_NAV_SAT_UART1, Value::U8(1)),
+                        (MSGOUT_UBX_NAV_SAT_I2C, Value::U8(1)),
+                        (MSGOUT_UBX_NAV_STATUS_UART1, Value::U8(1)),
+                        (MSGOUT_UBX_NAV_STATUS_I2C, Value::U8(1)),
+                        (MSGOUT_UBX_NAV_CLOCK_UART1, Value::U8(1)),
+                        (MSGOUT_UBX_NAV_CLOCK_I2C, Value::U8(1)),
+                        (MSGOUT_UBX_MON_RF_UART1, Value::U8(1)),
+                        (MSGOUT_UBX_MON_RF_I2C, Value::U8(1)),
+                    ],
+                    None,
+                );
+                f.optional = true;
+                f
+            }
+            5 => {
+                let mut f = frame("itfm", o.layers, &[(ITFM_ENABLE, Value::Bool(true))], None);
+                f.optional = true;
+                f
+            }
+            6 => match o.baud {
                 Some(b) => frame("baud", o.layers, &[(UART1_BAUDRATE, Value::U32(b))], Some(b)),
                 None => return None,
             },

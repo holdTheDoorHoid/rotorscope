@@ -10,6 +10,8 @@
 //! * [`config`] builds CFG-VALSET / CFG-VALGET / MON-VER frames and offers
 //!   [`configure_sequence`], the boot-time configuration.
 //! * [`ddc`] holds the I2C register constants and helpers.
+//! * [`sats`] keeps the satellites of the last epoch one by one (UBX NAV-SAT or NMEA GSV).
+//! * [`integrity`] watches for jamming and spoofing of the receiver itself.
 //!
 //! See the crate README for wiring (UART vs I2C, PPS) and for why this is not built on the
 //! `ublox` crate.
@@ -20,10 +22,12 @@
 pub mod config;
 pub mod ddc;
 mod fix;
+pub mod integrity;
 pub mod module;
 mod nmea;
 mod parser;
 pub mod quectel;
+pub mod sats;
 pub mod sky;
 mod ubx;
 
@@ -35,7 +39,9 @@ pub use module::{Module, Step, Steps};
 pub use quectel::{Lc29hOptions, Lc29hSequence, QuectelCommand, Reply};
 pub use sky::{Band, ConstellationView, SkyView, System};
 pub use parser::{Event, Events, Parser, Stats, MAX_NMEA_LEN, MAX_UBX_PAYLOAD};
-pub use ubx::{build_frame, fletcher, MonVer, ValGet, ValGetItem};
+pub use ubx::{build_frame, fletcher, MonRf, MonVer, NavClock, NavStatus, RfBlock, ValGet, ValGetItem};
+pub use sats::{Sat, SatTable};
+pub use integrity::{Monitor, State as IntegrityState, Status as IntegrityStatus};
 
 #[cfg(test)]
 extern crate std;
@@ -43,3 +49,5 @@ extern crate std;
 mod tests;
 #[cfg(test)]
 mod tests_lc29h;
+#[cfg(test)]
+mod tests_integrity;

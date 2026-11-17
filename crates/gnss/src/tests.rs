@@ -813,13 +813,25 @@ fn key_ids_match_the_m10_interface_description() {
     assert_eq!(keys::TP_ALIGN_TO_TOW_TP1, 0x1005000a);
     assert_eq!(keys::TP_POL_TP1, 0x1005000b);
     assert_eq!(keys::TP_TIMEGRID_TP1, 0x2005000c);
+    // Integrity messages (4.9.11 CFG-MSGOUT) and the interference monitor (4.9.9 CFG-ITFM).
+    assert_eq!(keys::MSGOUT_UBX_NAV_SAT_I2C, 0x20910015);
+    assert_eq!(keys::MSGOUT_UBX_NAV_SAT_UART1, 0x20910016);
+    assert_eq!(keys::MSGOUT_UBX_NAV_STATUS_I2C, 0x2091001a);
+    assert_eq!(keys::MSGOUT_UBX_NAV_STATUS_UART1, 0x2091001b);
+    assert_eq!(keys::MSGOUT_UBX_NAV_CLOCK_I2C, 0x20910065);
+    assert_eq!(keys::MSGOUT_UBX_NAV_CLOCK_UART1, 0x20910066);
+    assert_eq!(keys::MSGOUT_UBX_MON_RF_I2C, 0x20910359);
+    assert_eq!(keys::MSGOUT_UBX_MON_RF_UART1, 0x2091035a);
+    assert_eq!(keys::ITFM_ENABLE, 0x1041000d);
 }
 
 #[test]
 fn configure_sequence_contents() {
     let steps: Vec<_> = config::configure_sequence().collect();
     let names: Vec<_> = steps.iter().map(|s| s.name).collect();
-    assert_eq!(names, ["nav-pvt-out", "protocols", "dynmodel", "timepulse", "baud"]);
+    assert_eq!(names, ["nav-pvt-out", "protocols", "dynmodel", "timepulse", "integrity-out", "itfm", "baud"]);
+    let optional: Vec<_> = steps.iter().map(|s| s.optional).collect();
+    assert_eq!(optional, [false, false, false, false, true, true, false]);
     let mut all = Vec::new();
     for s in &steps {
         assert!(!s.bytes().is_empty());
@@ -844,17 +856,32 @@ fn configure_sequence_contents() {
     assert_eq!(get(keys::TP_LEN_LOCK_TP1), Some(100_000));
     assert_eq!(get(keys::TP_USE_LOCKED_TP1), Some(1));
     assert_eq!(get(keys::TP_SYNC_GNSS_TP1), Some(1));
+    for k in [
+        keys::MSGOUT_UBX_NAV_SAT_UART1,
+        keys::MSGOUT_UBX_NAV_SAT_I2C,
+        keys::MSGOUT_UBX_NAV_STATUS_UART1,
+        keys::MSGOUT_UBX_NAV_STATUS_I2C,
+        keys::MSGOUT_UBX_NAV_CLOCK_UART1,
+        keys::MSGOUT_UBX_NAV_CLOCK_I2C,
+        keys::MSGOUT_UBX_MON_RF_UART1,
+        keys::MSGOUT_UBX_MON_RF_I2C,
+    ] {
+        assert_eq!(get(k), Some(1), "{k:08x}");
+    }
+    assert_eq!(get(keys::ITFM_ENABLE), Some(1));
     // Output exists before NMEA goes away; baud change is last.
     assert_eq!(steps[0].name, "nav-pvt-out");
-    assert_eq!(steps[4].baud_after, Some(115_200));
-    assert!(steps[..4].iter().all(|s| s.baud_after.is_none()));
+    assert_eq!(steps[6].baud_after, Some(115_200));
+    assert!(steps[..6].iter().all(|s| s.baud_after.is_none()));
 }
 
 #[test]
 fn configure_sequence_options() {
     let no_baud = config::ConfigSequence::with_options(ConfigOptions { baud: None, ..Default::default() });
-    assert_eq!(no_baud.count(), 4);
-    let o = ConfigOptions { baud: Some(57_600), layers: config::LAYER_RAM, pps_len_us: 10_000 };
+    assert_eq!(no_baud.count(), 6);
+    let bare = config::ConfigSequence::with_options(ConfigOptions { baud: None, integrity: false, ..Default::default() });
+    assert_eq!(bare.map(|s| s.name).collect::<Vec<_>>(), ["nav-pvt-out", "protocols", "dynmodel", "timepulse"]);
+    let o = ConfigOptions { baud: Some(57_600), layers: config::LAYER_RAM, pps_len_us: 10_000, integrity: false };
     let last = config::ConfigSequence::with_options(o).last().unwrap();
     assert_eq!(last.baud_after, Some(57_600));
     let (_, layers, _, items) = decode_valset(check_frame(last.bytes(), 6, 0x8A));

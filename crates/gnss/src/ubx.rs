@@ -8,6 +8,10 @@ pub(crate) const SYNC2: u8 = 0x62;
 
 pub(crate) const CLS_NAV: u8 = 0x01;
 pub(crate) const ID_NAV_PVT: u8 = 0x07;
+pub(crate) const ID_NAV_STATUS: u8 = 0x03;
+pub(crate) const ID_NAV_CLOCK: u8 = 0x22;
+pub(crate) const ID_NAV_SAT: u8 = 0x35;
+pub(crate) const ID_MON_RF: u8 = 0x38;
 pub(crate) const CLS_ACK: u8 = 0x05;
 pub(crate) const ID_ACK_NAK: u8 = 0x00;
 pub(crate) const ID_ACK_ACK: u8 = 0x01;
@@ -257,6 +261,114 @@ pub(crate) fn decode_val_get(p: &[u8]) -> Option<ValGet> {
         } else {
             out.truncated = true;
         }
+    }
+    Some(out)
+}
+
+/// UBX-NAV-STATUS, the parts the integrity monitor uses (UBX-21035062 R03, 3.15.17.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavStatus {
+    /// GPS time of week, ms.
+    pub itow_ms: u32,
+    /// `flags2` bits 4..3, `spoofDetState`: 0 unknown or deactivated, 1 no spoofing indicated,
+    /// 2 spoofing indicated, 3 multiple spoofing indications. The receiver's own detector,
+    /// always on on the M10; it needs several constellations and cannot see spoofing that
+    /// was already there at power-up (MIA-M10C integration manual UBX-23001616 R05, 3.5.2.2).
+    pub spoof_det_state: u8,
+    /// Milliseconds since receiver start or reset.
+    pub msss: u32,
+}
+
+pub(crate) fn decode_nav_status(p: &[u8]) -> Option<NavStatus> {
+    if p.len() < 16 {
+        return None;
+    }
+    Some(NavStatus { itow_ms: u32le(p, 0), spoof_det_state: (p[7] >> 3) & 0x3, msss: u32le(p, 12) })
+}
+
+/// UBX-NAV-CLOCK: receiver clock bias and drift (UBX-21035062 R03, 3.15.2.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavClock {
+    /// GPS time of week, ms.
+    pub itow_ms: u32,
+    /// Clock bias, ns.
+    pub bias_ns: i32,
+    /// Clock drift, ns/s.
+    pub drift_ns_s: i32,
+    /// Time accuracy estimate, ns.
+    pub t_acc_ns: u32,
+    /// Frequency accuracy estimate, ps/s.
+    pub f_acc_ps_s: u32,
+}
+
+pub(crate) fn decode_nav_clock(p: &[u8]) -> Option<NavClock> {
+    if p.len() < 20 {
+        return None;
+    }
+    Some(NavClock {
+        itow_ms: u32le(p, 0),
+        bias_ns: i32le(p, 4),
+        drift_ns_s: i32le(p, 8),
+        t_acc_ns: u32le(p, 12),
+        f_acc_ps_s: u32le(p, 16),
+    })
+}
+
+/// One RF block of UBX-MON-RF (UBX-21035062 R03, 3.14.6.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RfBlock {
+    /// 0 = L1, 1 = L2 or L5.
+    pub block_id: u8,
+    /// `flags` bits 1..0, `jammingState` from the interference monitor (CFG-ITFM): 0 unknown
+    /// or monitor off, 1 ok, 2 warning (interference, fix still OK), 3 critical
+    /// (interference and no fix).
+    pub jamming_state: u8,
+    /// Antenna supervisor: 0 init, 1 don't know, 2 ok, 3 short, 4 open.
+    pub ant_status: u8,
+    /// Noise level as measured by the GPS core.
+    pub noise_per_ms: u16,
+    /// AGC monitor, 0..8191 (8191 = full gain). Falls when strong in-band power arrives.
+    pub agc_cnt: u16,
+    /// CW jamming indicator: 0 none, 255 strong (always on; relative to the unjammed baseline).
+    pub cw_suppression: u8,
+}
+
+/// UBX-MON-RF: the first two RF blocks (the M10 has one, L1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonRf {
+    /// Blocks; only `..count` are valid.
+    pub blocks: [RfBlock; 2],
+    /// Number of valid blocks.
+    pub count: u8,
+}
+
+impl MonRf {
+    /// The valid blocks.
+    pub fn blocks(&self) -> &[RfBlock] {
+        &self.blocks[..usize::from(self.count)]
+    }
+}
+
+pub(crate) fn decode_mon_rf(p: &[u8]) -> Option<MonRf> {
+    if p.len() < 4 || p[0] != 0 {
+        return None;
+    }
+    let n = usize::from(p[1]);
+    if p.len() < 4 + 24 * n {
+        return None;
+    }
+    let mut out = MonRf::default();
+    for i in 0..n.min(2) {
+        let b = &p[4 + 24 * i..28 + 24 * i];
+        out.blocks[i] = RfBlock {
+            block_id: b[0],
+            jamming_state: b[1] & 0x3,
+            ant_status: b[2],
+            noise_per_ms: u16le(b, 12),
+            agc_cnt: u16le(b, 14),
+            cw_suppression: b[16],
+        };
+        out.count += 1;
     }
     Some(out)
 }
