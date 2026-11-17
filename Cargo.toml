@@ -11,7 +11,7 @@ members = [
     "crates/sdnative", "crates/wirebus",
     "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence", "crates/djicrypt", "crates/uat", "crates/flarm",
-    "crates/aerohop", "crates/lr2021cfg",
+    "crates/aerohop", "crates/lr2021cfg", "crates/ctrlwatch",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rfuav-check", "tools/rawcap-pull", "tools/droneid-hil",
     "tools/cc26xx-flash", "tools/airspace-pack", "tools/modes-live",
     "tools/evidence-verify", "tools/evidence-server",
@@ -52,4 +52,7 @@ opt-level = 2
 opt-level = 2
 # The wire simulation steps every quarter byte through seconds of traffic.
 [profile.dev.package.wirebus]
+opt-level = 2
+# The ELRS UID-recovery test rebuilds 65,536 candidate hop tables.
+[profile.dev.package.ctrlwatch]
 opt-level = 2
