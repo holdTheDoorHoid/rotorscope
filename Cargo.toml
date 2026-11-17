@@ -11,7 +11,7 @@ members = [
     "crates/sdnative",
     "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence",
-    "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rawcap-pull", "tools/droneid-hil",
+    "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rfuav-check", "tools/rawcap-pull", "tools/droneid-hil",
     "tools/cc26xx-flash", "tools/airspace-pack", "tools/modes-live",
     "tools/evidence-verify", "tools/evidence-server",
 ]

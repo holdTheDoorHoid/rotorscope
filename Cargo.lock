@@ -1497,6 +1497,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfuav-check"
+version = "0.1.0"
+dependencies = [
+ "djilink",
+ "droneid",
+ "fpvscan",
+ "rawcap",
+ "serde_json",
+]
+
+[[package]]
 name = "rid"
 version = "0.1.0"
 dependencies = [

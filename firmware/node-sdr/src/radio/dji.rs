@@ -8,9 +8,11 @@
 //!
 //! - DJI video / O4 video / FPV air unit: reported at once, at the measured
 //!   centre when the whole signal was inside the capture;
-//! - a controller-shaped burst: fed to the hop tracker; reported (at the
-//!   burst's centre) only once bursts have appeared on two centres within
-//!   3 s, and rate-limited as one emitter rather than per channel;
+//! - a controller-shaped burst (15 kHz OcuSync/O3 or 30 kHz O4): fed to
+//!   the hop tracker, also from captures judged video (an O4 uplink burst
+//!   and its video burst share a 2.5 ms frame); reported (at the burst's
+//!   centre) only once bursts have appeared on two centres within 3 s, and
+//!   rate-limited as one emitter rather than per channel;
 //! - a DroneID burst or other 15 kHz OFDM: the existing LTE-style kind.
 
 use super::{Line, Radio, capture, now_us};
@@ -99,23 +101,24 @@ impl Radio {
         let freq = |k: Option<u32>, fallback: u32| k.map(|k| (k + 50) / 100).unwrap_or(fallback);
         let width = f.spec.w10_khz.min(u16::MAX as u32) as u16;
         let cur = self.cur_freq;
+        // Every controller-shaped burst feeds the hop tracker, whatever the
+        // capture's verdict: an O4 uplink burst and its video burst often
+        // share one capture (one 2.5 ms frame), and the video wins it.
+        let now = (now_us() / 1000) as u32;
+        let (mut confirmed, mut last, mut cw) = (false, None, width);
+        for b in djilink::classify::controller_bursts(&f) {
+            if let Some(c) = b.centre_khz {
+                let abs = (lo_khz as i64 + c as i64).max(0) as u32;
+                confirmed |= self.dji.hops.burst(abs, now);
+                last = Some(abs);
+                cw = b.width_khz.min(u16::MAX as u32) as u16;
+            }
+        }
         let report = match verdict {
             Some(Verdict::Video) => Some((RfKind::DjiVideo, freq(centre, cur), width, false)),
             Some(Verdict::O4Video) => Some((RfKind::DjiO4Video, freq(centre, cur), width, false)),
             Some(Verdict::FpvAirUnit) => Some((RfKind::DjiFpvAirUnit, freq(centre, cur), width, false)),
-            Some(Verdict::ControllerBurst) => {
-                let now = (now_us() / 1000) as u32;
-                let (mut confirmed, mut last, mut w) = (false, None, width);
-                for b in f.bursts.iter() {
-                    if let Some(c) = b.centre_khz {
-                        let abs = (lo_khz as i64 + c as i64).max(0) as u32;
-                        confirmed |= self.dji.hops.burst(abs, now);
-                        last = Some(abs);
-                        w = b.width_khz.min(u16::MAX as u32) as u16;
-                    }
-                }
-                confirmed.then(|| (RfKind::DjiController, freq(last, cur), w, true))
-            }
+            Some(Verdict::ControllerBurst) => confirmed.then(|| (RfKind::DjiController, freq(last, cur), cw, true)),
             Some(Verdict::DroneIdBurst | Verdict::Ofdm15) => Some((RfKind::LteStyle, freq(centre, cur), width, false)),
             Some(Verdict::Ofdm30) | None => None,
         };

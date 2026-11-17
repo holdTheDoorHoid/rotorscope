@@ -25,7 +25,11 @@
 //! (1.6 µs), and only windows within [`ALIGN_BINS`] of the predicted prefix
 //! are tried: fewer tries, so a lower threshold ([`K_ALIGNED`] instead of
 //! [`K_FREE`]). That is what makes a 1 MHz, 0.45 ms controller burst
-//! detectable at all.
+//! detectable at all. The free search (all windows, [`K_FREE`]) runs too and
+//! wins when only it detects: real O4 bursts (RFUAV Mini 4 Pro, 2.4 GHz)
+//! open with one to three symbols of other lengths (gaps of 33, 44 and
+//! 47 µs before the regular 35.7 µs grid), so the predicted window misses
+//! the prefixes of the rest of the burst.
 //!
 //! Numerologies tried ([`NORMAL15`], [`EXTENDED15`], [`NORMAL30`]): LTE's
 //! 15 kHz with normal prefix (4.69 µs; DJI's 144/2048 at 30.72 MS/s) and
@@ -129,6 +133,14 @@ impl CpReport {
     pub fn dji_numerology(&self) -> bool {
         self.normal15.detected && self.normal15.metric >= self.extended15.metric
     }
+
+    /// 30 kHz OFDM with a normal prefix, better explained by it than by
+    /// either 15 kHz fold: DJI O4's numerology (measured on the RFUAV
+    /// Mini 4 Pro recordings: useful symbol 33.33 µs, period 35.7 µs, video
+    /// and controller uplink both; docs/DJI-LINKS.md).
+    pub fn o4_numerology(&self) -> bool {
+        self.normal30.detected && self.normal30.metric >= self.normal15.metric.max(self.extended15.metric)
+    }
 }
 
 /// Sum `x[n] conj(x[n+lag])` into `bins` by `n mod period`; only pairs whose
@@ -190,56 +202,64 @@ fn best(bins: &[FoldBin], nb: usize, w: usize, starts: impl Iterator<Item = usiz
 
 fn one(x: &[C16], nm: &Numerology, b: &Bursts, spec: &Spectrum, s: &mut Scratch) -> Fold {
     let nb = nm.bins();
-    let mut out = Fold::default();
     // Predicted prefix start from the first burst whose start we saw: its
     // first prefix begins there.
     let align = b.first_with_head().filter(|_| !b.continuous).map(|h| {
         let p = (h.start_sample() as u64 * 256 % nm.period_q8 as u64) as usize;
         p / (256 * nm.bin)
     });
-    let starts = |c: Option<usize>| -> (usize, usize) {
-        match c {
-            Some(c) => (c + nb - ALIGN_BINS, 2 * ALIGN_BINS + 1),
-            None => (0, nb),
-        }
-    };
-    let (s0, cnt) = starts(align);
-    out.aligned = align.is_some();
 
     let pairs = fold(x, nm.lag, nm, b, &mut s.fold);
-    let (main, at) = best(&s.fold, nb, nm.window, s0..s0 + cnt);
-    // Prefix length: bins around the best window at least half as coherent.
-    let single = |k: usize| window(&s.fold, nb, k % nb, 1);
-    let half = main / 2;
-    let mut len = nm.window;
-    let mut k = at + nb - 1;
-    while len < nb && single(k) >= half {
-        len += 1;
-        k = k + nb - 1;
-    }
-    let mut k = at + nm.window;
-    while len < nb && single(k) >= half {
-        len += 1;
-        k += 1;
-    }
-    out.cp_samples = (len * nm.bin) as u16;
+    // Two candidates: the window the burst start predicts (lower
+    // threshold), and the best anywhere (higher). Real O4 bursts (RFUAV
+    // Mini 4 Pro) begin with one to three symbols of other lengths, so the
+    // prediction can miss the prefix grid of the rest of the burst.
+    let cand_a = align.map(|c| best(&s.fold, nb, nm.window, (c + nb - ALIGN_BINS)..(c + nb + ALIGN_BINS + 1)));
+    let cand_f = best(&s.fold, nb, nm.window, 0..nb);
+    // Prefix length: bins around a window at least half as coherent.
+    let cp_len = |fold: &[FoldBin], main: i32, at: usize| -> u16 {
+        let single = |k: usize| window(fold, nb, k % nb, 1);
+        let half = main / 2;
+        let mut len = nm.window;
+        let mut k = at + nb - 1;
+        while len < nb && single(k) >= half {
+            len += 1;
+            k = k + nb - 1;
+        }
+        let mut k = at + nm.window;
+        while len < nb && single(k) >= half {
+            len += 1;
+            k += 1;
+        }
+        (len * nm.bin) as u16
+    };
+    let cp_a = cand_a.map(|(m, at)| cp_len(&s.fold, m, at)).unwrap_or(0);
+    let cp_f = cp_len(&s.fold, cand_f.0, cand_f.1);
 
-    // Control: the same window at lags either side, averaged.
+    // Control: the same windows at lags either side, averaged.
+    let at_a = cand_a.map(|c| c.1).unwrap_or(0);
     fold(x, nm.lag - CTL_OFF, nm, b, &mut s.fold);
-    let ctl_lo = window(&s.fold, nb, at, nm.window);
+    let (lo_a, lo_f) = (window(&s.fold, nb, at_a, nm.window), window(&s.fold, nb, cand_f.1, nm.window));
     fold(x, nm.lag + CTL_OFF, nm, b, &mut s.fold);
-    let ctl = (ctl_lo + window(&s.fold, nb, at, nm.window)) / 2;
-    out.main = main;
-    out.ctl = ctl;
-    out.metric = main - ctl;
+    let ctl_a = (lo_a + window(&s.fold, nb, at_a, nm.window)) / 2;
+    let ctl_f = (lo_f + window(&s.fold, nb, cand_f.1, nm.window)) / 2;
 
     // Degrees of freedom of one window: the pairs it sums, thinned by the
     // signal's bandwidth.
     let per_window = pairs as u64 * (nm.window * nm.bin) as u64 * 256 / nm.period_q8 as u64;
     let bw = spec.w10_khz.clamp(MIN_DOF_KHZ, crate::FS / 1000) as u64;
     let dof = (per_window * bw / (crate::FS as u64 / 1000)).max(1);
-    let k = if out.aligned { K_ALIGNED } else { K_FREE };
-    out.thr = ((k * 100 * 100 / isqrt64(dof * 10_000).max(1)) as i32).max(FLOOR);
+    let thr = |k: u64| ((k * 100 * 100 / isqrt64(dof * 10_000).max(1)) as i32).max(FLOOR);
+
+    let free = Fold { main: cand_f.0, ctl: ctl_f, metric: cand_f.0 - ctl_f, thr: thr(K_FREE), cp_samples: cp_f, aligned: false, detected: false };
+    let mut out = match cand_a {
+        Some((m, _)) => {
+            let a = Fold { main: m, ctl: ctl_a, metric: m - ctl_a, thr: thr(K_ALIGNED), cp_samples: cp_a, aligned: true, detected: false };
+            // The aligned window unless only the free search detects.
+            if a.metric < a.thr && free.metric >= free.thr { free } else { a }
+        }
+        None => free,
+    };
     out.detected = out.metric >= out.thr;
     out
 }

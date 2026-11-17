@@ -14,8 +14,14 @@
 
 /// Burst centres remembered.
 pub const SLOTS: usize = 8;
-/// How long a burst counts toward confirmation.
-pub const WINDOW_MS: u32 = 3_000;
+/// How long a burst counts toward confirmation: two built-in FPV sweeps.
+/// The sweep visits 46 channels at 60 ms (plus retuning), about 3 s, and
+/// one capture per dwell sees at most a burst or two; the measured O4
+/// uplink (RFUAV Mini 4 Pro) changes centre frame to frame (2.5 ms) but
+/// stays inside one 5-10 MHz set for hundreds of ms, so its second centre
+/// is often seen only on the next sweep. 3 s (the first guess) could not
+/// span one revisit.
+pub const WINDOW_MS: u32 = 6_000;
 /// Distinct centres needed.
 pub const MIN_CENTRES: usize = 2;
 /// Centres closer than this are the same channel (half the 2 MHz raster).

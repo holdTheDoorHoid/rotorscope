@@ -1,0 +1,14 @@
+[package]
+name = "rfuav-check"
+description = "Laptop tool: run the C5 FPV job's detectors (fpvscan, djilink) and the DroneID decoder over RFUAV recordings (100 MS/s cf32), modelling the C5's 4-bit capture"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+droneid = { path = "../../crates/droneid", features = ["std"] }
+djilink = { path = "../../crates/djilink" }
+fpvscan = { path = "../../crates/fpvscan" }
+rawcap = { path = "../../crates/rawcap" }
+serde_json = "1"
