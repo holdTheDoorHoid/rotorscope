@@ -345,6 +345,35 @@ impl<const N: usize> Table<N> {
         }
     }
 
+    /// Build an empty table directly at `dst` (for example in external
+    /// RAM), field by field, so a whole table (~12 KB for 32 aircraft) never
+    /// sits on a small embedded stack the way `ptr.write(Table::new(..))`
+    /// may put it.
+    ///
+    /// # Safety
+    ///
+    /// `dst` must be valid for writes of a `Table<N>` and properly aligned.
+    /// Whatever was there is overwritten without being dropped.
+    pub unsafe fn init_in_place(dst: *mut Self, config: Config) {
+        // SAFETY: the caller guarantees `dst` is writable and aligned; each
+        // field is written once through a raw pointer, no reference to
+        // uninitialised memory is made.
+        unsafe {
+            let planes = (&raw mut (*dst).planes).cast::<Option<Plane>>();
+            for i in 0..N {
+                planes.add(i).write(None);
+            }
+            (&raw mut (*dst).config).write(config);
+            (&raw mut (*dst).stats).write(Stats::default());
+            (&raw mut (*dst).reference).write(None);
+            (&raw mut (*dst).raw_short).write(0);
+            (&raw mut (*dst).raw_long).write(0);
+            (&raw mut (*dst).ok_short).write(0);
+            (&raw mut (*dst).ok_long).write(0);
+            (&raw mut (*dst).started_ms).write(None);
+        }
+    }
+
     /// The receiver's own position (hub GPS or a manual position): the
     /// local-CPR reference, the surface-decode reference and the range
     /// check. `None` when unknown.

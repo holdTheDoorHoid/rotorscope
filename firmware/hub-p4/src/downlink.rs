@@ -8,7 +8,7 @@
 //! that does not ACK after a few tries).
 
 use coverage::{Coordinator, NodeInfo};
-use link::{Command, NodeRole};
+use link::{AeroMode, Command, NodeRole};
 
 use crate::links::{GatewayLink, MAX_RELAYED};
 
@@ -28,11 +28,36 @@ impl Downlink {
         Self { coord: Coordinator::new(), last_run: None, last_full: 0, commands: 0 }
     }
 
-    pub fn tick(&mut self, gw: &mut GatewayLink<'_>, now: u64) {
+    /// Console `a`: auto -> 1090 -> UAT -> FLARM -> OGN -> auto. Until
+    /// reboot. Returns the new setting.
+    #[inline(never)]
+    pub fn cycle_aero(&mut self) -> Option<AeroMode> {
+        let r = self.coord.aero.region;
+        self.coord.aero.only = match self.coord.aero.only {
+            None => Some(AeroMode::Es1090),
+            Some(AeroMode::Es1090) => Some(AeroMode::Uat978),
+            Some(AeroMode::Uat978) => Some(AeroMode::FlarmHop { band: r, ogn: false }),
+            Some(AeroMode::FlarmHop { ogn: false, .. }) => Some(AeroMode::FlarmHop { band: r, ogn: true }),
+            Some(AeroMode::FlarmHop { ogn: true, .. }) => None,
+        };
+        self.last_run = None; // decide again now
+        self.coord.aero.only
+    }
+
+    /// `adsbee_1090`: the hub's ADSBee hears 1090 MHz, so aero nodes need not.
+    pub fn tick(&mut self, gw: &mut GatewayLink<'_>, adsbee_1090: bool, now: u64) {
         if self.last_run.is_some_and(|t| now.saturating_sub(t) < RUN_MS) {
             return;
         }
         self.last_run = Some(now);
+        if self.coord.aero.es1090_elsewhere != adsbee_1090 {
+            println!(
+                "hub-p4: coverage: ADSBee {} 1090 MHz, aero nodes {}",
+                if adsbee_1090 { "hears" } else { "does not hear" },
+                if adsbee_1090 { "leave it out" } else { "add it to their turns" }
+            );
+            self.coord.aero.es1090_elsewhere = adsbee_1090;
+        }
         let mut table: heapless::Vec<NodeInfo, MAX_RELAYED> = heapless::Vec::new();
         for n in gw.nodes.iter() {
             let _ = table.push(NodeInfo {
@@ -89,6 +114,17 @@ impl Downlink {
                 self.coord.missing
             );
         }
+    }
+}
+
+/// The aero override for the console and the evidence log.
+pub fn aero_only_label(m: Option<AeroMode>) -> &'static str {
+    match m {
+        None => "auto (coverage default)",
+        Some(AeroMode::Es1090) => "1090 ES only",
+        Some(AeroMode::Uat978) => "UAT 978 only",
+        Some(AeroMode::FlarmHop { ogn: false, .. }) => "FLARM hop only",
+        Some(AeroMode::FlarmHop { ogn: true, .. }) => "OGN hop only",
     }
 }
 

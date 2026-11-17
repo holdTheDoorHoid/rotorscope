@@ -246,3 +246,25 @@ fn global_pair_overrides_a_receiver_local_alias() {
     let p = t.get(ICAO).unwrap().position().unwrap();
     assert!(distance_m(p, (45.5, -73.6)) < 10.0, "{p:?}");
 }
+
+/// `init_in_place` over garbage gives the same empty table as `new`, and
+/// it works like one.
+#[test]
+fn init_in_place_builds_an_empty_table() {
+    let mut slot = std::boxed::Box::new(core::mem::MaybeUninit::<Table<8>>::uninit());
+    // Garbage first, as reused memory would hold.
+    // SAFETY: writing bytes into a MaybeUninit is always allowed.
+    unsafe { core::ptr::write_bytes(slot.as_mut_ptr().cast::<u8>(), 0xA5, core::mem::size_of::<Table<8>>()) };
+    // SAFETY: the box is writable and aligned for Table<8>.
+    unsafe { Table::init_in_place(slot.as_mut_ptr(), Config::default()) };
+    // SAFETY: every field was written by init_in_place.
+    let t = unsafe { slot.assume_init_mut() };
+    assert_eq!(t.len(), 0);
+    assert_eq!(t.stats, Table::<8>::default().stats);
+    let (lat, lon) = (40.05, -75.01);
+    t.ingest(&rx(ident(ICAO, "N123AB")), 1000).unwrap();
+    t.ingest(&rx(pos(ICAO, lat, lon, 2500, false)), 1200).unwrap();
+    t.ingest(&rx(pos(ICAO, lat, lon, 2500, true)), 1700).unwrap();
+    assert!(distance_m(t.get(ICAO).unwrap().position().unwrap(), (lat, lon)) < 10.0);
+    assert_eq!(report(t, 2000).len(), 1);
+}

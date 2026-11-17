@@ -35,18 +35,21 @@ use crate::webhead::Feed;
 /// The ADSBee reports once a second; quiet for this long means it is gone.
 pub const ALIVE_MS: u64 = 3_000;
 
-/// Our decoder: Beast frames in, an aircraft table out.
+/// Our decoder: Beast frames in, an aircraft table out. The table (~12 KB)
+/// lives in PSRAM (`aero::Store`, shared with aero nodes' 1090 frames) and
+/// is set by `main` at boot; inside `main`'s frame it pushed the stack past
+/// its region. `None` (no PSRAM): Beast frames are read but not decoded.
 #[cfg(feature = "modes")]
 pub struct Raw {
     pub beast: modes::BeastReader,
-    pub table: modes::Table<{ crate::app::MAX_AIRCRAFT }>,
+    pub table: Option<&'static mut crate::aero::EsTable>,
     last_report_ms: u64,
 }
 
 #[cfg(feature = "modes")]
 impl Default for Raw {
     fn default() -> Self {
-        Self { beast: modes::BeastReader::new(), table: modes::Table::default(), last_report_ms: 0 }
+        Self { beast: modes::BeastReader::new(), table: None, last_report_ms: 0 }
     }
 }
 
@@ -90,13 +93,14 @@ impl Adsbee {
             return;
         }
         raw.last_report_ms = now;
-        if raw.table.stats.frames == 0 {
+        let Some(table) = raw.table.as_deref_mut() else { return };
+        if table.stats.frames == 0 {
             return;
         }
         // The hub's own position (GPS or manual) is the local-CPR and
         // surface reference and the range check's centre.
-        raw.table.set_reference(tracker.own_position(now).map(|f| (f.lat, f.lon)));
-        let stats = raw.table.report(now, |a| {
+        table.set_reference(tracker.own_position(now).map(|f| (f.lat, f.lon)));
+        let stats = table.report(now, |a| {
             tracker.ingest_aircraft(&a, now);
             if let Some(f) = feed.as_deref_mut() {
                 f.adsb(&adsb::Report::Aircraft(a));
@@ -117,7 +121,9 @@ impl Adsbee {
             let (table, last) = (&mut self.raw.table, &mut self.last_ms);
             self.raw.beast.feed(bytes, |rx| {
                 *last = Some(now);
-                let _ = table.ingest(&rx, now);
+                if let Some(t) = table.as_deref_mut() {
+                    let _ = t.ingest(&rx, now);
+                }
             });
         }
         {
@@ -155,6 +161,11 @@ impl Adsbee {
             aircraft: self.stats.map(|s| s.aircraft),
             errors: self.errors,
         }
+    }
+
+    /// Heard (any CSBee line or Beast frame) within `ms`.
+    pub fn heard_within(&self, now: u64, ms: u64) -> bool {
+        self.last_ms.is_some_and(|t| now.saturating_sub(t) <= ms)
     }
 
     pub fn bytes(&self) -> u32 {

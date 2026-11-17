@@ -212,6 +212,11 @@ pub struct Logger {
     o4_key: Option<djicrypt::PrivateKey>,
     /// What the key file check found, for the status line.
     pub o4_key_state: &'static str,
+    /// The FLARM legacy key words (`ROTORSCP/FLARMKEY.TXT`), read at mount,
+    /// until the main loop takes them ([`Logger::take_flarm_keys`]).
+    flarm_keys: Option<flarm::Keys>,
+    /// none / loaded / bad / error, for the status line.
+    pub flarm_key_state: &'static str,
     /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
     site: Option<tracker::site::SiteState>,
 }
@@ -224,6 +229,10 @@ const SITE_NAME: &str = "SITE.TXT";
 /// The owner's O4 DroneID private key (64 hex digits) in the log folder.
 /// Never in the repository; see docs/DRONEID-O4.md "Decryption".
 const O4_KEY_NAME: &str = "O4KEY.TXT";
+
+/// The FLARM legacy key constants (`flarm::Keys` format, docs/AERO-NODE.md
+/// "Hub side") in the log folder. Never in the repository, never printed.
+const FLARM_KEY_NAME: &str = "FLARMKEY.TXT";
 
 impl Logger {
     pub fn new(clk: Flex<'static>, cmd: Flex<'static>, dat: Flex<'static>) -> Self {
@@ -266,6 +275,8 @@ impl Logger {
             max_ev_what: "",
             o4_key: None,
             o4_key_state: "none",
+            flarm_keys: None,
+            flarm_key_state: "none",
             site: None,
         }
     }
@@ -273,6 +284,12 @@ impl Logger {
     /// The O4 key read from the card, once (the decryptor keeps it).
     pub fn take_o4_key(&mut self) -> Option<djicrypt::PrivateKey> {
         self.o4_key.take()
+    }
+
+    /// The FLARM keys read from the card, once (`aero.rs` keeps them).
+    #[inline(never)]
+    pub fn take_flarm_keys(&mut self) -> Option<flarm::Keys> {
+        self.flarm_keys.take()
     }
 
     /// The site file read at mount, once.
@@ -367,6 +384,63 @@ impl Logger {
             }
         }
         buf.zeroize();
+    }
+
+    /// Read `ROTORSCP/FLARMKEY.TXT` if present. Nothing of its contents is
+    /// ever printed (a refusal names a line number only); the file buffer
+    /// is wiped, and the parsed words wipe themselves when dropped.
+    #[inline(always)]
+    fn load_flarm_keys(&mut self) {
+        use zeroize::Zeroize;
+        let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
+        let f = match vm.open_file_in_dir(dir, FLARM_KEY_NAME, Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(embedded_sdmmc::Error::NotFound) => {
+                self.flarm_key_state = "none";
+                println!("hub-p4: no {DIR}/{FLARM_KEY_NAME}: FLARM aircraft are counted, not decoded");
+                return;
+            }
+            Err(e) => {
+                self.flarm_key_state = "error";
+                println!("hub-p4: {DIR}/{FLARM_KEY_NAME} open failed: {e:?}");
+                return;
+            }
+        };
+        // A key file is ~400 bytes; room for generous comments.
+        let mut buf = [0u8; 1024];
+        let mut n = 0;
+        while n < buf.len() {
+            match vm.read(f, &mut buf[n..]) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => n += k,
+            }
+        }
+        let too_long = n == buf.len();
+        let _ = vm.close_file(f);
+        let parsed = match core::str::from_utf8(&buf[..n]) {
+            _ if too_long => Err("longer than 1024 bytes"),
+            Ok(text) => flarm::Keys::parse(text).map_err(|e| match e {
+                flarm::KeyError::Syntax(_) => "a line without '='",
+                flarm::KeyError::UnknownName(_) => "a name other than key1..key5",
+                flarm::KeyError::Duplicate(_) => "a name given twice",
+                flarm::KeyError::BadWord(_) => "a value that is not a 32-bit hex word",
+                flarm::KeyError::WordCount(_) => "a wrong number of words",
+                flarm::KeyError::Missing(_) => "a key missing",
+            }),
+            Err(_) => Err("not text"),
+        };
+        buf.zeroize();
+        match parsed {
+            Ok(k) => {
+                self.flarm_keys = Some(k);
+                self.flarm_key_state = "loaded";
+                println!("hub-p4: FLARM keys loaded from {DIR}/{FLARM_KEY_NAME} (contents never shown)");
+            }
+            Err(why) => {
+                self.flarm_key_state = "bad";
+                println!("hub-p4: {DIR}/{FLARM_KEY_NAME} refused ({why}): FLARM aircraft are counted, not decoded");
+            }
+        }
     }
 
     /// Console `r`: re-stream the current evidence file from its start.
@@ -608,6 +682,7 @@ impl Logger {
                     self.pack_file = None;
                 }
                 self.load_o4_key();
+                self.load_flarm_keys();
                 self.load_site();
             }
             Err(e) => {

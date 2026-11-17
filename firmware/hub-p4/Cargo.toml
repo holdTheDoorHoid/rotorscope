@@ -76,7 +76,8 @@ embedpack = []
 # instead of trusting its CSBee summary. Set the ADSBee with
 # `AT+PROTOCOL_OUT=COMMS_UART,BEAST`; CSBee lines are still accepted. Off by
 # default until the raw path has run with a real ADSBee on this hub.
-modes = ["dep:modes"]
+# (crates/modes itself is always built: aero nodes' 1090 frames use it.)
+modes = []
 # Bench only: on-chip loop-back test of `modes`. UART4's TX drives its own
 # RX pad (GPIO30) with Beast frames recorded from the owner's ADSBee on the
 # laptop (2026-11-15, real aircraft), at their recorded pace, looped. Leave
@@ -105,8 +106,13 @@ droneid = { path = "../../crates/droneid", default-features = false }
 zeroize = { version = "1", default-features = false }
 # `encode`: the web-head feed re-prints ADSBee reports as CSBee lines.
 adsb = { path = "../../crates/adsb", features = ["encode"] }
-# Phase 14a, feature `modes`: our Mode S / ADS-B decoder.
-modes = { path = "../../crates/modes", optional = true }
+# Phase 14a: our Mode S / ADS-B decoder. Feature `modes` decodes the
+# ADSBee's Beast output with it; aero (LR2021) nodes' 1090 frames always do.
+modes = { path = "../../crates/modes" }
+# Aero nodes (docs/AERO-NODE.md): UAT 978, OGN, and FLARM legacy (keys
+# from ROTORSCP/FLARMKEY.TXT, never in the firmware).
+uat = { path = "../../crates/uat" }
+flarm = { path = "../../crates/flarm", features = ["legacy"] }
 embedded-graphics = "0.8"
 # SD card: our bit-banged native 1-bit protocol (crates/sdnative) under the
 # same FAT driver the S3 hub uses. MIT/Apache.

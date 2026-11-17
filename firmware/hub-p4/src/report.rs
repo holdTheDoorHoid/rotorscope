@@ -175,12 +175,12 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     w.opt(a.aircraft);
     #[cfg(feature = "modes")]
     {
-        let m = &adsbee.raw.table.stats;
+        let (m, n) = adsbee.raw.table.as_deref().map_or((modes::table::Stats::default(), 0), |t| (t.stats, t.len()));
         let _ = write!(
             w.0,
             ",\"modes\":{{\"frames\":{},\"used\":{},\"bad_crc\":{},\"fixed\":[{},{}],\"unconfirmed\":{},\"pos\":[{},{}],\"pos_refused\":{},\"tisb\":{},\"adsr\":{},\"aircraft\":{}}}",
             m.frames, m.used, m.bad_crc, m.fixed_1, m.fixed_2, m.unconfirmed, m.positions_global, m.positions_local,
-            m.positions_refused, m.tis_b, m.ads_r, adsbee.raw.table.len()
+            m.positions_refused, m.tis_b, m.ads_r, n
         );
     }
     let s = &gw.stats;
@@ -195,9 +195,13 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         o.no_session,
         o.rejected,
     );
+    // Aero (LR2021) nodes: decode counters, FLARM key state, time syncs
+    // sent; each node's state on the `{"t":"aero"}` line after this one.
+    let _ = write!(w.0, "}},");
+    app.aero.hub_json(w.0, if app.aero.has_keys() { "loaded" } else { sd.flarm_key_state }, crate::bus::syncs(), gw.air_full);
     let _ = write!(
         w.0,
-        "}},\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{},\"gw\":\"{}\"}},\"console_drops\":{},",
+        ",\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{},\"gw\":\"{}\"}},\"console_drops\":{},",
         sd.state_name(),
         sd.file_name(),
         sd.rows,
@@ -218,6 +222,12 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     console::json(&b.buf[..b.len]);
     let mut n = LineBuf::new();
     crate::bus::nodes_json(&mut n);
+    if n.len > 0 {
+        console::json(&n.buf[..n.len]);
+    }
+    // Same buffer again (stack is tight).
+    n.len = 0;
+    app.aero.nodes_json(&mut n, now);
     if n.len > 0 {
         console::json(&n.buf[..n.len]);
     }
