@@ -256,7 +256,7 @@ fn main() -> ! {
     let mut down = downlink::Downlink::new();
     // Aero (LR2021) nodes: their frame queue and the 1090 table (the
     // ADSBee's too with `modes`) in PSRAM (aero.rs).
-    let (air_q, mut aero_es) = aero::split(aero::store(psram));
+    let (air_q, mut aero_es, control_table) = aero::split(aero::store(psram));
     println!(
         "hub-p4: aero frames queued in {}; 1090 table {}",
         if air_q.is_some() { "PSRAM" } else { "the link queue (no PSRAM)" },
@@ -360,6 +360,11 @@ fn main() -> ! {
     };
     let band = unsafe { &mut *(&raw mut BAND) };
     let mut app = app::App::new(tracker, band);
+    // Protocol 12: drone control links from the same nodes, in PSRAM.
+    if control_table.is_none() {
+        println!("hub-p4: no PSRAM: control-link frames are logged but not tabled");
+    }
+    app.control = control_table;
 
     #[cfg(feature = "fakenode")]
     let mut last_fake = Instant::now();
@@ -414,6 +419,7 @@ fn main() -> ! {
             app.aero.report(aero_es.as_deref_mut(), app.tracker, gw.feed.as_mut(), ms);
             app.aero.print(if app.aero.has_keys() { "loaded" } else { sdlog.flarm_key_state }, bus::syncs(), ms);
             site.apply(&mut app, &gw);
+            control_settings(&site, &mut down, &mut app, &mut ev);
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
@@ -618,6 +624,27 @@ struct Lines<'a> {
     site: &'a mut Option<heapless::String<120>>,
 }
 
+/// The control-link opt-ins from the site settings to the coverage
+/// coordinator (which puts them in the LR2021 nodes' plans). A change is
+/// printed and logged as a Setting event, whatever made it (the card's
+/// file at mount, or a console line, which the site code logs as well).
+#[inline(never)]
+fn control_settings(site: &site::Site, down: &mut downlink::Downlink, app: &mut app::App, ev: &mut evlog::Evidence) {
+    let (ids, content) = site.control();
+    app.control_flags = (ids, content);
+    if !down.set_control(ids, content) {
+        return;
+    }
+    let onoff = |b: bool| if b { "on" } else { "off" };
+    let mut t: heapless::String<96> = heapless::String::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut t,
+        format_args!("control links: read IDs {}, decode content {} (LR2021 nodes' plans)", onoff(ids), onoff(content)),
+    );
+    ev.event(evidence::EventCode::Setting, t.as_bytes(), &[ids as u8, content as u8]);
+    println!("hub-p4: {t}");
+}
+
 /// Returns a finished site line (console `L`) for the caller to apply.
 fn command(
     app: &mut app::App,
@@ -728,9 +755,9 @@ fn command(
         b'm' => forget_gps_home(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
         }
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN), m=hub moved (forget the GPS home), L=site line (node position / mute alarm), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
+        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

@@ -171,6 +171,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrlwatch"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "serde",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1380,6 +1388,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 name = "link"
 version = "0.1.0"
 dependencies = [
+ "ctrlwatch",
  "heapless 0.8.0",
  "openlink",
  "postcard",

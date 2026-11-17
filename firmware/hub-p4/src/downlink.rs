@@ -28,8 +28,8 @@ impl Downlink {
         Self { coord: Coordinator::new(), last_run: None, last_full: 0, commands: 0 }
     }
 
-    /// Console `a`: auto -> 1090 -> UAT -> FLARM -> OGN -> auto. Until
-    /// reboot. Returns the new setting.
+    /// Console `a`: auto -> 1090 -> UAT -> FLARM -> OGN -> control links
+    /// -> auto. Until reboot. Returns the new setting.
     #[inline(never)]
     pub fn cycle_aero(&mut self) -> Option<AeroMode> {
         let r = self.coord.aero.region;
@@ -38,10 +38,25 @@ impl Downlink {
             Some(AeroMode::Es1090) => Some(AeroMode::Uat978),
             Some(AeroMode::Uat978) => Some(AeroMode::FlarmHop { band: r, ogn: false }),
             Some(AeroMode::FlarmHop { ogn: false, .. }) => Some(AeroMode::FlarmHop { band: r, ogn: true }),
-            Some(AeroMode::FlarmHop { ogn: true, .. }) => None,
+            // The regions come from the coverage settings.
+            Some(AeroMode::FlarmHop { ogn: true, .. }) => Some(AeroMode::Control { regions: 0, energy: 0 }),
+            Some(AeroMode::Control { .. } | AeroMode::ControlFlags { .. }) => None,
         };
         self.last_run = None; // decide again now
         self.coord.aero.only
+    }
+
+    /// The two control-link opt-ins (SITE.TXT / console `L control ...`).
+    /// True when they changed; the next run sends new plans.
+    pub fn set_control(&mut self, read_ids: bool, decode_content: bool) -> bool {
+        let c = &mut self.coord.aero.control;
+        if (c.read_ids, c.decode_content) == (read_ids, decode_content) {
+            return false;
+        }
+        c.read_ids = read_ids;
+        c.decode_content = decode_content;
+        self.last_run = None;
+        true
     }
 
     /// `adsbee_1090`: the hub's ADSBee hears 1090 MHz, so aero nodes need not.
@@ -125,6 +140,7 @@ pub fn aero_only_label(m: Option<AeroMode>) -> &'static str {
         Some(AeroMode::Uat978) => "UAT 978 only",
         Some(AeroMode::FlarmHop { ogn: false, .. }) => "FLARM hop only",
         Some(AeroMode::FlarmHop { ogn: true, .. }) => "OGN hop only",
+        Some(AeroMode::Control { .. } | AeroMode::ControlFlags { .. }) => "control links only",
     }
 }
 

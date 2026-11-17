@@ -318,3 +318,65 @@ fn dji_link_kinds_reach_the_screen() {
         assert!(e.kind.label().len() <= 11, "{}", e.kind.label());
     }
 }
+
+/// Protocol 12: control links reach the SIGNALS rows, and a drone known
+/// only from a link's telemetry is named after the link.
+#[test]
+fn control_links_reach_the_screen() {
+    use ctrlwatch::content::{AltRef, Channels, Position, PositionKind, PositionSource};
+    use ctrlwatch::{Confidence, ControlContent, ControlSighting, Direction, Probe, Region, System};
+    use tracker::ctrllinks::ControlTable;
+    let mut tr: Tracker = Tracker::default();
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, None, 0);
+    let mut table = ControlTable::new();
+    let mut ch = Channels::default();
+    for (i, v) in [1500u16, 1500, 988, 1500].into_iter().enumerate() {
+        ch.set(i, v);
+    }
+    let pos = Position {
+        kind: PositionKind::Aircraft,
+        lat_e7: (INDEPENDENCE.0 * 1e7) as i32,
+        lon_e7: (INDEPENDENCE.1 * 1e7) as i32,
+        alt_mm: Some((60_000, AltRef::Msl)),
+        rel_alt_mm: None,
+        ground_speed_cms: None,
+        heading_cdeg: None,
+        satellites: Some(12),
+        fix_type: Some(3),
+        source: PositionSource::CrsfGps,
+    };
+    let r = link::ControlReport {
+        sighting: ControlSighting {
+            system: System::ExpressLrs,
+            region: Region::Fcc915,
+            probe: Probe::Energy,
+            freq_hz: 915_500_000,
+            rssi_dbm: -64,
+            snr_db: 8,
+            t_us: 1,
+            confidence: Confidence::Confirmed,
+            direction: Direction::Uplink,
+            id: None,
+            version: Some(4),
+        },
+        best: Confidence::Confirmed,
+        packets: 9,
+        confirmed: 2,
+        peak_rssi: -60,
+        part: 1,
+        content: [ControlContent::Channels(ch), ControlContent::Position(pos)].into_iter().collect(),
+        raw: None,
+    };
+    table.ingest(&mut tr, 1, &r, 1_000);
+    let ctx = tr.context(2_000, None);
+    let mut st = UiState::default();
+    fill_from_tracker(&tr, &ctx, &mut st);
+    screen::from_tracker::fill_control(&table, &ctx, &mut st);
+    assert_eq!(st.total_control, 1);
+    let c = &st.control[0];
+    assert_eq!((c.system.as_str(), c.band, c.sure, c.rssi), ("ELRS", "915", ControlSure::Confirmed, -64));
+    assert_eq!(c.detail.as_str(), "1500 1500 988 1500");
+    assert_eq!(st.drones.len(), 1);
+    assert_eq!(st.drones[0].id.as_str(), "ExpressLRS link 915");
+    assert!(st.drones[0].drone.is_some(), "it has a position: on the radar");
+}

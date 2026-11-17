@@ -348,7 +348,9 @@ Decided 2026-11-09 (see RESEARCH.md "Expansion research"):
 - **Legal line.** A 2020 DOJ/FAA/FCC/DHS advisory warns that monitoring drone control links can fall under wiretap and pen-register law.
   - Presence and energy detection are the default.
   - Reading a link's identifier (ELRS UID bytes) is **opt-in**.
-  - Decoding link *content* is out of scope.
+  - Decoding link *content* (sticks, telemetry, positions) is a **separate opt-in**, off by default.
+    The owner stated on 2026-11-17 that they have permission for both; each kit turns them on with
+    `SITE.TXT` lines (`control ids on`, `control content on`). Nothing tries to break encryption.
 - The hub flags any detection made while its own LoRa backhaul was transmitting.
 
 **Status 2026-11-17 (branch `ctrlwatch`): host crate built, no hardware yet.** `crates/ctrlwatch`
@@ -359,8 +361,17 @@ mLRS LoRa, SiK/RFD900 and OpenLRSng are confirmed per packet. ELRS FLRC/FSK, mLR
 Crossfire, Tracer, Ghost, FrSky and FlySky are energy/timing candidates only. Identifiers and
 content are two separate opt-ins (content enabled by the owner 2026-11-17): RC channels, CRSF
 telemetry incl. GPS, MAVLink positions, and an ELRS follow mode that can rebuild a link's hop
-table from a sync packet plus a few observations. Next: wire it into `firmware/node-lr` as a
-role, then bench-test against real ELRS/mLRS/SiK transmitters. Details: docs/CONTROL-LINKS.md.
+table from a sync packet plus a few observations. Details: docs/CONTROL-LINKS.md.
+
+**Status 2026-11-17 (branch `ctrl-node`): wired into the node and the P4 hub, no hardware yet.**
+Link protocol 12 (`Frame::Control`, `Frame::ControlEnergy`, plan codes `Control` and
+`ControlFlags`); `firmware/node-lr` runs the ctrlwatch scan plans on the LR2021 (multi-SF
+groups, energy sweeps with burst timing, ExpressLRS follow with content on); a lone LR node
+gives control links about half its time, two nodes split aircraft / control. The hub keeps a
+control-link table, turns decoded positions into drone tracks (radar, list, aircraft-conflict
+warning), logs every frame as evidence, shows a CONTROL table on SIGNALS, and takes the two
+opt-ins from `SITE.TXT` / console `L`. Next: bench-test against real ELRS/mLRS/SiK
+transmitters (docs/CONTROL-LINKS.md "Not verified").
 
 ### Phase 10: DJI OcuSync detection and DroneID decoding (C5 as a radio sampler)
 Decided 2026-11-09 (see RESEARCH.md "DJI OcuSync and DroneID").

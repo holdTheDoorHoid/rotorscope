@@ -57,18 +57,23 @@ pub fn fill_from_tracker<const N: usize, const A: usize>(
         let _ = state.drones.push(view(&tracks[i], ctx));
     }
     fill_signals(tracker.emitters(), tracker.wifi_drones(), ctx, state);
-    fill_control(tracker.control_links(), tracker.control_bands(), ctx, state);
 }
 
-/// Replace `state.control` (and its total): control links first (active,
-/// then strongest), then bands with a recent hopper.
-pub fn fill_control(
-    links: &[tracker::ctrllinks::ControlLink],
-    bands: &[tracker::ctrllinks::EnergyBand],
-    ctx: &Context,
-    state: &mut UiState,
-) {
+/// Replace `state.control` (and its total) from the control-link table
+/// (kept apart from the tracker; call after [`fill_from_tracker`]):
+/// control links first (active, then strongest), then bands with a recent
+/// hopper. A drone known only from a link's telemetry is named after the
+/// link ("ExpressLRS link 915").
+#[inline(never)]
+pub fn fill_control(table: &tracker::ctrllinks::ControlTable, ctx: &Context, state: &mut UiState) {
     use tracker::ctrllinks::{band_name, hopper_state, short_name};
+    let (links, bands) = (table.links(), table.bands());
+    for v in state.drones.iter_mut().filter(|v| v.id_kind == IdKind::Presence) {
+        if let Some(l) = table.link_of(tracker::TrackId(v.key)) {
+            v.id.clear();
+            let _ = write!(v.id, "{} link {}", l.system.label(), l.band());
+        }
+    }
     let stale_after = ctx.config.stale_after_ms;
     let is_stale = |t: u64| ctx.now_ms.saturating_sub(t) >= stale_after;
     let hoppers = bands.iter().filter(|b| hopper_state(b, ctx.now_ms, &ctx.config).is_some());
@@ -122,7 +127,8 @@ pub fn fill_control(
         }
     }
     for b in hoppers {
-        let Some((h, at)) = &b.hopper else { continue };
+        let Some(h) = &b.hopper else { continue };
+        let at = &h.at_ms;
         let mut v = ControlView {
             key: 0x8000_0000 | u32::from(b.node) << 8 | b.region as u32,
             band: band_name(b.region),
@@ -132,9 +138,9 @@ pub fn fill_control(
             last_seen_ms: *at,
             ..ControlView::default()
         };
-        match h.candidates.first() {
+        match h.candidates().next() {
             Some((sys, _)) => {
-                let _ = v.system.push_str(short_name(*sys).trim_end_matches('?'));
+                let _ = v.system.push_str(short_name(sys).trim_end_matches('?'));
                 let _ = v.system.push('?');
             }
             None => {

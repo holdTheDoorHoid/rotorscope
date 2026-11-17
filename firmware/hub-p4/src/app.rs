@@ -83,6 +83,12 @@ pub struct App {
     pub o4: djicrypt::Decryptor<8>,
     /// Aircraft from aero (LR2021) nodes (`aero.rs`).
     pub aero: crate::aero::Aero,
+    /// The control-link opt-ins in force (read IDs, decode content), for
+    /// the `{"t":"control_stats"}` line.
+    pub control_flags: (bool, bool),
+    /// Drone control links and control-band energy from LR2021 nodes
+    /// (protocol 12), in PSRAM (`aero::Store`); `None` without PSRAM.
+    pub control: Option<&'static mut tracker::ctrllinks::ControlTable>,
 }
 
 impl App {
@@ -103,6 +109,8 @@ impl App {
             new_drones: heapless::Deque::new(),
             o4: djicrypt::Decryptor::default(),
             aero: crate::aero::Aero::default(),
+            control_flags: (false, false),
+            control: None,
         }
     }
 
@@ -151,6 +159,11 @@ impl App {
             }
             link::Frame::Air(a) => self.aero.on_air(a, actx, self.tracker, gw.feed.as_mut(), now),
             link::Frame::AeroStatus(st) => self.aero.on_status(relay.map_or([0; 6], |r| r.0), st, now),
+            link::Frame::Control(_) | link::Frame::ControlEnergy(_) => {
+                if let Some(ct) = self.control.as_deref_mut() {
+                    ct.ingest_frame(self.tracker, node, &f, now);
+                }
+            }
             _ => {}
         }
     }
@@ -304,6 +317,9 @@ impl App {
             None => self.tracker.clear_utc(),
         }
         self.tracker.expire(now);
+        if let Some(ct) = self.control.as_deref_mut() {
+            ct.expire(now, self.tracker.config());
+        }
         self.announce_new(now);
     }
 
@@ -405,6 +421,9 @@ impl App {
         // position for.
         self.state.gps = ext.gps;
         screen::from_tracker::fill_from_tracker(self.tracker, &ctx, &mut self.state);
+        if let Some(ct) = self.control.as_deref() {
+            screen::from_tracker::fill_control(ct, &ctx, &mut self.state);
+        }
         self.state.sd = ext.sd;
         self.state.flags = ext.flags.clone();
         self.state.threats = screen::Threats {

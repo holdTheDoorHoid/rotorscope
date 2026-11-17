@@ -372,5 +372,9 @@ fn is_data(f: &Frame) -> bool {
             // state (kept per node by `aero.rs`, not logged as evidence).
             | Frame::Air(_)
             | Frame::AeroStatus(_)
+            // Protocol 12: control links and control-band energy from the
+            // same nodes (tracker `ctrllinks`, logged as evidence).
+            | Frame::Control(_)
+            | Frame::ControlEnergy(_)
     )
 }

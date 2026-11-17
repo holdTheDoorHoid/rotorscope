@@ -441,9 +441,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             // holds the GPS time and the FLARM keys) and arrive here as
             // `ingest_aircraft`; the aero node's status is link bookkeeping.
             Frame::Air(_) | Frame::AeroStatus(_) => {}
-            // Protocol 12: drone control links and control-band energy.
-            Frame::Control(r) => drop(self.ingest_control(node, r, now_ms)),
-            Frame::ControlEnergy(e) => self.ingest_control_energy(node, e, now_ms),
+            // Protocol 12: drone control links and control-band energy go
+            // to a `ctrllinks::ControlTable`, which the caller owns (the P4
+            // hub keeps it in PSRAM) and feeds itself.
+            Frame::Control(_) | Frame::ControlEnergy(_) => {}
             Frame::Status { role, can, plan } => {
                 self.ingest_status(node, *role, *can, *plan, now_ms)
             }

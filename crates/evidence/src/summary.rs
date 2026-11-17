@@ -279,9 +279,9 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
             let s = &c.sighting;
             write!(
                 w,
-                "control {:?} {:?} f={}.{:03}MHz rssi{} snr{} {:?} best={:?} part={} pkts={}",
-                s.system,
-                s.region,
+                "control {} {} f={}.{:03}MHz rssi{} snr{} {:?} best={:?} part={} pkts={}",
+                s.system.name(),
+                s.region.name(),
                 s.freq_hz / 1_000_000,
                 s.freq_hz / 1000 % 1000,
                 s.rssi_dbm,
@@ -309,7 +309,7 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
         }
         Frame::ControlEnergy(e) => {
             use link::EnergyActivity as E;
-            write!(w, "control_energy {:?} windows={} steady={}", e.region, e.windows, e.steady.len())?;
+            write!(w, "control_energy {} windows={} steady={}", e.region.name(), e.windows, e.steady.len())?;
             match &e.activity {
                 E::Quiet => write!(w, " quiet"),
                 E::Steady => write!(w, " steady"),
@@ -317,7 +317,7 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
                 E::Hopper(h) => {
                     write!(w, " hopper {}-{}kHz ch{} rssi{}", h.low_khz, h.high_khz, h.channels, h.rssi)?;
                     match h.candidates.first() {
-                        Some((sys, score)) => write!(w, " best={sys:?}:{score}"),
+                        Some((sys, score)) => write!(w, " best={}:{score}", sys.name()),
                         None => Ok(()),
                     }
                 }

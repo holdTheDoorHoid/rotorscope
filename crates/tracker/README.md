@@ -302,6 +302,31 @@ the noise floor**) and `csv::wifi_drone_row` (track `W<n>`, `uas_id` the
 network name with `id_type` `Ssid`, `ua_type` the maker, `transports`
 `WifiDrone` or `WifiDrone5G`; no address). Neither makes CoT.
 
+## Drone control links (added 2026-11-17, protocol 12)
+
+`ctrllinks::ControlTable` (kept apart from `Tracker`; the P4 hub holds it in PSRAM) takes
+`Frame::Control` and `Frame::ControlEnergy` from LR2021 nodes (`table.ingest_frame(&mut
+tracker, node, &frame, now)`). Up to 4 links (keyed by system, region and, with the ID opt-in,
+the link ID) and 3 energy bands. A decoded aircraft position creates or updates a drone track
+with `location_src` `"ControlLink"`; `table.link_of(track_id)` names its link.
+docs/CONTROL-LINKS.md has the plain-language story and the two opt-ins.
+
+### Lines
+
+`json::control_line` (`{"t":"control"}`): `id`, `state`, `sys` (`"ExpressLrs"`, `"Mlrs"`,
+`"Sik"`, `"OpenLrsNg"`, ...), `label`, `band` (`"915"`, `"868"`, `"433"`, `"2.4"`), `region`,
+`mhz`, `rate` (`"200Hz v4"`, `"64k"`...), `conf` (`"confirmed"`, `"likely"`, `"energy"`), `ver`,
+`link_id` (only when the node read one), `rssi`, `peak`, `snr`, `pkts`, `confirmed`, `up`,
+`down`, `enc`, `sticks` (first four channels, µs), `armed`, `sticks_age_ms`, `batt_mv`,
+`batt_pct`, `lq`, `mode`, `alt_dm`, `tlm_age_ms`, `track`, `node`, `first_ms`, `last_ms`,
+`age_ms`. Content fields are null unless the owner turned content decoding on.
+
+`json::control_energy_line` (`{"t":"control_energy"}`): `region`, `band`, `node`, `windows`,
+`activity` (`"quiet"`, `"steady"`, `"background"`, `"hopper"`), `steady` (count), `hopper`
+(the last one seen: `low_mhz`, `high_mhz`, `ch`, `spacing_khz`, `bw_khz`, `rssi`,
+`spread_db`, `burst_us`, `interval_us`, `periodic`, `cands` [{`sys`, `label`, `score`}],
+`state`, `age_ms`), `age_ms`.
+
 ## Phone page API (`json::state`, `json::parse_own_pos`)
 
 The hub's hotspot serves the page in `web/index.html` (bundled by

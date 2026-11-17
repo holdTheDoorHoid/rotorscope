@@ -657,6 +657,8 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
                             | link::Frame::Status { role: link::NodeRole::Aero, .. }
                             | link::Frame::AeroStatus(_)
                             | link::Frame::Air(_)
+                            | link::Frame::Control(_)
+                            | link::Frame::ControlEnergy(_)
                     );
                 }
                 Err(_) => {

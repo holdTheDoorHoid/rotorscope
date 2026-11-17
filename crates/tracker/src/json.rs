@@ -1136,7 +1136,11 @@ impl core::fmt::Display for ProbeText {
         use ctrlwatch::Probe;
         match self.0 {
             Probe::Elrs { rate, version } => write!(f, "{} v{}", rate.info().name, version.id()),
-            Probe::Mlrs(m) => write!(f, "{m:?}"),
+            Probe::Mlrs(m) => {
+                // Names by index (no switch table in RAM on the hub).
+                const N: [&str; 7] = ["900 31Hz", "900 19Hz", "2.4 50Hz", "2.4 31Hz", "2.4 19Hz", "FLRC 111Hz", "FSK 50Hz"];
+                f.write_str(N.get(m as usize).copied().unwrap_or("mLRS"))
+            }
             Probe::Sik { kbps } => write!(f, "{kbps}k"),
             Probe::OpenLrs { rate, bind } => write!(f, "rate{rate}{}", if bind { " bind" } else { "" }),
             Probe::Energy => f.write_str("energy"),
@@ -1168,10 +1172,10 @@ struct ControlLine<'a> {
     t: &'static str,
     id: crate::ctrllinks::ControlLinkId,
     state: TrackState,
-    sys: ctrlwatch::System,
+    sys: &'static str,
     label: &'static str,
     band: &'static str,
-    region: ctrlwatch::Region,
+    region: &'static str,
     mhz: f64,
     rate: heapless::String<24>,
     conf: &'static str,
@@ -1188,7 +1192,7 @@ struct ControlLine<'a> {
     sticks: Option<[u16; crate::ctrllinks::SHOWN_CHANNELS]>,
     armed: Option<bool>,
     sticks_age_ms: Option<u64>,
-    batt_mv: Option<u32>,
+    batt_mv: Option<u16>,
     batt_pct: Option<u8>,
     lq: Option<u8>,
     mode: Option<&'a str>,
@@ -1206,6 +1210,7 @@ pub const MAX_CONTROL_LINE: usize = 768;
 const _: () = assert!(MAX_CONTROL_LINE <= MAX_LINE);
 
 /// Write one control link as a JSON object followed by `\n` (`"t":"control"`).
+#[inline(never)]
 pub fn control_line(l: &crate::ctrllinks::ControlLink, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
     let state = if ctx.now_ms.saturating_sub(l.last_seen_ms) >= ctx.config.stale_after_ms { TrackState::Stale } else { TrackState::Active };
     let tlm = l.telemetry.as_ref();
@@ -1213,10 +1218,10 @@ pub fn control_line(l: &crate::ctrllinks::ControlLink, ctx: &Context, buf: &mut 
         t: "control",
         id: l.id,
         state,
-        sys: l.system,
+        sys: l.system.name(),
         label: l.system.label(),
         band: l.band(),
-        region: l.region,
+        region: l.region.name(),
         mhz: libm::round(l.freq_hz as f64 / 1000.0) / 1000.0,
         rate: crate::text::render(ProbeText(l.probe)),
         conf: crate::ctrllinks::confidence_name(l.best),
@@ -1253,7 +1258,7 @@ pub fn control_line(l: &crate::ctrllinks::ControlLink, ctx: &Context, buf: &mut 
 
 #[derive(Serialize)]
 struct Cand {
-    sys: ctrlwatch::System,
+    sys: &'static str,
     label: &'static str,
     score: u8,
 }
@@ -1263,14 +1268,14 @@ struct HopperLine {
     low_mhz: f64,
     high_mhz: f64,
     ch: u16,
-    spacing_khz: Option<u32>,
-    bw_khz: u32,
+    spacing_khz: Option<u16>,
+    bw_khz: u16,
     rssi: i8,
     spread_db: i8,
-    burst_us: Option<u32>,
-    interval_us: Option<u32>,
+    burst_us: Option<u16>,
+    interval_us: Option<u16>,
     periodic: u8,
-    cands: heapless::Vec<Cand, 4>,
+    cands: heapless::Vec<Cand, 2>,
     state: TrackState,
     age_ms: u64,
 }
@@ -1278,7 +1283,7 @@ struct HopperLine {
 #[derive(Serialize)]
 struct EnergyLine {
     t: &'static str,
-    region: ctrlwatch::Region,
+    region: &'static str,
     band: &'static str,
     node: u8,
     windows: u32,
@@ -1290,9 +1295,9 @@ struct EnergyLine {
 
 /// Write one control band's energy as a JSON object followed by `\n`
 /// (`"t":"control_energy"`).
+#[inline(never)]
 pub fn control_energy_line(b: &crate::ctrllinks::EnergyBand, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
-    use link::EnergyActivity as E;
-    let hopper = b.hopper.as_ref().map(|(h, at)| HopperLine {
+    let hopper = b.hopper.as_ref().map(|h| HopperLine {
         low_mhz: h.low_khz as f64 / 1000.0,
         high_mhz: h.high_khz as f64 / 1000.0,
         ch: h.channels,
@@ -1303,22 +1308,17 @@ pub fn control_energy_line(b: &crate::ctrllinks::EnergyBand, ctx: &Context, buf:
         burst_us: h.burst_us,
         interval_us: h.interval_us,
         periodic: h.periodic_pct,
-        cands: h.candidates.iter().map(|&(sys, score)| Cand { sys, label: sys.label(), score }).collect(),
+        cands: h.candidates().map(|(sys, score)| Cand { sys: sys.name(), label: sys.label(), score }).collect(),
         state: crate::ctrllinks::hopper_state(b, ctx.now_ms, &ctx.config).unwrap_or(TrackState::Stale),
-        age_ms: ctx.now_ms.saturating_sub(*at),
+        age_ms: ctx.now_ms.saturating_sub(h.at_ms),
     });
     let line = EnergyLine {
         t: "control_energy",
-        region: b.region,
+        region: b.region.name(),
         band: crate::ctrllinks::band_name(b.region),
         node: b.node,
         windows: b.windows,
-        activity: match b.activity {
-            E::Quiet => "quiet",
-            E::Steady => "steady",
-            E::Background => "background",
-            E::Hopper(_) => "hopper",
-        },
+        activity: b.activity.name(),
         steady: b.steady,
         hopper,
         age_ms: ctx.now_ms.saturating_sub(b.last_seen_ms),

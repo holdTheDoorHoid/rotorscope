@@ -19,6 +19,14 @@ pub struct Site {
     st: SiteState,
 }
 
+impl Site {
+    /// The control-link opt-ins (read IDs, decode content): what the file
+    /// and the operator's lines last said; off when never said.
+    pub fn control(&self) -> (bool, bool) {
+        (self.st.control_ids.unwrap_or(false), self.st.control_content.unwrap_or(false))
+    }
+}
+
 /// Where a change came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum From {
@@ -62,13 +70,17 @@ impl Site {
             app.tracker.mute(m.clone());
         }
         crate::println!(
-            "hub-p4: site file: {} lines used, {} ignored; {} nodes placed, {} alarm mutes",
+            "hub-p4: site file: {} lines used, {} ignored; {} nodes placed, {} alarm mutes; control links: IDs {}, content {}",
             st.used,
             st.ignored,
             st.nodes.len(),
-            st.mutes.len()
+            st.mutes.len(),
+            if st.control_ids == Some(true) { "on" } else { "off" },
+            if st.control_content == Some(true) { "on" } else { "off" },
         );
         self.st.nodes = st.nodes;
+        self.st.control_ids = st.control_ids;
+        self.st.control_content = st.control_content;
     }
 
     fn apply_line(&mut self, l: SiteLine, app: &mut App) {
@@ -77,6 +89,7 @@ impl Site {
             SiteLine::NodeClear { mac } => self.st.nodes.retain(|n| n.0 != mac),
             SiteLine::Mute(m) => drop(app.tracker.mute(m)),
             SiteLine::UnmuteAll => app.tracker.unmute_all(),
+            l @ SiteLine::Control { .. } => self.st.apply(l),
             SiteLine::AllNodesHere | SiteLine::Nothing => {}
         }
     }

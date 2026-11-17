@@ -542,7 +542,10 @@ fn with_signals() -> UiState {
         (1, "ELRS", "915", ControlSure::Confirmed, -64, "1500 1500 988 1500", false),
         (2, "SiK", "915", ControlSure::Confirmed, -88, "64k", false),
         (3, "ELRS?", "2.4", ControlSure::Energy, -71, "24ch 1000k 4.0ms", true),
-    ] {
+    ]
+    .into_iter()
+    .take(MAX_CONTROL_ROWS)
+    {
         st.control
             .push(ControlView {
                 key,

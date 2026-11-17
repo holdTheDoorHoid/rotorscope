@@ -116,19 +116,42 @@ pub enum System {
 }
 
 impl System {
+    /// Display names, in declaration order. (Tables indexed by the
+    /// discriminant rather than `match`es: on the ESP32 targets the
+    /// compiler's string switch tables land in RAM.)
+    const LABELS: [&'static str; 10] = [
+        "ExpressLRS",
+        "mLRS",
+        "SiK/RFD900",
+        "OpenLRSng",
+        "TBS Crossfire",
+        "TBS Tracer",
+        "ImmersionRC Ghost",
+        "FrSky R9/ACCESS 900",
+        "FrSky D16/ACCESS 2.4",
+        "FlySky AFHDS 2A",
+    ];
+    /// Identifier-style names (as the variants and their serde form).
+    const NAMES: [&'static str; 10] = [
+        "ExpressLrs",
+        "Mlrs",
+        "Sik",
+        "OpenLrsNg",
+        "Crossfire",
+        "Tracer",
+        "Ghost",
+        "FrskyR9",
+        "FrskyX",
+        "FlyskyAfhds2a",
+    ];
+
     pub const fn label(self) -> &'static str {
-        match self {
-            System::ExpressLrs => "ExpressLRS",
-            System::Mlrs => "mLRS",
-            System::Sik => "SiK/RFD900",
-            System::OpenLrsNg => "OpenLRSng",
-            System::Crossfire => "TBS Crossfire",
-            System::Tracer => "TBS Tracer",
-            System::Ghost => "ImmersionRC Ghost",
-            System::FrskyR9 => "FrSky R9/ACCESS 900",
-            System::FrskyX => "FrSky D16/ACCESS 2.4",
-            System::FlyskyAfhds2a => "FlySky AFHDS 2A",
-        }
+        Self::LABELS[self as usize]
+    }
+
+    /// The variant's name (`"ExpressLrs"`), as serde writes it.
+    pub const fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
     }
 }
 
@@ -165,6 +188,12 @@ impl Region {
 
     pub const fn is_2g4(self) -> bool {
         matches!(self, Region::Ism2g4)
+    }
+
+    /// The variant's name (`"Fcc915"`), as serde writes it.
+    pub const fn name(self) -> &'static str {
+        const NAMES: [&str; 10] = ["Fcc915", "Au915", "Eu868", "In866", "Au433", "Eu433", "Us433", "Us433W", "Th920", "Ism2g4"];
+        NAMES[self as usize]
     }
 }
 
@@ -323,5 +352,36 @@ pub(crate) const fn lora_snr_floor(sf: u8) -> i8 {
         10 => -15,
         11 => -18,
         _ => -20,
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn names_match_variants_and_serde() {
+        for (i, r) in Region::ALL.iter().enumerate() {
+            assert_eq!(*r as usize, i);
+            assert_eq!(std::format!("{r:?}"), r.name());
+            assert_eq!(serde_json::to_string(r).unwrap(), std::format!("\"{}\"", r.name()));
+        }
+        let all = [
+            System::ExpressLrs,
+            System::Mlrs,
+            System::Sik,
+            System::OpenLrsNg,
+            System::Crossfire,
+            System::Tracer,
+            System::Ghost,
+            System::FrskyR9,
+            System::FrskyX,
+            System::FlyskyAfhds2a,
+        ];
+        for s in all {
+            assert_eq!(std::format!("{s:?}"), s.name());
+            assert_eq!(serde_json::to_string(&s).unwrap(), std::format!("\"{}\"", s.name()));
+        }
+        assert_eq!(System::Ghost.label(), "ImmersionRC Ghost");
     }
 }

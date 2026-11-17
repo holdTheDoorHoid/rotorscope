@@ -59,6 +59,9 @@ pub struct Store {
     /// The 1090 table: with `modes` the ADSBee's (`adsbee::Raw::table`),
     /// which aero nodes' 1090 frames join; without, theirs alone.
     pub table: EsTable,
+    /// Protocol 12: the same nodes' drone control links and control-band
+    /// energy (`tracker::ctrllinks`).
+    pub control: tracker::ctrllinks::ControlTable,
 }
 
 const _: () = assert!(STORE_OFFSET + core::mem::size_of::<Store>() <= crate::faa::PACK_OFFSET);
@@ -80,6 +83,7 @@ pub fn store(psram: Option<(*mut u32, usize)>) -> Option<&'static mut Store> {
         let p = base.cast::<u8>().add(STORE_OFFSET).cast::<Store>();
         (&raw mut (*p).queue).write(heapless::Deque::new());
         EsTable::init_in_place(&raw mut (*p).table, modes::Config::default());
+        (&raw mut (*p).control).write(tracker::ctrllinks::ControlTable::new());
         Some(&mut *p)
     }
 }
@@ -391,7 +395,9 @@ pub fn mode_name(code: u32) -> &'static str {
         Some(AeroMode::Uat978) => "uat978",
         Some(AeroMode::FlarmHop { ogn: false, .. }) => "flarm",
         Some(AeroMode::FlarmHop { ogn: true, .. }) => "ogn",
-        None => "unknown",
+        Some(AeroMode::Control { .. }) => "control",
+        // Settings, never a running mode.
+        Some(AeroMode::ControlFlags { .. }) | None => "unknown",
     }
 }
 
@@ -416,17 +422,25 @@ pub fn screen_label(st: &AeroStatus) -> &'static str {
         (Some(AeroMode::FlarmHop { ogn: false, .. }), true) => "LR FLARM parked",
         (Some(AeroMode::FlarmHop { ogn: true, .. }), false) => "LR OGN hop",
         (Some(AeroMode::FlarmHop { ogn: true, .. }), true) => "LR OGN parked",
-        (None, _) => "LR other",
+        (Some(AeroMode::Control { .. }), _) => "LR control",
+        (Some(AeroMode::ControlFlags { .. }) | None, _) => "LR other",
     }
 }
 
-/// The PSRAM store's two halves for their two users (`links.rs` gets the
-/// queue; the 1090 table goes to the ADSBee with `modes`, else stays with
-/// the main loop for aero frames). Both `None` without PSRAM.
+/// The PSRAM store's parts for their users (`links.rs` gets the queue; the
+/// 1090 table goes to the ADSBee with `modes`, else stays with the main
+/// loop for aero frames; the control-link table goes to the app). All
+/// `None` without PSRAM.
+pub type Parts = (
+    Option<&'static mut AirQueue>,
+    Option<&'static mut EsTable>,
+    Option<&'static mut tracker::ctrllinks::ControlTable>,
+);
+
 #[inline(never)]
-pub fn split(st: Option<&'static mut Store>) -> (Option<&'static mut AirQueue>, Option<&'static mut EsTable>) {
+pub fn split(st: Option<&'static mut Store>) -> Parts {
     match st {
-        Some(Store { queue, table }) => (Some(queue), Some(table)),
-        None => (None, None),
+        Some(Store { queue, table, control }) => (Some(queue), Some(table), Some(control)),
+        None => (None, None, None),
     }
 }

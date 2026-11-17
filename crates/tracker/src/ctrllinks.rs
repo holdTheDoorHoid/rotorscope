@@ -9,13 +9,16 @@
 //!   decoding is on, the latest stick positions and telemetry.
 //! - A decoded **aircraft position** (`ControlContent::Position`, kind
 //!   aircraft, a plausible fix) creates or updates an ordinary drone track
-//!   ([`crate::Source::ControlLink`]), so it appears on the radar and list
+//!   ([`crate::Source::ControlLink`]; [`ControlLink::track`] names it, and
+//!   [`ControlTable::link_of`] goes the other way), so it appears on the radar and list
 //!   and in the drone-near-aircraft check, like a DJI DroneID position. The
 //!   home point goes to the track's `home`.
 //! - [`EnergyBands`]: the latest energy window of each band per node:
 //!   hopping transmitters with their candidate systems, steady carriers.
 //!
-//! Small and fixed-size: the P4 hub keeps the tracker in internal RAM.
+//! The table is not part of [`Tracker`]: the P4 hub keeps the tracker in
+//! internal RAM, which has no room to spare, and this table in PSRAM. It
+//! takes the tracker as an argument where a position goes to a drone track.
 
 use ctrlwatch::content::{AltRef, PositionKind, Telemetry};
 use ctrlwatch::{Confidence, ControlContent, LinkId, Probe, Region, System};
@@ -29,9 +32,9 @@ use crate::{Config, Stamped, TrackId, TrackState, Tracker};
 
 /// Control links held. A sensor rarely hears more than a few at once; when
 /// full, the one heard least recently makes room.
-pub const MAX_CONTROL_LINKS: usize = 6;
+pub const MAX_CONTROL_LINKS: usize = 4;
 /// Energy bands held (band x node).
-pub const MAX_ENERGY_BANDS: usize = 4;
+pub const MAX_ENERGY_BANDS: usize = 3;
 /// Stick channels kept for display (roll, pitch, throttle, yaw on most
 /// radios; the rest are switches).
 pub const SHOWN_CHANNELS: usize = 4;
@@ -53,11 +56,12 @@ pub struct Sticks {
 /// The latest telemetry items worth a glance.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TelemetrySnap {
-    pub battery_mv: Option<u32>,
+    /// mV (saturating at 65.5 V).
+    pub battery_mv: Option<u16>,
     pub battery_pct: Option<u8>,
     /// Link quality the link reports about itself (ELRS LQ, %).
     pub lq: Option<u8>,
-    pub mode: heapless::String<12>,
+    pub mode: heapless::String<8>,
     /// Altitude (dm, barometric) if the link sends it.
     pub baro_dm: Option<i32>,
     pub rx_ms: u64,
@@ -89,7 +93,6 @@ pub struct ControlLink {
     pub encrypted: bool,
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
-    pub reports: u32,
     pub sticks: Option<Sticks>,
     pub telemetry: Option<TelemetrySnap>,
     /// The drone track its decoded positions feed.
@@ -103,29 +106,18 @@ impl ControlLink {
     }
 }
 
+/// (Name tables indexed by the discriminant, not `match`es: on the hub's
+/// chip string switch tables land in RAM.)
 pub const fn band_name(r: Region) -> &'static str {
-    match r {
-        Region::Fcc915 | Region::Au915 | Region::Th920 => "915",
-        Region::Eu868 | Region::In866 => "868",
-        Region::Au433 | Region::Eu433 | Region::Us433 | Region::Us433W => "433",
-        Region::Ism2g4 => "2.4",
-    }
+    // Region::ALL order.
+    const B: [&str; 10] = ["915", "915", "868", "868", "433", "433", "433", "433", "915", "2.4"];
+    B[r as usize]
 }
 
 /// Short system names for small screens (eight characters at most).
 pub const fn short_name(s: System) -> &'static str {
-    match s {
-        System::ExpressLrs => "ELRS",
-        System::Mlrs => "mLRS",
-        System::Sik => "SiK",
-        System::OpenLrsNg => "OpenLRS",
-        System::Crossfire => "CRSF?",
-        System::Tracer => "Tracer?",
-        System::Ghost => "Ghost?",
-        System::FrskyR9 => "R9?",
-        System::FrskyX => "FrSky?",
-        System::FlyskyAfhds2a => "FlySky?",
-    }
+    const N: [&str; 10] = ["ELRS", "mLRS", "SiK", "OpenLRS", "CRSF?", "Tracer?", "Ghost?", "R9?", "FrSky?", "FlySky?"];
+    N[s as usize]
 }
 
 pub const fn confidence_name(c: Confidence) -> &'static str {
@@ -136,18 +128,96 @@ pub const fn confidence_name(c: Confidence) -> &'static str {
     }
 }
 
+/// What a band's latest energy window found (`link::EnergyActivity`
+/// without the hopper, which [`EnergyBand::hopper`] keeps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Quiet,
+    Steady,
+    Background,
+    Hopper,
+}
+
+impl ActivityKind {
+    pub const fn of(a: &EnergyActivity) -> Self {
+        match a {
+            EnergyActivity::Quiet => ActivityKind::Quiet,
+            EnergyActivity::Steady => ActivityKind::Steady,
+            EnergyActivity::Background => ActivityKind::Background,
+            EnergyActivity::Hopper(_) => ActivityKind::Hopper,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            ActivityKind::Quiet => "quiet",
+            ActivityKind::Steady => "steady",
+            ActivityKind::Background => "background",
+            ActivityKind::Hopper => "hopper",
+        }
+    }
+}
+
 /// The latest energy window of one band from one node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnergyBand {
     pub region: Region,
     pub node: u8,
     pub windows: u32,
-    pub activity: EnergyActivity,
+    pub activity: ActivityKind,
     pub steady: u8,
     pub last_seen_ms: u64,
-    /// When a hopper was last seen here (it stays on the screen while
-    /// active, even when the next window is quiet).
-    pub hopper: Option<(link::HopperReport, u64)>,
+    /// The last hopper seen here (it stays on the screen while active,
+    /// even when the next window is quiet).
+    pub hopper: Option<HopperSnap>,
+}
+
+/// A hopper, kept small (the hub's tracker lives in internal RAM).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HopperSnap {
+    pub low_khz: u32,
+    pub high_khz: u32,
+    pub channels: u16,
+    pub spacing_khz: Option<u16>,
+    pub occupied_khz: u16,
+    pub rssi: i8,
+    pub spread_db: i8,
+    /// Median burst length and packet interval, µs (saturating at 65.5 ms).
+    pub burst_us: Option<u16>,
+    pub interval_us: Option<u16>,
+    pub periodic_pct: u8,
+    /// The two best candidates (score 0 = none).
+    pub candidates: [(System, u8); 2],
+    pub at_ms: u64,
+}
+
+impl HopperSnap {
+    pub fn of(h: &link::HopperReport, at_ms: u64) -> Self {
+        let sat = |v: u32| v.min(u32::from(u16::MAX)) as u16;
+        let mut candidates = [(System::ExpressLrs, 0); 2];
+        for (slot, c) in candidates.iter_mut().zip(&h.candidates) {
+            *slot = *c;
+        }
+        Self {
+            low_khz: h.low_khz,
+            high_khz: h.high_khz,
+            channels: h.channels,
+            spacing_khz: h.spacing_khz.map(sat),
+            occupied_khz: sat(h.occupied_khz),
+            rssi: h.rssi,
+            spread_db: h.spread_db,
+            burst_us: h.burst_us.map(sat),
+            interval_us: h.interval_us.map(sat),
+            periodic_pct: h.periodic_pct,
+            candidates,
+            at_ms,
+        }
+    }
+
+    /// Candidates with a score, best first.
+    pub fn candidates(&self) -> impl Iterator<Item = (System, u8)> + '_ {
+        self.candidates.iter().copied().filter(|c| c.1 > 0)
+    }
 }
 
 /// The control-link tables.
@@ -232,56 +302,18 @@ impl ControlTable {
             encrypted: false,
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
-            reports: 0,
             sticks: None,
             telemetry: None,
             track: None,
         });
         self.links.len() - 1
     }
-
-    fn ingest_energy(&mut self, node: u8, e: &ControlEnergy, now_ms: u64) {
-        self.energy = self.energy.saturating_add(1);
-        let i = match self
-            .bands
-            .iter()
-            .position(|b| b.region == e.region && b.node == node)
-        {
-            Some(i) => i,
-            None => {
-                if self.bands.is_full()
-                    && let Some(i) =
-                        (0..self.bands.len()).min_by_key(|&i| self.bands[i].last_seen_ms)
-                {
-                    self.bands.remove(i);
-                }
-                let _ = self.bands.push(EnergyBand {
-                    region: e.region,
-                    node,
-                    windows: 0,
-                    activity: EnergyActivity::Quiet,
-                    steady: 0,
-                    last_seen_ms: now_ms,
-                    hopper: None,
-                });
-                self.bands.len() - 1
-            }
-        };
-        let b = &mut self.bands[i];
-        b.windows = e.windows;
-        b.steady = e.steady.len() as u8;
-        b.last_seen_ms = now_ms;
-        if let EnergyActivity::Hopper(h) = &e.activity {
-            b.hopper = Some((h.clone(), now_ms));
-        }
-        b.activity = e.activity.clone();
-    }
 }
 
 /// Whether a band's last hopper is still worth showing.
 pub fn hopper_state(b: &EnergyBand, now_ms: u64, cfg: &Config) -> Option<TrackState> {
-    let (_, t) = b.hopper.as_ref()?;
-    Some(if now_ms.saturating_sub(*t) >= cfg.stale_after_ms {
+    let t = b.hopper.as_ref()?.at_ms;
+    Some(if now_ms.saturating_sub(t) >= cfg.stale_after_ms {
         TrackState::Stale
     } else {
         TrackState::Active
@@ -321,15 +353,22 @@ fn location_from(p: &ctrlwatch::content::Position) -> Location {
     }
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
-    /// Feed one `Frame::Control` from `node`. Returns the link's entry id.
-    pub fn ingest_control(&mut self, node: u8, r: &ControlReport, now_ms: u64) -> ControlLinkId {
-        let cfg = self.config;
-        self.control.expire(now_ms, &cfg);
-        let i = self.control.entry(r, now_ms);
+impl ControlTable {
+    /// Feed one `Frame::Control` from `node`. A decoded position goes to a
+    /// drone track in `tracker`. Returns the link's entry id.
+    pub fn ingest<const N: usize, const A: usize>(
+        &mut self,
+        tracker: &mut Tracker<N, A>,
+        node: u8,
+        r: &ControlReport,
+        now_ms: u64,
+    ) -> ControlLinkId {
+        let cfg = *tracker.config();
+        self.expire(now_ms, &cfg);
+        let i = self.entry(r, now_ms);
         let s = &r.sighting;
         {
-            let l = &mut self.control.links[i];
+            let l = &mut self.links[i];
             l.probe = s.probe;
             l.freq_hz = s.freq_hz;
             l.version = s.version.or(l.version);
@@ -346,21 +385,27 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 ctrlwatch::Direction::Unknown => {}
             }
             l.last_seen_ms = now_ms;
-            l.reports = l.reports.saturating_add(1);
         }
         if r.part == 0 {
-            self.control.summaries = self.control.summaries.saturating_add(1);
+            self.summaries = self.summaries.saturating_add(1);
         } else {
-            self.control.contents = self.control.contents.saturating_add(1);
+            self.contents = self.contents.saturating_add(1);
         }
         for c in &r.content {
-            self.control_content(i, node, c, s.rssi_dbm, now_ms);
+            self.content(tracker, i, node, c, now_ms);
         }
-        self.control.links[i].id
+        self.links[i].id
     }
 
-    fn control_content(&mut self, i: usize, node: u8, c: &ControlContent, rssi: i16, now_ms: u64) {
-        let l = &mut self.control.links[i];
+    fn content<const N: usize, const A: usize>(
+        &mut self,
+        tracker: &mut Tracker<N, A>,
+        i: usize,
+        node: u8,
+        c: &ControlContent,
+        now_ms: u64,
+    ) {
+        let l = &mut self.links[i];
         match c {
             ControlContent::Channels(ch) => {
                 let mut s = Sticks {
@@ -382,7 +427,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                         remaining_pct,
                         ..
                     } => {
-                        snap.battery_mv = Some(*voltage_mv);
+                        snap.battery_mv = Some((*voltage_mv).min(u32::from(u16::MAX)) as u16);
                         snap.battery_pct = remaining_pct.or(snap.battery_pct);
                     }
                     Telemetry::Link { uplink_lq, .. } => snap.lq = Some(*uplink_lq),
@@ -401,38 +446,103 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             ControlContent::Opaque(ctrlwatch::content::Opaque::Encrypted) => l.encrypted = true,
             ControlContent::Opaque(_) => {}
             ControlContent::Position(p) if p.is_plausible() => {
-                self.control_position(i, node, p, rssi, now_ms)
+                let id = tracker.control_position(l.track, node, p, now_ms);
+                l.track = Some(id);
+                if p.kind == PositionKind::Aircraft {
+                    self.positions = self.positions.saturating_add(1);
+                }
             }
             ControlContent::Position(_) => {}
         }
     }
 
-    /// A decoded position: the link's drone track (made if it has none, or
-    /// its track expired).
-    fn control_position(
+    /// Feed one `Frame::ControlEnergy` from `node`.
+    pub fn ingest_energy(&mut self, node: u8, e: &ControlEnergy, now_ms: u64) {
+        self.energy = self.energy.saturating_add(1);
+        let i = match self.bands.iter().position(|b| b.region == e.region && b.node == node) {
+            Some(i) => i,
+            None => {
+                if self.bands.is_full()
+                    && let Some(i) = (0..self.bands.len()).min_by_key(|&i| self.bands[i].last_seen_ms)
+                {
+                    self.bands.remove(i);
+                }
+                let _ = self.bands.push(EnergyBand {
+                    region: e.region,
+                    node,
+                    windows: 0,
+                    activity: ActivityKind::Quiet,
+                    steady: 0,
+                    last_seen_ms: now_ms,
+                    hopper: None,
+                });
+                self.bands.len() - 1
+            }
+        };
+        let b = &mut self.bands[i];
+        b.windows = e.windows;
+        b.steady = e.steady.len() as u8;
+        b.last_seen_ms = now_ms;
+        if let EnergyActivity::Hopper(h) = &e.activity {
+            b.hopper = Some(HopperSnap::of(h, now_ms));
+        }
+        b.activity = ActivityKind::of(&e.activity);
+    }
+
+    /// Feed a protocol 12 frame (others are ignored).
+    pub fn ingest_frame<const N: usize, const A: usize>(
         &mut self,
-        i: usize,
+        tracker: &mut Tracker<N, A>,
         node: u8,
-        p: &ctrlwatch::content::Position,
-        rssi: i16,
+        f: &link::Frame,
         now_ms: u64,
     ) {
-        let system = self.control.links[i].system;
-        let want = self.control.links[i].track;
+        match f {
+            link::Frame::Control(r) => drop(self.ingest(tracker, node, r, now_ms)),
+            link::Frame::ControlEnergy(e) => self.ingest_energy(node, e, now_ms),
+            _ => {}
+        }
+    }
+
+    /// The control link whose positions feed drone track `id`, if any.
+    pub fn link_of(&self, id: TrackId) -> Option<&ControlLink> {
+        self.links.iter().find(|l| l.track == Some(id))
+    }
+
+    /// Counters for the hub's stats line: summaries, content reports,
+    /// energy windows, positions that went to drone tracks.
+    pub fn counts(&self) -> (u32, u32, u32, u32) {
+        (self.summaries, self.contents, self.energy, self.positions)
+    }
+
+    /// Links heard within [`Config::stale_after_ms`].
+    pub fn active_count(&self, now_ms: u64, cfg: &Config) -> usize {
+        self.links
+            .iter()
+            .filter(|l| now_ms.saturating_sub(l.last_seen_ms) < cfg.stale_after_ms)
+            .count()
+    }
+}
+
+impl<const N: usize, const A: usize> Tracker<N, A> {
+    /// A position decoded from a control link: the drone track `want` (or a
+    /// new one, if it has none or that track expired). Returns its id.
+    pub(crate) fn control_position(
+        &mut self,
+        want: Option<TrackId>,
+        node: u8,
+        p: &ctrlwatch::content::Position,
+        now_ms: u64,
+    ) -> TrackId {
         let ti = match want.and_then(|id| self.tracks.iter().position(|t| t.id == id)) {
             Some(ti) => ti,
             None => self.create(now_ms),
         };
         let t = &mut self.tracks[ti];
-        t.control = Some(system);
         if node < 8 {
             t.nodes |= 1 << node;
         }
         t.last_seen_ms = t.last_seen_ms.max(now_ms);
-        let ll = LatLon {
-            lat: p.lat_e7 as f64 / 1e7,
-            lon: p.lon_e7 as f64 / 1e7,
-        };
         match p.kind {
             PositionKind::Aircraft => {
                 // A fresh Remote ID position (the same drone, if it was
@@ -448,47 +558,17 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                     });
                     t.location_src = crate::Source::ControlLink;
                 }
-                self.control.positions = self.control.positions.saturating_add(1);
             }
             PositionKind::Home => {
                 t.home = Some(Stamped {
-                    value: ll,
+                    value: LatLon {
+                        lat: p.lat_e7 as f64 / 1e7,
+                        lon: p.lon_e7 as f64 / 1e7,
+                    },
                     rx_ms: now_ms,
                 })
             }
         }
-        let id = t.id;
-        let _ = rssi;
-        self.control.links[i].track = Some(id);
-    }
-
-    /// Feed one `Frame::ControlEnergy` from `node`.
-    pub fn ingest_control_energy(&mut self, node: u8, e: &ControlEnergy, now_ms: u64) {
-        self.control.ingest_energy(node, e, now_ms);
-    }
-
-    /// Control links, in table order.
-    pub fn control_links(&self) -> &[ControlLink] {
-        self.control.links()
-    }
-
-    /// Control-band energy, per band and node.
-    pub fn control_bands(&self) -> &[EnergyBand] {
-        self.control.bands()
-    }
-
-    /// Counters for the hub's stats line.
-    pub fn control_counts(&self) -> (u32, u32, u32, u32) {
-        let c = &self.control;
-        (c.summaries, c.contents, c.energy, c.positions)
-    }
-
-    /// Control links heard within [`Config::stale_after_ms`].
-    pub fn active_control_count(&self, now_ms: u64) -> usize {
-        self.control
-            .links()
-            .iter()
-            .filter(|l| now_ms.saturating_sub(l.last_seen_ms) < self.config.stale_after_ms)
-            .count()
+        t.id
     }
 }

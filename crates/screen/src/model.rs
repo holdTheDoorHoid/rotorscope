@@ -465,7 +465,7 @@ pub struct WifiDroneView {
 }
 
 /// Control-link rows the screen is given per frame.
-pub const MAX_CONTROL_ROWS: usize = 4;
+pub const MAX_CONTROL_ROWS: usize = 3;
 
 /// How sure a control-link row is (mirrors `ctrlwatch::Confidence`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

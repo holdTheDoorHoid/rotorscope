@@ -63,7 +63,8 @@ model aircraft: the stick commands going up and the telemetry coming down.
 **The legal line**
 
 A 2020 DOJ/FAA/FCC/DHS advisory warns that monitoring drone control links
-can fall under the Wiretap Act and the Pen/Trap statute. So:
+can fall under the Wiretap Act and the Pen/Trap statute. So (how to turn
+the two opt-ins on: "The two settings" below):
 
 - **By default** the node reports presence and energy only: which system,
   where in the band, how strong, how sure. No identifiers, no content, no
@@ -81,6 +82,126 @@ can fall under the Wiretap Act and the Pen/Trap statute. So:
   rebuilds an identifier, so it needs **both** flags.
 - **No encryption is broken.** Encrypted payloads are reported as such.
 - **Receive-only.** There is no transmit code of any kind.
+
+## On the node and the hub (2026-11-17, branch `ctrl-node`)
+
+**Status: written, host-tested and built for both boards; never run with an LR2021.** No LR2021
+board was in hand. Everything about how it behaves on air is what the code is meant to do.
+
+### In plain language
+
+- **Who listens.** The same LR2021 "aero" node that hears aircraft (docs/AERO-NODE.md). Its
+  radio does one thing at a time, so the hub shares it out:
+  - **One LR node:** aircraft and control links take turns, about **half the time each**. The
+    aircraft turns (UAT 10 s, FLARM 10 s, OGN 5 s, and 1090 MHz 10 s when there is no ADSBee)
+    are followed by one control-link turn as long as all of them together (25 s, or 35 s).
+    Aircraft beacons repeat every second or so, so 25 s away loses little; a connected
+    ExpressLRS link sends its sync packet every 5 s, so a 25 s turn gets through several scan
+    steps.
+  - **Two LR nodes:** one does aircraft only, the other control links only.
+  - **More:** half of them (rounded down) do control links; two control nodes split the bands
+    (900 MHz and 433 MHz on one, 2.4 GHz on the other).
+  - The console command `a` can still pin every LR node to one thing; "control links only" is
+    now one of its choices.
+- **What it scans** (US default): ExpressLRS, mLRS, SiK and OpenLRSng on 902-928 MHz, the US
+  433 MHz band and 2.4 GHz, plus an energy-only look at 863-870 MHz (European gear brought over).
+  Between every two packet steps it sweeps one band for energy (round robin), which is how
+  Crossfire, Tracer, Ghost, FrSky and FlySky show up (as "probably X"). A full pass of every
+  step takes about 5 minutes of control time; with half-time sharing, about 10 minutes.
+- **What reaches the hub.**
+  - A line per link every 2 seconds while it is heard: which system, band, rate, how sure,
+    signal, packet counts.
+  - An energy report per band when a hopper or steady carrier shows up (otherwise one every
+    30 s): the hopping pattern and the systems it could be.
+  - With content decoding on (below): stick positions, telemetry (battery, link quality, flight
+    mode, altitude) and GPS positions, plus the raw packet for the evidence log.
+- **What the hub does with it.**
+  - **SIGNALS page:** a CONTROL table at the top: system, band, how sure ("sure" = the packet
+    passed the system's own checksum, "likely", "energy" = a pattern only), signal, and a detail
+    column: stick positions or telemetry when decoded, else the rate; for an energy hopper, its
+    channel count, spacing and packet interval.
+  - **A drone position from a link's telemetry** (content decoding on, an ExpressLRS/mLRS/SiK
+    link carrying GPS) becomes an ordinary drone on the radar and the list, named after the link
+    ("ExpressLRS link 915"), and counts in the drone-near-aircraft warning like any drone. A home
+    point is kept as the drone's home.
+  - **Evidence log:** every control frame and energy report is logged raw, like every other
+    detection (kinds "control" and "control energy").
+  - **JSON lines** on the console: `{"t":"control"}` per link, `{"t":"control_energy"}` per band,
+    and a `{"t":"control_stats"}` line with the counts and the two settings.
+
+### The two settings, and how to turn them on
+
+Both are **off by default**, on every hub, and the node obeys the hub: a node never reads IDs or
+content unless the hub's plan tells it to (an older node that does not know the setting simply
+never does).
+
+| Setting | Off (default) | On |
+|---|---|---|
+| `control ids` | which system, how sure, signal | also the link's identifier (ExpressLRS UID bytes, SiK NET ID, mLRS sync word, OpenLRSng magic); links with different IDs are told apart |
+| `control content` | no content, no raw packets | stick positions, telemetry, GPS positions, raw packets for evidence; ExpressLRS "follow" (stays with one link for 20 s to decode it) |
+
+The owner stated on 2026-11-17 that they have permission for both. Turn them on per kit:
+
+- **On the SD card:** add lines to `ROTORSCP/SITE.TXT` (later lines win):
+  ```
+  control ids on
+  control content on
+  ```
+- **From the console:** press `L`, type `control content on` (or `off`, or `control ids on`),
+  press Enter. The line is appended to `SITE.TXT`, so it survives a restart.
+
+Every change, from the card or the console, is printed (`control links: read IDs on, decode
+content on`) and logged in the evidence log as a Setting event. Rebuilding an ExpressLRS link's
+missing ID bytes from what the node hears (needed to hop along with a link) needs **both**.
+Encrypted links stay encrypted: nothing tries to break them.
+
+### Protocol (link protocol 12)
+
+- `Frame::Control(ControlReport)`: one sighting (`part` 0: the 2-second summary, counts only) or
+  one packet's decoded content (`part` 1, 2, ...: two items per frame, the raw packet in part 1).
+  The largest is 246 bytes.
+- `Frame::ControlEnergy`: one band's energy window.
+- Hub to node: plan entries `AeroMode::Control { regions, energy }` (code bit 30, two region
+  masks) and `AeroMode::ControlFlags { read_ids, decode_content }` (bit 29, settings only).
+- Appended, so every protocol 11 frame and command is byte-for-byte the same (tested against a
+  hash taken from the v11 code).
+
+### How it is built
+
+- `crates/lr2021cfg/src/ctrl.rs` (host-tested): ctrlwatch receive settings as chip settings
+  (LoRa, GFSK fixed-length read, RSSI-only; FLRC refused because ctrlwatch's FLRC needs the
+  binding phrase), multi-SF groups on the side detectors, the scan order, energy maps and
+  frames, report splitting and rate limits, ExpressLRS follow mode.
+- `firmware/node-lr/src/control.rs`: runs those jobs on the chip.
+- `crates/coverage/src/plans.rs`: the time split above.
+- `crates/tracker/src/ctrllinks.rs`: the hub's table (4 links, 3 bands; kept apart from the
+  tracker, in PSRAM on the P4 hub next to the aero frame queue),
+  positions to drone tracks, JSON lines; `crates/tracker/src/site.rs`: the `control` lines.
+- Receive only: a test runs every scan, sweep and follow setting through the chip layer and
+  finds no transmit command, and checks the node's radio code builds no command bytes itself.
+
+### Not verified (needs hardware)
+
+- Everything about the chip, as before, plus: multi-SF side detectors with implicit header and
+  the 0x12 sync word on each (the side-detector sync byte format is taken as the main one's),
+  which detector bit the packet status sets, RSSI readings while the FSK engine waits for a
+  sync word that never comes (the sweep), and how fast retunes really are.
+- ExpressLRS follow-mode timing on the C3 (retunes inside a 4 ms packet interval).
+- Whether a 2 ms bin dwell catches a 1-ms ELRS burst often enough for the energy map; the
+  thresholds were tuned on synthetic data.
+
+### Bench checklist (P4 hub, no LR2021 needed)
+
+1. Boot: no new errors; `hub-p4: site file: ... control links: IDs off, content off`.
+2. Console `L`, `control content on`, Enter: `hub-p4: site (console): control content on`, then
+   within 2 s `hub-p4: control links: read IDs off, decode content on (LR2021 nodes' plans)`;
+   the card's `SITE.TXT` gains the line; the evidence log has two Setting events.
+3. The `{"t":"control_stats"}` line appears once a setting is on, with `"content":true`.
+4. Restart with the card in: the setting is back on (read from `SITE.TXT`), printed at mount.
+5. With a node simulator or `fakenode`: an aero node's assignment includes a control entry
+   (`hub-p4: assign ... -> Aero plan ...`); with content on, its plan grows by one entry.
+6. `control content off`: the plan shrinks again; nothing else changes.
+7. The SIGNALS page shows the CONTROL table ("none heard") above RF.
 
 ## How the node uses the crate
 

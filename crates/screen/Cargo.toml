@@ -29,3 +29,4 @@ adsb.workspace = true
 rid = { workspace = true, features = ["encode"] }
 tracker.workspace = true
 link.workspace = true
+ctrlwatch = { path = "../ctrlwatch" }

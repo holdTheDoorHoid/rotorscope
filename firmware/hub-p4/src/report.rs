@@ -2,8 +2,11 @@
 //! stream (`firmware/hub/src/tick.rs`): `{"t":"new"}` per new drone, one
 //! `{"t":"track"}` per drone track, `{"t":"link"}` per open FPV link,
 //! `{"t":"aircraft"}` per ADS-B aircraft (the tracker's own formatters, so
-//! byte-for-byte the S3 format), then one `{"t":"hub"}` status line, which
-//! is P4-specific (this hub's links, GPS module, SD and console figures).
+//! byte-for-byte the S3 format), `{"t":"control"}` per drone control link
+//! and `{"t":"control_energy"}` per control band (LR2021 nodes, protocol
+//! 12), then one `{"t":"hub"}` status line, which is P4-specific (this
+//! hub's links, GPS module, SD and console figures), and its companions
+//! (`bus`, `aero`, `control_stats`).
 //!
 //! The console runs at 115200 baud (~11.5 KB/s, shared with the log), so the
 //! hub line goes first and the per-track lines after it; whatever does not
@@ -61,6 +64,23 @@ pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd:
             && !console::json(&line[..n])
         {
             return;
+        }
+    }
+    // Protocol 12: drone control links and control-band energy.
+    if let Some(ct) = app.control.as_deref() {
+        for l in ct.links() {
+            if let Ok(n) = json::control_line(l, &ctx, &mut line)
+                && !console::json(&line[..n])
+            {
+                return;
+            }
+        }
+        for b in ct.bands() {
+            if let Ok(n) = json::control_energy_line(b, &ctx, &mut line)
+                && !console::json(&line[..n])
+            {
+                return;
+            }
         }
     }
     // Protocol 9: one {"t":"threat"} line per attack or jamming entry.
@@ -231,4 +251,29 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     if n.len > 0 {
         console::json(&n.buf[..n.len]);
     }
+    // Control links (protocol 12): counts and the two opt-ins, on a line of
+    // their own (the hub line is nearly full). Only once anything was heard
+    // or an opt-in is on.
+    n.len = 0;
+    control_stats(&mut n, app, now);
+    if n.len > 0 {
+        console::json(&n.buf[..n.len]);
+    }
+}
+
+#[inline(never)]
+fn control_stats(w: &mut LineBuf, app: &App, now: u64) {
+    let Some(ct) = app.control.as_deref() else { return };
+    let (summaries, contents, energy, positions) = ct.counts();
+    let (ids, content) = app.control_flags;
+    if summaries + contents + energy == 0 && !ids && !content {
+        return;
+    }
+    let _ = writeln!(
+        w,
+        r#"{{"t":"control_stats","links":{},"active":{},"bands":{},"summaries":{summaries},"contents":{contents},"energy":{energy},"positions":{positions},"ids":{ids},"content":{content}}}"#,
+        ct.links().len(),
+        ct.active_count(now, app.tracker.config()),
+        ct.bands().len(),
+    );
 }
