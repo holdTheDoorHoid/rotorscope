@@ -7,7 +7,7 @@ members = [
     "crates/gnss", "crates/screen", "crates/webui",
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap", "crates/airlink",
     "crates/coverage", "crates/nodeimage", "crates/fpvscan", "crates/djilink",
-    "crates/wifidrone",
+    "crates/wifidrone", "crates/wifiwatch",
     "crates/sdnative",
     "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence", "crates/djicrypt",

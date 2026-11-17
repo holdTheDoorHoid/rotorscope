@@ -1,0 +1,10 @@
+[package]
+name = "wifiwatch"
+description = "no_std detection of Wi-Fi and Bluetooth attacks (deauth floods, beacon spam, Karma, evil twins, channel-switch abuse, attack-tool signatures, BLE pairing spam) from raw frames"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+link.workspace = true
+heapless.workspace = true
