@@ -123,8 +123,8 @@ impl Lr {
         Ok(rsp)
     }
 
-    /// Instantaneous RSSI, dBm (RSSI-only dwells of a future scan plan).
-    #[allow(dead_code)]
+    /// Instantaneous RSSI, dBm (the control scan's energy sweeps and burst
+    /// timing).
     pub fn rssi_inst(&mut self) -> Result<i8, Error> {
         let mut rsp = [0u8; cmd::RSSI_INST_RSP];
         self.read(&cmd::GET_RSSI_INST, &mut rsp)?;

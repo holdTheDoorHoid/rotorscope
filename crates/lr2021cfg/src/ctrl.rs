@@ -527,6 +527,10 @@ pub struct EnergyGate {
 }
 
 impl EnergyGate {
+    pub const fn new() -> Self {
+        Self { last: [None; 10] }
+    }
+
     pub fn due(&mut self, region: Region, rep: &EnergyReport, now_us: u64) -> bool {
         let i = Region::ALL.iter().position(|r| *r == region).unwrap_or(0);
         let news = matches!(rep.activity, Activity::Hopper(_)) || !rep.steady.is_empty();
@@ -610,6 +614,10 @@ pub struct ContentGate {
 }
 
 impl ContentGate {
+    pub const fn new() -> Self {
+        Self { last_channels: [None; 10] }
+    }
+
     /// Drop the items that should not go out now; true if anything is left.
     pub fn filter<const N: usize>(
         &mut self,
@@ -1192,5 +1200,53 @@ mod tests {
         let c = f.target(2_000 + 2 * PARK_US).unwrap().channel;
         assert_eq!(a, 20);
         assert!(b != 20 && c != 20 && b != c);
+    }
+
+    /// Receive only, for the control scan too: no chip sequence any scan,
+    /// sweep or follow configuration produces holds a transmit opcode, and
+    /// the node firmware's radio code builds no command bytes of its own
+    /// (every command comes from this crate).
+    #[test]
+    fn control_scan_is_receive_only() {
+        const TX: [[u8; 2]; 8] = [[2, 0x0D], [2, 0x03], [2, 0x02], [2, 0x0F], [2, 0x0E], [2, 0x11], [2, 0x1B], [0, 0x02]];
+        let board = crate::config::Board { tcxo: None, irq_dio: 9, rf_switch: &[], rx_boost: 7 };
+        let mut n = 0;
+        let mut check = |c: &LrConfig| {
+            for seq in [config::apply(&board, c), config::retune(c.freq_hz)] {
+                for cmd in &seq {
+                    assert!(!TX.contains(&[cmd[0], cmd[1]]), "transmit opcode {:02x?}", &cmd[..2]);
+                    n += 1;
+                }
+            }
+        };
+        for region in Region::ALL {
+            let mut sc = Scanner::new(region_bit(region), region_bit(region));
+            for _ in 0..200 {
+                match sc.current().unwrap() {
+                    Job::Listen { steps } => {
+                        if let Some(c) = lr_group(&steps) {
+                            check(&c);
+                        }
+                    }
+                    Job::Sweep { region, bin_hz, .. } => {
+                        for s in scan::energy_plan(region, bin_hz) {
+                            check(&lr_config(&s.config).unwrap());
+                        }
+                    }
+                }
+                sc.done();
+            }
+        }
+        assert!(n > 1000);
+        // The firmware side: no opcode literals outside lr2021cfg.
+        for (name, src) in [
+            ("control.rs", include_str!("../../../firmware/node-lr/src/control.rs")),
+            ("radio.rs", include_str!("../../../firmware/node-lr/src/radio.rs")),
+            ("lr.rs", include_str!("../../../firmware/node-lr/src/lr.rs")),
+        ] {
+            for op in ["0x02, 0x0D", "0x02, 0x03", "0x02, 0x02", "0x02, 0x0F", "0x02, 0x0E", "0x02, 0x11", "0x02, 0x1B", "0x00, 0x02", "[2, 0x0D"] {
+                assert!(!src.contains(op), "{name}: {op}");
+            }
+        }
     }
 }

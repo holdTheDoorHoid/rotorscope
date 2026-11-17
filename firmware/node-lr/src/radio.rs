@@ -1,6 +1,8 @@
 //! The radio task: keeps the LR2021 on what the plan asks for, retunes at
 //! FLARM / OGN slot boundaries, runs the 1090 watchdog, and turns each
-//! received packet into a `Frame::Air` (or a rejection).
+//! received packet into a `Frame::Air` (or a rejection). For an
+//! `AeroMode::Control` entry it hands the radio to `control.rs` for the
+//! entry's dwell.
 //!
 //! Receive only. Every command it sends comes from `lr2021cfg`, which has
 //! no transmit command.
@@ -13,6 +15,7 @@ use lr2021cfg::{accept, cmd, roles};
 use portable_atomic::Ordering::Relaxed;
 
 use crate::board;
+use crate::control::Control;
 use crate::lr::Lr;
 use crate::out::{self, COUNTERS, Hex, bump};
 use crate::state::{self, PLAN};
@@ -51,14 +54,20 @@ async fn bring_up(lr: &mut Lr) {
     }
 }
 
+/// The control scan's state (energy maps and all, ~20 KB): built in place,
+/// never on the stack.
+static CONTROL: static_cell::ConstStaticCell<Control> = static_cell::ConstStaticCell::new(Control::new());
+
 #[embassy_executor::task]
 pub async fn run(mut lr: Lr) {
     bring_up(&mut lr).await;
+    let ctl = CONTROL.take();
     let mut cursor = PlanCursor::new(&[], now_ms());
     let mut applied: Option<(AeroMode, u32)> = None;
     let mut wd = Es1090Watchdog::new(now_ms());
     let mut limit = RateLimit::new(AIR_PER_S, state::now_us());
     let mut fifo = [0u8; 64];
+    let mut last_mode: Option<AeroMode> = None;
     loop {
         if let Some(a) = PLAN.try_take() {
             cursor = PlanCursor::new(&a.plan, now_ms());
@@ -68,6 +77,42 @@ pub async fn run(mut lr: Lr) {
         }
         cursor.poll(now_ms());
         let mode = cursor.current();
+
+        if let AeroMode::Control { regions, energy } = mode {
+            if cursor_is_new(&mut last_mode, mode) {
+                out::line(format_args!(
+                    r#"{{"t":"mode","code":{},"control":{{"regions":{regions},"energy":{energy},"ids":{},"content":{}}}}}"#,
+                    mode.code(),
+                    cursor.flags.read_ids,
+                    cursor.flags.decode_content
+                ));
+            }
+            applied = None;
+            let up = state::now_us();
+            state::set_status(|s| {
+                s.mode = mode.code();
+                s.parked = false;
+                s.time = state::time_state(up);
+                s.rejected = COUNTERS.rejected.load(Relaxed);
+                s.rate_dropped = COUNTERS.rate_dropped.load(Relaxed);
+            });
+            // To the entry's end, or a second at a time when it stays (the
+            // scan keeps its place between calls).
+            let until_us = match cursor.ends_ms() {
+                Some(end) => up + end.saturating_sub(now_ms()) * 1000,
+                None => up + 1_000_000,
+            };
+            if let Err(e) = ctl.run(&mut lr, regions, energy, cursor.flags, until_us).await {
+                bump(&COUNTERS.radio_errors);
+                out::line(format_args!(r#"{{"t":"warn","what":"radio","note":"{e:?}"}}"#));
+                state::set_status(|s| s.radio_ok = false);
+                ctl.forget_radio();
+                Timer::after_secs(1).await;
+                bring_up(&mut lr).await;
+            }
+            continue;
+        }
+        last_mode = Some(mode);
 
         // Where to be now, and until when.
         let up = state::now_us();
@@ -84,7 +129,7 @@ pub async fn run(mut lr: Lr) {
                 // PlanCursor only keeps known bands; never here.
                 None => (roles::ES1090_HZ, false, None),
             },
-            m => (roles::config(m, 0).freq_hz, false, None),
+            m => (roles::config(m, 0).map_or(roles::ES1090_HZ, |c| c.freq_hz), false, None),
         };
 
         let result = match applied {
@@ -96,7 +141,8 @@ pub async fn run(mut lr: Lr) {
             _ => {
                 out::line(format_args!(r#"{{"t":"mode","code":{},"freq_khz":{}}}"#, mode.code(), freq / 1000));
                 wd = Es1090Watchdog::new(now_ms());
-                lr.run(&config::apply(&board::LR2021, &roles::config(mode, freq)))
+                ctl.forget_radio();
+                lr.run(&config::apply(&board::LR2021, &roles::config(mode, freq).unwrap_or(roles::es1090())))
             }
         };
         match result {
@@ -106,6 +152,7 @@ pub async fn run(mut lr: Lr) {
                 applied = None;
                 out::line(format_args!(r#"{{"t":"warn","what":"radio","note":"{e:?}"}}"#));
                 state::set_status(|s| s.radio_ok = false);
+                ctl.forget_radio();
                 Timer::after_secs(1).await;
                 bring_up(&mut lr).await;
                 continue;
@@ -154,7 +201,9 @@ fn on_irq(lr: &mut Lr, mode: AeroMode, freq: u32, wd: &mut Es1090Watchdog, limit
     if irq & cmd::irq::RX_DONE == 0 {
         return;
     }
-    let cfg = roles::config(mode, freq);
+    let (Some(cfg), Some(proto)) = (roles::config(mode, freq), roles::proto(mode)) else {
+        return;
+    };
     let n = match lr.packet_len() {
         Ok(n) => (n as usize).min(fifo.len()),
         Err(_) => {
@@ -173,7 +222,6 @@ fn on_irq(lr: &mut Lr, mode: AeroMode, freq: u32, wd: &mut Es1090Watchdog, limit
     };
     bump(&COUNTERS.packets);
     wd.on_rx(now_ms());
-    let proto = roles::proto(mode);
     let raw = match accept::accept(proto, &fifo[..n]) {
         Ok(raw) => raw,
         Err(_) => {
@@ -189,4 +237,12 @@ fn on_irq(lr: &mut Lr, mode: AeroMode, freq: u32, wd: &mut Es1090Watchdog, limit
     let utc_ms = state::utc_ms(up);
     out::line(format_args!(r#"{{"t":"air","p":"{proto:?}","f":{},"rssi":{rssi},"raw":"{}"}}"#, freq / 1000, Hex(&raw)));
     out::hub_frame(&Frame::Air(AirFrame { proto, freq_khz: freq / 1000, rssi, utc_ms, uptime_us: up, raw }));
+}
+
+/// True the first time a control entry runs after something else (for the
+/// mode line).
+fn cursor_is_new(last: &mut Option<AeroMode>, mode: AeroMode) -> bool {
+    let new = *last != Some(mode);
+    *last = Some(mode);
+    new
 }

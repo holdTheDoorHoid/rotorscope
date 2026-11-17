@@ -29,6 +29,15 @@ pub struct Counters {
     pub retunes: AtomicU32,
     pub rx_restarts: AtomicU32,
     pub time_syncs: AtomicU32,
+    /// Control scan: packets received, recognised by ctrlwatch, link
+    /// frames sent (summaries, content, energy), content dropped by the
+    /// rate limit, energy windows closed, ExpressLRS follows started.
+    pub ctrl_packets: AtomicU32,
+    pub ctrl_recognised: AtomicU32,
+    pub ctrl_reports: AtomicU32,
+    pub ctrl_dropped: AtomicU32,
+    pub sweeps: AtomicU32,
+    pub follows: AtomicU32,
 }
 
 pub static COUNTERS: Counters = Counters {
@@ -42,6 +51,12 @@ pub static COUNTERS: Counters = Counters {
     retunes: AtomicU32::new(0),
     rx_restarts: AtomicU32::new(0),
     time_syncs: AtomicU32::new(0),
+    ctrl_packets: AtomicU32::new(0),
+    ctrl_recognised: AtomicU32::new(0),
+    ctrl_reports: AtomicU32::new(0),
+    ctrl_dropped: AtomicU32::new(0),
+    sweeps: AtomicU32::new(0),
+    follows: AtomicU32::new(0),
 };
 
 pub fn bump(c: &AtomicU32) {

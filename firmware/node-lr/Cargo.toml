@@ -1,6 +1,7 @@
 # The aero node: a receive-only Semtech LR2021 on SPI, attached to an
 # ESP32-C3, hearing 1090 MHz extended squitter, 978 MHz UAT, or FLARM / OGN
-# trackers followed through their hops (docs/AERO-NODE.md). It never
+# trackers followed through their hops (docs/AERO-NODE.md), and drone
+# control links (ExpressLRS, mLRS, SiK, OpenLRSng; docs/CONTROL-LINKS.md). It never
 # transmits on any of those bands: there is no transmit path to the LR2021
 # at all (crates/lr2021cfg has no transmit command). Its only transmissions
 # are its link to the hub (ESP-NOW with `espnow`, or a wire).
@@ -35,6 +36,7 @@ wirebus = ["dep:node-common", "node-common/wirebus"]
 link      = { path = "../../crates/link" }
 lr2021cfg = { path = "../../crates/lr2021cfg" }
 aerohop   = { path = "../../crates/aerohop" }
+ctrlwatch = { path = "../../crates/ctrlwatch" }
 airlink   = { path = "../../crates/airlink", optional = true }
 node-common = { path = "../node-common", optional = true, features = ["esp32c3"] }
 heapless  = { version = "0.8", features = ["serde"] }
@@ -52,6 +54,8 @@ esp-radio              = { version = "=1.0.0-beta.1", optional = true, features 
 embassy-executor = { version = "0.10.0" }
 embassy-time     = { version = "0.5.0" }
 embassy-sync     = { version = "0.7" }
+embassy-futures  = "0.1"
+
 embedded-io-async = "0.7"
 critical-section = "1.2.0"
 # riscv32imc has no atomic read-modify-write instructions: counters go

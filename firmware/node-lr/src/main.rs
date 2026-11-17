@@ -1,7 +1,9 @@
 //! The aero node: a receive-only Semtech LR2021 on an ESP32-C3, hearing
 //! 1090 MHz extended squitter, 978 MHz UAT, or FLARM / OGN trackers
 //! followed through their frequency hops, and sending the raw frames to the
-//! hub (docs/AERO-NODE.md).
+//! hub (docs/AERO-NODE.md); and, when the plan says so, scanning for drone
+//! control links (ExpressLRS, mLRS, SiK, OpenLRSng, energy of closed
+//! systems; docs/CONTROL-LINKS.md, `control.rs`).
 //!
 //! ```text
 //! LR2021 --SPI--> radio task (lr2021cfg: configs, checks; aerohop: hops)
@@ -22,6 +24,7 @@
 compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one");
 
 mod board;
+mod control;
 mod lr;
 mod out;
 mod radio;
@@ -155,6 +158,8 @@ async fn main(spawner: Spawner) -> ! {
             let k = state::CLOCK.borrow_ref(cs);
             (k.rate_ppm(), k.last_error_ms, k.age_us(up).map_or(-1, |a| (a / 1000) as i64))
         });
+        let (cp, cr, crep, cdrop, csw, cfol) = control::stats();
+        out::line(format_args!(r#"{{"t":"ctrl_stats","packets":{cp},"recognised":{cr},"reports":{crep},"dropped":{cdrop},"windows":{csw},"follows":{cfol}}}"#));
         out::line(format_args!(
             r#"{{"t":"stats","up_us":{up},"packets":{packets},"air":{air},"rejected":{},"rate_dropped":{},"uart_drops":{},"usb_drops":{},"radio_err":{},"retunes":{},"rx_restarts":{},"syncs":{},"utc":{},"clock_ppm":{clock_rate:.1},"clock_err_ms":{clock_err},"sync_age_ms":{clock_age},"plan_id":{},"cmds":[{},{},{}]}}"#,
             c.rejected.load(Relaxed),

@@ -179,6 +179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctrlwatch"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "serde",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1288,6 +1296,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 name = "link"
 version = "0.1.0"
 dependencies = [
+ "ctrlwatch",
  "heapless 0.8.0",
  "openlink",
  "postcard",
@@ -1340,6 +1349,7 @@ name = "lr2021cfg"
 version = "0.1.0"
 dependencies = [
  "aerohop",
+ "ctrlwatch",
  "heapless 0.8.0",
  "link",
  "modes",
@@ -1405,7 +1415,9 @@ dependencies = [
  "aerohop",
  "airlink",
  "critical-section",
+ "ctrlwatch",
  "embassy-executor",
+ "embassy-futures",
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-io-async 0.7.0",
