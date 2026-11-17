@@ -186,8 +186,9 @@ aircraft type, and the "don't track me" and "stealth" flags.
 - Needs the receiver's UTC time and position (`flarm::legacy::Receiver`). A wrong time gives
   a wrong key: v6 then usually fails its parity bit; v7 has no check of its own, so do not feed
   v7 packets in without a GNSS time.
-- Aircraft that set **no-track** should be shown on the unit but not logged or relayed off it
-  (OGN honours the same flag). `Decoded.no_track` carries it; the hub decides.
+- Aircraft that set **no-track** (OGN honours the same flag) carry it in `Decoded.no_track`; the
+  hub decides. **Owner decision 2026-11-17: the hub logs, shows and relays them like every other
+  aircraft** ("everything should be logged"); see docs/AERO-NODE.md "Hub side".
 - Hub API:
   ```rust
   let keys = flarm::Keys::parse(&text)?;              // text of ROTORSCP/FLARMKEY.TXT
