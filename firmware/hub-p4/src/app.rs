@@ -120,6 +120,17 @@ impl App {
         }
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
+        self.announce_spoof(ev, now);
+    }
+
+    /// Drone tracks whose broadcasts look forged or replayed: one evidence
+    /// event and one console line each time a track's suspicion rises.
+    fn announce_spoof(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
+        while let Some(e) = self.tracker.take_spoof_flag(now) {
+            let text = tracker::spoof::event_text(&e, self.tracker.get(e.track));
+            ev.event(evidence::format::EventCode::SpoofSuspect, text.as_bytes(), &e.data());
+            crate::println!("hub-p4: SPOOF? {}", text);
+        }
     }
 
     /// New attacks and jamming (protocol 9, and the hub's own deaf-node
@@ -238,6 +249,11 @@ impl App {
                 self.tracker.set_own_position(p.lat, p.lon, p.alt, stamp);
             }
             None => self.tracker.clear_own_position(),
+        }
+        // The spoofing checks compare broadcast timestamps with GPS time.
+        match gps.utc_ms(now) {
+            Some(utc) => self.tracker.set_utc(utc, now),
+            None => self.tracker.clear_utc(),
         }
         self.tracker.expire(now);
         self.announce_new(now);
