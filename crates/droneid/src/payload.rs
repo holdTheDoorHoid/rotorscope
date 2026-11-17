@@ -36,11 +36,19 @@
 //!
 //! **O4 (encrypted).** The record is a `CRYP` (selector 0x13, 163 bytes) or
 //! `INFP` (0x10, 128 bytes; 0x11, 160 bytes) core inside the same logical
-//! envelope (or, per the spec, a 0x55-framed "V1" envelope). Only the
-//! cleartext header is read: record type, the 4-byte key ID that links one
-//! session's packets, the IV and the declared length. Layout facts from
-//! EdwardBlair/dji-droneid-spec. **Untested on real signals**: no O4
-//! recording was available. This crate never decrypts and never handles keys.
+//! envelope: `[length][core][7 zero bytes][CRC-16 LE]`, length = core + 7,
+//! then zeros to the end of the 173-byte slot (SPEC.md "Logical-object
+//! envelope", "O4 PHY transport block"). A record counts only when every
+//! check in [`O4Checks`] passes ([`Encrypted::valid`]): boundary, CRC-16,
+//! selector and marker, exact core length, the length field, zero padding
+//! and zero tail. Only the cleartext header is read: record type, the 4-byte
+//! key ID that links one session's packets, the IV and the declared length.
+//! The ciphertext is left in the block, reachable through
+//! [`Encrypted::ciphertext`] for a later layer; this crate never decrypts.
+//! The older "V1" 0x55 envelope and bare cores are still recognised for
+//! logs, but never count as valid O4 records (the O4 PHY carries a logical
+//! object). Layout facts from EdwardBlair/dji-droneid-spec. **Untested on
+//! real signals**: no O4 recording was available.
 
 use crate::crc::{dji_crc8, dji_crc16};
 
@@ -200,6 +208,13 @@ impl EncKind {
             EncKind::Infp11 => 160,
         }
     }
+    /// Core offset of the encrypted bytes.
+    pub fn ciphertext_at(self) -> usize {
+        match self {
+            EncKind::Cryp => 131,
+            EncKind::Infp10 | EncKind::Infp11 => 19,
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             EncKind::Cryp => "CRYP",
@@ -210,16 +225,98 @@ impl EncKind {
 }
 
 /// Cleartext header of an O4 record. Nothing here is secret: the key ID is
-/// a truncated hash that only links records of one session.
+/// a truncated hash of the session key (`SHA-256(K)[0..4]` per the spec)
+/// that only links the records of one session, and collisions between
+/// sessions are possible. The ciphertext stays in the transport block
+/// ([`Encrypted::core`], [`Encrypted::ciphertext`]); this crate only checks
+/// its length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Encrypted {
     pub kind: EncKind,
     pub key_id: [u8; 4],
+    /// CRYP: the AES-CTR IV prefix at core offset 121. INFP: at offset 9.
     pub iv: [u8; 8],
     /// The record's own length field (ciphertext or plaintext length).
     pub declared_len: u16,
     /// Whether that field holds the value the spec gives for this kind.
     pub layout_ok: bool,
+    /// Where the core starts in the 173-byte block.
+    pub core_at: u8,
+    /// The spec's structural checks, all of which must pass before a record
+    /// counts ([`Encrypted::valid`]).
+    pub checks: O4Checks,
+}
+
+/// The receiver-side checks of the O4 spec (RF_PHY.md "Passive
+/// demodulation" step 8, SPEC.md "Logical-object envelope" and "O4 PHY
+/// transport block"), applied after CRC-24A has passed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct O4Checks {
+    /// A logical-object envelope (length byte, payload, CRC-16) whose
+    /// declared end, `length + 3`, lies inside the 173-byte slot.
+    pub boundary: bool,
+    /// Its CRC-16 (init 0x3692, reflected 0x8408) matches.
+    pub crc16: bool,
+    /// Selector and ASCII marker agree (0x13 `CRYP`, 0x10/0x11 `INFP`).
+    pub marker: bool,
+    /// Exact core length: the payload is one whole core of the selector's
+    /// length plus the seven padding bytes.
+    pub core_len: bool,
+    /// The record's length field holds the spec's value (32, 109, 141).
+    pub declared_len: bool,
+    /// The seven padding bytes after the core are zero.
+    pub padding_zero: bool,
+    /// Every slot byte after the logical object is zero.
+    pub tail_zero: bool,
+}
+
+impl O4Checks {
+    pub fn valid(&self) -> bool {
+        self.boundary && self.crc16 && self.marker && self.core_len && self.declared_len && self.padding_zero && self.tail_zero
+    }
+    /// The first failing check, for logs.
+    pub fn first_failure(&self) -> Option<&'static str> {
+        [
+            (self.boundary, "boundary"),
+            (self.crc16, "crc16"),
+            (self.marker, "marker"),
+            (self.core_len, "core_len"),
+            (self.declared_len, "declared_len"),
+            (self.padding_zero, "padding"),
+            (self.tail_zero, "tail"),
+        ]
+        .into_iter()
+        .find(|(ok, _)| !ok)
+        .map(|(_, n)| n)
+    }
+}
+
+/// Seven zero bytes follow every O4 core inside the logical object (SPEC.md).
+pub const O4_PADDING: usize = 7;
+
+impl Encrypted {
+    /// Passed every structural check of the spec. Only valid records may
+    /// update a session, a track or the channel follower.
+    pub fn valid(&self) -> bool {
+        self.checks.valid()
+    }
+    /// The whole core (selector to end of ciphertext) inside `block`.
+    pub fn core<'a>(&self, block: &'a [u8; BLOCK]) -> &'a [u8] {
+        let a = self.core_at as usize;
+        &block[a..(a + self.kind.core_len()).min(BLOCK)]
+    }
+    /// The encrypted bytes of the core: CRYP's 32-byte auxiliary ciphertext
+    /// (core offset 131) or INFP's 109 / 141 bytes (offset 19). Returned
+    /// untouched; this crate never decrypts.
+    pub fn ciphertext<'a>(&self, block: &'a [u8; BLOCK]) -> &'a [u8] {
+        let c = self.core(block);
+        &c[self.kind.ciphertext_at().min(c.len())..]
+    }
+    /// The complete logical object (`length + 3` bytes from block offset 0)
+    /// when the envelope is a logical one.
+    pub fn logical_object<'a>(&self, block: &'a [u8; BLOCK]) -> Option<&'a [u8]> {
+        (self.checks.boundary).then(|| &block[..block[0] as usize + 3])
+    }
 }
 
 fn classify(rec: &[u8]) -> Record {
@@ -247,7 +344,9 @@ fn classify(rec: &[u8]) -> Record {
             };
             iv.copy_from_slice(&rec[iv_at..iv_at + 8]);
             let declared_len = u16::from_le_bytes([rec[len_at], rec[len_at + 1]]);
-            return Record::Encrypted(Encrypted { kind, key_id, iv, declared_len, layout_ok: declared_len == want });
+            let layout_ok = declared_len == want;
+            let checks = O4Checks { marker: true, declared_len: layout_ok, ..O4Checks::default() };
+            return Record::Encrypted(Encrypted { kind, key_id, iv, declared_len, layout_ok, core_at: 0, checks });
         }
     }
     if selector == 0x10 && rec.len() >= 88 {
@@ -308,11 +407,14 @@ pub fn parse(b: &[u8; BLOCK]) -> Parsed {
         if (13..=BLOCK).contains(&len) && dji_crc8(&b[..3]) == b[3] {
             let ok = dji_crc16(&b[..len - 2]) == le16(b, len - 2);
             if b[9..11] == [0x03, 0xda] {
-                return Parsed {
-                    envelope: Envelope::V1 { len: len as u16 },
-                    crc16_ok: Some(ok),
-                    record: classify(&b[11..len - 2]),
-                };
+                let mut record = classify(&b[11..len - 2]);
+                if let Record::Encrypted(e) = &mut record {
+                    // Recognised, but not the logical object the O4 PHY
+                    // carries: never valid (checks.boundary stays false).
+                    e.core_at = 11;
+                    e.checks.crc16 = ok;
+                }
+                return Parsed { envelope: Envelope::V1 { len: len as u16 }, crc16_ok: Some(ok), record };
             }
         }
     }
@@ -320,7 +422,16 @@ pub fn parse(b: &[u8; BLOCK]) -> Parsed {
     let l = b[0] as usize;
     if l >= 1 && l + 3 <= BLOCK {
         let ok = dji_crc16(&b[..l + 1]) == le16(b, l + 1);
-        let record = classify(&b[1..l + 1]);
+        let mut record = classify(&b[1..l + 1]);
+        if let Record::Encrypted(e) = &mut record {
+            let n = e.kind.core_len();
+            e.core_at = 1;
+            e.checks.boundary = true;
+            e.checks.crc16 = ok;
+            e.checks.core_len = l == n + O4_PADDING;
+            e.checks.padding_zero = b[1 + n..1 + l].iter().all(|&v| v == 0);
+            e.checks.tail_zero = b[l + 3..].iter().all(|&v| v == 0);
+        }
         if ok || !matches!(record, Record::Unknown { .. }) {
             return Parsed { envelope: Envelope::Logical { len: l as u8 }, crc16_ok: Some(ok), record };
         }
@@ -535,5 +646,101 @@ mod tests {
         let p = parse(&b);
         assert_eq!(p.envelope, Envelope::Direct);
         assert!(matches!(p.record, Record::Encrypted(Encrypted { kind: EncKind::Infp11, key_id: [0xde, 0xad, 0xbe, 0xef], .. })));
+    }
+
+    fn o4_block(kind: EncKind) -> [u8; BLOCK] {
+        let core = o4_core(kind);
+        let l = core.len() + O4_PADDING;
+        let mut b = [0u8; BLOCK];
+        b[0] = l as u8;
+        b[1..1 + core.len()].copy_from_slice(&core);
+        let c = dji_crc16(&b[..l + 1]);
+        b[l + 1..l + 3].copy_from_slice(&c.to_le_bytes());
+        b
+    }
+
+    fn reseal(b: &mut [u8; BLOCK]) {
+        let l = b[0] as usize;
+        let c = dji_crc16(&b[..l + 1]);
+        b[l + 1..l + 3].copy_from_slice(&c.to_le_bytes());
+    }
+
+    fn enc(b: &[u8; BLOCK]) -> Encrypted {
+        match parse(b).record {
+            Record::Encrypted(e) => e,
+            r => panic!("{r:?}"),
+        }
+    }
+
+    #[test]
+    fn o4_spec_layout_is_valid_and_exposes_the_raw_core() {
+        for kind in [EncKind::Cryp, EncKind::Infp10, EncKind::Infp11] {
+            let b = o4_block(kind);
+            let e = enc(&b);
+            assert!(e.valid(), "{kind:?} {:?}", e.checks);
+            assert_eq!(e.checks.first_failure(), None);
+            assert_eq!(e.core(&b), &o4_core(kind)[..]);
+            assert_eq!(e.ciphertext(&b).len(), match kind {
+                EncKind::Cryp => 32,
+                EncKind::Infp10 => 109,
+                EncKind::Infp11 => 141,
+            });
+            assert_eq!(e.logical_object(&b).unwrap().len(), kind.core_len() + O4_PADDING + 3);
+        }
+        // CRYP fills the slot exactly: 1 + 163 + 7 + 2 = 173.
+        assert_eq!(EncKind::Cryp.core_len() + O4_PADDING + 3, BLOCK);
+    }
+
+    #[test]
+    fn o4_every_check_can_fail() {
+        let kind = EncKind::Infp10;
+        // CRC-16.
+        let mut b = o4_block(kind);
+        b[40] ^= 1;
+        assert_eq!(enc(&b).checks.first_failure(), Some("crc16"));
+        // Non-zero padding inside the object (CRC fixed up).
+        let mut b = o4_block(kind);
+        b[1 + kind.core_len() + 3] = 0x5a;
+        reseal(&mut b);
+        assert_eq!(enc(&b).checks.first_failure(), Some("padding"));
+        // Stale bytes after the object.
+        let mut b = o4_block(kind);
+        b[BLOCK - 1] = 1;
+        assert_eq!(enc(&b).checks.first_failure(), Some("tail"));
+        // Wrong length field.
+        let mut b = o4_block(kind);
+        b[1 + 17] = 108;
+        reseal(&mut b);
+        assert_eq!(enc(&b).checks.first_failure(), Some("declared_len"));
+        // Object two bytes short of core + padding.
+        let mut b = o4_block(kind);
+        b[0] -= 2;
+        reseal(&mut b);
+        assert_eq!(enc(&b).checks.first_failure(), Some("core_len"));
+        // An INFP marker on the CRYP selector is not O4.
+        let mut b = o4_block(kind);
+        b[1] = 0x13;
+        reseal(&mut b);
+        assert!(!matches!(parse(&b).record, Record::Encrypted(_)));
+        // A V1-framed core is recognised but never valid.
+        let core = o4_core(kind);
+        let len = 11 + core.len() + 2;
+        let mut b = [0u8; BLOCK];
+        b[0] = 0x55;
+        b[1] = len as u8;
+        b[3] = dji_crc8(&b[..3]);
+        b[9..11].copy_from_slice(&[0x03, 0xda]);
+        b[11..11 + core.len()].copy_from_slice(&core);
+        let c = dji_crc16(&b[..len - 2]);
+        b[len - 2..len].copy_from_slice(&c.to_le_bytes());
+        assert_eq!(enc(&b).checks.first_failure(), Some("boundary"));
+    }
+
+    #[test]
+    fn legacy_plaintext_unchanged_next_to_o4() {
+        // Selector 0x10 without the INFP marker stays OcuSync 2 flight info.
+        let p = parse(&sample_block());
+        assert!(matches!(p.record, Record::FlightInfo(_)));
+        assert_eq!(p.crc16_ok, Some(true));
     }
 }

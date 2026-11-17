@@ -255,7 +255,7 @@ fn fills_droneid_and_signals() {
         .iter()
         .find(|d| d.id_kind == IdKind::Presence)
         .unwrap();
-    assert_eq!(o4.id.as_str(), "O4 01020304");
+    assert_eq!(o4.id.as_str(), "DJI O4 01020304");
     assert_eq!(st.total_emitters, 2);
     // Strongest first: the energy, then the video.
     assert_eq!(st.emitters[0].kind, EmitterKind::Energy);
@@ -283,7 +283,7 @@ fn fills_droneid_and_signals() {
         1_000,
     );
     fill_from_tracker(&tr2, &tr2.context(1_500, None), &mut st);
-    assert_eq!(st.drones[0].id.as_str(), "O4 2414.5");
+    assert_eq!(st.drones[0].id.as_str(), "DJI O4 2414.5");
 }
 
 /// Protocol 7: the DJI link kinds reach the signals page with short labels.

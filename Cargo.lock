@@ -486,6 +486,7 @@ name = "droneid"
 version = "0.1.0"
 dependencies = [
  "droneid",
+ "sha2",
 ]
 
 [[package]]

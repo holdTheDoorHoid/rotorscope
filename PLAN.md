@@ -383,6 +383,16 @@ ground.
    - Fallback for signal quality: the 10-bit snapshot capture at 20 MS/s, if the 4-bit ring proves
      too coarse.
 
+**O4 / DroneID v3 status (2026-11-16, branch `droneid-v3`; details in docs/DRONEID-O4.md):**
+built and tested on synthetic signals only. The published O4 coding chain matches our decoder bit
+for bit (5 of the spec's 7 SHA-256 stage digests; the two floating-point stages are not
+reproduced and the reason is unknown, no generator is published), and synthetic O4 packets
+decode through the C5 capture model. O4 records now pass the spec's full structural checks
+before they count, are shown as `DJI O4 <key id>` sessions with a model-dependent "GPS locked"
+/ "probably flying" state, and travel to the hub with their raw logical object (link protocol 8).
+node-sdr's DroneID plan adds 5816.5 MHz and follows O4 drones with the published seven-channel
+schedule (`droneid::follow`), falling back to scanning. Needs a real O4 drone to confirm.
+
 **Decisions:**
 - **Its own C5.** Parked on one DroneID frequency it catches a share of bursts (O4 hops over 7
   frequencies, so roughly one every 4–5 s), enough for presence and tracking. Prefer a C5 with

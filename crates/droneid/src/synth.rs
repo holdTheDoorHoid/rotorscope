@@ -24,7 +24,7 @@ fn cmul(a: Cx, b: Cx) -> Cx {
 }
 
 /// In-place radix-2 inverse FFT (no 1/N).
-fn ifft(x: &mut [Cx]) {
+pub fn ifft(x: &mut [Cx]) {
     let n = x.len();
     let mut j = 0;
     for i in 1..n {
@@ -54,7 +54,7 @@ fn ifft(x: &mut [Cx]) {
     }
 }
 
-fn zc_f64(u: u32, k: i32) -> Cx {
+pub fn zc_f64(u: u32, k: i32) -> Cx {
     let i = (k + 300) as f64;
     let a = -PI * u as f64 * i * (i + 1.0) / 601.0;
     (a.cos(), a.sin())
@@ -209,6 +209,35 @@ pub fn random_payload(rng: &mut Rng) -> [u8; BLOCK] {
     b[68] = 6;
     let c = crate::crc::dji_crc16(&b[..89]);
     b[89..91].copy_from_slice(&c.to_le_bytes());
+    b
+}
+
+/// A synthetic O4 transport block laid out as the spec gives it: one
+/// CRYP / INFP core (random stand-in bytes where the spec has ciphertext or
+/// key material; nothing here is real or encrypted), seven zero padding
+/// bytes inside the logical object, its CRC-16, then zeros to 173 bytes.
+pub fn o4_payload(kind: crate::payload::EncKind, key_id: [u8; 4], rng: &mut Rng) -> [u8; BLOCK] {
+    use crate::payload::EncKind;
+    let n = kind.core_len();
+    let mut core = vec![0u8; n];
+    for v in core.iter_mut() {
+        *v = rng.u8();
+    }
+    let (sel, magic, len_at, len) = match kind {
+        EncKind::Cryp => (0x13, b"CRYP", 129, 32u16),
+        EncKind::Infp10 => (0x10, b"INFP", 17, 109),
+        EncKind::Infp11 => (0x11, b"INFP", 17, 141),
+    };
+    core[0] = sel;
+    core[1..5].copy_from_slice(magic);
+    core[5..9].copy_from_slice(&key_id);
+    core[len_at..len_at + 2].copy_from_slice(&len.to_le_bytes());
+    let l = n + 7;
+    let mut b = [0u8; BLOCK];
+    b[0] = l as u8;
+    b[1..1 + n].copy_from_slice(&core);
+    let c = crate::crc::dji_crc16(&b[..l + 1]);
+    b[l + 1..l + 3].copy_from_slice(&c.to_le_bytes());
     b
 }
 

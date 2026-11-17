@@ -34,7 +34,12 @@ use serde::{Deserialize, Serialize};
 ///   `DjiController` (PLAN.md Phase 11b, `crates/djilink`). Appended, so
 ///   every v6 `Rf` frame encodes exactly as before; a v6 hub counts an `Rf`
 ///   frame carrying a new kind as corrupt and carries on.
-pub const PROTOCOL_VERSION: u8 = 7;
+/// - 8: [`DroneIdRecord`] gains `O4` (record type, key ID and the raw
+///   CRC-valid logical object, PLAN.md Phase 10, docs/DRONEID-O4.md).
+///   Appended, so every v7 `DroneId` frame encodes exactly as before; a v7
+///   hub counts a `DroneId` frame carrying an `O4` record as corrupt and
+///   carries on. Nodes from v8 send `O4` instead of `Encrypted`.
+pub const PROTOCOL_VERSION: u8 = 8;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -126,11 +131,41 @@ pub enum DroneIdRecord {
         home_lon_raw: i32,
         product_type: u8,
     },
-    /// O4 encrypted record: the session key ID only, never decrypted.
+    /// O4 encrypted record, protocol 4-7 nodes: the session key ID only.
     Encrypted { key_id: [u8; 4] },
     /// A burst matched the DroneID reference pattern but did not decode
     /// (weak, clipped or an unknown layout): presence only.
     Detected,
+    /// Protocol 8. An O4 record that passed every structural check of the
+    /// spec (CRC-24A, logical-object boundary and CRC-16, marker, exact core
+    /// length, zero padding). `key_id` is the cleartext session identifier;
+    /// `object` is the whole logical object (`length + 3` bytes, at most
+    /// 173), ciphertext included, exactly as received, so the hub can keep
+    /// it as evidence and a decryption layer can work from it.
+    O4 { kind: O4Kind, key_id: [u8; 4], object: Vec<u8, 173> },
+}
+
+/// Protocol 8. Which O4 record a [`DroneIdRecord::O4`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum O4Kind {
+    /// Selector 0x13, `CRYP`: the session-key record. In the one model
+    /// studied (Mini 5 Pro) it starts after a GNSS fix.
+    Cryp,
+    /// Selector 0x10, `INFP`, 128-byte core: flight telemetry. Starts after
+    /// takeoff on that model.
+    Infp10,
+    /// Selector 0x11, `INFP`, 160-byte core.
+    Infp11,
+}
+
+impl O4Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            O4Kind::Cryp => "CRYP",
+            O4Kind::Infp10 => "INFP-10",
+            O4Kind::Infp11 => "INFP-11",
+        }
+    }
 }
 
 /// Protocol 4. What a raw-capture scanner recognised on one frequency.
@@ -480,7 +515,7 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 20] {
+    fn samples() -> [Frame; 21] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -590,6 +625,14 @@ mod tests {
                 items: core::iter::repeat_n(FlagItem { rule: u8::MAX, area: u8::MAX, level: u8::MAX, value: f32::MAX, secs: u16::MAX }, MAX_FLAG_ITEMS).collect(),
                 pack_date: u32::MAX,
             }),
+            // Protocol 8: a full-size O4 object at the widest varints.
+            Frame::DroneId(DroneIdSighting {
+                freq: u32::MAX,
+                rssi: i8::MIN,
+                snr_db: i8::MIN,
+                uptime_us: u64::MAX,
+                record: DroneIdRecord::O4 { kind: O4Kind::Infp11, key_id: [0xFF; 4], object: [0xFF; 173].into_iter().collect() },
+            }),
         ]
     }
 
@@ -624,9 +667,27 @@ mod tests {
             .iter()
             .map(|f| postcard::to_slice(f, &mut buf).unwrap()[0])
             .collect();
-        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5, 10, 10, 11, 11, 12]);
+        assert_eq!(tags, [0, 1, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 5, 10, 10, 11, 11, 12, 6]);
         assert_eq!(NodeRole::Fpv as u8, 3);
         assert_eq!(NodeRole::Gateway.bit(), 1 << 5);
+    }
+
+    /// Protocol 8 appended `DroneIdRecord::O4`: the older records keep their
+    /// postcard indices, so a v7 `DroneId` frame encodes byte for byte as before.
+    #[test]
+    fn protocol_8_droneid_record_append_only() {
+        let mut buf = [0u8; MAX_FRAME];
+        let tag = |r: DroneIdRecord, buf: &mut [u8]| postcard::to_slice(&r, buf).unwrap()[0];
+        assert_eq!(tag(DroneIdRecord::Encrypted { key_id: [0; 4] }, &mut buf), 1);
+        assert_eq!(tag(DroneIdRecord::Detected, &mut buf), 2);
+        let o4 = DroneIdRecord::O4 { kind: O4Kind::Cryp, key_id: [1, 2, 3, 4], object: [7u8; 173].into_iter().collect() };
+        assert_eq!(tag(o4.clone(), &mut buf), 3);
+        assert_eq!(postcard::to_slice(&O4Kind::Infp11, &mut buf).unwrap(), [2]);
+        let f = Frame::DroneId(DroneIdSighting { freq: 58165, rssi: -60, snr_db: 9, uptime_us: 5, record: o4 });
+        let mut dec = Decoder::new();
+        let mut got = None;
+        dec.feed(encode(&f, &mut buf).unwrap(), |r| got = Some(r));
+        assert_eq!(got, Some(Ok(f)));
     }
 
     /// Protocol 7 appended four `RfKind`s; the six older ones keep their

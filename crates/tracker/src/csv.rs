@@ -19,7 +19,9 @@
 //! altitude for a position from DroneID.)
 //!
 //! DJI DroneID tracks are drone rows; `transports` adds `DroneId`,
-//! `DroneIdO4` or `DjiWifi`.
+//! `DroneIdO4` or `DjiWifi`. An O4 track with no other ID has its session
+//! key ID as `uas_id` with `id_type` `O4Session` (unless DroneID IDs are
+//! hidden).
 //!
 //! RF emitters ([`rf_row`]): `track` is `R<n>`, `uas_id` the frequency in
 //! MHz with `id_type` `FreqMHz`, `ua_type` the kind (`AnalogVideo`, ...),
@@ -95,6 +97,9 @@ pub fn row(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, Format
         if let Some(id) = id {
             let text: heapless::String<48> = render(IdText(&id.id));
             write!(w, "{},{:?}", CsvField(&text), id.id_type)?;
+        } else if let Some(k) = track.dji.key_id.filter(|_| !ctx.config.hide_droneid_ids) {
+            // An O4 track's only identity: its session key ID.
+            write!(w, "{},O4Session", crate::json::key_hex(k))?;
         } else {
             w.write_char(',')?;
         }

@@ -39,14 +39,59 @@ pub type Hop = (u32, u16);
 pub type Plan = HVec<Hop, 48>;
 
 /// The built-in DroneID plan (crates/coverage DRONEID_58 + DRONEID_24, 700 ms
-/// each: a burst comes every ~640 ms, so one dwell catches one).
-pub const DRONEID_PLAN: [Hop; 8] =
-    [(57565, 700), (57765, 700), (57965, 700), (24145, 700), (24295, 700), (24445, 700), (24595, 700), (23995, 700)];
+/// each: a burst comes every ~640 ms, so one dwell catches one). All seven
+/// O4 channels of the published schedule (5816.5 MHz added 2026-11-16,
+/// docs/DRONEID-O4.md), plus 2459.5 MHz (listed by King-Of-Knights) and
+/// 2399.5 MHz. The O4 follower (`droneid::follow`) visits predicted
+/// channels between these hops.
+pub const DRONEID_PLAN: [Hop; 9] = [
+    (57565, 700),
+    (57765, 700),
+    (57965, 700),
+    (58165, 700),
+    (24145, 700),
+    (24295, 700),
+    (24445, 700),
+    (24595, 700),
+    (23995, 700),
+];
 
 /// DroneID burst centres the receiver accepts in an assignment: the C5's
-/// measured reach, 2200-2650 and 5180-5800 MHz LO (100 kHz units).
+/// measured reach, 2200-2650 and 5180-5800 MHz LO (100 kHz units), plus
+/// O4's 5816.5 MHz channel (LO 5816 MHz, above the measured range: not yet
+/// verified on a chip).
 fn droneid_freq_ok(f: u32) -> bool {
-    (22_000..=26_500).contains(&f) || (51_800..=58_100).contains(&f)
+    (22_000..=26_500).contains(&f) || (51_800..=58_170).contains(&f)
+}
+
+/// O4 follower: arrive this long before a predicted window opens (a retune
+/// with a DC calibration costs about 22 ms on 5 GHz).
+const FOLLOW_LEAD_US: u64 = 30_000;
+/// A plan dwell cut shorter than this by an upcoming prediction is not
+/// worth the retune: go to the predicted channel early instead.
+const FOLLOW_MIN_DWELL_US: u64 = 120_000;
+
+/// What the O4 follower did, for the stats line.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FollowStats {
+    /// Predicted windows visited, and those with a valid packet of the
+    /// predicted session in them.
+    pub visits: u32,
+    pub hits: u32,
+    /// Settled windows with nothing (passed to the follower as misses).
+    pub misses: u32,
+}
+
+/// The predicted window the receiver is sitting in.
+#[derive(Clone, Copy, Debug)]
+struct Visit {
+    a: droneid::follow::Appointment,
+    /// Tuned before the window opened (settled coverage).
+    settled: bool,
+    heard: bool,
+    /// `n.accepted` when the visit began: a decode during the window means
+    /// the ring was stopped for part of it, so a miss would not be fair.
+    accepted: u32,
 }
 
 /// FPV retunes within this distance of the last DC calibration reuse it (a
@@ -192,6 +237,13 @@ pub struct Radio {
     dc: phy::DcCal,
     dc_for_mhz: u16,
     dc_auto: bool,
+    /// O4 channel follower (`droneid::follow`): sessions, the window being
+    /// visited, counters, the start time of the burst being decoded.
+    follow: droneid::follow::Follower,
+    visit: Option<Visit>,
+    pub follow_stats: FollowStats,
+    pub follow_on: bool,
+    burst_us: u64,
 }
 
 fn now_us() -> u64 {
@@ -259,6 +311,11 @@ impl Radio {
             dc: phy::DcCal::default(),
             dc_for_mhz: 0,
             dc_auto: true,
+            follow: droneid::follow::Follower::new(),
+            visit: None,
+            follow_stats: FollowStats::default(),
+            follow_on: true,
+            burst_us: 0,
         }
     }
 
@@ -449,6 +506,8 @@ impl Radio {
         ring::stop();
         self.pending = None;
         let (produced, _) = ring::produced();
+        // When the burst rose: the ring runs at RATE_B bytes a second.
+        self.burst_us = now_us().saturating_sub(produced.saturating_sub(r.pos) * 1_000_000 / RATE_B as u64);
         if !window_ok(start, end, produced, NODE_BYTES) {
             self.n.lapped += 1;
             self.restart();
@@ -539,6 +598,11 @@ impl Radio {
         self.decode_into(&mut line, CAPTURE_LEN, Some((&mut found, lvl, snr)));
         println!("{}}}", line.as_str());
         for s in found {
+            if let DroneIdRecord::O4 { key_id, .. } = &s.record
+                && !self.hil
+            {
+                self.follow_observe(*key_id);
+            }
             let _ = self.events.push(Event::DroneId { s, hil: self.hil });
         }
         true
@@ -603,7 +667,7 @@ impl Radio {
         let (produced, overrun) = ring::produced();
         let _ = write!(
             line,
-            r#"{{"t":"stats","up_us":{},"role":"{}","plan":{},"hop":{},"f":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"heap_free":{}}}"#,
+            r#"{{"t":"stats","up_us":{},"role":"{}","plan":{},"hop":{},"f":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"follow":[{},{},{},{}],"heap_free":{}}}"#,
             now_us(),
             crate::hub::role_name(self.role),
             self.plan_id,
@@ -629,6 +693,10 @@ impl Radio {
             self.n.last_decode_ms,
             self.n.gain_lost,
             self.held != Held::Nothing,
+            self.follow.active(),
+            self.follow_stats.visits,
+            self.follow_stats.hits,
+            self.follow_stats.misses,
             esp_alloc::HEAP.free()
         );
     }
@@ -1103,7 +1171,17 @@ fn sighting(b: &droneid::rx::Burst, freq: u32, expect_hz: i64, lvl_x10: i32, _sn
                 home_lon_raw: f.home_lon_raw,
                 product_type: f.product_type,
             },
-            Record::Encrypted(e) => DroneIdRecord::Encrypted { key_id: e.key_id },
+            // O4: only records that pass every structural check of the
+            // spec count; the raw logical object goes up with them.
+            Record::Encrypted(e) if e.valid() => DroneIdRecord::O4 {
+                kind: match e.kind {
+                    droneid::payload::EncKind::Cryp => link::O4Kind::Cryp,
+                    droneid::payload::EncKind::Infp10 => link::O4Kind::Infp10,
+                    droneid::payload::EncKind::Infp11 => link::O4Kind::Infp11,
+                },
+                key_id: e.key_id,
+                object: e.logical_object(&b.block).unwrap_or(&[]).iter().copied().collect(),
+            },
             _ => DroneIdRecord::Detected,
         },
         // The reference pattern matched (that is what an `Ok` burst means)
@@ -1190,6 +1268,7 @@ impl Radio {
         self.floors.reset();
         self.sweep = SweepStats { t0_us: now_us(), ..SweepStats::default() };
         self.events.clear();
+        self.visit = None;
     }
 
     /// The built-in plan of the current role (plan id 0).
@@ -1212,12 +1291,71 @@ impl Radio {
         ring::stop();
     }
 
-    /// Tune to the next hop of the plan and start its dwell.
+    /// A valid O4 record of session `key_id` was decoded from the burst at
+    /// `burst_us` on the current frequency.
+    fn follow_observe(&mut self, key_id: [u8; 4]) {
+        let id = u32::from_be_bytes(key_id);
+        let r = self.follow.observe(id, self.burst_us, self.cur_freq);
+        if let Some(v) = self.visit.as_mut()
+            && v.a.id == id
+        {
+            v.heard = true;
+        }
+        if r == Some(droneid::follow::Observed::Restarted) {
+            // The packet fits no hypothesis (another schedule, or lost
+            // timing): the follower started over from it.
+            println!(r#"{{"t":"follow","ev":"restart","f":{}}}"#, self.cur_freq);
+        }
+    }
+
+    /// Close the predicted window just visited: a settled, uninterrupted
+    /// window with nothing valid in it is a miss for the follower.
+    fn close_visit(&mut self) {
+        let Some(v) = self.visit.take() else { return };
+        if v.heard {
+            self.follow_stats.hits += 1;
+        } else if v.settled && self.n.accepted == v.accepted {
+            self.follow_stats.misses += 1;
+            if !self.follow.missed(&v.a) {
+                println!(r#"{{"t":"follow","ev":"lost","note":"back to scanning"}}"#);
+            }
+        }
+    }
+
+    /// The follower's next window, when one is due before the plan's next
+    /// dwell would end: tune there and dwell over it. Returns the cap on
+    /// the plan dwell otherwise (µs from now), if a window is coming.
+    fn follow_hop(&mut self) -> Result<(), Option<u64>> {
+        if self.role != NodeRole::DroneId || !self.follow_on {
+            return Err(None);
+        }
+        let now = now_us();
+        let Some(a) = self.follow.next(now) else { return Err(None) };
+        let until_lead = a.start_us.saturating_sub(now + FOLLOW_LEAD_US);
+        if until_lead >= FOLLOW_MIN_DWELL_US {
+            return Err(Some(until_lead));
+        }
+        self.cur_freq = a.freq;
+        self.tune_quiet((a.freq / 10) as u16, 0);
+        let t = now_us();
+        self.hop_until_us = a.end_us.max(t + 5_000);
+        self.visit = Some(Visit { a, settled: t <= a.start_us, heard: false, accepted: self.n.accepted });
+        self.follow_stats.visits += 1;
+        Ok(())
+    }
+
+    /// Tune to the next hop of the plan and start its dwell (or, on the
+    /// DroneID job, to a channel the O4 follower predicts).
     pub fn next_hop(&mut self) {
         if self.plan.is_empty() {
             self.hopping = false;
             return;
         }
+        self.close_visit();
+        let cap_us = match self.follow_hop() {
+            Ok(()) => return,
+            Err(c) => c,
+        };
         self.hop_idx = (self.hop_idx + 1) % self.plan.len();
         if self.hop_idx == 0 && self.role == NodeRole::Fpv && self.sweep.n > 0 {
             self.sweep_line();
@@ -1230,7 +1368,8 @@ impl Radio {
             _ => ((f / 10) as u16, 0),
         };
         self.tune_quiet(lo, tol);
-        self.hop_until_us = now_us() + ms as u64 * 1000;
+        let dwell = (ms as u64 * 1000).min(cap_us.unwrap_or(u64::MAX));
+        self.hop_until_us = now_us() + dwell;
     }
 
     /// Retune without printing (one `phy` line per hop would flood the
