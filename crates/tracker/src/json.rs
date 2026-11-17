@@ -73,8 +73,12 @@ struct Dji<'a> {
     ids_shown: bool,
     /// O4 session key ID, 8 hex digits; null when hidden or not O4.
     key_id: Option<heapless::String<8>>,
-    /// Encrypted (O4) records only: position and serial unreadable.
+    /// Encrypted (O4) records only, not decrypted: position and serial
+    /// unreadable.
     encrypted: bool,
+    /// O4 records decrypted with the owner's key (serial and positions are
+    /// from the decrypted records).
+    decrypted: bool,
     /// The shared track for bursts that did not decode.
     undecoded: bool,
     /// O4 record types heard (protocol 8 nodes), and what they suggest:
@@ -140,7 +144,8 @@ fn dji_json<'a>(t: &'a Track, ctx: &Context) -> Option<Dji<'a>> {
         model: d.product_name(),
         ids_shown: shown,
         key_id: d.key_id.filter(|_| shown).map(key_hex),
-        encrypted: d.key_id.is_some(),
+        encrypted: d.key_id.is_some() && !d.o4_decrypted,
+        decrypted: d.o4_decrypted,
         undecoded: d.undecoded,
         o4: d.o4.heard().then(|| O4J {
             cryp: d.o4.cryp,

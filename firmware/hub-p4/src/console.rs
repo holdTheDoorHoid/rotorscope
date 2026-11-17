@@ -134,13 +134,13 @@ pub fn read_command() -> Option<u8> {
 
 /// `core::fmt::Write` into a fixed buffer, truncating at the end.
 pub struct LineBuf {
-    pub buf: [u8; 1024],
+    pub buf: [u8; 1536],
     pub len: usize,
 }
 
 impl LineBuf {
     pub const fn new() -> Self {
-        Self { buf: [0; 1024], len: 0 }
+        Self { buf: [0; 1536], len: 0 }
     }
 }
 

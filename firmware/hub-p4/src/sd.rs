@@ -207,7 +207,16 @@ pub struct Logger {
     pub ev_errors: u32,
     max_ev_us: u64,
     max_ev_what: &'static str,
+    /// The owner's O4 key, read from the card at mount, until the main loop
+    /// takes it ([`Logger::take_o4_key`]).
+    o4_key: Option<djicrypt::PrivateKey>,
+    /// What the key file check found, for the status line.
+    pub o4_key_state: &'static str,
 }
+
+/// The owner's O4 DroneID private key (64 hex digits) in the log folder.
+/// Never in the repository; see docs/DRONEID-O4.md "Decryption".
+const O4_KEY_NAME: &str = "O4KEY.TXT";
 
 impl Logger {
     pub fn new(clk: Flex<'static>, cmd: Flex<'static>, dat: Flex<'static>) -> Self {
@@ -248,7 +257,53 @@ impl Logger {
             ev_errors: 0,
             max_ev_us: 0,
             max_ev_what: "",
+            o4_key: None,
+            o4_key_state: "none",
         }
+    }
+
+    /// The O4 key read from the card, once (the decryptor keeps it).
+    pub fn take_o4_key(&mut self) -> Option<djicrypt::PrivateKey> {
+        self.o4_key.take()
+    }
+
+    /// Read `ROTORSCP/O4KEY.TXT` if present. Only a fingerprint of the
+    /// matching public key is printed; the file buffer is wiped.
+    fn load_o4_key(&mut self) {
+        use zeroize::Zeroize;
+        let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
+        let f = match vm.open_file_in_dir(dir, O4_KEY_NAME, Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(embedded_sdmmc::Error::NotFound) => {
+                self.o4_key_state = "none";
+                println!("hub-p4: no {DIR}/{O4_KEY_NAME}: O4 DroneID stays detect-only");
+                return;
+            }
+            Err(e) => {
+                self.o4_key_state = "error";
+                println!("hub-p4: {DIR}/{O4_KEY_NAME} open failed: {e:?}");
+                return;
+            }
+        };
+        let mut buf = [0u8; 512];
+        let n = vm.read(f, &mut buf).unwrap_or(0);
+        let _ = vm.close_file(f);
+        match djicrypt::PrivateKey::from_hex_text(&buf[..n]) {
+            Ok(k) => {
+                let fp = k.fingerprint();
+                println!(
+                    "hub-p4: O4 DroneID key loaded from {DIR}/{O4_KEY_NAME} (public fingerprint {:02x}{:02x}-{:02x}{:02x})",
+                    fp[0], fp[1], fp[2], fp[3]
+                );
+                self.o4_key = Some(k);
+                self.o4_key_state = "loaded";
+            }
+            Err(e) => {
+                self.o4_key_state = "bad";
+                println!("hub-p4: {DIR}/{O4_KEY_NAME} refused ({e:?}): O4 stays detect-only");
+            }
+        }
+        buf.zeroize();
     }
 
     /// Console `r`: re-stream the current evidence file from its start.
@@ -489,6 +544,7 @@ impl Logger {
                     println!("hub-p4: sd airspace pack: {e:?}");
                     self.pack_file = None;
                 }
+                self.load_o4_key();
             }
             Err(e) => {
                 if let embedded_sdmmc::Error::FormatError(_) = e {

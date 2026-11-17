@@ -206,6 +206,11 @@ pub enum EventCode {
     /// checkpoint follows.
     Shutdown = 14,
     GpsReceiver = 15,
+    /// An O4 DroneID record was decrypted with the owner's key (derived
+    /// from the raw frame record just before it, which keeps the
+    /// ciphertext). Data: session key ID (4), record selector (1). Text:
+    /// what it decrypted to (serial, positions). Never the key.
+    O4Decrypted = 16,
 }
 
 impl EventCode {
@@ -227,6 +232,7 @@ impl EventCode {
             13 => NotLogged,
             14 => Shutdown,
             15 => GpsReceiver,
+            16 => O4Decrypted,
             _ => return None,
         })
     }
@@ -248,6 +254,7 @@ impl EventCode {
             NotLogged => "not_logged",
             Shutdown => "shutdown",
             GpsReceiver => "gps_receiver",
+            O4Decrypted => "o4_decrypted",
         }
     }
 }

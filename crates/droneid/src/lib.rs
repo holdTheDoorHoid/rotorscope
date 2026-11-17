@@ -34,7 +34,8 @@
 //!   boundary, CRC-16, marker, exact core length, zero padding); then its
 //!   cleartext type and key ID (a per-session identifier) are reported and
 //!   the raw object stays available ([`payload::Encrypted::core`]). This
-//!   crate never decrypts and holds no keys (PLAN.md, Phase 10).
+//!   crate never decrypts and holds no keys; `crates/djicrypt` does, with
+//!   an owner-supplied key (PLAN.md, Phase 10, decision 2026-11-16).
 //!   [`o4plain`] is the plug-in point for a separate decryption layer: it
 //!   checks and reads CRYP / INFP plaintext bytes handed to it, with no
 //!   cryptography of its own.

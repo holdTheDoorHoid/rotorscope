@@ -397,8 +397,12 @@ schedule (`droneid::follow`), falling back to scanning. Needs a real O4 drone to
 - **Its own C5.** Parked on one DroneID frequency it catches a share of bursts (O4 hops over 7
   frequencies, so roughly one every 4–5 s), enough for presence and tracking. Prefer a C5 with
   built-in PSRAM (XIAO ESP32-C5).
-- **O4 stays detect-only, permanently.** No key handling of any kind: decrypting would lose the
-  legal "readily accessible" safe harbour and could raise anti-circumvention issues.
+- ~~**O4 stays detect-only, permanently.**~~ **Owner decision 2026-11-16: O4 decryption is
+  authorised.** Built as `crates/djicrypt` on the P4 hub. The key is supplied by the owner at run
+  time (`ROTORSCP/O4KEY.TXT` on the SD card) and never lives in this public repository; without
+  it O4 stays detect-only. No public key exists today (docs/DRONEID-O4.md "Decryption"). The
+  earlier caution stands as a note for kit sellers: decrypting can lose the "readily accessible"
+  safe harbour and may raise anti-circumvention questions, so only use a lawfully obtained key.
 - **Plaintext fields shown by default**, like Remote ID, because DroneID is a broadcast made for
   third-party receivers (AeroScope), with a setting to turn decoding off. This is our call, not
   legal advice; revisit before selling kits.

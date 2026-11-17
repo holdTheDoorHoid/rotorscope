@@ -71,7 +71,7 @@ use rid::message::{
 };
 
 pub use aircraft::{AircraftGeometry, AircraftKey, AircraftTrack};
-pub use dji::{DjiInfo, DjiLink, O4Seen, O4State, Source};
+pub use dji::{DjiInfo, DjiLink, O4Decrypted, O4Seen, O4State, Source};
 pub use geo::RangeBearing;
 pub use openlinks::{LinkTrack, LinkTrackId};
 pub use signals::{Emitter, EmitterId, NodeInfo, SignalKey, WifiDrone, WifiDroneId};

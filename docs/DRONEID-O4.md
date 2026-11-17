@@ -106,11 +106,11 @@ turbo decoder gets them.
    seen)" or "probably flying (INFP seen)", always marked model-dependent. With
    `hide_droneid_ids` the key ID is hidden everywhere; the state still shows.
 5. **The follower** (`droneid::follow`, wired into node-sdr's DroneID job). See below.
-6. **A plug-in point, no cryptography.** `droneid::payload::Encrypted::{core, ciphertext,
+6. **Raw bytes and plaintext parsers.** `droneid::payload::Encrypted::{core, ciphertext,
    logical_object}` hand out the raw bytes, and `droneid::o4plain` checks and reads CRYP / INFP-10
    / INFP-11 *plaintext* (the spec's field tables and semantic checks; INFP-10 altitude is metres
-   and height decimetres, unlike OcuSync 2). Nothing in the repository decrypts; a decryption
-   layer, if the owner decides to add one, would sit between the two.
+   and height decimetres, unlike OcuSync 2). `crates/djicrypt` (see "Decryption") sits between
+   the two, with an owner-supplied key.
 
 ## The channel follower
 
@@ -142,7 +142,50 @@ reports `"follow":[sessions, visits, hits, misses]` so the gain can be measured 
 - **Transmit DroneID.** Never, not even on the bench. The test packets exist only as sample
   arrays in host tests.
 - **Embed or guess keys.** The repository contains no private or public key, and no
-  session-key prediction.
+  session-key prediction. Decryption (below) only ever uses a key the owner installs.
+
+## Decryption (owner decision 2026-11-16)
+
+The owner authorised O4 decryption. `crates/djicrypt` does it on the P4 hub, following SPEC.md's
+receiver steps (facts only; our own code):
+
+1. A **CRYP** record carries a fresh 16-byte session key, locked to the receiver's SM2 public key.
+   With the matching private key `d`, the hub computes `d x C1`, derives the mask with SM3, unlocks
+   the session key, and accepts it only if SM3 check value `C3` matches and the key hashes to the
+   record's key ID. It also decrypts CRYP's 32 auxiliary bytes (serial and aircraft position).
+2. Session keys are kept by key ID (8 at once, forgotten after 30 minutes unused).
+3. Every **INFP** record of that session is then decrypted (AES-128-CTR, counter `iv || 0 x 8`)
+   and checked against the plaintext rules in `droneid::o4plain`: INFP-10 gives the serial, model,
+   drone, pilot and home positions, altitude, height, speeds and the motors-on / in-air flags;
+   INFP-11 the flight-purpose text.
+4. The tracker folds the session's track into the drone's serial-number track (the same serial
+   Remote ID carries), so one drone is one track. JSON shows `"decrypted": true`.
+
+**The key.** There is no public key that decrypts real aircraft: DJI's AeroScope private key has
+never been published, and the services that decode O4 today are closed. The owner installs a
+lawfully obtained key as `ROTORSCP/O4KEY.TXT` on the hub's SD card: 64 hex digits (spaces, a `0x`
+prefix and `#` comment lines are fine). At mount the hub prints only a fingerprint of the
+matching public key; the status line shows `"o4":{"key":"loaded",...}` (or `none` / `bad`).
+Without the file, nothing changes: O4 stays detect-only with its session ID.
+
+**Key hygiene.** The key types have no debug or print form and are wiped from memory on drop; the
+file buffer is wiped after reading. The key is never printed, logged, sent between boards or
+written to the evidence log. `.gitignore` excludes `O4KEY.TXT` and `*o4key*` files.
+
+**Evidence.** The raw frame (ciphertext included) is logged as before. Each decrypted record adds
+an `o4_decrypted` event naming the session key ID and record type, with the decrypted serial and
+positions as text, marked as derived from the frame before it. Anyone with the same key can
+re-derive it from the raw record.
+
+**Privacy.** INFP-10 also carries the pilot's DJI account name. The hub never reads it into the
+tracker, the screen, any output or the evidence text. "Hide DroneID IDs" hides decrypted serials
+like plaintext ones.
+
+**Tested** with a key made up in the tests (`crates/djicrypt/src/tests.rs`): the test plays the
+aircraft (SM2 wrap and AES-CTR as the spec gives the sender side), the hub code undoes it, and the
+records pass `droneid`'s own structural checks first. Wrong keys, a changed C1, C2, C3 or key ID,
+wrong lengths and colliding key IDs are all refused, and no rejected CRYP leaves a key behind.
+**Not tested on a real aircraft** (no key exists for us to try).
 
 ## Needs a real O4 drone
 

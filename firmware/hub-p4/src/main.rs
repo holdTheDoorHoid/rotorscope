@@ -389,6 +389,16 @@ fn main() -> ! {
             });
         }
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
+        if let Some(k) = sdlog.take_o4_key() {
+            let fp = k.fingerprint();
+            app.o4.set_key(k);
+            let mut t: heapless::String<64> = heapless::String::new();
+            let _ = core::fmt::Write::write_fmt(
+                &mut t,
+                format_args!("O4 DroneID key installed (public fingerprint {:02x}{:02x}-{:02x}{:02x})", fp[0], fp[1], fp[2], fp[3]),
+            );
+            ev.event(evidence::format::EventCode::Setting, t.as_bytes(), &fp);
+        }
         #[cfg(feature = "gpsloop")]
         gpsloop.tick();
         #[cfg(feature = "modesloop")]

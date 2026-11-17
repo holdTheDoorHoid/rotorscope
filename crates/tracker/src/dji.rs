@@ -37,6 +37,7 @@
 
 use heapless::Vec;
 use libm::{atan2, hypot};
+use droneid::o4plain::Infp10;
 use link::{DroneIdRecord, DroneIdSighting};
 use rid::message::{
     Category, ClassificationType, DescType, FixedStr, HeightType, HorizontalAccuracy, IdType,
@@ -106,6 +107,10 @@ pub struct DjiInfo {
     pub undecoded: bool,
     /// O4 record types heard on this track.
     pub o4: O4Seen,
+    /// O4 records on this track were decrypted with the owner's key (the
+    /// hub's `djicrypt` layer): its serial and positions are real, not
+    /// just the session ID.
+    pub o4_decrypted: bool,
     pub ocusync: DjiLink,
     pub wifi: DjiLink,
 }
@@ -210,6 +215,7 @@ impl DjiInfo {
         self.key_id = self.key_id.or(other.key_id);
         self.undecoded &= other.undecoded;
         self.o4.absorb(&other.o4);
+        self.o4_decrypted |= other.o4_decrypted;
         self.ocusync.newer(&other.ocusync);
         self.wifi.newer(&other.wifi);
     }
@@ -541,4 +547,99 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         }
         Some(t.id)
     }
+
+    /// Apply one decrypted O4 record (the hub decrypts with the owner's
+    /// key; see `crates/djicrypt`). Call it after [`Tracker::ingest_droneid`]
+    /// fed the same record, which created or refreshed the session track.
+    ///
+    /// The serial joins the session track to any track already known by
+    /// that serial (Remote ID, plaintext DroneID); positions land as a
+    /// plaintext DroneID record's do. The pilot's DJI account ID that
+    /// INFP-10 carries is personal data and is never taken in.
+    pub fn ingest_o4_decrypted(&mut self, key_id: [u8; 4], rec: O4Decrypted<'_>, now_ms: u64) -> TrackId {
+        let serial = match rec {
+            O4Decrypted::Cryp(a) => a.serial_str(),
+            O4Decrypted::Infp10(t) => t.serial_str().filter(|_| t.has(Infp10::STATE_SERIAL_VALID)),
+            O4Decrypted::Infp11(p) => p.serial_str(),
+        }
+        .and_then(|s| serial_id(s.as_bytes()));
+        let session = self.dji_track_where(now_ms, |t| t.dji.key_id == Some(key_id));
+        self.tracks[session].dji.key_id = Some(key_id);
+        let i = match serial {
+            Some(sn) => {
+                let session_id = self.tracks[session].id;
+                let j = self.dji_track_by_serial(sn, now_ms);
+                // dji_track_by_serial may have moved indices; find the
+                // session track again and fold it into the serial's.
+                match self.tracks.iter().position(|t| t.id == session_id) {
+                    Some(s) if s != j => self.merge_into(j, core::iter::once(s), &[]),
+                    _ => j,
+                }
+            }
+            None => session,
+        };
+        let hide = self.config.hide_droneid_ids;
+        let t = &mut self.tracks[i];
+        t.dji.key_id = Some(key_id);
+        t.dji.o4_decrypted = true;
+        t.dji.undecoded = false;
+        t.last_seen_ms = t.last_seen_ms.max(now_ms);
+        match rec {
+            O4Decrypted::Cryp(a) => {
+                let fix = Fix {
+                    position: a.position_valid().then(|| rad_e7_position(a.lat_raw, a.lon_raw)).flatten(),
+                    alt_m: None,
+                    height_m: None,
+                    motion: None,
+                    pilot: None,
+                    home: None,
+                };
+                if fix.position.is_some() {
+                    t.apply_dji(&fix, crate::Source::DroneId, now_ms);
+                }
+            }
+            O4Decrypted::Infp10(r) => {
+                let fix = Fix {
+                    position: r.has(Infp10::STATE_POSITION_VALID).then(|| rad_e7_position(r.lat_raw, r.lon_raw)).flatten(),
+                    // INFP-10 altitude is metres and height decimetres
+                    // (not feet as in OcuSync 2).
+                    alt_m: r.has(Infp10::STATE_ALTITUDE_VALID).then_some(f32::from(r.altitude_m)),
+                    height_m: r.has(Infp10::STATE_HEIGHT_VALID).then_some(r.height_m() as f32),
+                    motion: r.has(Infp10::STATE_HVEL_VALID).then(|| {
+                        let (s, tr, v) = motion(r.v_north, r.v_east, r.v_up);
+                        (s, tr, if r.has(Infp10::STATE_VVEL_VALID) { v } else { 0.0 })
+                    }),
+                    pilot: r
+                        .has(Infp10::STATE_APP_POSITION_VALID)
+                        .then(|| rad_e7_position(r.app_lat_raw, r.app_lon_raw))
+                        .flatten(),
+                    home: r.home_set().then(|| rad_e7_position(r.home_lat_raw, r.home_lon_raw)).flatten(),
+                };
+                t.apply_dji(&fix, crate::Source::DroneId, now_ms);
+                if r.product_type != 0 {
+                    t.dji.product_type = Some(r.product_type);
+                }
+            }
+            O4Decrypted::Infp11(p) => {
+                if let Some(text) = p.purpose_str()
+                    && !hide
+                    && !text.is_empty()
+                {
+                    let b = text.as_bytes();
+                    if let Ok(d) = FixedStr::<23>::new(&b[..b.len().min(23)]) {
+                        t.self_id = Some(Stamped { value: SelfId { desc_type: DescType::Text, description: d }, rx_ms: now_ms });
+                    }
+                }
+            }
+        }
+        t.id
+    }
+}
+
+/// One decrypted O4 record, as [`Tracker::ingest_o4_decrypted`] takes it.
+#[derive(Clone, Copy, Debug)]
+pub enum O4Decrypted<'a> {
+    Cryp(&'a droneid::o4plain::CrypAux),
+    Infp10(&'a Infp10),
+    Infp11(&'a droneid::o4plain::Infp11),
 }

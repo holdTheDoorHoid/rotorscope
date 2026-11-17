@@ -163,6 +163,17 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         );
     }
     let s = &gw.stats;
+    let o = &app.o4.stats;
+    let _ = write!(
+        w.0,
+        "}},\"o4\":{{\"key\":\"{}\",\"sessions\":{},\"unwrapped\":{},\"decrypted\":{},\"no_session\":{},\"rejected\":{}",
+        if app.o4.has_key() { "loaded" } else { sd.o4_key_state },
+        app.o4.sessions().count(),
+        o.sessions_unwrapped,
+        o.records_decrypted,
+        o.no_session,
+        o.rejected,
+    );
     let _ = writeln!(
         w.0,
         "}},\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{}}},\"console_drops\":{}}}",

@@ -78,6 +78,9 @@ pub struct App {
     pub manual: Option<OwnPos>,
     /// New drones since the last report, for the `{"t":"new"}` lines.
     pub new_drones: heapless::Deque<u32, 8>,
+    /// O4 DroneID decryption; detect-only until the SD card supplies the
+    /// owner's key (`sd::Logger::take_o4_key`).
+    pub o4: djicrypt::Decryptor<8>,
 }
 
 impl App {
@@ -96,6 +99,7 @@ impl App {
             max_band_us: 0,
             manual: None,
             new_drones: heapless::Deque::new(),
+            o4: djicrypt::Decryptor::default(),
         }
     }
 
@@ -105,7 +109,69 @@ impl App {
             let relay = node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| (n.mac, n.rssi));
             ev.frame(node, relay, &f);
             self.tracker.ingest_frame(node, &f, now);
+            if let link::Frame::DroneId(link::DroneIdSighting {
+                record: link::DroneIdRecord::O4 { key_id, object, .. },
+                ..
+            }) = &f
+                && self.o4.has_key_or_sessions()
+            {
+                self.decrypt_o4(*key_id, object, ev, now);
+            }
         }
+        self.announce_new(now);
+    }
+
+    /// Decrypt one O4 record with the owner's key and fold it into its
+    /// track; log a derived evidence record (the raw frame, ciphertext
+    /// included, was logged just before). The key is never logged.
+    fn decrypt_o4(&mut self, key_id: [u8; 4], object: &[u8], ev: &mut crate::evlog::Evidence, now: u64) {
+        use core::fmt::Write;
+        use djicrypt::Plain;
+        use tracker::O4Decrypted;
+        let plain = match self.o4.process(object, now) {
+            Ok(p) => p,
+            Err(djicrypt::Error::NoSession | djicrypt::Error::NoKey) => return,
+            Err(e) => {
+                crate::println!("hub-p4: O4 {:02x}{:02x}{:02x}{:02x} not decrypted: {e:?}", key_id[0], key_id[1], key_id[2], key_id[3]);
+                return;
+            }
+        };
+        let (rec, sel) = match &plain {
+            Plain::Cryp(a) => (O4Decrypted::Cryp(a), 0x13u8),
+            Plain::Infp10(t) => (O4Decrypted::Infp10(t), 0x10),
+            Plain::Infp11(p) => (O4Decrypted::Infp11(p), 0x11),
+        };
+        self.tracker.ingest_o4_decrypted(key_id, rec, now);
+        let mut text: heapless::String<160> = heapless::String::new();
+        let deg = droneid::payload::rad_e7_to_deg;
+        let _ = match &plain {
+            Plain::Cryp(a) => write!(
+                text,
+                "CRYP sn={} pos={:.6},{:.6} valid={}",
+                a.serial_str().unwrap_or("?"),
+                deg(a.lat_raw),
+                deg(a.lon_raw),
+                a.position_valid()
+            ),
+            Plain::Infp10(t) => write!(
+                text,
+                "INFP-10 sn={} pos={:.6},{:.6} alt={}m h={:.1}m pilot={:.6},{:.6} type={} state={:04x}",
+                t.serial_str().unwrap_or("?"),
+                t.lat(),
+                t.lon(),
+                t.altitude_m,
+                t.height_m(),
+                deg(t.app_lat_raw),
+                deg(t.app_lon_raw),
+                t.product_type,
+                t.state
+            ),
+            Plain::Infp11(p) => write!(text, "INFP-11 sn={} purpose", p.serial_str().unwrap_or("?")),
+        };
+        let mut data = [0u8; 5];
+        data[..4].copy_from_slice(&key_id);
+        data[4] = sel;
+        ev.event(evidence::format::EventCode::O4Decrypted, text.as_bytes(), &data);
         self.announce_new(now);
     }
 

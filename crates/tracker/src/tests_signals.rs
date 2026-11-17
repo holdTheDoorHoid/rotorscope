@@ -942,3 +942,88 @@ fn memory_footprint() {
         size_of::<signals::NodeTable>(),
     );
 }
+
+/// A decrypted INFP-10 over City Hall (what the hub's `djicrypt` layer
+/// hands the tracker once the owner's key unwrapped the session).
+fn infp10_plain(sn: &str) -> droneid::o4plain::Infp10 {
+    use droneid::o4plain::{HOME_UNSET, Infp10};
+    let mut account = [0u8; 20];
+    account[..9].copy_from_slice(b"pilot-acc");
+    Infp10 {
+        version: 2,
+        seq: 1,
+        state: Infp10::STATE_SERIAL_VALID
+            | Infp10::STATE_MOTORS_ON
+            | Infp10::STATE_IN_AIR
+            | Infp10::STATE_POSITION_VALID
+            | Infp10::STATE_ALTITUDE_VALID
+            | Infp10::STATE_HEIGHT_VALID
+            | Infp10::STATE_HVEL_VALID
+            | Infp10::STATE_APP_POSITION_VALID,
+        serial: serial16(sn),
+        lon_raw: rad_e7(CITY_HALL.1),
+        lat_raw: rad_e7(CITY_HALL.0),
+        altitude_m: 120,
+        height_dm: 805,
+        v_north: 300,
+        v_east: 0,
+        v_up: 0,
+        heading_cdeg: 0,
+        gps_time_ms: 1_794_232_987_250,
+        app_lat_raw: rad_e7(39.9530),
+        app_lon_raw: rad_e7(-75.1640),
+        home_lon_raw: HOME_UNSET,
+        home_lat_raw: HOME_UNSET,
+        product_type: 84,
+        identity_len: 0,
+        identity: [0; 20],
+        account_len: 9,
+        account,
+    }
+}
+
+#[test]
+fn decrypted_o4_joins_its_serial_and_gets_positions() {
+    let k = [0xde, 0xad, 0xbe, 0xef];
+    let mut tr: Tracker = Tracker::default();
+    // Remote ID heard first, with the same serial the O4 records carry.
+    let rid = det(Transport::BleLegacy, WIFI_MAC, -60, &[serial(SN)]);
+    tr.ingest(0, &rid, 500);
+    tr.ingest_droneid(2, &o4(link::O4Kind::Cryp, k), 1_000);
+    assert_eq!(tr.len(), 2, "session track apart until decrypted");
+    let p = infp10_plain(SN);
+    tr.ingest_droneid(2, &o4(link::O4Kind::Infp10, k), 1_640);
+    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_640);
+    assert_eq!(tr.len(), 1, "session folded into the serial's track");
+    let t = tr.get(id).unwrap();
+    assert!(t.dji.o4_decrypted);
+    assert_eq!(t.dji.key_id, Some(k));
+    assert_eq!(t.dji.product_type, Some(84));
+    let loc = &t.location.as_ref().unwrap().value;
+    assert!((loc.position.unwrap().lat - CITY_HALL.0).abs() < 1e-5);
+    assert_eq!(loc.altitude_pressure, Some(120.0));
+    assert_eq!(loc.height, Some(80.5));
+    assert!((loc.speed_horizontal.unwrap() - 3.0).abs() < 1e-3);
+    let pilot = t.system.as_ref().unwrap().value.operator_position.unwrap();
+    assert!((pilot.lat - 39.9530).abs() < 1e-5);
+    assert!(t.home.is_none(), "home unset sentinel");
+    // JSON says decrypted, not encrypted; the account ID appears nowhere.
+    let ctx = tr.context(1_700, None);
+    let v = json_of(t, &ctx);
+    assert_eq!(v["dji"]["decrypted"], true);
+    assert_eq!(v["dji"]["encrypted"], false);
+    assert!(!std::format!("{v}").contains("pilot-acc"));
+}
+
+#[test]
+fn decrypted_o4_without_a_known_serial_track_keeps_the_session_track() {
+    let k = [1, 2, 3, 4];
+    let mut tr: Tracker = Tracker::default();
+    tr.ingest_droneid(2, &o4(link::O4Kind::Cryp, k), 1_000);
+    let p = infp10_plain(SN);
+    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_100);
+    assert_eq!(tr.len(), 1);
+    let t = tr.get(id).unwrap();
+    assert!(t.dji.serial.is_some() && t.dji.o4_decrypted);
+    assert!(t.location.is_some());
+}

@@ -21,3 +21,8 @@ tools/airspace-pack/cache/
 # Evidence signing keys (development keys: never commit)
 *.evkey
 evidence-data/
+
+# O4 DroneID keys are the owner's and never belong in this public repository.
+O4KEY.TXT
+*.o4key
+*o4key*.txt

@@ -91,6 +91,10 @@ faarules = { path = "../../crates/faarules" }
 gnss = { path = "../../crates/gnss" }
 # Phase 13: the evidence log (hash chain, signed checkpoints, software key).
 evidence = { path = "../../crates/evidence", features = ["soft-signer", "decode"] }
+# O4 DroneID decryption with the owner's key from the SD card (ROTORSCP/O4KEY.TXT).
+djicrypt = { path = "../../crates/djicrypt" }
+droneid = { path = "../../crates/droneid", default-features = false }
+zeroize = { version = "1", default-features = false }
 # `encode`: the web-head feed re-prints ADSBee reports as CSBee lines.
 adsb = { path = "../../crates/adsb", features = ["encode"] }
 # Phase 14a, feature `modes`: our Mode S / ADS-B decoder.
