@@ -116,6 +116,18 @@ switching images is the multi-image layout's business. Console: `role droneid|fp
 against hub assignments until `role auto`, for bench work), `hop on|off`
 (`freq` parks the node), `plan`, `assign <role> <id> [f:ms ...]`, `fpv verbose on|off`, `uplink [now]`.
 
+### Jamming watch (2026-11-17, not yet run on a chip)
+
+Every dwell of either job is also judged for jamming (`crates/jamwatch`, `src/radio/jam.rs`,
+docs/JAMMING.md): the probes' levels against a per-hop floor that cannot learn a jammer, plus a
+128-frame 64-point spectrogram of the newest ring bytes at the end of the dwell (~2 ms, no extra
+air time); suspicious dwells get an `fpvscan` link check on 4096 samples (~25 ms). Findings go to
+the hub as `Frame::Threat` (`jam_broadband`, `jam_tone`, `jam_sweep`, `jam_pulsed`, `blinded`, each
+at most once a second) and to the console as `jam` lines; notable dwells print `jamhop`. Console:
+`jam` (counters, each hop's floor and latest verdict), `edge on|off` (FPV: one off-plan channel per
+round: 5181-5241 MHz O4 band and 5820-5945 MHz, the latter above the verified LO). The `link` line
+counts `threats`.
+
 ### FPV / RF scanner
 
 Each dwell: every trigger probe goes into a level meter (half-dB histogram); the noise floor is

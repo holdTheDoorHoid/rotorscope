@@ -11,6 +11,8 @@
 //! - `DroneId`: one per decoded or detected burst, as it comes.
 //! - `Rf`: FPV scanner verdicts, at most one per channel per [`RF_REPEAT_US`]
 //!   unless the kind changes.
+//! - `Threat` (protocol 9): jamming on the drone bands (`radio/jam.rs`), each
+//!   kind at most about once a second while it lasts.
 
 use heapless::{Deque, Vec};
 use link::{Assignment, Command, CommandDecoder, Frame, MAX_FRAME, NodeRole, PROTOCOL_VERSION, RfSighting};
@@ -39,6 +41,7 @@ pub struct Hub {
     pub hil_frames: u32,
     pub droneid: u32,
     pub rf: u32,
+    pub threats: u32,
     pub commands: u32,
     pub bad_commands: u32,
     dec: CommandDecoder,
@@ -67,6 +70,7 @@ impl Hub {
             hil_frames: 0,
             droneid: 0,
             rf: 0,
+            threats: 0,
             commands: 0,
             bad_commands: 0,
             dec: CommandDecoder::new(),
@@ -162,6 +166,13 @@ impl Hub {
         }
         self.rf += 1;
         self.push(&Frame::Rf(s));
+    }
+
+    /// Jamming seen by the node (`radio/jam.rs` already limits each kind to
+    /// about one a second).
+    pub fn threat(&mut self, s: link::ThreatSighting) {
+        self.threats += 1;
+        self.push(&Frame::Threat(s));
     }
 
     /// Feed hub-to-node bytes (one or more whole COBS command frames);

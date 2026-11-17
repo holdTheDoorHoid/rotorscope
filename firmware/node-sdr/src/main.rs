@@ -420,13 +420,14 @@ fn link_line(radio: &mut radio::Radio, hub: &hub::Hub) {
     use core::fmt::Write as _;
     let _ = write!(
         line,
-        r#"{{"t":"link","stack_free":{},"queued":{},"waiting":{},"dropped":{},"droneid":{},"rf":{},"hil_frames":{},"commands":{},"bad_commands":{}}}"#,
+        r#"{{"t":"link","stack_free":{},"queued":{},"waiting":{},"dropped":{},"droneid":{},"rf":{},"threats":{},"hil_frames":{},"commands":{},"bad_commands":{}}}"#,
         stack_free(),
         hub.queued,
         hub.len(),
         hub.dropped,
         hub.droneid,
         hub.rf,
+        hub.threats,
         hub.hil_frames,
         hub.commands,
         hub.bad_commands
@@ -440,6 +441,7 @@ fn drain_events(radio: &mut radio::Radio, hub: &mut hub::Hub) {
         match e {
             radio::Event::DroneId { s, hil } => hub.droneid(s, hil),
             radio::Event::Rf { s, mhz } => hub.rf(s, mhz),
+            radio::Event::Threat(s) => hub.threat(s),
         }
     }
     radio.events.clear();
@@ -481,6 +483,11 @@ fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
             println!(r#"{{"t":"ok","hop":{}}}"#, radio.hopping);
         }
         Local::Plan => print_plan(radio),
+        Local::Jam => radio.jam_report(),
+        Local::Edge(on) => {
+            radio.edge_on = on;
+            println!(r#"{{"t":"ok","edge":{on}}}"#);
+        }
         Local::FpvVerbose(on) => {
             radio.fpv_verbose = on;
             println!(r#"{{"t":"ok","fpv_verbose":{on}}}"#);

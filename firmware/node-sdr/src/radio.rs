@@ -24,6 +24,7 @@ use link::{DroneIdRecord, DroneIdSighting, NodeRole, RfKind, RfSighting};
 use crate::{engine, phy, ring, route};
 
 mod dji;
+mod jam;
 
 /// Something for the hub, drained by `main` after every call into the radio.
 #[derive(Clone, Debug)]
@@ -32,6 +33,8 @@ pub enum Event {
     DroneId { s: DroneIdSighting, hil: bool },
     /// An FPV verdict for the channel at `mhz`.
     Rf { s: RfSighting, mhz: u16 },
+    /// Jamming seen on the drone bands (`radio/jam.rs`).
+    Threat(link::ThreatSighting),
 }
 
 /// One hop: centre in 100 kHz units, dwell ms (as `link::Assignment::plan`).
@@ -239,6 +242,13 @@ pub struct Radio {
     pub fpv_verbose: bool,
     /// FPV: DJI link fingerprints (`crates/djilink`, `radio/dji.rs`).
     dji: dji::Dji,
+    /// Jamming watch over every dwell of either job (`radio/jam.rs`).
+    pub jam: jam::Jam,
+    /// FPV: visit one channel outside the main sweep after each round
+    /// (`radio/jam.rs` `EDGE_MHZ`); `edge` = on that visit now.
+    pub edge_on: bool,
+    edge: bool,
+    edge_idx: usize,
     sweep: SweepStats,
     /// A hardware-in-the-loop run is in progress (events are marked).
     hil: bool,
@@ -287,7 +297,7 @@ fn capture() -> &'static mut [C16] {
 
 impl Radio {
     pub fn new(s: Settings) -> Self {
-        Radio {
+        let mut r = Radio {
             s,
             trig: Trigger::new(s.trig),
             next_block: 0,
@@ -316,6 +326,10 @@ impl Radio {
             fpv_scratch: None,
             fpv_verbose: false,
             dji: dji::Dji::new(),
+            jam: jam::Jam::new(),
+            edge_on: true,
+            edge: false,
+            edge_idx: 0,
             sweep: SweepStats::default(),
             hil: false,
             hil_cap_crc: 0,
@@ -327,7 +341,9 @@ impl Radio {
             follow_stats: FollowStats::default(),
             follow_on: true,
             burst_us: 0,
-        }
+        };
+        r.jam.set_plan(&DRONEID_PLAN, false);
+        r
     }
 
     pub fn set_fpv_scratch(&mut self, s: &'static mut fpvscan::Scratch) {
@@ -380,6 +396,7 @@ impl Radio {
         self.held = Held::Nothing;
         self.pending = None;
         self.next_block = 0;
+        self.jam.probes.gap();
         if !self.phy_ok || self.s.mode == Mode::Idle {
             ring::stop();
             engine::stop();
@@ -485,6 +502,7 @@ impl Radio {
             // The probe may have been overwritten while summed: re-check.
             let (now, _) = ring::produced();
             if window_ok(self.next_block, self.next_block + cfg.probe as u64, now, NODE_BYTES) {
+                self.jam.probes.feed(if fpv { p_ac } else { p });
                 if self.role == NodeRole::Fpv {
                     self.meter.feed(p_ac);
                     self.dji.timeline.feed(p_ac);
@@ -1256,6 +1274,7 @@ impl Radio {
         self.set_role(role);
         self.plan = p;
         self.plan_id = id;
+        self.jam.set_plan(&self.plan, role == NodeRole::Fpv && self.edge_on);
         self.hopping = true;
         self.hop_idx = self.plan.len() - 1;
         self.hop_until_us = 0;
@@ -1277,6 +1296,7 @@ impl Radio {
         };
         self.trig.reset();
         self.floors.reset();
+        self.jam.watch.reset();
         self.sweep = SweepStats { t0_us: now_us(), ..SweepStats::default() };
         self.events.clear();
         self.visit = None;
@@ -1296,10 +1316,12 @@ impl Radio {
 
     /// End the current dwell (FPV: judge the channel) without retuning.
     pub fn end_dwell(&mut self) {
-        if self.role == NodeRole::Fpv && self.hop_until_us != 0 {
-            self.fpv_judge();
-        }
         ring::stop();
+        if self.hop_until_us == 0 {
+            return;
+        }
+        let link = if self.role == NodeRole::Fpv { self.fpv_judge() } else { None };
+        self.jam_judge(link);
     }
 
     /// A valid O4 record of session `key_id` was decoded from the burst at
@@ -1367,6 +1389,18 @@ impl Radio {
             Ok(()) => return,
             Err(c) => c,
         };
+        // FPV: after the last channel of a round, one channel outside the
+        // main sweep (rotating), before the next round starts.
+        if self.role == NodeRole::Fpv && self.edge_on && !self.edge && self.hop_idx + 1 == self.plan.len() {
+            self.edge = true;
+            let mhz = jam::EDGE_MHZ[self.edge_idx % jam::EDGE_MHZ.len()];
+            self.edge_idx = self.edge_idx.wrapping_add(1);
+            self.cur_freq = mhz as u32 * 10;
+            self.tune_quiet(mhz - fpvscan::channels::OFFSET_MHZ, FPV_DCAL_MHZ);
+            self.hop_until_us = now_us() + fpvscan::channels::DWELL_MS as u64 * 1000;
+            return;
+        }
+        self.edge = false;
         self.hop_idx = (self.hop_idx + 1) % self.plan.len();
         if self.hop_idx == 0 && self.role == NodeRole::Fpv && self.sweep.n > 0 {
             self.sweep_line();
@@ -1400,6 +1434,7 @@ impl Radio {
         }
         self.trig.reset();
         self.meter.reset();
+        self.jam.begin(self.cur_freq);
         self.fpv_cap = false;
         self.restart();
     }
@@ -1414,7 +1449,9 @@ impl Radio {
     }
 
     /// FPV: the dwell is over; measure, analyse if loud, classify, report.
-    fn fpv_judge(&mut self) {
+    /// Returns, when the capture was analysed, whether it held a recognised
+    /// link (for the jamming watch).
+    fn fpv_judge(&mut self) -> Option<bool> {
         ring::stop();
         if !self.fpv_cap {
             // Nothing rose: a quiet channel, or a continuous transmitter the
@@ -1461,8 +1498,9 @@ impl Radio {
             };
             let _ = write!(
                 line,
-                r#","lo":{},"snr_db":{},"duty":{},"floor":{},"probes":{},"kind":"{}""#,
+                r#","lo":{},"edge":{},"snr_db":{},"duty":{},"floor":{},"probes":{},"kind":"{}""#,
                 self.s.mhz,
+                self.edge,
                 d.snr_db,
                 d.duty_pct,
                 Dec1(floor),
@@ -1492,6 +1530,12 @@ impl Radio {
             }
             println!("{}}}", line.as_str());
         }
+        let link = a.map(|_| {
+            use fpvscan::Kind::*;
+            matches!(kind, AnalogVideo | LteStyle | Wifi | WifiNarrow)
+                || (kind == Energy && extra.dsss >= fpvscan::dsss::DSSS_MIN)
+                || dji.as_ref().is_some_and(|j| j.verdict.is_some())
+        });
         if let Some((k, freq, width_khz, hopping)) = dji.and_then(|j| j.report) {
             let s = RfSighting { kind: k, freq, width_khz, snr_db: d.snr_db, duty_pct: d.duty_pct, line_hz: 0, uptime_us: now_us() };
             // A hopping controller is one emitter: rate-limit it as one
@@ -1509,6 +1553,7 @@ impl Radio {
             };
             let _ = self.events.push(Event::Rf { s, mhz });
         }
+        link
     }
 
     fn sweep_line(&mut self) {
@@ -1620,6 +1665,7 @@ impl Radio {
         route::set_lanes(&self.s.pins, self.lanes());
         self.trig.reset();
         self.meter.reset();
+        self.jam.begin(self.cur_freq);
         self.fpv_cap = false;
         self.restart();
         rb.txq_off && rb.gain_forced && rb.agc_off
@@ -1672,6 +1718,7 @@ fn help() {
         "dump [raw|c16] [b64|hex] | resend <first> [last] | resume",
         "role droneid|fpv | hop on|off | plan | assign droneid|fpv <id> [<f100k>:<ms> ...]",
         "fpv verbose on|off | uplink [now] | hil run <len> <crc32> (after @F lines)",
+        "jam (jamming watch state) | edge on|off (FPV off-plan channel each round)",
     ] {
         println!(r#"{{"t":"help","l":"{l}"}}"#);
     }

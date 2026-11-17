@@ -7,7 +7,7 @@ members = [
     "crates/gnss", "crates/screen", "crates/webui",
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap", "crates/airlink",
     "crates/coverage", "crates/nodeimage", "crates/fpvscan", "crates/djilink",
-    "crates/wifidrone", "crates/wifiwatch",
+    "crates/wifidrone", "crates/wifiwatch", "crates/jamwatch",
     "crates/sdnative",
     "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence", "crates/djicrypt",
@@ -39,3 +39,12 @@ droneid = { path = "crates/droneid", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
 heapless = { version = "0.8", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["heapless"] }
+
+# The jamming tests push millions of synthetic samples through the DSP
+# crates; unoptimised they take minutes.
+[profile.dev.package.jamwatch]
+opt-level = 2
+[profile.dev.package.fpvscan]
+opt-level = 2
+[profile.dev.package.rawcap]
+opt-level = 2
