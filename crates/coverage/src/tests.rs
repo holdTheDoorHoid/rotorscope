@@ -530,3 +530,27 @@ fn droneid_58_covers_the_5_mhz_raster() {
         assert!(DRONEID_58.contains(&c));
     }
 }
+
+#[test]
+fn fpv_edge_channels_are_off_the_sweep_and_tunable() {
+    let sw = fpv_sweep();
+    assert!(FPV_EDGE.windows(2).all(|w| w[0] < w[1]));
+    for &f in FPV_EDGE {
+        assert!(!sw.contains(&f), "{f} is already swept");
+        let lo = f / 10 - 1;
+        // The C5 PLL takes any whole MHz; the receive path is measured from
+        // 5180 MHz up. Above C5_LO_VERIFIED_MAX it is unverified.
+        assert!((5180..=5950).contains(&lo), "{f}: LO {lo}");
+    }
+    // The 5.1 GHz O4 band is covered whole by 20 MHz captures (+-10 MHz
+    // around each LO, which sits 1 MHz below the carrier).
+    let o4: std::vec::Vec<u32> = FPV_EDGE.iter().map(|&f| f - 10).filter(|&lo| lo < 53_000).collect();
+    assert!(o4.first().is_some_and(|&lo| lo - 100 <= 51_700) && o4.last().is_some_and(|&lo| lo + 100 >= 52_500));
+    assert!(o4.windows(2).all(|w| w[1] - w[0] <= 200));
+    // Every upper 5.8 GHz analog channel the sweep skips is within 10 MHz
+    // of an edge carrier.
+    for &f in FPV_CHANNELS.iter().filter(|&&f| f > FPV_C5_MAX) {
+        assert!(FPV_EDGE.iter().any(|&e| e.abs_diff(f) <= 100), "{f} not covered");
+    }
+    assert!(FPV_EDGE.iter().any(|&f| f / 10 - 1 > C5_LO_VERIFIED_MAX), "the unverified ones are marked by this constant");
+}

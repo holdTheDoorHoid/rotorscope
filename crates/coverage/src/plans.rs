@@ -88,6 +88,25 @@ pub const FPV_C5_MAX: u32 = 58100;
 /// Most channels in [`fpv_sweep`].
 pub const FPV_SWEEP_MAX: usize = 64;
 
+/// Off-plan channels every FPV node visits, one after each round of its
+/// plan, rotating (100 kHz units). Not split between nodes and not part of
+/// an assignment: the node adds them itself (`firmware/node-sdr`
+/// `radio/jam.rs` `EDGE_MHZ`, which must match). They watch the parts of
+/// the band a drone could use to slip past the main sweep:
+///
+/// - 5181-5241: the 5.170-5.250 GHz video band only DJI O4 (and some
+///   Autel) products use; LO 5180-5240, inside the C5's measured reach.
+/// - 5820-5945: the 5.8 GHz FPV channels above the main sweep's reach
+///   ([`FPV_C5_MAX`]). Their LO (5819-5944 MHz) is above the highest one
+///   verified on a chip (5816): UNVERIFIED until a bench run shows sane
+///   floors there.
+///
+/// 2.3 GHz is deliberately absent (satellite radio and LTE live there as
+/// continuous OFDM; see docs/JAMMING.md).
+pub const FPV_EDGE: &[u32] = &[51810, 52010, 52210, 52410, 58200, 58400, 58600, 58800, 59050, 59250, 59450];
+/// Highest LO verified on a chip (MHz): the DroneID plan's top hop.
+pub const C5_LO_VERIFIED_MAX: u32 = 5816;
+
 /// What FPV nodes split between them: every 2.4 GHz channel, then the
 /// 5.8 GHz channels a C5 can reach (31 of 47; sending the others would
 /// only be dropped by the node and unbalance the split). 46 in all, so two
