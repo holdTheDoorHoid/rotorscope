@@ -1166,3 +1166,5 @@ mod tests_aircraft;
 mod tests_openlinks;
 #[cfg(test)]
 mod tests_signals;
+#[cfg(test)]
+mod tests_spoof;
