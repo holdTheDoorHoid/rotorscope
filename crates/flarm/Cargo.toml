@@ -1,0 +1,22 @@
+[package]
+name = "flarm"
+description = "no_std receive-only decoders for the 902-928 / 868 MHz FLARM family: OGN tracker packets, and (feature `legacy`) FLARM legacy v6/v7 with runtime-loaded keys"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# FLARM legacy (v6/v7) decoding. Off by default: the hub opts in, and needs
+# the key file (ROTORSCP/FLARMKEY.TXT) at run time. No key is in this crate.
+legacy = []
+
+[dependencies]
+# The decoded aircraft is the same record the tracker already ingests.
+adsb.workspace = true
+# atan2, sqrt and round without std.
+libm = "0.2"
+
+[dev-dependencies]
+# Tests always see the optional decoder, and the CSBee encoder.
+flarm = { path = ".", features = ["legacy"] }
+adsb = { workspace = true, features = ["encode"] }
