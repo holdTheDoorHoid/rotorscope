@@ -15,8 +15,8 @@
 //! | [`Verdict::DroneIdBurst`] | 15 kHz | 8-10.5 MHz (and >= 5 at -3 dB) | one whole 0.45-0.8 ms burst, dwell nearly silent | anywhere |
 //! | [`Verdict::O4Video`] | 30 kHz | >= 7 MHz and >= 5.5 at -3 dB, or a burst >= 8.8 MHz | anything else | anywhere |
 //! | [`Verdict::O4Video`] | 15 kHz | >= 7 MHz (and >= 5 at -3 dB) | anything else | 5.170-5.250 GHz |
-//! | [`Verdict::Video`] | 15 kHz | >= 7 MHz | | centre on the x.5 MHz raster, or unknown (clipped) |
-//! | [`Verdict::FpvAirUnit`] | 15 kHz | >= 7 MHz | | a whole-MHz DJI FPV channel, off the x.5 raster |
+//! | [`Verdict::Video`] | 15 kHz | >= 7 MHz | | centre on the x.5 MHz raster, or unknown (clipped, or wider than 12 MHz) |
+//! | [`Verdict::FpvAirUnit`] | 15 kHz | 7-12 MHz | | a whole-MHz DJI FPV channel, off the x.5 raster (unconfirmed: the one DJI FPV system recorded, the FPV Combo, sat on 5770.5) |
 //! | [`Verdict::Ofdm15`] | 15 kHz | anything else (a measured centre on neither raster: e.g. Autel), or extended prefix | | |
 //!
 //! [`Verdict::Ofdm30`] is 30 kHz OFDM of no DJI shape.
@@ -110,6 +110,9 @@ pub const VIDEO_MIN_WIDTH_KHZ: u32 = 7_000;
 /// ...and wide at -3 dB too: a weak narrow signal barely over the noise
 /// reads wide at -10 dB (the noise is within 10 dB of it), not at -3 dB.
 pub const WIDE_MIN_W3_KHZ: u32 = 5_000;
+
+/// Widest signal (kHz, -10 dB) whose measured centre the raster tests use.
+pub const RASTER_MAX_W10_KHZ: u32 = 12_000;
 
 /// The absolute centre (kHz) of the capture's signal, if it was all inside
 /// the capture.
@@ -219,7 +222,13 @@ pub fn classify(f: &Features, c: &Context) -> Option<Verdict> {
         if in_band {
             return Some(Verdict::O4Video);
         }
-        if let Some(k) = centre_khz(f, c) {
+        // The raster tests need a centre to tens of kHz: only the 10 MHz
+        // modes give one. An 18 MHz signal reaches the half-band's roll-off
+        // at both edges of the capture, and its centre came out 0.1-2.1 MHz
+        // low (RFUAV FPV Combo, 20 MHz mode, true 5770.50 at full rate).
+        if let Some(k) = centre_khz(f, c)
+            && f.spec.w10_khz <= RASTER_MAX_W10_KHZ
+        {
             if plan::on_half_raster(k) {
                 return Some(Verdict::Video);
             }

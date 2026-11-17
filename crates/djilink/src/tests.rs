@@ -437,10 +437,13 @@ fn fpv_air_unit_by_whole_mhz_channel() {
     // The same signal 1.5 MHz lower is on the OcuSync x.5 raster (5768.5).
     let fe = run(&packets(&dji10(), 300.0, -0.5e6, 0.0, 4), 5);
     assert_eq!(classify(&fe, &ctx(5769.0)), Some(Verdict::Video));
-    // A 20 MHz link centred in the capture on channel 3 (5735).
+    // A 20 MHz link centred in the capture on channel 3 (5735): its centre
+    // is not trusted for the raster (updated: the RFUAV FPV Combo's 20 MHz
+    // video, truly on 5770.50, measured 5768.4-5770.4 through the C5), so
+    // plain DJI video.
     let fe = run(&packets(&dji20(), 300.0, 0.0, 0.0, 6), 7);
     show("v1 ch3 20 MHz", &fe);
-    assert_eq!(classify(&fe, &ctx(5735.0)), Some(Verdict::FpvAirUnit));
+    assert_eq!(classify(&fe, &ctx(5735.0)), Some(Verdict::Video));
     // Clipped (centre unknown): never an air-unit claim.
     let fe = run(&packets(&dji20(), 300.0, 1.0e6, 0.0, 6), 7);
     assert!(fe.spec.clipped());
