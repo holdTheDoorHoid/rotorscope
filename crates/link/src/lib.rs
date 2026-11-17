@@ -39,7 +39,11 @@ use serde::{Deserialize, Serialize};
 ///   Appended, so every v7 `DroneId` frame encodes exactly as before; a v7
 ///   hub counts a `DroneId` frame carrying an `O4` record as corrupt and
 ///   carries on. Nodes from v8 send `O4` instead of `Encrypted`.
-pub const PROTOCOL_VERSION: u8 = 8;
+/// - 9: adds [`Frame::Threat`]: attacks on Wi-Fi or Bluetooth (deauth floods,
+///   beacon spam, evil twins...) and jamming on drone bands, as seen by a
+///   node. Appended, so every v8 frame encodes exactly as before; a v8 hub
+///   counts a `Threat` frame as corrupt and carries on.
+pub const PROTOCOL_VERSION: u8 = 9;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -233,6 +237,117 @@ pub struct WifiDroneSighting {
     pub uptime_us: u64,
 }
 
+/// Protocol 9. What kind of hostile or disruptive radio activity a node saw.
+/// Not a drone: something attacking the radios around it (or ours), or
+/// drowning out the bands drones use. Keep new kinds last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreatKind {
+    /// 802.11 deauthentication frames (subtype 12) well above the
+    /// background rate. `detail` = the most common reason code.
+    Deauth,
+    /// 802.11 disassociation frames (subtype 10), likewise.
+    Disassoc,
+    /// Many networks appearing at once, usually from random addresses
+    /// (beacon spam). `detail` = distinct names in the window.
+    BeaconFlood,
+    /// A known network name from a second transmitter that does not match
+    /// the first (different security, channel or vendor). `ssid` = the
+    /// name, `source` = the newcomer, `target` = the original.
+    EvilTwin,
+    /// One transmitter beaconing or answering probes for many network names
+    /// (Karma / Wi-Fi Pineapple style). `detail` = distinct names.
+    Karma,
+    /// Channel Switch Announcements sent to move clients off a channel.
+    /// `detail` = the channel they are told to move to.
+    ChannelSwitch,
+    /// Authentication / association request flood at one access point.
+    AuthFlood,
+    /// Probe request flood. `detail` = distinct source addresses.
+    ProbeFlood,
+    /// A known attack tool's own signature (Pwnagotchi beacon, ESP32 attack
+    /// firmware...). `detail` = index into the tool table on the hub.
+    AttackTool,
+    /// Bluetooth advertising spam (pairing pop-up floods, random addresses).
+    /// `detail` = distinct addresses in the window.
+    BleSpam,
+    /// Noise floor raised across a wide span (barrage jamming).
+    /// `level` = rise above the learned floor, dB.
+    JamBroadband,
+    /// A strong unmodulated or narrow tone sitting on a band.
+    JamTone,
+    /// A carrier sweeping across the band (chirp jammer). `detail` = sweep
+    /// rate, MHz per second.
+    JamSweep,
+    /// Strong pulsed or reactive interference (on only part of the time).
+    JamPulsed,
+    /// The node can hear almost nothing it normally hears while the band is
+    /// loud: it is effectively blind. `detail` = percent of the usual
+    /// frame rate still arriving.
+    Blinded,
+}
+
+impl ThreatKind {
+    pub fn name(self) -> &'static str {
+        use ThreatKind::*;
+        match self {
+            Deauth => "deauth",
+            Disassoc => "disassoc",
+            BeaconFlood => "beacon_flood",
+            EvilTwin => "evil_twin",
+            Karma => "karma",
+            ChannelSwitch => "channel_switch",
+            AuthFlood => "auth_flood",
+            ProbeFlood => "probe_flood",
+            AttackTool => "attack_tool",
+            BleSpam => "ble_spam",
+            JamBroadband => "jam_broadband",
+            JamTone => "jam_tone",
+            JamSweep => "jam_sweep",
+            JamPulsed => "jam_pulsed",
+            Blinded => "blinded",
+        }
+    }
+
+    /// Jamming rather than a protocol attack.
+    pub fn is_jamming(self) -> bool {
+        use ThreatKind::*;
+        matches!(self, JamBroadband | JamTone | JamSweep | JamPulsed | Blinded)
+    }
+}
+
+/// Protocol 9. One threat, summarised over a window (sent at most about
+/// once a second per kind and target while it lasts).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreatSighting {
+    pub kind: ThreatKind,
+    /// Wi-Fi channel number (Wi-Fi kinds) or BLE advertising channel, 0 if
+    /// unknown.
+    pub channel: u8,
+    /// Centre frequency, 100 kHz units; 0 if unknown. Raw-capture (jamming)
+    /// kinds always set it.
+    pub freq: u32,
+    /// Affected width, kHz; 0 if unknown.
+    pub width_khz: u32,
+    /// Frame kinds: strongest RSSI in the window, dBm. Jamming kinds: rise
+    /// above the node's learned floor, dB.
+    pub level: i8,
+    /// Frames, bursts or dwells counted in the window.
+    pub count: u32,
+    /// Length of the window, ms.
+    pub window_ms: u32,
+    /// Transmitter address (display order); all zero when unknown or when
+    /// the frames came from many random addresses.
+    pub source: [u8; 6],
+    /// Who is being hit: a BSSID or station, all 0xFF for broadcast, all zero
+    /// if not applicable.
+    pub target: [u8; 6],
+    /// Kind-specific number (see [`ThreatKind`]).
+    pub detail: u32,
+    /// Network name involved (evil twin, Karma, tool), may be empty.
+    pub ssid: heapless::String<32>,
+    pub uptime_us: u64,
+}
+
 /// Protocol 5. A GPS receiver's state, as a hub reports it to a web head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GnssState {
@@ -402,6 +517,8 @@ pub enum Frame {
     /// Protocol 6, hub to web head only: possible FAA rule violations on one
     /// track (PLAN.md Phase 12).
     Flags(FlagReport),
+    /// Protocol 9: an attack or jamming seen by a node.
+    Threat(ThreatSighting),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -728,6 +845,39 @@ mod tests {
             dec.feed(encode(&f, &mut buf).unwrap(), |r| got = Some(r));
             assert_eq!(got, Some(Ok(f)));
         }
+    }
+
+    /// Protocol 9 appended `Frame::Threat` as tag 13; every kind round-trips
+    /// and the largest fits a frame.
+    #[test]
+    fn protocol_9_threat_appended() {
+        let mut buf = [0u8; MAX_FRAME];
+        let mut dec = Decoder::new();
+        for k in 0..=14u8 {
+            let kind: ThreatKind = postcard::from_bytes(&[k]).unwrap();
+            let f = Frame::Threat(ThreatSighting {
+                kind,
+                channel: u8::MAX,
+                freq: u32::MAX,
+                width_khz: u32::MAX,
+                level: i8::MIN,
+                count: u32::MAX,
+                window_ms: u32::MAX,
+                source: [0xFF; 6],
+                target: [0xFF; 6],
+                detail: u32::MAX,
+                ssid: heapless::String::try_from("x".repeat(32).as_str()).unwrap(),
+                uptime_us: u64::MAX,
+            });
+            let wire = encode(&f, &mut buf).unwrap();
+            assert!(wire.len() < MAX_FRAME);
+            assert_eq!(postcard::to_slice(&f, &mut [0u8; MAX_FRAME]).unwrap()[0], 13);
+            let mut got = None;
+            dec.feed(wire, |r| got = Some(r));
+            assert_eq!(got, Some(Ok(f)));
+        }
+        assert!(postcard::from_bytes::<ThreatKind>(&[15]).is_err());
+        assert!(ThreatKind::Blinded.is_jamming() && !ThreatKind::Deauth.is_jamming());
     }
 
     #[test]
