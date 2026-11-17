@@ -1,0 +1,8 @@
+[package]
+name = "aerohop"
+description = "FLARM / OGN-tracker frequency hopping (OGN frequency plans, FreqHopHash, slot schedule) and a hub-synced UTC clock, for a receive-only node"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
