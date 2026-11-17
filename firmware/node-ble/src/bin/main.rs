@@ -349,9 +349,10 @@ impl Snapshot {
 
 #[embassy_executor::task]
 async fn stats_task() {
-    let mut line = [0u8; 768];
+    let mut line = [0u8; 1024];
     let mut ticker = Ticker::every(Duration::from_secs(1));
     let mut prev = Snapshot::take();
+    let mut prev_spam = wifiwatch::ble::Totals::default();
     let mut last = Instant::now();
     let mut secs: u64 = 0;
     loop {
@@ -359,6 +360,19 @@ async fn stats_task() {
         secs += 1;
         let now = Instant::now();
         let cur = Snapshot::take();
+        // Pairing pop-up spam: judge the last five seconds, report outside the lock.
+        let mut spam: heapless::Vec<link::ThreatSighting, 2> = heapless::Vec::new();
+        let spam_tot = critical_section::with(|cs| {
+            let mut w = adv::SPAM.borrow_ref_mut(cs);
+            w.poll(now.as_micros(), &mut |s| {
+                let _ = spam.push(s);
+            });
+            w.totals
+        });
+        for s in &spam {
+            out::json_line(&out::ThreatLine::new(s), &mut line);
+            out::hub_frame(&link::Frame::Threat(s.clone()));
+        }
         let d = |f: fn(&Snapshot) -> u32| f(&cur).wrapping_sub(f(&prev));
         let stats = StatsLine {
             t: "stats",
@@ -387,6 +401,9 @@ async fn stats_task() {
             tot_adv: cur.adv,
             tot_rid: cur.rid,
             tot_drops: cur.drops,
+            pair: spam_tot.pairing.wrapping_sub(prev_spam.pairing),
+            pair_new: spam_tot.new.wrapping_sub(prev_spam.new),
+            threat: spam_tot.threats,
         };
         out::json_line(&stats, &mut line);
         // The hub gets running totals: it can difference them itself, and a
@@ -409,6 +426,7 @@ async fn stats_task() {
             out::hub_frame(&role::status_frame());
         }
         prev = cur;
+        prev_spam = spam_tot;
         last = now;
     }
 }

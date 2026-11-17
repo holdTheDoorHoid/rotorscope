@@ -95,6 +95,19 @@ The S3 pins are placeholders until the carrier board fixes them.
 | `Detection` | per Remote ID advert |
 | `Stats` | 1 s, with **running totals**: `frames_seen` = adverts, `rid_found`, and `dropped` = queue drops + UART drops |
 
+## Pairing pop-up spam (protocol 9)
+
+Every advert is also run through `wifiwatch::ble::classify` (Apple Continuity
+proximity pairing / nearby action, Samsung, Microsoft Swift Pair, Google Fast
+Pair; a walk of at most one advert's bytes) in the report handler; pairing
+adverts are recorded in `adv::SPAM`. The stats task judges the last five
+seconds once a second: 20 or more addresses of one family not heard in the
+last 5-10 s is spam (Flipper Zero / ESP32 "BLE spam"), reported as
+`{"t":"threat","kind":"ble_spam","fam":"apple","new":96,"n":160,"win_ms":5000,"rssi":-41,"up_us":..}`
+and `Frame::Threat` (`BleSpam`, `detail` = new addresses, `ssid` = family).
+Stats gain `pair`, `pair_new` (per window) and `threat` (total). Remote ID
+filtering is unchanged. See `docs/WIFI-ATTACKS.md`.
+
 ## Roles and hub commands (protocol 4)
 
 The node sends `Frame::Status { role: Ble, can, plan }` with every Hello and

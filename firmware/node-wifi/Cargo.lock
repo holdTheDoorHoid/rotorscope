@@ -1552,6 +1552,7 @@ dependencies = [
  "serde",
  "serde-json-core",
  "wifidrone",
+ "wifiwatch",
 ]
 
 [[package]]
@@ -2234,6 +2235,14 @@ checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
 [[package]]
 name = "wifidrone"
 version = "0.1.0"
+
+[[package]]
+name = "wifiwatch"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "link",
+]
 
 [[package]]
 name = "winapi-util"

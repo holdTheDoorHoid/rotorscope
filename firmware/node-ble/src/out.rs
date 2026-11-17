@@ -273,5 +273,40 @@ pub struct StatsLine {
     pub tot_adv: u32,
     pub tot_rid: u32,
     pub tot_drops: u32,
+    /// Pairing pop-up adverts (`wifiwatch::ble`) in the window, of those from
+    /// addresses not heard recently, and spam reports, total.
+    pub pair: u32,
+    pub pair_new: u32,
+    pub threat: u32,
+}
+
+/// `{"t":"threat",...}`: Bluetooth pairing pop-up spam (`ThreatKind::BleSpam`).
+/// `fam` = the pairing family with the most new addresses, `new` = new
+/// addresses in the window, `n` = pairing adverts in the window.
+#[derive(Serialize)]
+pub struct ThreatLine<'a> {
+    pub t: &'static str,
+    pub kind: &'static str,
+    pub fam: &'a str,
+    pub new: u32,
+    pub n: u32,
+    pub win_ms: u32,
+    pub rssi: i8,
+    pub up_us: u64,
+}
+
+impl<'a> ThreatLine<'a> {
+    pub fn new(s: &'a link::ThreatSighting) -> Self {
+        Self {
+            t: "threat",
+            kind: s.kind.name(),
+            fam: &s.ssid,
+            new: s.detail,
+            n: s.count,
+            win_ms: s.window_ms,
+            rssi: s.level,
+            up_us: s.uptime_us,
+        }
+    }
 }
 

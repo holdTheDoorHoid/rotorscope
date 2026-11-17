@@ -2632,6 +2632,14 @@ name = "wifidrone"
 version = "0.1.0"
 
 [[package]]
+name = "wifiwatch"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "link",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

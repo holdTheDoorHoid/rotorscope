@@ -34,8 +34,11 @@ pub const LADDER: &[NodeRole] = &[
 pub const WIFI24_ALONE: &[(u32, u16)] = &[(6, 150), (1, 50), (6, 150), (11, 50)];
 /// With two or more: the first parks on 6.
 pub const WIFI24_PARK: &[(u32, u16)] = &[(6, 1000)];
-/// ...and the others share these, split into contiguous runs.
-pub const WIFI24_SWEEP: &[u32] = &[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13];
+/// ...and the others share these, split into contiguous runs. 12-14 are
+/// included on purpose: US gear avoids them, so a drone or attack tool set
+/// to a Japanese/European channel would otherwise never be heard (14 is
+/// Japan's 802.11b-only channel). Receive-only, so any channel is fine.
+pub const WIFI24_SWEEP: &[u32] = &[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14];
 pub const WIFI24_SWEEP_MS: u16 = 80;
 
 // --------------------------------------------------------------- Wi-Fi 5 --
@@ -48,9 +51,55 @@ pub const WIFI5_VISITS: &[u32] = &[153, 157, 161, 165, 36, 40, 44, 48];
 pub const WIFI5_VISIT_MS: u16 = 50;
 /// With two or more: the first parks on 149...
 pub const WIFI5_PARK: &[(u32, u16)] = &[(149, 1000)];
-/// ...and the others share these.
-pub const WIFI5_SWEEP: &[u32] = &[36, 40, 44, 48, 153, 157, 161, 165];
+/// ...and the others share these. 169-177 (UNII-4) are where some FPV links
+/// and modified drones go to be alone; the DFS channels (52-144) are only
+/// scouted ([`SCOUT_5`]): sweeping them all would not fit a 24-hop plan.
+pub const WIFI5_SWEEP: &[u32] = &[36, 40, 44, 48, 153, 157, 161, 165, 169, 173, 177];
 pub const WIFI5_SWEEP_MS: u16 = 100;
+
+// -------------------------------------------------------- Wi-Fi scouting --
+
+/// Every 2.4 GHz channel a node can receive, for scouting visits.
+pub const SCOUT_24: &[u8] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+/// Every 20 MHz 5 GHz channel an ESP32-C5 can tune to: UNII-1 (36-48),
+/// UNII-2A (52-64), UNII-2C (100-144), UNII-3 (149-165) and UNII-4
+/// (169-177). Whether the C5's driver really tunes 169-177 is to be
+/// checked on hardware (a refused channel shows in the node's `ch_err`).
+pub const SCOUT_5: &[u8] = &[
+    36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 149, 153, 157,
+    161, 165, 169, 173, 177,
+];
+/// A Wi-Fi node leaves its plan this often for one scouting visit to the
+/// next channel of its band(s) that the plan does not cover (round robin,
+/// [`scout_channel`]), so nothing can hide on a channel the plan skips:
+/// a drone's network, an evil twin, a beacon flood. Costs
+/// `SCOUT_MS / SCOUT_EVERY_MS` = 3.5% of air time.
+pub const SCOUT_EVERY_MS: u32 = 3000;
+/// One beacon interval (102.4 ms) and a little: every access point on the
+/// channel is heard at least once per visit.
+pub const SCOUT_MS: u16 = 105;
+
+/// The `n`th scouting channel for a plan whose channels are `plan`: the
+/// channels of the plan's band(s) ([`SCOUT_24`] if it has any 2.4 GHz
+/// channel, [`SCOUT_5`] if it has any 5 GHz one) that the plan does not
+/// visit, round robin. `None` if the plan already covers its bands.
+pub fn scout_channel(plan: impl Iterator<Item = u8> + Clone, n: usize) -> Option<u8> {
+    let has24 = plan.clone().any(|c| c <= 14);
+    let has5 = plan.clone().any(|c| c > 14);
+    let bands = [(has24, SCOUT_24), (has5, SCOUT_5)];
+    let candidates = || {
+        bands
+            .iter()
+            .filter(|b| b.0)
+            .flat_map(|b| b.1.iter().copied())
+            .filter(|&c| !plan.clone().any(|p| p == c))
+    };
+    let count = candidates().count();
+    if count == 0 {
+        return None;
+    }
+    candidates().nth(n % count)
+}
 
 // --------------------------------------------------------------- DroneID --
 
