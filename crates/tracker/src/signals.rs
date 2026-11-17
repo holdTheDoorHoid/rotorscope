@@ -446,6 +446,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 let _ = self.ingest_node_stats(node, *uptime_us, *frames_seen, now_ms);
             }
             Frame::Via { .. } => {}
+            // Protocol 10: wired-bus bookkeeping, consumed by the bus master.
+            Frame::BusJoin { .. } | Frame::BusDone { .. } => {}
             // Protocol 5, hub to web head: the hub firmware handles these
             // (own position, ADS-B), not the drone tables.
             Frame::HubFix(_) | Frame::Csbee(_) | Frame::Flags(_) => {}

@@ -8,7 +8,7 @@ members = [
     "crates/droneid", "crates/openlink", "crates/adsb", "crates/rawcap", "crates/airlink",
     "crates/coverage", "crates/nodeimage", "crates/fpvscan", "crates/djilink",
     "crates/wifidrone", "crates/wifiwatch", "crates/jamwatch",
-    "crates/sdnative",
+    "crates/sdnative", "crates/wirebus",
     "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence", "crates/djicrypt",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rfuav-check", "tools/rawcap-pull", "tools/droneid-hil",
@@ -26,6 +26,7 @@ repository = "https://github.com/holdTheDoorHoid/rotorscope"
 [workspace.dependencies]
 rid = { path = "crates/rid" }
 link = { path = "crates/link" }
+wirebus = { path = "crates/wirebus" }
 tracker = { path = "crates/tracker" }
 openlink = { path = "crates/openlink" }
 adsb = { path = "crates/adsb" }
@@ -47,4 +48,7 @@ opt-level = 2
 [profile.dev.package.fpvscan]
 opt-level = 2
 [profile.dev.package.rawcap]
+opt-level = 2
+# The wire simulation steps every quarter byte through seconds of traffic.
+[profile.dev.package.wirebus]
 opt-level = 2

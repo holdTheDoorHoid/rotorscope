@@ -43,7 +43,14 @@ use serde::{Deserialize, Serialize};
 ///   beacon spam, evil twins...) and jamming on drone bands, as seen by a
 ///   node. Appended, so every v8 frame encodes exactly as before; a v8 hub
 ///   counts a `Threat` frame as corrupt and carries on.
-pub const PROTOCOL_VERSION: u8 = 9;
+/// - 10: the wired bus (`crates/wirebus`, docs/WIREBUS.md): many nodes on one
+///   hub UART, polled in turn. Adds [`Command::Poll`], [`Command::JoinSlot`]
+///   and [`Command::Address`] (hub to nodes) and [`Frame::BusJoin`] and
+///   [`Frame::BusDone`] (node to hub). All appended, so every v9 frame and
+///   command encodes exactly as before; a v9 node ignores the new commands
+///   (its decoder reports them as corrupt) and a v9 hub counts the new frames
+///   as corrupt and carries on.
+pub const PROTOCOL_VERSION: u8 = 10;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -100,8 +107,27 @@ pub enum Command {
     /// Listen as described. Idempotent: resent every few seconds.
     Assign(Assignment),
     /// Gateway only: the next command is for the node with this station
-    /// address (the reverse of [`Frame::Via`]).
+    /// address (the reverse of [`Frame::Via`]). Protocol 10: on the wired
+    /// bus too, where every node hears every command; a node takes the
+    /// command after a `To` naming its own address.
     To { node: [u8; 6] },
+    /// Protocol 10, wired bus: "node `addr`, go ahead". Only that node
+    /// answers, at once, with its queued frames (whole frames, at most
+    /// `budget` bytes unless the first frame alone is longer) and then a
+    /// [`Frame::BusDone`]. `ack` is the sequence number of the node's last
+    /// answer the hub accepted (0: none since the address was given), so a
+    /// node resends an answer the hub did not get. `epoch` names this hub
+    /// boot: a node holding an address from another epoch must join again.
+    Poll { addr: u8, epoch: u16, ack: u8, budget: u16 },
+    /// Protocol 10, wired bus: "anyone new?". A node without an address (of
+    /// this `epoch`) answers with a [`Frame::BusJoin`] in one of `slots`
+    /// slots of `slot_us` microseconds, picked at random, counted from the
+    /// end of this command.
+    JoinSlot { epoch: u16, slots: u8, slot_us: u16 },
+    /// Protocol 10, wired bus: the node with station address `mac` is bus
+    /// address `addr` for this `epoch`. `check` is `wirebus::crc` over the
+    /// other fields (a garbled grant must never bind the wrong node).
+    Address { mac: [u8; 6], addr: u8, epoch: u16, check: u16 },
 }
 
 /// Protocol 4. One DJI OcuSync DroneID burst, decoded on the node. Raw units
@@ -561,6 +587,19 @@ pub enum Frame {
     Flags(FlagReport),
     /// Protocol 9: an attack or jamming seen by a node.
     Threat(ThreatSighting),
+    /// Protocol 10, wired bus: a node without an address answering a
+    /// [`Command::JoinSlot`]. `want` is the address it held last (0: none),
+    /// so the hub can give it back; `check` is `wirebus::crc` over `mac` and
+    /// `want` (two joins in the same slot collide on the wire, and a garbled
+    /// join must not bind a made-up address).
+    BusJoin { mac: [u8; 6], want: u8, check: u16 },
+    /// Protocol 10, wired bus: the end of a node's answer to a
+    /// [`Command::Poll`]. `seq` numbers the answer (1-255, 0 = the answer
+    /// carried no frames); `more` = frames are still queued; `crc` is
+    /// `wirebus::crc` over every byte of the answer before this frame, then
+    /// `addr`, `seq` and `more`. The hub keeps an answer's frames only when
+    /// the CRC matches.
+    BusDone { addr: u8, seq: u8, more: bool, crc: u16 },
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -800,14 +839,51 @@ mod tests {
         ]
     }
 
-    fn commands() -> [Command; 3] {
+    fn commands() -> [Command; 6] {
         let mut plan = Vec::new();
         while plan.push((u32::MAX, u16::MAX)).is_ok() {}
         [
             Command::Assign(Assignment { role: NodeRole::DroneId, plan, id: u16::MAX }),
             Command::Assign(Assignment { role: NodeRole::Wifi24, plan: Vec::new(), id: 1 }),
             Command::To { node: [0xFF; 6] },
+            Command::Poll { addr: u8::MAX, epoch: u16::MAX, ack: u8::MAX, budget: u16::MAX },
+            Command::JoinSlot { epoch: u16::MAX, slots: u8::MAX, slot_us: u16::MAX },
+            Command::Address { mac: [0xFF; 6], addr: u8::MAX, epoch: u16::MAX, check: u16::MAX },
         ]
+    }
+
+    /// Protocol 10 appended the bus commands (tags 2-4) and frames (tags 14
+    /// and 15); the older tags did not move, and the bus messages are small.
+    #[test]
+    fn protocol_10_bus_append_only() {
+        let mut buf = [0u8; MAX_FRAME];
+        let tags: std::vec::Vec<u8> = commands().iter().map(|c| postcard::to_slice(c, &mut buf).unwrap()[0]).collect();
+        assert_eq!(tags, [0, 0, 1, 2, 3, 4]);
+        // The v9 command encodings are byte for byte what they were.
+        assert_eq!(postcard::to_slice(&Command::To { node: [1, 2, 3, 4, 5, 6] }, &mut buf).unwrap(), [1, 1, 2, 3, 4, 5, 6]);
+        let join = Frame::BusJoin { mac: [0xFF; 6], want: u8::MAX, check: u16::MAX };
+        let done = Frame::BusDone { addr: u8::MAX, seq: u8::MAX, more: true, crc: u16::MAX };
+        assert_eq!(postcard::to_slice(&join, &mut buf).unwrap()[0], 14);
+        assert_eq!(postcard::to_slice(&done, &mut buf).unwrap()[0], 15);
+        let mut dec = Decoder::new();
+        for f in [join, done] {
+            let wire = encode(&f, &mut buf).unwrap();
+            assert!(wire.len() <= 16, "{} bytes", wire.len());
+            let mut got = None;
+            dec.feed(wire, |r| got = Some(r));
+            assert_eq!(got, Some(Ok(f)));
+        }
+        let mut cmd = CommandDecoder::new();
+        for c in &commands()[3..] {
+            let wire = encode_command(c, &mut buf).unwrap();
+            assert!(wire.len() <= 16, "{} bytes", wire.len());
+            let mut got = None;
+            cmd.feed(wire, |r| got = Some(r));
+            assert_eq!(got.as_ref(), Some(&Ok(c.clone())));
+        }
+        // A v9 decoder (no bus variants) sees these as corrupt and resyncs:
+        // modelled by feeding a tag past the last v9 command.
+        assert!(postcard::from_bytes::<Command>(&[5]).is_err());
     }
 
     #[test]
