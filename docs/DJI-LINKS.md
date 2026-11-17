@@ -87,7 +87,7 @@ subcarriers** (not 15 kHz), and **Autel uses DJI's 15 kHz numerology**.
 
 | System | Channels | Width | Label | Source |
 |---|---|---|---|---|
-| DJI FPV V1/V2 goggles, Air Unit, Caddx Vista, DJI FPV drone | 5660, 5695, 5735, 5770, 5805, 5878, 5914, 5839 (public ch 8); CE/SRRC 5735/5770/5805/5839; MIC 5660/5700/5745 | 20 MHz per channel at 25 Mbps; 50 Mbps takes about two channels | filed (FCC list via RESEARCH.md); widths secondary | D3 |
+| DJI FPV V1/V2 goggles, Air Unit, Caddx Vista, DJI FPV drone | 5660, 5695, 5735, 5770, 5805, 5878, 5914, 5839 (public ch 8); CE/SRRC 5735/5770/5805/5839; MIC 5660/5700/5745 | 20 MHz per channel at 25 Mbps; 50 Mbps takes about two channels | filed (FCC list via RESEARCH.md); widths secondary. **The DJI FPV drone measured on 5770.50 (10/20 MHz) and 5745.50 (40 MHz)**: the listed whole-MHz values look rounded (RFUAV DJI FPV COMBO) | D3 |
 | O3 Air Unit | 5768.5, 5804.5, 5839.5 (10/20); 5794.5 (40) | 10/20/40 | filed | D2 |
 | O4 Air Unit / Pro | 5768.5, 5789.5, 5814.5 (10/20); 5794.5 (40/60); also 5.170-5.250 GHz | 10/20/40/60 | filed | D1 |
 | DJI FPV drone (FPV Combo) channel, measured | its video sat on **5770.50 MHz** in the 10 and 20 MHz modes (full-rate -6 dB edges 5766.10-5774.89 and 5761.61-5779.39): the x.5 raster, not the whole-MHz "5770" of the channel list, which is probably rounded. Vista / Air Unit V1 not recorded | measured (RFUAV DJI FPV COMBO) | |
@@ -141,8 +141,10 @@ centre and width from one FFT); 16 FFTs over the bursts averaged into 256 groups
 -10, -20 dB; -6 dB edges interpolated in dB; centre); the prefix fold for 15 kHz normal,
 15 kHz extended and 30 kHz normal prefixes, each against two control lags 1.85 µs away and a
 threshold scaled by the signal's degrees of freedom (bandwidth x prefix samples). When the
-capture saw a burst begin, the prefix search is limited to the timing that start predicts, which
-is what makes a 0.45 ms, 1.1 MHz uplink burst detectable at all.
+capture saw a burst begin, the prefix search is first limited to the timing that start predicts
+(lower threshold), which is what makes a 0.45 ms, 1.1 MHz uplink burst detectable at all; if that
+fails, the best window anywhere is tried against the higher threshold (real O4 bursts start off
+their own grid). Both reuse the same three folds; no extra memory.
 
 **Per dwell** (`djilink::Timeline`): every trigger probe's level (one byte, half-dB steps), split
 at the end of the dwell against the sweep's floor: burst count, median length and period, duty,
@@ -158,13 +160,14 @@ first flash: the node's heap also carries fpvscan's 26 KiB scratch and the Wi-Fi
 multiply-accumulate passes over the capture with 64-bit sums. fpvscan's analysis took ~100 ms on
 the bench, dominated by its 64-bit sums; expect the same order here (the `fpv` line logs
 `dji_us`). The ring is stopped meanwhile. Optimisation candidates: 32-bit products (4-bit-derived
-samples are small), skipping the extended/30 kHz folds when the normal fold is far from its
-threshold.
+samples are small), skipping the extended fold when the normal folds are far from their
+thresholds. (The 30 kHz fold can no longer be skipped: it is O4's numerology.)
 
 **Wire format**: protocol 7 appends four `RfKind`s (older kinds keep their postcard indices;
 `crates/link` test `protocol_7_rf_kinds_append_only` pins them). A protocol-6 hub counts an `Rf`
 frame with a new kind as corrupt and carries on. The tracker treats every `DjiController` sighting
-within 150 MHz as one emitter (it hops); the node rate-limits it as one emitter too.
+within 150 MHz as one emitter (it hops); the node rate-limits it as one emitter too. `DjiO4Video`
+now also means 30 kHz video anywhere, not only on 5.1 GHz; no wire change.
 
 ## Validation against RFUAV recordings
 
@@ -270,7 +273,29 @@ signals shaped to the measured numbers.
 
 ### DJI FPV Combo, 5.8 GHz (`DJI FPV COMBO.rar`)
 
-FPVRESULTS
+Three packs: `VTSBW=10` (pack1, 13 s), `VTSBW=20` (pack3), `VTSBW=40` (pack2); 5 s of each used.
+All centred 5760 MHz.
+
+- **Video: 15 kHz** (lag peak 66.68 µs, 32-56x its median), on **5770.50 MHz** in the 10 and
+  20 MHz modes (full-rate -6 dB edges 5766.10-5774.89 and 5761.61-5779.39; 8.8 and 17.8 MHz).
+  So the DJI FPV system is not on a whole-MHz channel: "5770" is 5770.5, on the OcuSync x.5
+  raster, and it reads `DjiVideo`. Bursts are long (0.16-3.5 ms, median 2.1-3.1 ms) and fill
+  ~70 % of the channel's time.
+- **Controller uplink: O3-like**, 15 kHz, 2.2-2.3 MHz at -10 dB in the C5 model (ICTC's O3:
+  145 subcarriers, 2.2 MHz), 0.53 ms (7 symbols), two bursts per 10 ms (gaps alternating 4.0 and
+  6.0 ms), cycling over a few centres (5729.4, 5731.4, 5735.5, 5745.3 in pack1; 5729.2, 5730.8,
+  5735.5, 5738.2, 5793.3 among others in pack3).
+- **DroneID**: unencrypted flight-info records, product "DJI FPV", CRC-valid on both paths, at
+  5796.5 MHz (2 in 5 s of pack1). Their contents (serial, positions) were never written out.
+- **Detectors** (after tuning; 5 s, sweep simulation over 46 phases): 10 MHz mode: `DjiVideo` on
+  83/84 dwells at LOs 5768 and 5770 (half-clipped LOs: `LteStyle`); controller confirmed in 46
+  of 46 phases (median 1.3 s). 20 MHz mode: `DjiVideo` on 80-84/84 dwells at four LOs;
+  controller confirmed in 37 of 46 (median 2.1 s). Before the raster-width gate the 20 MHz video
+  at LO 5770 was called a DJI FPV air unit on 29 dwells (its centre read 5770.1-5770.4).
+- **40 MHz mode** (pack2): still 15 kHz, 35.7 MHz wide at -6 dB, centred **5745.50 MHz** (x.5
+  again). Through the 20 MHz capture it is always clipped: `DjiVideo` on 63-80 of 84 dwells at the
+  seven LOs inside it; controller confirmed in 38 of 46 phases (median 2.3 s); 5 CRC-valid
+  DroneID flight-info records at 5796.5 MHz in 5 s.
 
 ### What changed in `crates/djilink`, and why
 
@@ -330,8 +355,9 @@ plus the C5's receiver noise, quantised to 4 bits by the real `rawcap` window an
   4/4 down to -0.6 dB and 3/4 at -2.7 dB; O3 uplink down to +1.9 dB; OcuSync 2 uplink down to
   +4.4 dB (that is ~17 dB in its own 1.1 MHz). Weak signals give no verdict, never a wrong one.
 
-Whole workspace: `cargo test --workspace` 617 passed (baseline 595). `cargo fw` and `cargo fw-lite`
-(node-sdr), `cargo fw` (hub-p4, hub c5, hub s3) build. Not flashed.
+Whole workspace: `cargo test --workspace` 634 passed after the RFUAV validation (629 before it:
+three new djilink tests, two in `tools/rfuav-check`). `cargo fw`, `cargo fw-lite`, `cargo fw-now`
+(node-sdr) and `cargo fw` (hub-p4) build. Not flashed.
 
 ## What would validate it further
 

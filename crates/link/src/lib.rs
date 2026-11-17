@@ -148,19 +148,24 @@ pub enum RfKind {
     WifiNarrow,
     /// Unclassified energy above the floor.
     Energy,
-    /// Protocol 7. DJI-style video downlink (OcuSync drone or O3/O4 air
-    /// unit), generation not determined: 15 kHz OFDM with DJI's 4.7 µs
-    /// prefix, 9 MHz or wider. Autel's LTE-based links share the shape.
+    /// Protocol 7. DJI-style video downlink (OcuSync drone, O3 air unit,
+    /// DJI FPV), generation not determined: 15 kHz OFDM with DJI's 4.7 µs
+    /// prefix, 9 MHz or wider, on DJI's x.5 MHz raster when the centre is
+    /// measurable. Autel uses the same numerology (RFUAV EVO Nano; its
+    /// off-raster bursts are not reported as this kind).
     DjiVideo,
-    /// Protocol 7. The same on 5.170-5.250 GHz, a band only O4 products use
-    /// for video (Autel EVO Lite/Max also file it).
+    /// Protocol 7. DJI O4 video: 30 kHz OFDM of video width on any band
+    /// (measured on the RFUAV Mini 4 Pro and Avata 2 recordings), or the
+    /// 15 kHz shape on 5.170-5.250 GHz, a band only O4 products list for
+    /// video (Autel EVO Lite/Max also file it).
     DjiO4Video,
     /// Protocol 7. The same on a whole-MHz DJI FPV (V1/Vista) channel;
     /// Walksnail reportedly shares the channel plan.
     DjiFpvAirUnit,
     /// Protocol 7. DJI controller uplink: narrow (1.1/2.2 MHz) 15 kHz OFDM
-    /// bursts, confirmed hopping between centres. `freq` is the latest
-    /// burst's centre.
+    /// bursts (OcuSync, O3, DJI FPV) or ~4.4 MHz 30 kHz bursts (O4),
+    /// confirmed hopping between centres. `freq` is the latest burst's
+    /// centre.
     DjiController,
 }
 
