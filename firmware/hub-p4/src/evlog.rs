@@ -108,6 +108,8 @@ pub struct Evidence {
     last_fix: Option<(f64, f64, u64)>,
     anchor: Option<crate::gps::TimeAnchor>,
     pack_logged: bool,
+    /// Last GPS integrity state logged (see `watch_integrity`).
+    integrity: gnss::IntegrityState,
     // Figures for the 5 s console line and the docs.
     pub records: u32,
     pub bytes: u32,
@@ -168,6 +170,7 @@ impl Evidence {
             last_fix: None,
             anchor: None,
             pack_logged: false,
+            integrity: gnss::IntegrityState::Ok,
             records: 0,
             bytes: 0,
             checkpoints: 0,
@@ -302,6 +305,7 @@ impl Evidence {
     /// Once a second: GPS, clock, nodes and pack changes become events.
     pub fn watch(&mut self, gps: &crate::gps::Gps, nodes: &[crate::links::NodeStats], pack: Option<&airspace::Pack<'_>>, now: u64) {
         use tracker::json::GpsState;
+        self.watch_integrity(gps);
         let present = gps.status.state != GpsState::Absent;
         if present != self.gps_present {
             self.gps_present = present;
@@ -395,6 +399,43 @@ impl Evidence {
             data[4..8].copy_from_slice(&(p.len() as u32).to_le_bytes());
             data[8..].copy_from_slice(&p.version.to_le_bytes());
             self.event(EventCode::Pack, t.as_bytes(), &data);
+        }
+    }
+
+    // ---------------------------------------------- GPS integrity hook --
+
+    /// Log a change of the GPS integrity verdict (docs/GNSS-INTEGRITY.md):
+    /// entering or changing a jamming state is `GnssJamming` (data: kind u8,
+    /// level i16 LE), a spoofing state `GnssSpoofing` (data: kind u8, level
+    /// i32 LE); kind and level are `gnss::integrity::Cause::kind` and the
+    /// finding's value in `Cause::unit`. Back to normal is the event of the
+    /// category left, with kind 0 and level 0. Text: the plain-English
+    /// reason. The monitor's hysteresis keeps this to state changes, never
+    /// once a second.
+    fn watch_integrity(&mut self, gps: &crate::gps::Gps) {
+        let st = *gps.integrity();
+        if st.state == self.integrity {
+            return;
+        }
+        let was = self.integrity;
+        self.integrity = st.state;
+        let mut t: heapless::String<200> = heapless::String::new();
+        let _ = st.write_reason(&mut t);
+        if st.state == gnss::IntegrityState::Ok {
+            let _ = write!(t, " (was {})", was.text());
+        }
+        let (kind, level) = st.cause.map_or((0, 0), |f| (f.cause.kind(), f.value));
+        let spoofing = st.state.is_spoofing() || (st.state == gnss::IntegrityState::Ok && was.is_spoofing());
+        if spoofing {
+            let mut d = [0u8; 5];
+            d[0] = kind;
+            d[1..].copy_from_slice(&level.to_le_bytes());
+            self.event(EventCode::GnssSpoofing, t.as_bytes(), &d);
+        } else {
+            let mut d = [0u8; 3];
+            d[0] = kind;
+            d[1..].copy_from_slice(&(level.clamp(i16::MIN.into(), i16::MAX.into()) as i16).to_le_bytes());
+            self.event(EventCode::GnssJamming, t.as_bytes(), &d);
         }
     }
 
