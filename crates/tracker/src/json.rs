@@ -55,6 +55,57 @@ struct Line<'a> {
     home: Option<Home>,
     /// What DJI's own broadcasts said; null when none was heard.
     dji: Option<Dji<'a>>,
+    /// Spoofing checks that fired, and authentication pages seen; null
+    /// when neither (see `crate::spoof`).
+    spoof: Option<SpoofJ<'a>>,
+    /// The track this one probably continues under a new identity; null
+    /// when none (see `crate::continuity`).
+    cont: Option<ContJ>,
+}
+
+#[derive(Serialize)]
+struct SpoofJ<'a> {
+    /// Combined suspicion 0-100 (below 30 when every flag is weak).
+    score: u8,
+    flags: SpoofFlags<'a>,
+    /// Authentication pages heard (count of distinct page numbers). Not
+    /// verified: the hub has no keys.
+    auth: u32,
+}
+
+#[derive(Serialize)]
+struct FlagJ {
+    check: crate::spoof::Check,
+    conf: u8,
+    detail: i32,
+}
+
+struct SpoofFlags<'a>(&'a [crate::spoof::Flag]);
+
+impl Serialize for SpoofFlags<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.0.iter().map(|f| FlagJ {
+            check: f.check,
+            conf: f.confidence,
+            detail: f.detail,
+        }))
+    }
+}
+
+#[derive(Serialize)]
+struct ContJ {
+    prev: TrackId,
+    conf: u8,
+    id_changed: bool,
+}
+
+fn spoof_json(t: &Track) -> Option<SpoofJ<'_>> {
+    let s = &t.spoof;
+    (!s.flags().is_empty() || s.auth_pages != 0).then(|| SpoofJ {
+        score: s.score(),
+        flags: SpoofFlags(s.flags()),
+        auth: s.auth_pages.count_ones(),
+    })
 }
 
 #[derive(Serialize)]
@@ -267,8 +318,9 @@ struct Own {
 /// Wi-Fi DroneID too, every field at its longest; see the test). Kept tight
 /// because the hub holds several of these in static task state without
 /// PSRAM. (1792 before protocol 4 added the `dji` object; 2304 before
-/// protocol 8 added `dji.o4`; worst case now 2329 bytes.)
-pub const MAX_LINE: usize = 2432;
+/// protocol 8 added `dji.o4`; 2432 before the `spoof` and `cont` objects,
+/// which add up to 373 bytes; worst case now 2702 bytes.)
+pub const MAX_LINE: usize = 2816;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.
 pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
@@ -337,6 +389,12 @@ pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize,
             age_ms: now.saturating_sub(h.rx_ms),
         }),
         dji: dji_json(track, ctx),
+        spoof: spoof_json(track),
+        cont: track.continuity.previous.map(|prev| ContJ {
+            prev,
+            conf: track.continuity.link_confidence,
+            id_changed: track.continuity.identity_changed,
+        }),
     };
     let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
     let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
