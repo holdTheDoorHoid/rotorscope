@@ -80,6 +80,12 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 13 | not_logged | frames received but not recorded (queue full) (u32) |
 | 14 | shutdown | (none); a shutdown checkpoint follows |
 | 15 | gps_receiver | 1 answering, 0 silent |
+| 16 | o4_decrypted | session key ID (4), record selector (1); text is what it decrypted to, never the key |
+| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); text describes it. The raw `Threat` frame is the record before it |
+| 18 | gnss_jamming | kind (1), level (i16); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
+| 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
+| 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
+| 21 | link_forgery | claimed station address (6), count (u32) (reserved; forged ESP-NOW packets currently arrive as `threat` kind 15) |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 
