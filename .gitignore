@@ -2,6 +2,7 @@ target/
 **/target/
 **/target-band24/
 **/target-espnow/
+**/target-bus/
 *.bin
 *.elf
 # Hub station-mode credentials: created by the owner, never committed.

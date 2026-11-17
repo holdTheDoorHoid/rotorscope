@@ -34,6 +34,11 @@ decode = []
 # capture path stays receive-only (see README.md "Hub link"). Off by default.
 # Build with `cargo fw-now` from c5/.
 espnow = ["esp-radio/esp-now", "dep:airlink"]
+# Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
+# hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
+# (GPIO12). Nothing is transmitted on the air and the capture never pauses
+# to send. Build with `cargo fw-bus` from c5/. Not with `espnow`.
+wirebus = ["dep:node-common", "node-common/wirebus"]
 
 [dependencies]
 rawcap  = { path = "../../crates/rawcap", default-features = false }
@@ -43,6 +48,8 @@ djilink = { path = "../../crates/djilink" }
 jamwatch = { path = "../../crates/jamwatch" }
 link    = { path = "../../crates/link" }
 airlink = { path = "../../crates/airlink", optional = true }
+# The wired-bus node glue (feature `wirebus`), shared with node-wifi and node-ble.
+node-common = { path = "../node-common", optional = true, features = ["esp32c5"] }
 heapless = "0.8"
 
 esp-hal                = { version = "~1.2.2", features = ["esp32c5", "unstable"] }

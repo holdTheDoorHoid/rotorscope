@@ -26,7 +26,10 @@
 #[cfg_attr(not(feature = "espnow"), allow(dead_code, reason = "Uplink(now) is for the espnow build"))]
 mod console;
 mod engine;
-#[cfg_attr(not(feature = "espnow"), allow(dead_code, reason = "the queue and command side serve the espnow uplink"))]
+#[cfg_attr(
+    not(feature = "espnow"),
+    allow(dead_code, reason = "the queue and command side serve the espnow uplink (the wired bus decodes its own commands)")
+)]
 mod hub;
 mod out;
 mod phy;
@@ -37,6 +40,9 @@ mod ring;
 mod route;
 #[cfg(feature = "espnow")]
 mod uplink;
+
+#[cfg(all(feature = "wirebus", feature = "espnow"))]
+compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one");
 
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -253,6 +259,18 @@ async fn main(spawner: Spawner) -> ! {
     // How much heap the Wi-Fi driver really took (README.md "Memory").
     println!(r#"{{"t":"mem","heap_used":{},"heap_free":{}}}"#, esp_alloc::HEAP.used(), esp_alloc::HEAP.free());
 
+    // The wired bus (docs/WIREBUS.md): TX open-drain on D9 (GPIO9), RX on D7
+    // (GPIO12), on an interrupt-mode executor so a poll is answered in time
+    // even while the capture loop is busy decoding (it never awaits then).
+    #[cfg(feature = "wirebus")]
+    {
+        let exec = alloc::boxed::Box::leak(alloc::boxed::Box::new(esp_rtos::embassy::InterruptExecutor::new(
+            peripherals.FROM_CPU_INTR2,
+        )));
+        let bus = exec.start(esp_hal::interrupt::Priority::Priority2);
+        bus.spawn(bus_task(peripherals.UART1, peripherals.GPIO9, peripherals.GPIO12).expect("spawn bus_task"));
+    }
+
     let (rx, tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).split();
     spawner.spawn(console(rx, tx).expect("spawn console"));
 
@@ -263,7 +281,13 @@ async fn main(spawner: Spawner) -> ! {
     let up: Option<()> = None;
     println!(
         r#"{{"t":"hub","transport":"{}","role":"{}","can":"droneid,fpv","protocol":{}}}"#,
-        if cfg!(feature = "espnow") { "espnow" } else { "none (build with --features espnow / cargo fw-now)" },
+        if cfg!(feature = "espnow") {
+            "espnow"
+        } else if cfg!(feature = "wirebus") {
+            "wirebus"
+        } else {
+            "none (build with --features wirebus / cargo fw-bus, or espnow / cargo fw-now)"
+        },
         hub::role_name(radio.role),
         link::PROTOCOL_VERSION
     );
@@ -281,6 +305,27 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         Timer::after(Duration::from_secs(3600)).await;
     }
+}
+
+/// The wired-bus node: frames from `hub::BUS_OUT`, assignments to
+/// `hub::BUS_COMMANDS` (applied by the capture loop).
+#[cfg(feature = "wirebus")]
+#[embassy_executor::task]
+async fn bus_task(
+    uart: esp_hal::peripherals::UART1<'static>,
+    tx: esp_hal::peripherals::GPIO9<'static>,
+    rx: esp_hal::peripherals::GPIO12<'static>,
+) -> ! {
+    // Made here: an async UART is bound to the executor that polls it.
+    let uart = node_common::bus::uart(uart, tx, rx);
+    let mut outbox = node_common::bus::Staged::new(|v: &mut node_common::bus::Unit| match hub::BUS_OUT.try_receive() {
+        Ok(f) => v.extend_from_slice(&f).is_ok(),
+        Err(_) => false,
+    });
+    node_common::bus::run(uart, &mut outbox, &mut |a| {
+        let _ = hub::BUS_COMMANDS.try_send(a);
+    })
+    .await
 }
 
 #[cfg(feature = "espnow")]
@@ -345,7 +390,21 @@ async fn capture_loop(mut radio: alloc::boxed::Box<radio::Radio>, mut hub: alloc
                 apply_assignment(&mut radio, &mut hub, &a);
             }
         }
-        #[cfg(not(feature = "espnow"))]
+        #[cfg(feature = "wirebus")]
+        {
+            // Hand queued frames to the bus task; it sends them when polled.
+            while let Some(f) = hub.front() {
+                if hub::BUS_OUT.try_send(f.clone()).is_err() {
+                    break;
+                }
+                hub.pop();
+            }
+            while let Ok(a) = hub::BUS_COMMANDS.try_receive() {
+                hub.commands += 1;
+                apply_assignment(&mut radio, &mut hub, &a);
+            }
+        }
+        #[cfg(not(any(feature = "espnow", feature = "wirebus")))]
         while hub.pop().is_some() {}
         if Instant::now() >= next_script {
             next_script = Instant::now() + Duration::from_millis(500);
@@ -369,6 +428,8 @@ async fn capture_loop(mut radio: alloc::boxed::Box<radio::Radio>, mut hub: alloc
             radio.stats_paced();
             radio.poll();
             link_line(&mut radio, &hub);
+            #[cfg(feature = "wirebus")]
+            out::paced(node_common::bus::json_line().as_str(), 128, || radio.probe());
         }
     }
 }

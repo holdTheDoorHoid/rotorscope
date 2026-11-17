@@ -15,6 +15,14 @@
 #
 # Wired (UART) nodes: set NODE_WIRED=1 to build both images without `espnow`.
 #
+# Wired-bus nodes (many nodes on one hub UART, docs/WIREBUS.md): set NODE_BUS=1
+# to build both images with `wirebus` (TX open-drain on D9, RX on D7). The
+# node-sdr slot then defaults to its bus build,
+# firmware/node-sdr/target-bus/riscv32imac-unknown-none-elf/release/node-sdr
+# (build it with `cd firmware/node-sdr/c5 && cargo fw-bus`). Every image on a
+# bus node must be a bus build: an image that is not would talk over the
+# other nodes when it boots.
+#
 # ESP-NOW link key (docs/ESPNOW.md "Securing the link"): the images are built
 # with the kit key in tools/link.key (or $ROTORSCOPE_LINK_KEY_FILE; "none" for
 # an open build). Every image on the board must carry the same key as the
@@ -40,7 +48,15 @@ fi
 chip=$("$here/dev-board.sh" --resolve "$board" | awk '{print $2}')
 [[ $chip == esp32c5 ]] || { echo "$board is $chip; multi-image nodes are ESP32-C5 only" >&2; exit 1; }
 
-if [[ ${NODE_WIRED:-0} == 1 ]]; then
+if [[ ${NODE_BUS:-0} == 1 && ${NODE_WIRED:-0} == 1 ]]; then
+  echo "flash-node: NODE_BUS and NODE_WIRED are two different wirings; set one" >&2
+  exit 1
+fi
+if [[ ${NODE_BUS:-0} == 1 ]]; then
+  (cd "$root/firmware/node-wifi/c5" && cargo fw24-bus)
+  wifi=$root/firmware/node-wifi/target-bus/riscv32imac-unknown-none-elf/release/node-wifi
+  ble_features=esp32c5,wirebus
+elif [[ ${NODE_WIRED:-0} == 1 ]]; then
   (cd "$root/firmware/node-wifi/c5" && cargo fw24)
   wifi=$root/firmware/node-wifi/target-band24/riscv32imac-unknown-none-elf/release/node-wifi
   ble_features=esp32c5
@@ -54,7 +70,11 @@ fi
 ble=$root/firmware/node-ble/target/riscv32imac-unknown-none-elf/release/node-ble
 
 apps=(--app "ota_0=$wifi" --app "ota_1=$ble")
-sdr=${NODE_SDR_ELF:-$root/firmware/node-sdr/target/riscv32imac-unknown-none-elf/release/node-sdr}
+if [[ ${NODE_BUS:-0} == 1 ]]; then
+  sdr=${NODE_SDR_ELF:-$root/firmware/node-sdr/target-bus/riscv32imac-unknown-none-elf/release/node-sdr}
+else
+  sdr=${NODE_SDR_ELF:-$root/firmware/node-sdr/target/riscv32imac-unknown-none-elf/release/node-sdr}
+fi
 images=("$wifi" "$ble")
 if [[ -f $sdr ]]; then
   apps+=(--app "ota_2=$sdr")
@@ -62,6 +82,17 @@ if [[ -f $sdr ]]; then
 else
   echo "flash-node: no node-sdr ELF at $sdr; slot ota_2 erased (the node will not offer DroneID / FPV)"
   apps+=(--erase ota_2)
+fi
+
+# A bus node must run bus images only (an image that is not would drive the
+# shared wire on its own): the bus images print "t":"bus" status lines.
+if [[ ${NODE_BUS:-0} == 1 ]]; then
+  for f in "${images[@]}"; do
+    if ! grep -aq '"t":"bus","addr"' "$f"; then
+      echo "flash-node: $f is not a wired-bus build (NODE_BUS=1 needs every image built with wirebus)" >&2
+      exit 1
+    fi
+  done
 fi
 
 # Same link key in every ESP-NOW image (wired images carry none and are skipped).

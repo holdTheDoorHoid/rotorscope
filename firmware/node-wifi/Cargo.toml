@@ -52,6 +52,11 @@ band24 = []
 # gateway is on 2.4 GHz channel 6). A 5 GHz plan gets 40 ms visits to channel 6
 # at least once a second so the node can still send (`role::with_espnow_visits`).
 espnow = ["esp-radio/esp-now", "dep:airlink"]
+# Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
+# hub UART, polled by the hub, TX open-drain on XIAO D9 (GPIO9), RX on D7
+# (GPIO12). Receive-only on the air, like the plain wired build. C5 only; not
+# with `espnow`.
+wirebus = ["node-common/wirebus"]
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }

@@ -6,6 +6,10 @@
 //! captures. Without a transport they are counted and dropped, so the
 //! capture path is the same in every build.
 //!
+//! With the `wirebus` feature the capture loop moves queued frames to
+//! [`BUS_OUT`] for the bus task (`node_common::bus`) and applies the
+//! assignments it puts in [`BUS_COMMANDS`].
+//!
 //! - `Hello` + `Status` at boot, every [`KEEPALIVE_US`] and whenever the role
 //!   or plan changes (the hub forgets a node after 15 s of silence).
 //! - `DroneId`: one per decoded or detected burst, as it comes.
@@ -18,6 +22,15 @@ use heapless::{Deque, Vec};
 use link::{Assignment, Command, CommandDecoder, Frame, MAX_FRAME, NodeRole, PROTOCOL_VERSION, RfSighting};
 
 pub type Encoded = Vec<u8, MAX_FRAME>;
+
+/// Wired bus (feature `wirebus`): frames for the bus task, and the hub's
+/// assignments from it.
+#[cfg(feature = "wirebus")]
+pub static BUS_OUT: embassy_sync::channel::Channel<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, Encoded, 8> =
+    embassy_sync::channel::Channel::new();
+#[cfg(feature = "wirebus")]
+pub static BUS_COMMANDS: embassy_sync::channel::Channel<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, Assignment, 2> =
+    embassy_sync::channel::Channel::new();
 
 /// Frames waiting for the uplink. When full the oldest is dropped (and
 /// counted): a stale sighting is worth less than a fresh one.
@@ -186,6 +199,9 @@ impl Hub {
                 got = Some(a);
             }
             Ok(Command::To { .. }) => good += 1,
+            // Protocol 10 bus commands never come this way (the bus glue
+            // takes them); counted as good, ignored.
+            Ok(_) => good += 1,
             Err(_) => bad += 1,
         });
         self.commands += good;

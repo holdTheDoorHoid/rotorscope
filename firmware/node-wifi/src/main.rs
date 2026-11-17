@@ -13,7 +13,9 @@
 //! also leaves its plan now and then to scout a channel the plan skips
 //! (`coverage::plans::scout_channel`). Receive-only:
 //! nothing here transmits on the air, except with the `espnow` feature, where
-//! `uplink` sends hub frames to an ESP-NOW gateway instead of the UART.
+//! `uplink` sends hub frames to an ESP-NOW gateway instead of the UART. With
+//! `wirebus` the hub frames go on the shared wired bus instead
+//! (`node_common::bus`, docs/WIREBUS.md), still receive-only on the air.
 #![no_std]
 #![no_main]
 #![deny(
@@ -21,6 +23,11 @@
     reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
     holding buffers for the duration of a data transfer."
 )]
+
+#[cfg(all(feature = "wirebus", feature = "espnow"))]
+compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one");
+#[cfg(all(feature = "wirebus", not(feature = "esp32c5")))]
+compile_error!("`wirebus` pins are set for the XIAO ESP32-C5 only");
 
 mod chip;
 mod detect;
@@ -37,7 +44,7 @@ use embassy_time::{Duration, Instant, Ticker, with_timeout};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
-#[cfg(not(feature = "espnow"))]
+#[cfg(not(any(feature = "espnow", feature = "wirebus")))]
 use esp_hal::uart::{Config as UartConfig, Uart};
 use esp_radio::wifi::{SecondaryChannel, WifiController};
 use rid::wifi::{BEACON_OUI, BEACON_OUI_TYPE, NAN_DEST};
@@ -92,7 +99,7 @@ async fn main(spawner: Spawner) -> ! {
         images.slots.iter().map(|s| s.image.map(nodeimage::Image::project)).collect();
     report::hello_json(&names);
 
-    #[cfg(not(feature = "espnow"))]
+    #[cfg(not(any(feature = "espnow", feature = "wirebus")))]
     {
         // TX to the hub, RX for the hub's commands (`chip::hub_rx_pin!`).
         let (hub_rx, hub_tx) = Uart::new(peripherals.UART1, UartConfig::default().with_baudrate(chip::HUB_BAUD))
@@ -103,6 +110,18 @@ async fn main(spawner: Spawner) -> ! {
             .split();
         spawner.spawn(report::hub_writer(hub_tx).expect("spawn hub_writer"));
         spawner.spawn(report::hub_reader(hub_rx).expect("spawn hub_reader"));
+    }
+
+    // The wired bus: TX open-drain on D9 (GPIO9), RX on D7 (GPIO12), served
+    // from an interrupt-mode executor so a poll is answered within the hub's
+    // window even while the drain task parses a frame.
+    #[cfg(feature = "wirebus")]
+    {
+        let exec = alloc::boxed::Box::leak(alloc::boxed::Box::new(esp_rtos::embassy::InterruptExecutor::new(
+            peripherals.FROM_CPU_INTR2,
+        )));
+        let bus = exec.start(esp_hal::interrupt::Priority::Priority2);
+        bus.spawn(bus_task(peripherals.UART1, peripherals.GPIO9, peripherals.GPIO12).expect("spawn bus_task"));
     }
 
     let mut wifi = WifiController::new(peripherals.WIFI, Default::default()).expect("Wi-Fi init");
@@ -129,6 +148,28 @@ async fn main(spawner: Spawner) -> ! {
 
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
     hop_forever(&mut wifi).await
+}
+
+/// The wired-bus node: hub frames from `report::HUB_QUEUE`, `Assign`s to
+/// `role` (docs/WIREBUS.md).
+#[cfg(feature = "wirebus")]
+#[embassy_executor::task]
+async fn bus_task(
+    uart: esp_hal::peripherals::UART1<'static>,
+    tx: esp_hal::peripherals::GPIO9<'static>,
+    rx: esp_hal::peripherals::GPIO12<'static>,
+) -> ! {
+    // Made here: an async UART is bound to the executor that polls it.
+    let uart = node_common::bus::uart(uart, tx, rx);
+    let mut out = node_common::bus::Staged::new(|v: &mut node_common::bus::Unit| match report::HUB_QUEUE.try_receive() {
+        Ok(f) => v.extend_from_slice(&f).is_ok(),
+        Err(_) => false,
+    });
+    node_common::bus::run(uart, &mut out, &mut |a| {
+        // Full: an older command is still queued; the hub resends.
+        let _ = role::COMMANDS.try_send(a);
+    })
+    .await
 }
 
 /// Walk the current channel plan forever; start over at once on a new plan
@@ -414,6 +455,8 @@ async fn stats() {
         last_seen = seen;
         report::stats_json(&line);
         report::stats_hub(&line);
+        #[cfg(feature = "wirebus")]
+        esp_println::println!("{}", node_common::bus::json_line());
         if tick.is_multiple_of(5) {
             report::hello_hub();
         }

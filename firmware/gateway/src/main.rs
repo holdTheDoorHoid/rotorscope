@@ -431,6 +431,8 @@ async fn hub_commands(mut rx: UartRx<'static, esp_hal::Async>) {
                     HUB_ORPHANS.fetch_add(1, Relaxed);
                 }
             }
+            // Protocol 10 wired-bus commands: not for a gateway (it is never on the bus).
+            Ok(_) => {}
             Err(_) => {
                 HUB_CORRUPT.fetch_add(1, Relaxed);
                 to = None;
