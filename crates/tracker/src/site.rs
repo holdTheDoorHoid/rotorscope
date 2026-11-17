@@ -156,6 +156,110 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
     Err("unknown line (node, mute, unmute)")
 }
 
+/// Node positions held by [`SiteState`].
+pub const MAX_PLACED: usize = 16;
+
+/// What a whole site file says, line by line (later lines win). Small and
+/// fixed-size, so a file of any length can be read in pieces.
+#[derive(Debug, Clone, Default)]
+pub struct SiteState {
+    /// Station address -> (lat, lon).
+    pub nodes: heapless::Vec<([u8; 6], f64, f64), MAX_PLACED>,
+    pub mutes: heapless::Vec<Mute, { crate::threats::MAX_MUTES }>,
+    pub used: u32,
+    pub ignored: u32,
+}
+
+impl SiteState {
+    pub fn place(&mut self, mac: [u8; 6], lat: f64, lon: f64) {
+        self.nodes.retain(|n| n.0 != mac);
+        if self.nodes.is_full() {
+            self.nodes.remove(0);
+        }
+        let _ = self.nodes.push((mac, lat, lon));
+    }
+
+    /// Apply one line. `AllNodesHere` needs a live position and is ignored
+    /// here (the hub handles it).
+    pub fn apply(&mut self, l: SiteLine) {
+        match l {
+            SiteLine::Nothing => return,
+            SiteLine::NodeAt { mac, lat, lon } => self.place(mac, lat, lon),
+            SiteLine::NodeClear { mac } => self.nodes.retain(|n| n.0 != mac),
+            SiteLine::Mute(m) => {
+                if !self.mutes.contains(&m) {
+                    if self.mutes.is_full() {
+                        self.mutes.remove(0);
+                    }
+                    let _ = self.mutes.push(m);
+                }
+            }
+            SiteLine::UnmuteAll => self.mutes.clear(),
+            SiteLine::AllNodesHere => {
+                self.ignored += 1;
+                return;
+            }
+        }
+        self.used += 1;
+    }
+}
+
+/// Longest line kept; a longer one is ignored as a whole.
+pub const MAX_LINE: usize = 160;
+
+/// Splits a byte stream fed in pieces into lines.
+#[derive(Debug, Default)]
+pub struct Lines {
+    buf: heapless::Vec<u8, MAX_LINE>,
+    too_long: bool,
+    /// 1-based number of the line being read.
+    pub number: u32,
+}
+
+impl Lines {
+    /// Feed bytes; `f(line_number, Ok(text) | Err(reason))` per finished line.
+    pub fn feed(&mut self, bytes: &[u8], mut f: impl FnMut(u32, Result<&str, SiteError>)) {
+        for &b in bytes {
+            if b == b'\n' {
+                self.end(&mut f);
+            } else if self.buf.push(b).is_err() {
+                self.too_long = true;
+            }
+        }
+    }
+
+    /// The last line, if the file does not end in a newline.
+    pub fn finish(&mut self, mut f: impl FnMut(u32, Result<&str, SiteError>)) {
+        if !self.buf.is_empty() || self.too_long {
+            self.end(&mut f);
+        }
+    }
+
+    fn end(&mut self, f: &mut impl FnMut(u32, Result<&str, SiteError>)) {
+        self.number += 1;
+        let r = if self.too_long {
+            Err("line too long")
+        } else {
+            core::str::from_utf8(&self.buf).map_err(|_| "not text")
+        };
+        f(self.number, r);
+        self.buf.clear();
+        self.too_long = false;
+    }
+}
+
+/// Read a whole site file fed in pieces into a [`SiteState`]; `refused`
+/// hears each line that was not understood.
+pub fn read_into(state: &mut SiteState, lines: &mut Lines, bytes: &[u8], mut refused: impl FnMut(u32, SiteError)) {
+    lines.feed(bytes, |n, r| match r.and_then(parse_line) {
+        Ok(l) => state.apply(l),
+        Err(e) => {
+            state.ignored += 1;
+            refused(n, e);
+        }
+    });
+}
+
 struct MacText<'a>(&'a [u8; 6]);
 
 impl core::fmt::Display for MacText<'_> {
@@ -190,6 +294,7 @@ pub fn write_node<W: Write>(w: &mut W, mac: &[u8; 6], lat: f64, lon: f64) -> cor
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
 
     #[test]
@@ -231,6 +336,41 @@ mod tests {
             "hello",
         ] {
             assert!(parse_line(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_long_file_read_in_pieces_keeps_the_latest_lines() {
+        let mut text = std::string::String::new();
+        // 300 appended changes, far more than any buffer: the last ones win.
+        for i in 0..300 {
+            text += &std::format!("node 10:bd:a3:ce:bd:{:02x} 1.{i} 2.0\n", i % 20);
+            text += "mute deauth target=ff:ff:ff:ff:ff:ff\n";
+            if i % 7 == 0 {
+                text += "unmute all\n";
+            }
+        }
+        text += "node 10:bd:a3:ce:bd:00 clear\nbad line here\n";
+        text += &"x".repeat(400);
+        text += "\nmute evil_twin ssid=Last One"; // no final newline
+        for piece in [1usize, 7, 512] {
+            let (mut st, mut lines) = (SiteState::default(), Lines::default());
+            let mut refused = std::vec::Vec::new();
+            for chunk in text.as_bytes().chunks(piece) {
+                read_into(&mut st, &mut lines, chunk, |n, e| refused.push((n, e)));
+            }
+            lines.finish(|n, r| match r.and_then(parse_line) {
+                Ok(l) => st.apply(l),
+                Err(e) => refused.push((n, e)),
+            });
+            assert_eq!(st.nodes.len(), 16, "20 nodes, oldest dropped past 16");
+            assert!(st.nodes.iter().all(|n| n.0[5] != 0), "node :00 cleared");
+            // The latest position of node :13 is from i = 299.
+            assert!(st.nodes.iter().any(|n| n.0[5] == 0x13 && (n.1 - 1.299).abs() < 1e-9));
+            assert_eq!(st.mutes.len(), 2, "unmute all at i=294, then deauth + twin");
+            assert_eq!(st.mutes[1].ssid.as_str(), "Last One");
+            assert_eq!(refused.len(), 2, "{refused:?}");
+            assert_eq!(refused[1].1, "line too long");
         }
     }
 

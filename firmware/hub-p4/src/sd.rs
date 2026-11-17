@@ -212,20 +212,14 @@ pub struct Logger {
     o4_key: Option<djicrypt::PrivateKey>,
     /// What the key file check found, for the status line.
     pub o4_key_state: &'static str,
-    /// Bytes of `ROTORSCP/SITE.TXT` read into [`SITE_BUF`] at mount,
-    /// until the main loop takes them.
-    site: Option<usize>,
+    /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
+    site: Option<tracker::site::SiteState>,
 }
-
-/// The site file's text. Static, not on the stack: the main task's stack
-/// has no room for 8 KB.
-static mut SITE_BUF: [u8; SITE_MAX] = [0; SITE_MAX];
 
 /// Node positions and muted alarms (`tracker::site`). The hub only ever
 /// appends to it, so hand edits are never lost.
 const SITE_NAME: &str = "SITE.TXT";
-/// Longest site file read (later lines win; a longer file is read up to here).
-pub const SITE_MAX: usize = 8192;
+
 
 /// The owner's O4 DroneID private key (64 hex digits) in the log folder.
 /// Never in the repository; see docs/DRONEID-O4.md "Decryption".
@@ -282,15 +276,14 @@ impl Logger {
     }
 
     /// The site file read at mount, once.
-    pub fn take_site(&mut self) -> Option<&'static [u8]> {
-        let n = self.site.take()?;
-        // SAFETY: only this Logger (one, owned by the main loop) touches
-        // SITE_BUF, and only at mount, after the previous text was used.
-        Some(unsafe { &(&*core::ptr::addr_of!(SITE_BUF))[..n] })
+    pub fn take_site(&mut self) -> Option<tracker::site::SiteState> {
+        self.site.take()
     }
 
-    /// Read `ROTORSCP/SITE.TXT` if present.
+    /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (it only
+    /// grows, so it can be any length; later lines win).
     fn load_site(&mut self) {
+        use tracker::site::{Lines, SiteState, parse_line, read_into};
         let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
         let f = match vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadOnly) {
             Ok(f) => f,
@@ -303,18 +296,29 @@ impl Logger {
                 return;
             }
         };
-        // SAFETY: see `take_site`.
-        let buf = unsafe { &mut *core::ptr::addr_of_mut!(SITE_BUF) };
-        let mut n = 0;
-        while n < SITE_MAX {
-            match vm.read(f, &mut buf[n..]) {
+        let (mut st, mut lines) = (SiteState::default(), Lines::default());
+        let refused = |n: u32, e: &str| println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
+        let mut buf = [0u8; 256];
+        let mut total = 0usize;
+        loop {
+            match vm.read(f, &mut buf) {
                 Ok(0) | Err(_) => break,
-                Ok(k) => n += k,
+                Ok(k) => {
+                    total += k;
+                    read_into(&mut st, &mut lines, &buf[..k], refused);
+                }
             }
         }
         let _ = vm.close_file(f);
-        println!("hub-p4: {DIR}/{SITE_NAME} read ({n} bytes)");
-        self.site = Some(n);
+        lines.finish(|n, r| match r.and_then(parse_line) {
+            Ok(l) => st.apply(l),
+            Err(e) => {
+                st.ignored += 1;
+                refused(n, e);
+            }
+        });
+        println!("hub-p4: {DIR}/{SITE_NAME} read ({total} bytes, {} lines)", lines.number);
+        self.site = Some(st);
     }
 
     /// Append `text` (whole lines) to `ROTORSCP/SITE.TXT`, creating it.

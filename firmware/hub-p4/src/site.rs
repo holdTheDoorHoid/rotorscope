@@ -6,20 +6,17 @@
 
 use core::fmt::Write;
 
-use tracker::site::{self, SiteLine};
+use tracker::site::{self, SiteLine, SiteState};
 
 use crate::app::App;
 use crate::evlog::Evidence;
 use crate::links::GatewayLink;
 use crate::sd::Logger;
 
-/// Node positions held (one per relayed node, like the gateway's table).
-pub const MAX_PLACED: usize = 16;
-
 #[derive(Default)]
 pub struct Site {
-    /// Station address -> (lat, lon).
-    nodes: heapless::Vec<([u8; 6], f64, f64), MAX_PLACED>,
+    /// Node positions (the mute rules live in the tracker).
+    st: SiteState,
 }
 
 /// Where a change came from.
@@ -43,11 +40,7 @@ impl From {
 
 impl Site {
     fn place(&mut self, mac: [u8; 6], lat: f64, lon: f64) {
-        self.nodes.retain(|n| n.0 != mac);
-        if self.nodes.is_full() {
-            self.nodes.remove(0);
-        }
-        let _ = self.nodes.push((mac, lat, lon));
+        self.st.place(mac, lat, lon);
     }
 
     /// Once a second: tell the tracker where each node it knows stands
@@ -55,46 +48,33 @@ impl Site {
     pub fn apply(&self, app: &mut App, gw: &GatewayLink<'_>) {
         for (i, n) in gw.nodes.iter().enumerate() {
             let node = i as u8 + 1;
-            match self.nodes.iter().find(|p| p.0 == n.mac) {
+            match self.st.nodes.iter().find(|p| p.0 == n.mac) {
                 Some(&(_, lat, lon)) => app.tracker.set_node_position(node, lat, lon),
                 None => app.tracker.clear_node_position(node),
             }
         }
     }
 
-    /// Every line of the card's file, in order (later lines win).
-    pub fn load(&mut self, text: &[u8], app: &mut App) {
-        let (mut ok, mut bad) = (0u32, 0u32);
-        for (n, raw) in text.split(|&b| b == b'\n').enumerate() {
-            let Ok(line) = core::str::from_utf8(raw) else {
-                bad += 1;
-                continue;
-            };
-            match site::parse_line(line) {
-                Ok(SiteLine::Nothing) => {}
-                // "node all here" needs a live hub position: console/screen only.
-                Ok(SiteLine::AllNodesHere) => crate::println!("hub-p4: SITE.TXT line {}: 'node all here' only works on the console", n + 1),
-                Ok(l) => {
-                    ok += 1;
-                    self.apply_line(l, app);
-                }
-                Err(e) => {
-                    bad += 1;
-                    crate::println!("hub-p4: SITE.TXT line {} ignored: {e}", n + 1);
-                }
-            }
+    /// What the card's file said at mount.
+    pub fn load(&mut self, st: SiteState, app: &mut App) {
+        app.tracker.unmute_all();
+        for m in &st.mutes {
+            app.tracker.mute(m.clone());
         }
         crate::println!(
-            "hub-p4: site file: {ok} lines used, {bad} ignored; {} nodes placed, {} alarm mutes",
-            self.nodes.len(),
-            app.tracker.mutes().len()
+            "hub-p4: site file: {} lines used, {} ignored; {} nodes placed, {} alarm mutes",
+            st.used,
+            st.ignored,
+            st.nodes.len(),
+            st.mutes.len()
         );
+        self.st.nodes = st.nodes;
     }
 
     fn apply_line(&mut self, l: SiteLine, app: &mut App) {
         match l {
             SiteLine::NodeAt { mac, lat, lon } => self.place(mac, lat, lon),
-            SiteLine::NodeClear { mac } => self.nodes.retain(|n| n.0 != mac),
+            SiteLine::NodeClear { mac } => self.st.nodes.retain(|n| n.0 != mac),
             SiteLine::Mute(m) => drop(app.tracker.mute(m)),
             SiteLine::UnmuteAll => app.tracker.unmute_all(),
             SiteLine::AllNodesHere | SiteLine::Nothing => {}
