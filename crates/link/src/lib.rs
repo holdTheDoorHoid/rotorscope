@@ -287,6 +287,25 @@ pub enum ThreatKind {
     /// Frames claiming to come from one of our own nodes failed
     /// authentication (ESP-NOW gateway): someone is injecting fake nodes or
     /// commands. `source` = the claimed node, `count` = rejected frames.
+    ///
+    /// Sent by a gateway built with the kit link key (`crates/airlink`
+    /// `auth`, docs/ESPNOW.md "Securing the link"), at most once a second per
+    /// claimed address and reason while it lasts, with no `Via` before it
+    /// (it is the gateway's own frame). `source` = the claimed node address
+    /// (all zero: more addresses than the gateway's table, e.g. random ones),
+    /// `target` = the gateway's own address, `channel` 6 / `freq` 24370,
+    /// `level` = strongest RSSI of the rejected packets, `window_ms` = the
+    /// window `count` covers. `detail` = why (`airlink::auth::Reject`):
+    /// - 1 **bad tag**: the authentication tag does not match: a forgery (or
+    ///   a packet made with another key);
+    /// - 2 **replay**: a genuine packet, but older than one already taken
+    ///   from that node: a recording played back;
+    /// - 3 **unauthenticated**: no tag at all: a node built without the key
+    ///   (a keyed gateway accepts keyed nodes only), or a forgery that does
+    ///   not try;
+    /// - 4 **stale**: a genuine packet from before the gateway's last
+    ///   restart, more than a minute after it (expected, and not reported,
+    ///   for the few seconds a node takes to resync after a restart).
     ForgedLink,
 }
 
