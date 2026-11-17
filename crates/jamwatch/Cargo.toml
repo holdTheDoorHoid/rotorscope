@@ -1,0 +1,15 @@
+[package]
+name = "jamwatch"
+description = "no_std jamming detection for the raw-capture ESP32-C5: per-hop noise-floor baselines, broadband / tone / sweep / pulsed interference, and a fail-loud 'blinded' estimate"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fpvscan = { path = "../fpvscan" }
+link = { workspace = true }
+heapless.workspace = true
+
+[dev-dependencies]
+rawcap = { path = "../rawcap" }
+droneid = { path = "../droneid" }
