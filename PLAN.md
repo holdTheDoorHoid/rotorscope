@@ -249,6 +249,23 @@ transmitting at all (no unauthenticated radio input), and frees the gateway C5 t
 - **Done when:** c5a, b and c (gateway turned listener) share UART3 into the P4 with 0 corrupt
   frames, every role assignment arrives over the wire, and the listening-time gain over ESP-NOW is
   measured.
+- **BUILT 2026-11-17 (branch `wired-bus`), untested on hardware** (docs/WIREBUS.md):
+  - Protocol 10 in `crates/link` (`Poll`, `JoinSlot`, `Address`; `BusJoin`, `BusDone`, appended).
+  - `crates/wirebus`: bus master and bus node as pure state machines; CRC-checked answers with
+    resend, MAC-bound addresses kept across reboots, image switches and hub restarts, absent
+    nodes, fairness budget. 27 host tests incl. a byte-level wire simulation: 8 nodes join
+    through collisions in < 0.25 s; mean latency ~12 ms, p99 22-26 ms for 2-8 nodes at 921600;
+    noise, reboots, unplugging, a flooding node: nothing lost or reordered.
+  - Nodes: `wirebus` feature in node-wifi (`cargo fw24-bus`), node-ble and node-sdr
+    (`cargo fw-bus`), shared glue `node-common/src/bus.rs`; TX open-drain on XIAO D9 (GPIO9), RX
+    D7 (GPIO12). `NODE_BUS=1 tools/flash-node.sh`.
+  - Hub: `hub-p4/src/bus.rs`, on UART3 by default, driven from the UART interrupt; frames carry
+    a `Via` per node so the tracker path is unchanged; an old ESP-NOW gateway on UART3 is
+    recognised and read as before. Wired nodes get no channel-6 visits in their plans.
+  - **Remains:** the owner wires it (WIREBUS.md "Wiring guide"), then the bench checklist
+    (WIREBUS.md) for the "done when" above, including measuring the listening-time gain
+    (estimated: Bluetooth +22% adverts, 5 GHz 4-8% more time on plan, raw capture ~7% more
+    capture). Gateway-on-the-bus mode and RS-485 driver-enable support are not built.
 - Browser flasher that updates every chip, building on the earlier Orbic web-flasher work.
 - Build guide.
 - **Done when:** someone other than us builds one from the guide.
