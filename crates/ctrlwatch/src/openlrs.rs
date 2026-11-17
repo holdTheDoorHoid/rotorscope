@@ -228,6 +228,22 @@ mod tests {
     }
 
     #[test]
+    fn random_reads_rejected() {
+        let rx = rx_config(Region::Eu433, 435_000_000, 2, false).unwrap();
+        let mut x = 11u64;
+        for _ in 0..50_000 {
+            let mut b = [0u8; 32];
+            for v in b.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *v = x as u8;
+            }
+            assert!(crate::recognise(&b, &rx, RxMeta::default(), &Config::default()).is_none());
+        }
+    }
+
+    #[test]
     fn sik_frame_is_not_openlrs() {
         let rx = rx_config(Region::Eu433, 435_000_000, 2, false).unwrap();
         let f = crate::sik::encode(25, &[1, 2, 3], 0);
