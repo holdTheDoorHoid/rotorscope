@@ -125,8 +125,10 @@ with an aero node.** Branch `aero-hub`.
 - **What the node listens to.** A lone aero node takes turns: 978 MHz UAT for 10 s, FLARM for
   10 s, OGN trackers for 5 s. If the hub has not heard its ADSBee for a minute, 1090 MHz joins
   the turns for 10 s (the ADSBee normally covers 1090). Two or more aero nodes split these
-  between them. The console command `a` pins every aero node to one signal (1090, UAT, FLARM or
-  OGN, then back to the turns); it lasts until the hub restarts. US channels are the default
+  between them. Since protocol 12 the same radio also scans for drone control links, about half
+  the time on a lone node, or on its own node when there are two (docs/CONTROL-LINKS.md). The
+  console command `a` pins every aero node to one signal (1090, UAT, FLARM, OGN or control
+  links, then back to the turns); it lasts until the hub restarts. US channels are the default
   (`AERO_REGION` in `crates/coverage/src/plans.rs` for Europe or elsewhere).
 - **On the screen.** The node health page shows each aero node as "LR" with a line saying what
   its radio is doing: "LR UAT 978", "LR FLARM hop", "LR FLARM parked" (no time, so it cannot

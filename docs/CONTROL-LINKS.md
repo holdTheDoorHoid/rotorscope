@@ -198,9 +198,11 @@ Encrypted links stay encrypted: nothing tries to break them.
    the card's `SITE.TXT` gains the line; the evidence log has two Setting events.
 3. The `{"t":"control_stats"}` line appears once a setting is on, with `"content":true`.
 4. Restart with the card in: the setting is back on (read from `SITE.TXT`), printed at mount.
-5. With a node simulator or `fakenode`: an aero node's assignment includes a control entry
-   (`hub-p4: assign ... -> Aero plan ...`); with content on, its plan grows by one entry.
-6. `control content off`: the plan shrinks again; nothing else changes.
+5. With an aero node attached (later, with hardware): its assignment line (`hub-p4: assign ...
+   -> Aero plan ...`) has one entry more than the aircraft turns (the control turn), and one
+   more again with an opt-in on (the settings entry). Without one, the coverage tests
+   (`cargo test -p coverage`) show the same plans.
+6. `control content off`: printed and logged again; the plan loses its settings entry.
 7. The SIGNALS page shows the CONTROL table ("none heard") above RF.
 
 ## How the node uses the crate
