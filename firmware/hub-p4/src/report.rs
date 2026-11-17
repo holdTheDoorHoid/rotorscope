@@ -63,6 +63,15 @@ pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd:
             return;
         }
     }
+    // Protocol 9: one {"t":"threat"} line per attack or jamming entry.
+    let mut tl = [0u8; tracker::threats::MAX_THREAT_LINE];
+    for t in app.tracker.threats() {
+        if let Ok(n) = tracker::threats::threat_line(t, &ctx, &mut tl)
+            && !console::json(&tl[..n])
+        {
+            return;
+        }
+    }
     // Phase 12: one {"t":"flags"} line per flagged drone or aircraft (only
     // whole lines: one that does not fit the buffer is skipped).
     for e in faa.engine.entries().iter().filter(|e| !e.flags.is_empty()) {
@@ -82,8 +91,10 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     let src = gps.time.map(|a| if a.pps { "\"gps_pps\"" } else { "\"gps\"" });
     let _ = write!(
         w.0,
-        ",\"utc_src\":{},\"tracks\":{},\"active\":{},\"open_links\":{},\"open_active\":{},\"aircraft\":{},\"aircraft_active\":{},\"own\":",
+        ",\"utc_src\":{},\"threats\":{},\"blind\":{},\"tracks\":{},\"active\":{},\"open_links\":{},\"open_active\":{},\"aircraft\":{},\"aircraft_active\":{},\"own\":",
         src.unwrap_or("null"),
+        t.active_threats(now).count(),
+        t.partly_blind(now),
         t.tracks().len(),
         t.active_count(now),
         t.open_links().len(),

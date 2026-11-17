@@ -494,6 +494,18 @@ pub struct UiState {
     pub total_wifi_drones: u16,
     /// Possible-violation flags (P4 hub); `None` hides the FLAGS page.
     pub flags: Option<FlagsView>,
+    /// Attacks and jamming the hub sees right now (link protocol 9).
+    pub threats: Threats,
+}
+
+/// Attacks and jamming in progress, for the status bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Threats {
+    /// Active attacks of any kind (deauth floods, fake networks, jamming...).
+    pub active: u8,
+    /// A node is jammed or deaf: the detector may be missing drones, so an
+    /// empty list must not read as "all clear".
+    pub jammed: bool,
 }
 
 impl UiState {

@@ -119,6 +119,38 @@ impl App {
             }
         }
         self.announce_new(now);
+        self.announce_threats(gw, ev, now);
+    }
+
+    /// New attacks and jamming (protocol 9, and the hub's own deaf-node
+    /// check): one evidence event and one console line each, once.
+    fn announce_threats(&mut self, gw: &GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
+        use core::fmt::Write;
+        while let Some(id) = self.tracker.take_new_threat(now) {
+            let Some(t) = self.tracker.get_threat(id) else { continue };
+            let mac = t.node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
+            let mut text: heapless::String<160> = heapless::String::new();
+            let _ = write!(text, "{} (node {}", t.label(), t.node);
+            if t.channel != 0 {
+                let _ = write!(text, ", ch {}", t.channel);
+            }
+            if t.freq != 0 {
+                let _ = write!(text, ", {:.1} MHz", t.freq_mhz());
+            }
+            let _ = if t.kind.is_jamming() {
+                write!(text, ", +{} dB, detail {})", t.level, t.detail)
+            } else {
+                write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
+            };
+            if !t.ssid.is_empty() {
+                let _ = write!(text, " \"{}\"", t.ssid);
+            }
+            let mut data = [0u8; 7];
+            data[0] = t.kind as u8;
+            data[1..].copy_from_slice(&mac);
+            ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+            crate::println!("hub-p4: THREAT {}", text);
+        }
     }
 
     /// Decrypt one O4 record with the owner's key and fold it into its
@@ -306,6 +338,10 @@ impl App {
         screen::from_tracker::fill_from_tracker(self.tracker, &ctx, &mut self.state);
         self.state.sd = ext.sd;
         self.state.flags = ext.flags.clone();
+        self.state.threats = screen::Threats {
+            active: self.tracker.active_threats(now).count().min(255) as u8,
+            jammed: self.tracker.partly_blind(now),
+        };
         // No battery sense on this board (the BAT connector's voltage is not
         // wired to a GPIO): report USB power, as a bench S3 does.
         self.state.power = screen::Power::Usb { battery_pct: None };

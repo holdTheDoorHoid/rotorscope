@@ -396,6 +396,11 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// A node's Status frame: its role, what it can do, the plan it applied.
     pub fn ingest_status(&mut self, node: u8, role: NodeRole, can: u8, plan: u16, now_ms: u64) {
         let n = self.nodes.entry(node, now_ms);
+        // What is a normal frame rate depends on what the node listens to.
+        if n.role != Some(role) || n.plan != Some(plan) {
+            self.deaf.reset(node);
+        }
+        let n = self.nodes.entry(node, now_ms);
         n.role = Some(role);
         n.can = Some(can);
         n.plan = Some(plan);
@@ -436,12 +441,16 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 self.ingest_status(node, *role, *can, *plan, now_ms)
             }
             Frame::Hello { role, .. } => self.ingest_hello(node, *role, now_ms),
-            Frame::Stats { .. } | Frame::Via { .. } => {}
+            // Stats feed the hub's deaf-node check (a jammed node).
+            Frame::Stats { uptime_us, frames_seen, .. } => {
+                let _ = self.ingest_node_stats(node, *uptime_us, *frames_seen, now_ms);
+            }
+            Frame::Via { .. } => {}
             // Protocol 5, hub to web head: the hub firmware handles these
             // (own position, ADS-B), not the drone tables.
             Frame::HubFix(_) | Frame::Csbee(_) | Frame::Flags(_) => {}
-            // Protocol 9: attacks and jamming are not drones (see `threats`).
-            Frame::Threat(_) => {}
+            // Protocol 9: attacks and jamming, a table of their own.
+            Frame::Threat(s) => drop(self.ingest_threat(node, s, now_ms)),
         }
     }
 

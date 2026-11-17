@@ -63,6 +63,7 @@ pub mod json;
 pub mod openlinks;
 pub mod signals;
 mod text;
+pub mod threats;
 
 use heapless::Vec;
 use rid::Transport;
@@ -771,6 +772,9 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     wifi_drones: signals::WifiDroneTable,
     /// Per-node role and plan, from Hello and Status frames.
     nodes: signals::NodeTable,
+    /// Attacks and jamming (protocol 9) and the hub's deaf-node check.
+    threats: threats::ThreatTable,
+    deaf: threats::DeafWatch,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -791,6 +795,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             emitters: signals::EmitterTable::new(),
             wifi_drones: signals::WifiDroneTable::new(),
             nodes: signals::NodeTable::new(),
+            threats: threats::ThreatTable::new(),
+            deaf: threats::DeafWatch::new(),
             next_id: 1,
             own: None,
             config,
@@ -1095,6 +1101,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.aircraft.expire(now_ms);
         self.emitters.expire(now_ms, &self.config);
         self.wifi_drones.expire(now_ms, &self.config);
+        self.threats.expire(now_ms, self.config.remove_after_ms);
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         self.tracks

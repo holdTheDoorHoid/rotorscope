@@ -111,6 +111,13 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         x += gap;
     }
 
+    // Attacks and jamming: an inverse box, like a missing GPS fix.
+    if s.threats.jammed {
+        x = text_boxed(d, "JAMMED", x + 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+    } else if s.threats.active > 0 {
+        x = text_boxed(d, "ATTACK", x + 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+    }
+
     // Right side, from the right edge inwards: time, power, recording.
     let mut rx = WIDTH - 3;
     b.clear();
@@ -557,7 +564,7 @@ fn rows<D: DrawTarget<Color = Rgb565>>(
         text_center(d, "No drones heard yet", WIDTH / 2, top + 30, F_MED, p.dim)?;
         text_center(
             d,
-            "Listening on every radio",
+            if s.threats.jammed { "Jamming: may be missing drones" } else { "Listening on every radio" },
             WIDTH / 2,
             top + 50,
             F_LABEL,
