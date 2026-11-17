@@ -246,6 +246,20 @@ pub fn base_plan(role: NodeRole, k: usize, idx: usize) -> Plan {
 // hub has no ADSBee hearing 1090 already. Several aero nodes split the
 // same list, one or more modes each, so with enough of them each mode has
 // a radio of its own.
+//
+// Protocol 12: the same radio also scans for drone control links
+// (docs/CONTROL-LINKS.md, `AeroMode::Control`).
+// - One node: aircraft and control links take turns, about half the time
+//   each: one control entry as long as the aircraft turns together (25 s,
+//   35 s with 1090). Aircraft beacons repeat every second or so, so 25 s
+//   away loses little; a control link's ELRS sync packet comes every 5 s,
+//   so a control turn of 25 s covers several plan steps.
+// - Two or more: half the nodes (rounded down) do control links only, the
+//   rest aircraft only. Two control nodes split the packet bands (sub-GHz
+//   on one, 2.4 GHz on the other).
+// - The two opt-ins (link IDs, decoded content) ride as one
+//   `AeroMode::ControlFlags` entry at the end of any plan with a control
+//   entry, only when one of them is on (no entry = both off).
 
 /// FLARM/OGN hopping region (SoftRF `RF_BAND_*`): 2 = USA/Canada (902-928
 /// MHz). 1 = Europe (868 MHz), 3 = Australia/South America.
@@ -258,6 +272,63 @@ pub const AERO_UAT_MS: u16 = 10_000;
 pub const AERO_FLARM_MS: u16 = 10_000;
 pub const AERO_OGN_MS: u16 = 5_000;
 
+/// Control-link regions scanned with packet plans by default (US):
+/// 902-928 MHz, 433 MHz (US ELRS 433 domain, OpenLRSng) and 2.4 GHz.
+pub const CONTROL_REGIONS_US: &[ctrlwatch::Region] =
+    &[ctrlwatch::Region::Fcc915, ctrlwatch::Region::Us433, ctrlwatch::Region::Ism2g4];
+/// Swept for energy only by default (US): 863-870 MHz (European gear
+/// brought over; nothing legal transmits a control link there in the US).
+pub const CONTROL_ENERGY_US: &[ctrlwatch::Region] = &[ctrlwatch::Region::Eu868];
+
+/// A region list as an `AeroMode::Control` mask.
+pub const fn region_mask(rs: &[ctrlwatch::Region]) -> u16 {
+    let mut m = 0;
+    let mut i = 0;
+    while i < rs.len() {
+        m |= link::control_region_bit(rs[i]);
+        i += 1;
+    }
+    m
+}
+
+/// The control-link scan the hub asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlSettings {
+    /// Scan for control links at all.
+    pub enabled: bool,
+    /// Regions with packet plans, and bands swept for energy only
+    /// (`AeroMode::Control` masks).
+    pub regions: u16,
+    pub energy: u16,
+    /// The opt-ins: off unless the owner turns them on (SITE.TXT
+    /// `control ids on`, `control content on`).
+    pub read_ids: bool,
+    pub decode_content: bool,
+}
+
+impl ControlSettings {
+    pub const fn us() -> Self {
+        Self {
+            enabled: true,
+            regions: region_mask(CONTROL_REGIONS_US),
+            energy: region_mask(CONTROL_ENERGY_US),
+            read_ids: false,
+            decode_content: false,
+        }
+    }
+
+    fn flags_entry(&self) -> Option<(u32, u16)> {
+        (self.read_ids || self.decode_content)
+            .then(|| link::AeroMode::ControlFlags { read_ids: self.read_ids, decode_content: self.decode_content }.entry(0))
+    }
+}
+
+impl Default for ControlSettings {
+    fn default() -> Self {
+        Self::us()
+    }
+}
+
 /// What the hub tells the coordinator about aero coverage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AeroSettings {
@@ -268,11 +339,33 @@ pub struct AeroSettings {
     pub only: Option<link::AeroMode>,
     /// FLARM/OGN region.
     pub region: u8,
+    /// Protocol 12: drone control links.
+    pub control: ControlSettings,
 }
 
 impl AeroSettings {
     pub const fn new() -> Self {
-        Self { es1090_elsewhere: false, only: None, region: AERO_REGION }
+        Self { es1090_elsewhere: false, only: None, region: AERO_REGION, control: ControlSettings::us() }
+    }
+
+    /// The control entry with this node's share of the regions.
+    fn control_mode(&self, parts: usize, idx: usize) -> link::AeroMode {
+        let c = &self.control;
+        if parts <= 1 {
+            return link::AeroMode::Control { regions: c.regions, energy: c.energy };
+        }
+        // Two or more control nodes: 2.4 GHz to the last, sub-GHz split
+        // among the others; energy-only bands with the first.
+        let g24 = link::control_region_bit(ctrlwatch::Region::Ism2g4);
+        let sub: heapless::Vec<u32, 10> = (0..10).map(|i| 1u32 << i).filter(|b| c.regions as u32 & b & !(g24 as u32) != 0).collect();
+        let (regions, energy) = if idx == parts - 1 && c.regions & g24 != 0 {
+            (g24, 0)
+        } else {
+            let k = if c.regions & g24 != 0 { parts - 1 } else { parts };
+            let mine = part(&sub, k.max(1), idx.min(k.saturating_sub(1)));
+            (mine.iter().fold(0u16, |m, b| m | *b as u16), if idx == 0 { c.energy } else { 0 })
+        };
+        link::AeroMode::Control { regions, energy }
     }
 }
 
@@ -286,8 +379,18 @@ impl Default for AeroSettings {
 pub fn aero_plan(k: usize, idx: usize, s: &AeroSettings) -> Plan {
     use link::AeroMode;
     let mut p = Plan::new();
+    let k = k.max(1);
+    let control_on = s.control.enabled && (s.control.regions | s.control.energy) != 0;
     if let Some(m) = s.only {
+        let m = match m {
+            // The override names "control"; the regions are the settings'.
+            AeroMode::Control { .. } => s.control_mode(1, 0),
+            m => m,
+        };
         let _ = p.push(m.entry(0));
+        if matches!(m, AeroMode::Control { .. }) {
+            push_all(&mut p, s.control.flags_entry());
+        }
         return p;
     }
     let all = [
@@ -297,11 +400,27 @@ pub fn aero_plan(k: usize, idx: usize, s: &AeroSettings) -> Plan {
         (AeroMode::FlarmHop { band: s.region, ogn: true }, AERO_OGN_MS),
     ];
     let modes = if s.es1090_elsewhere { &all[1..] } else { &all[..] };
+    // Who does what: with control on and two or more nodes, the last
+    // floor(k/2) do control links only.
+    let control_nodes = if control_on && k >= 2 { k / 2 } else { 0 };
+    let air_nodes = k - control_nodes;
+    if idx >= air_nodes {
+        let _ = p.push(s.control_mode(control_nodes, idx - air_nodes).entry(0));
+        push_all(&mut p, s.control.flags_entry());
+        return p;
+    }
     let codes: heapless::Vec<u32, 4> = modes.iter().map(|(m, _)| m.code()).collect();
-    let mine = part(&codes, k.max(1), idx);
+    let mine = part(&codes, air_nodes, idx);
+    let share = control_on && k == 1;
     for &c in mine {
-        let dwell = if mine.len() == 1 { 0 } else { modes.iter().find(|(m, _)| m.code() == c).map_or(0, |m| m.1) };
+        let dwell = if mine.len() == 1 && !share { 0 } else { modes.iter().find(|(m, _)| m.code() == c).map_or(0, |m| m.1) };
         let _ = p.push((c, dwell));
+    }
+    if share {
+        // About half the time: as long as the aircraft turns together.
+        let air: u32 = p.iter().map(|e| u32::from(e.1)).sum();
+        let _ = p.push(s.control_mode(1, 0).entry(air.min(u32::from(u16::MAX)) as u16));
+        push_all(&mut p, s.control.flags_entry());
     }
     p
 }

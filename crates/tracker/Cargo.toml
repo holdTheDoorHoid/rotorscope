@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 rid = { workspace = true, features = ["serde"] }
 link.workspace = true
+ctrlwatch = { path = "../ctrlwatch", features = ["serde"] }
 openlink = { workspace = true, features = ["serde"] }
 adsb.workspace = true
 wifidrone.workspace = true

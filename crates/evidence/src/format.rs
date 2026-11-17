@@ -328,6 +328,13 @@ pub mod frame_kind {
     /// Link protocol 11: one raw aircraft frame from an aero node
     /// (`link::Frame::Air`: 1090 ES, UAT, FLARM or OGN), band `RF`.
     pub const AIRCRAFT: u8 = 7;
+    /// Link protocol 12: a drone control link heard by an LR2021 node
+    /// (`link::Frame::Control`: system, signal, confidence; decoded
+    /// content and the raw packet only with the owner's opt-in), band `RF`.
+    pub const CONTROL: u8 = 8;
+    /// Link protocol 12: one energy window of a control band
+    /// (`link::Frame::ControlEnergy`: hoppers, steady carriers), band `RF`.
+    pub const CONTROL_ENERGY: u8 = 9;
 }
 
 /// Detection body: band.

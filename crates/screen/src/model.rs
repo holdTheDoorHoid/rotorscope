@@ -464,6 +464,49 @@ pub struct WifiDroneView {
     pub last_seen_ms: u64,
 }
 
+/// Control-link rows the screen is given per frame.
+pub const MAX_CONTROL_ROWS: usize = 4;
+
+/// How sure a control-link row is (mirrors `ctrlwatch::Confidence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ControlSure {
+    /// Energy and timing only (closed systems, or a hopper).
+    #[default]
+    Energy,
+    /// Right settings and size, nothing checkable.
+    Likely,
+    /// The packet passed the system's own checksum.
+    Confirmed,
+}
+
+impl ControlSure {
+    pub const fn label(self) -> &'static str {
+        match self {
+            ControlSure::Energy => "energy",
+            ControlSure::Likely => "likely",
+            ControlSure::Confirmed => "sure",
+        }
+    }
+}
+
+/// One drone control link (ExpressLRS, mLRS, SiK...) or a hopping
+/// transmitter in a control band, for the SIGNALS page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ControlView {
+    pub key: u32,
+    /// Short system name ("ELRS", "mLRS", "SiK", "ELRS?" for an energy
+    /// candidate).
+    pub system: String<8>,
+    /// "915", "868", "433", "2.4".
+    pub band: &'static str,
+    pub sure: ControlSure,
+    pub rssi: i16,
+    /// Stick positions, telemetry, rate or hop pattern, 19 characters at most.
+    pub detail: String<19>,
+    pub stale: bool,
+    pub last_seen_ms: u64,
+}
+
 /// Most flag rows the FLAGS page lists.
 pub const MAX_FLAG_ROWS: usize = 12;
 
@@ -523,6 +566,10 @@ pub struct UiState {
     /// Wi-Fi drones, active first then strongest, and how many in all.
     pub wifi_drones: Vec<WifiDroneView, MAX_SIGNALS>,
     pub total_wifi_drones: u16,
+    /// Drone control links, then control-band hoppers: active first, then
+    /// strongest; and how many the hub holds.
+    pub control: Vec<ControlView, MAX_CONTROL_ROWS>,
+    pub total_control: u16,
     /// Possible-violation flags (P4 hub); `None` hides the FLAGS page.
     pub flags: Option<FlagsView>,
     /// Attacks and jamming the hub sees right now (link protocol 9).

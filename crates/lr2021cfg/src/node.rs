@@ -16,6 +16,9 @@ pub struct PlanCursor {
     since_ms: u64,
     /// Entries skipped because this firmware does not know their code.
     pub unknown: u8,
+    /// The control-link opt-ins from the plan's [`AeroMode::ControlFlags`]
+    /// entry (both off without one).
+    pub flags: ctrlwatch::Config,
 }
 
 /// The built-in plan: 1090 MHz, for good.
@@ -28,6 +31,7 @@ impl PlanCursor {
     pub fn new(plan: &[(u32, u16)], now_ms: u64) -> Self {
         let mut entries = Vec::new();
         let mut unknown = 0u8;
+        let mut flags = ctrlwatch::Config::default();
         for &(code, dwell) in plan {
             match AeroMode::from_code(code) {
                 Some(m @ AeroMode::FlarmHop { band, .. }) if Band::from_number(band).is_some() => {
@@ -36,13 +40,19 @@ impl PlanCursor {
                 Some(m @ (AeroMode::Es1090 | AeroMode::Uat978)) => {
                     let _ = entries.push((m, dwell));
                 }
+                Some(m @ AeroMode::Control { regions, energy }) if regions | energy != 0 => {
+                    let _ = entries.push((m, dwell));
+                }
+                Some(AeroMode::ControlFlags { read_ids, decode_content }) => {
+                    flags = ctrlwatch::Config { read_ids, decode_content };
+                }
                 _ => unknown = unknown.saturating_add(1),
             }
         }
         if entries.is_empty() {
             let _ = entries.push((DEFAULT_MODE, 0));
         }
-        Self { entries, idx: 0, since_ms: now_ms, unknown }
+        Self { entries, idx: 0, since_ms: now_ms, unknown, flags }
     }
 
     pub fn current(&self) -> AeroMode {
@@ -189,6 +199,22 @@ mod tests {
         assert_eq!(c.current(), AeroMode::Uat978);
         assert!(c.poll(8000));
         assert_eq!(c.current(), AeroMode::Es1090);
+        // Control entries are modes; the flags entry is settings only.
+        let plan = [
+            AeroMode::Uat978.entry(10_000),
+            AeroMode::ControlFlags { read_ids: false, decode_content: true }.entry(0),
+            AeroMode::Control { regions: 0x201, energy: 0 }.entry(20_000),
+            AeroMode::Control { regions: 0, energy: 0 }.entry(20_000),
+        ];
+        let mut c = PlanCursor::new(&plan, 0);
+        assert_eq!((c.unknown, c.flags), (1, ctrlwatch::Config { read_ids: false, decode_content: true }));
+        assert!(c.poll(10_000));
+        assert_eq!(c.current(), AeroMode::Control { regions: 0x201, energy: 0 });
+        assert_eq!(c.ends_ms(), Some(30_000));
+        assert!(c.poll(30_000));
+        assert_eq!(c.current(), AeroMode::Uat978);
+        // No flags entry: both off.
+        assert_eq!(PlanCursor::new(&plan[2..], 0).flags, ctrlwatch::Config::default());
         // One entry with a dwell: stays.
         let mut c = PlanCursor::new(&[AeroMode::FlarmHop { band: 2, ogn: true }.entry(100)], 0);
         assert!(!c.poll(1_000_000));

@@ -57,6 +57,101 @@ pub fn fill_from_tracker<const N: usize, const A: usize>(
         let _ = state.drones.push(view(&tracks[i], ctx));
     }
     fill_signals(tracker.emitters(), tracker.wifi_drones(), ctx, state);
+    fill_control(tracker.control_links(), tracker.control_bands(), ctx, state);
+}
+
+/// Replace `state.control` (and its total): control links first (active,
+/// then strongest), then bands with a recent hopper.
+pub fn fill_control(
+    links: &[tracker::ctrllinks::ControlLink],
+    bands: &[tracker::ctrllinks::EnergyBand],
+    ctx: &Context,
+    state: &mut UiState,
+) {
+    use tracker::ctrllinks::{band_name, hopper_state, short_name};
+    let stale_after = ctx.config.stale_after_ms;
+    let is_stale = |t: u64| ctx.now_ms.saturating_sub(t) >= stale_after;
+    let hoppers = bands.iter().filter(|b| hopper_state(b, ctx.now_ms, &ctx.config).is_some());
+    state.total_control = (links.len() + hoppers.clone().count()).min(usize::from(u16::MAX)) as u16;
+    state.control.clear();
+    let mut order: Vec<(bool, i16, usize), { tracker::ctrllinks::MAX_CONTROL_LINKS }> =
+        links.iter().enumerate().map(|(i, l)| (is_stale(l.last_seen_ms), -l.rssi, i)).collect();
+    order.sort_unstable();
+    for &(stale, _, i) in &order {
+        let l = &links[i];
+        let mut v = ControlView {
+            key: l.id.0,
+            band: l.band(),
+            sure: match l.best {
+                ctrlwatch::Confidence::Energy => ControlSure::Energy,
+                ctrlwatch::Confidence::Likely => ControlSure::Likely,
+                ctrlwatch::Confidence::Confirmed => ControlSure::Confirmed,
+            },
+            rssi: l.rssi,
+            stale,
+            last_seen_ms: l.last_seen_ms,
+            ..ControlView::default()
+        };
+        let _ = v.system.push_str(short_name(l.system));
+        // Fresh sticks, else telemetry, else the rate.
+        let fresh = |t: u64| ctx.now_ms.saturating_sub(t) < 10_000;
+        match (l.sticks.filter(|s| fresh(s.rx_ms)), l.telemetry.as_ref().filter(|t| fresh(t.rx_ms))) {
+            (Some(st), _) => {
+                for (k, us) in st.us.iter().enumerate() {
+                    let _ = write!(v.detail, "{}{}", if k == 0 { "" } else { " " }, us);
+                }
+            }
+            (None, Some(t)) => {
+                if let Some(mv) = t.battery_mv {
+                    let _ = write!(v.detail, "{}.{}V ", mv / 1000, mv / 100 % 10);
+                }
+                if let Some(lq) = t.lq {
+                    let _ = write!(v.detail, "LQ{lq} ");
+                }
+                let _ = v.detail.push_str(t.mode.get(..t.mode.len().min(8)).unwrap_or(""));
+            }
+            (None, None) if l.encrypted => {
+                let _ = v.detail.push_str("encrypted");
+            }
+            (None, None) => {
+                let _ = write!(v.detail, "{}", tracker::json::ProbeText(l.probe));
+            }
+        }
+        if state.control.push(v).is_err() {
+            break;
+        }
+    }
+    for b in hoppers {
+        let Some((h, at)) = &b.hopper else { continue };
+        let mut v = ControlView {
+            key: 0x8000_0000 | u32::from(b.node) << 8 | b.region as u32,
+            band: band_name(b.region),
+            sure: ControlSure::Energy,
+            rssi: i16::from(h.rssi),
+            stale: is_stale(*at),
+            last_seen_ms: *at,
+            ..ControlView::default()
+        };
+        match h.candidates.first() {
+            Some((sys, _)) => {
+                let _ = v.system.push_str(short_name(*sys).trim_end_matches('?'));
+                let _ = v.system.push('?');
+            }
+            None => {
+                let _ = v.system.push_str("hopper");
+            }
+        }
+        let _ = write!(v.detail, "{}ch", h.channels);
+        if let Some(sp) = h.spacing_khz {
+            let _ = write!(v.detail, " {sp}k");
+        }
+        if let Some(iv) = h.interval_us {
+            let _ = write!(v.detail, " {}.{}ms", iv / 1000, iv / 100 % 10);
+        }
+        if state.control.push(v).is_err() {
+            break;
+        }
+    }
 }
 
 /// Replace `state.emitters` and `state.wifi_drones` (and their totals):

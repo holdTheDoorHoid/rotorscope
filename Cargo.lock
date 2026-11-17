@@ -451,6 +451,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 name = "coverage"
 version = "0.1.0"
 dependencies = [
+ "ctrlwatch",
  "heapless 0.8.0",
  "link",
 ]
@@ -1382,6 +1383,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 name = "link"
 version = "0.1.0"
 dependencies = [
+ "ctrlwatch",
  "heapless 0.8.0",
  "openlink",
  "postcard",
@@ -1428,6 +1430,7 @@ name = "lr2021cfg"
 version = "0.1.0"
 dependencies = [
  "aerohop",
+ "ctrlwatch",
  "heapless 0.8.0",
  "link",
  "modes",
@@ -1987,6 +1990,7 @@ name = "screen"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "ctrlwatch",
  "embedded-graphics",
  "heapless 0.8.0",
  "libm",
@@ -2484,6 +2488,7 @@ name = "tracker"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "ctrlwatch",
  "droneid",
  "heapless 0.8.0",
  "libm",

@@ -8,7 +8,7 @@ license.workspace = true
 [features]
 # `from_tracker`: fill a UiState straight from a tracker::Tracker (the hub
 # enables this; the renderer itself does not need the tracker).
-tracker = ["dep:tracker", "dep:rid", "dep:link"]
+tracker = ["dep:tracker", "dep:rid", "dep:link", "dep:ctrlwatch"]
 
 [dependencies]
 embedded-graphics = "0.8"
@@ -17,6 +17,7 @@ libm = "0.2"
 tracker = { workspace = true, optional = true }
 rid = { workspace = true, optional = true }
 link = { workspace = true, optional = true }
+ctrlwatch = { path = "../ctrlwatch", optional = true }
 
 [dev-dependencies]
 # Snapshot tests write PNGs of every screen.

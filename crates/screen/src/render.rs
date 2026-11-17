@@ -972,12 +972,49 @@ fn signals<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -
     text(d, "SIGNALS", 4, y, F_BAR, p.fg)?;
     let _ = write!(
         b,
-        "{} RF, {} Wi-Fi drones",
+        "{} ctrl, {} RF, {} Wi-Fi drones",
+        s.total_control.max(s.control.len() as u16),
         s.total_emitters.max(s.emitters.len() as u16),
         s.total_wifi_drones.max(s.wifi_drones.len() as u16)
     );
     text_right(d, &b, WIDTH - 4, y + 2, F_SMALL, p.dim)?;
     y += 18;
+
+    // Control links: system, band, how sure, level, sticks / telemetry /
+    // rate, age. At most three rows.
+    for (x, h, right) in [
+        (4, "CONTROL", false),
+        (84, "BAND", true),
+        (90, "SURE", false),
+        (160, "dBm", true),
+        (166, "DETAIL", false),
+        (314, "AGE", true),
+    ] {
+        if right {
+            text_right(d, h, x, y, F_SMALL, p.dim)?;
+        } else {
+            text(d, h, x, y, F_SMALL, p.dim)?;
+        }
+    }
+    hline(d, 0, WIDTH, y + 11, p.grid)?;
+    y += 14;
+    if s.control.is_empty() {
+        text(d, "none heard", 18, y, F_LABEL, p.dim)?;
+        y += RH;
+    }
+    for c in s.control.iter().take(3) {
+        let col = if c.stale { p.stale } else { p.fg };
+        text(d, &c.system, 4, y, F_LABEL, col)?;
+        text_right(d, c.band, 84, y, F_LABEL, col)?;
+        text(d, c.sure.label(), 90, y + 2, F_SMALL, col)?;
+        b.clear();
+        let _ = write!(b, "{}", c.rssi);
+        text_right(d, &b, 160, y, F_LABEL, col)?;
+        text(d, &c.detail, 166, y + 2, F_SMALL, col)?;
+        text_right(d, &age(s.now_ms.saturating_sub(c.last_seen_ms)), 314, y, F_LABEL, col)?;
+        y += RH;
+    }
+    y += 3;
 
     // RF: kind, frequency, level, duty or line rate, age.
     for (x, h, right) in [

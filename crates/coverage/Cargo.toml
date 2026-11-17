@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 link.workspace = true
+ctrlwatch = { path = "../ctrlwatch" }
 heapless.workspace = true

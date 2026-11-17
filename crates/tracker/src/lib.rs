@@ -41,6 +41,14 @@
 //! encrypted (O4) record gives a presence-only track keyed by its session
 //! key ID; a burst that did not decode joins one presence-only track.
 //!
+//! # Drone control links
+//! ExpressLRS, mLRS, SiK and OpenLRSng links and control-band energy from
+//! LR2021 nodes (link protocol 12): a table of their own
+//! ([`Tracker::ingest_control`], [`Tracker::control_links`], module
+//! [`ctrllinks`]). A position decoded from a link's telemetry (only with
+//! the owner's content opt-in) becomes an ordinary drone track, source
+//! [`Source::ControlLink`].
+//!
 //! # Other signals
 //! Raw-capture RF emitters (analog video, HDZero, LTE-style links...) and
 //! Wi-Fi drones recognised by network name and address prefix are two more
@@ -56,6 +64,7 @@
 
 pub mod aircraft;
 pub mod continuity;
+pub mod ctrllinks;
 pub mod cot;
 pub mod csv;
 pub mod dji;
@@ -395,6 +404,9 @@ pub struct Track {
     pub spoof: SpoofState,
     /// Link to the track this one probably continues (see [`continuity`]).
     pub continuity: Continuity,
+    /// Protocol 12: the control link whose telemetry gave this track its
+    /// position (see [`ctrllinks`]).
+    pub control: Option<ctrlwatch::System>,
     announced: bool,
 }
 
@@ -419,6 +431,7 @@ impl Track {
             dji: DjiInfo::default(),
             spoof: SpoofState::default(),
             continuity: Continuity::default(),
+            control: None,
             announced: false,
         }
     }
@@ -650,6 +663,7 @@ impl Track {
         self.decode_errors = self.decode_errors.saturating_add(other.decode_errors);
         self.spoof.absorb(&other.spoof);
         self.continuity.absorb(&other.continuity);
+        self.control = self.control.or(other.control);
         // Whoever was alerted on already, the drone has been announced.
         self.announced |= other.announced;
     }
@@ -791,6 +805,8 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     deaf: threats::DeafWatch,
     /// Drone / crewed-aircraft pairs already announced.
     conflict_watch: conflict::ConflictWatch,
+    /// Drone control links and control-band energy (protocol 12).
+    control: ctrllinks::ControlTable,
     /// UTC and node positions for the spoofing checks.
     spoof_cfg: spoof::SpoofConfig,
     next_id: u32,
@@ -816,6 +832,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             threats: threats::ThreatTable::new(),
             deaf: threats::DeafWatch::new(),
             conflict_watch: conflict::ConflictWatch::new(),
+            control: ctrllinks::ControlTable::new(),
             spoof_cfg: spoof::SpoofConfig {
                 utc_offset_ms: None,
                 nodes: [None; spoof::MAX_NODE_POS],
@@ -1163,6 +1180,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.emitters.expire(now_ms, &self.config);
         self.wifi_drones.expire(now_ms, &self.config);
         self.threats.expire(now_ms, self.config.remove_after_ms);
+        self.control.expire(now_ms, &self.config);
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         self.tracks
@@ -1190,6 +1208,8 @@ mod tests;
 mod tests_aircraft;
 #[cfg(test)]
 mod tests_conflict;
+#[cfg(test)]
+mod tests_control;
 #[cfg(test)]
 mod tests_openlinks;
 #[cfg(test)]

@@ -488,3 +488,74 @@ fn aircraft_frames_are_logged_raw() {
     });
     assert!(evidence::summary::info(&st).is_none());
 }
+
+/// Protocol 12: control-link frames are data frames, kinds CONTROL and
+/// CONTROL_ENERGY on the RF band; the stored bytes decode back to the same
+/// frame and summary, and an ID (opt-in) stays out of the summary.
+#[test]
+fn control_frames_are_logged_raw() {
+    use link::ctrlwatch::{self, content::Channels, Confidence, ControlContent, LinkId, Probe, Region, System};
+    let mut ch = Channels::default();
+    ch.set(0, 1500);
+    ch.set(1, 1500);
+    let f = link::Frame::Control(link::ControlReport {
+        sighting: ctrlwatch::ControlSighting {
+            system: System::ExpressLrs,
+            region: Region::Fcc915,
+            probe: Probe::Elrs { rate: ctrlwatch::elrs::ElrsRate::L900_200, version: ctrlwatch::elrs::OtaVersion::V4 },
+            freq_hz: 915_500_000,
+            rssi_dbm: -70,
+            snr_db: 6,
+            t_us: 7,
+            confidence: Confidence::Confirmed,
+            direction: ctrlwatch::Direction::Uplink,
+            id: Some(LinkId::ElrsUid { uid3: None, uid4: 0xAB, uid5: 0xCD, uid5_real: 0xCD }),
+            version: Some(4),
+        },
+        best: Confidence::Confirmed,
+        packets: 40,
+        confirmed: 2,
+        peak_rssi: -60,
+        part: 1,
+        content: [ControlContent::Channels(ch)].into_iter().collect(),
+        raw: Some([1u8, 2, 3, 4, 5, 6, 7, 8].into_iter().collect()),
+    });
+    let info = evidence::summary::info(&f).unwrap();
+    assert_eq!((info.frame_kind, info.band, info.freq_100khz, info.rssi), (evidence::format::frame_kind::CONTROL, evidence::format::band::RF, 9155, Some(-70)));
+    let mut s = evidence::summary::Summary::new();
+    evidence::summary::write_summary(&f, &mut s).unwrap();
+    let text = core::str::from_utf8(s.as_bytes()).unwrap();
+    assert_eq!(text, "control ExpressLrs Fcc915 f=915.500MHz rssi-70 snr6 Confirmed best=Confirmed part=1 pkts=40 id=yes channels=2 raw=8B");
+    assert!(!text.contains("ab") && !text.contains("cd"), "no ID bytes in the summary");
+    let mut buf = [0u8; link::MAX_FRAME];
+    let bytes = evidence::summary::raw_bytes(&f, &mut buf).unwrap().to_vec();
+    let (i2, s2, f2) = evidence::summary::decode_raw(evidence::format::RAW_LINK_FRAME_V6, &bytes).unwrap();
+    assert_eq!((i2, s2.as_bytes(), f2), (info, s.as_bytes(), f));
+
+    let e = link::Frame::ControlEnergy(link::ControlEnergy {
+        region: Region::Ism2g4,
+        windows: 25,
+        activity: link::EnergyActivity::Hopper(link::HopperReport {
+            low_khz: 2_400_500,
+            high_khz: 2_479_500,
+            channels: 30,
+            spacing_khz: Some(1_000),
+            occupied_khz: 1_000,
+            rssi: -66,
+            spread_db: 4,
+            burst_us: None,
+            interval_us: None,
+            periodic_pct: 0,
+            candidates: [(System::ExpressLrs, 60)].into_iter().collect(),
+        }),
+        steady: heapless::Vec::new(),
+        uptime_us: 1,
+    });
+    let info = evidence::summary::info(&e).unwrap();
+    assert_eq!((info.frame_kind, info.freq_100khz), (evidence::format::frame_kind::CONTROL_ENERGY, 24_000));
+    let mut s = evidence::summary::Summary::new();
+    evidence::summary::write_summary(&e, &mut s).unwrap();
+    assert_eq!(core::str::from_utf8(s.as_bytes()).unwrap(), "control_energy Ism2g4 windows=25 steady=0 hopper 2400500-2479500kHz ch30 rssi-66 best=ExpressLrs:60");
+    let bytes = evidence::summary::raw_bytes(&e, &mut buf).unwrap().to_vec();
+    assert!(evidence::summary::decode_raw(evidence::format::RAW_LINK_FRAME_V6, &bytes).is_ok());
+}

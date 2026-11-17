@@ -582,7 +582,8 @@ fn fpv_edge_channels_are_off_the_sweep_and_tunable() {
 }
 
 /// Protocol 11: an aero node is assigned role Aero with the default plan:
-/// UAT and FLARM/OGN (US) time-shared, plus 1090 when no ADSBee hears it.
+/// UAT and FLARM/OGN (US) time-shared, plus 1090 when no ADSBee hears it;
+/// protocol 12: plus a control-link turn as long as the aircraft turns.
 #[test]
 fn lone_aero_node_default_plan() {
     use link::AeroMode as M;
@@ -591,21 +592,24 @@ fn lone_aero_node_default_plan() {
     let d = c.run(&nodes, 0);
     let a = d.iter().find(|d| d.key == nodes[0].key).unwrap();
     assert_eq!(a.assignment.role, Aero);
+    let ctl = M::Control { regions: 0x241, energy: 0x004 };
     let want = [
         M::Es1090.entry(AERO_1090_MS),
         M::Uat978.entry(AERO_UAT_MS),
         M::FlarmHop { band: 2, ogn: false }.entry(AERO_FLARM_MS),
         M::FlarmHop { band: 2, ogn: true }.entry(AERO_OGN_MS),
+        ctl.entry(35_000),
     ];
     assert_eq!(&a.assignment.plan[..], &want[..]);
     // The Wi-Fi node is unaffected.
     assert_eq!(d.iter().find(|d| d.key == nodes[1].key).unwrap().assignment.role, Wifi24);
 
-    // With an ADSBee on the hub, 1090 is left to it; a new plan id.
+    // With an ADSBee on the hub, 1090 is left to it; control still half.
     c.aero.es1090_elsewhere = true;
     let d2 = c.run(&nodes, 1000);
     let a2 = d2.iter().find(|d| d.key == nodes[0].key).unwrap();
-    assert_eq!(&a2.assignment.plan[..], &want[1..]);
+    assert_eq!(&a2.assignment.plan[..3], &want[1..4]);
+    assert_eq!(a2.assignment.plan[3], ctl.entry(25_000));
     assert!(a2.plan_changed);
     assert_ne!(a2.assignment.id, a.assignment.id);
 
@@ -614,6 +618,56 @@ fn lone_aero_node_default_plan() {
     let d3 = c.run(&nodes, 2000);
     let a3 = d3.iter().find(|d| d.key == nodes[0].key).unwrap();
     assert_eq!(&a3.assignment.plan[..], &[M::Uat978.entry(0)][..]);
+
+    // Control off: the aircraft plan alone, exactly as protocol 11.
+    c.aero.only = None;
+    c.aero.control.enabled = false;
+    let d4 = c.run(&nodes, 3000);
+    let a4 = d4.iter().find(|d| d.key == nodes[0].key).unwrap();
+    assert_eq!(&a4.assignment.plan[..], &want[1..4]);
+}
+
+/// The two opt-ins ride as one flags entry, only when one is on, and every
+/// plan with a control entry carries it.
+#[test]
+fn control_flags_entry() {
+    use link::AeroMode as M;
+    let mut s = AeroSettings { es1090_elsewhere: true, ..AeroSettings::new() };
+    assert!(!s.control.read_ids && !s.control.decode_content, "off by default");
+    let has_flags = |p: &[(u32, u16)]| p.iter().filter_map(|e| M::from_code(e.0)).find(|m| m.is_flags());
+    assert_eq!(has_flags(&aero_plan(1, 0, &s)), None);
+    s.control.decode_content = true;
+    assert_eq!(has_flags(&aero_plan(1, 0, &s)), Some(M::ControlFlags { read_ids: false, decode_content: true }));
+    s.control.read_ids = true;
+    // Two nodes: aircraft on one (no flags), control on the other (flags).
+    assert_eq!(has_flags(&aero_plan(2, 0, &s)), None);
+    assert_eq!(has_flags(&aero_plan(2, 1, &s)), Some(M::ControlFlags { read_ids: true, decode_content: true }));
+    // The override "control" takes the settings' regions and flags.
+    s.only = Some(M::Control { regions: 0, energy: 0 });
+    let p = aero_plan(1, 0, &s);
+    assert_eq!(p[0], M::Control { regions: 0x241, energy: 0x004 }.entry(0));
+    assert!(has_flags(&p).is_some());
+}
+
+/// Two aero nodes: one aircraft, one control links. Four: two each, the
+/// control pair splitting sub-GHz and 2.4 GHz.
+#[test]
+fn aero_nodes_split_aircraft_and_control() {
+    use link::AeroMode as M;
+    let s = AeroSettings { es1090_elsewhere: true, ..AeroSettings::new() };
+    let air = [M::Uat978.entry(AERO_UAT_MS), M::FlarmHop { band: 2, ogn: false }.entry(AERO_FLARM_MS), M::FlarmHop { band: 2, ogn: true }.entry(AERO_OGN_MS)];
+    assert_eq!(&aero_plan(2, 0, &s)[..], &air[..]);
+    assert_eq!(&aero_plan(2, 1, &s)[..], &[M::Control { regions: 0x241, energy: 0x004 }.entry(0)][..]);
+    // Three: two aircraft, one control.
+    assert!(aero_plan(3, 2, &s).iter().all(|e| matches!(M::from_code(e.0), Some(M::Control { .. }))));
+    // Four: the control pair splits the bands, nothing lost.
+    let c2 = aero_plan(4, 2, &s);
+    let c3 = aero_plan(4, 3, &s);
+    let Some(M::Control { regions: r2, energy: e2 }) = M::from_code(c2[0].0) else { panic!() };
+    let Some(M::Control { regions: r3, energy: e3 }) = M::from_code(c3[0].0) else { panic!() };
+    assert_eq!((r2, e2), (0x041, 0x004), "915 + 433, and 868 for energy");
+    assert_eq!((r3, e3), (0x200, 0), "2.4 GHz");
+    assert_eq!(r2 | r3, 0x241);
 }
 
 /// An aero node that never said its role (Status with `can` only) still
@@ -627,10 +681,12 @@ fn aero_node_without_role_is_aero() {
 }
 
 /// Several aero nodes split the modes; a single mode per node stays (dwell 0).
+/// (Control links off here: with them on, half the nodes do control.)
 #[test]
 fn aero_nodes_split_the_modes() {
     use link::AeroMode as M;
-    let s = AeroSettings { es1090_elsewhere: true, ..AeroSettings::new() };
+    let mut s = AeroSettings { es1090_elsewhere: true, ..AeroSettings::new() };
+    s.control.enabled = false;
     let one = |k, i| aero_plan(k, i, &s);
     assert_eq!(&one(3, 0)[..], &[M::Uat978.entry(0)][..]);
     assert_eq!(&one(3, 1)[..], &[M::FlarmHop { band: 2, ogn: false }.entry(0)][..]);
@@ -643,11 +699,18 @@ fn aero_nodes_split_the_modes() {
     for i in 0..5 {
         assert_eq!(one(5, i).len(), 1);
     }
-    // Every code is one the node understands.
-    for k in 1..=4 {
-        for i in 0..k {
-            for &(c, _) in &aero_plan(k, i, &AeroSettings::new()) {
-                assert!(M::from_code(c).is_some());
+    // Every code is one the node understands, control on or off.
+    for on in [false, true] {
+        let mut s = AeroSettings::new();
+        s.control.enabled = on;
+        s.control.read_ids = on;
+        for k in 1..=4 {
+            for i in 0..k {
+                let p = aero_plan(k, i, &s);
+                assert!(!p.is_empty());
+                for &(c, _) in &p {
+                    assert!(M::from_code(c).is_some());
+                }
             }
         }
     }

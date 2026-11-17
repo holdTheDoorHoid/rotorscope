@@ -19,6 +19,9 @@
 //! - [`manchester`] and [`accept`]: the raw-chip post-processing (SoftRF's
 //!   Manchester table and DF17 trick) and the checks that keep junk off the
 //!   link.
+//! - [`ctrl`]: the drone control-link scan (`crates/ctrlwatch` plans as
+//!   chip configurations, multi-SF groups, the scan order, ExpressLRS
+//!   follow mode, the `Frame::Control` reports).
 //! - [`node`]: the node's pure logic: plan cursor, hop target, the 1090
 //!   receive watchdog, the frame rate limit.
 //!
@@ -33,6 +36,7 @@
 pub mod accept;
 pub mod cmd;
 pub mod config;
+pub mod ctrl;
 pub mod manchester;
 pub mod node;
 pub mod roles;

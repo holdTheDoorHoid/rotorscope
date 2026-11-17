@@ -1,6 +1,6 @@
 [package]
 name = "lr2021cfg"
-description = "Receive-only Semtech LR2021 configuration as data: SPI command bytes, generic RX configs (OOK, FSK, LoRa, RSSI-only), the aero roles (1090ES, UAT, FLARM, OGN) and their raw-chip post-processing"
+description = "Receive-only Semtech LR2021 configuration as data: SPI command bytes, generic RX configs (OOK, FSK, LoRa with multi-SF, RSSI-only), the aero roles (1090ES, UAT, FLARM, OGN), the control-link scan (ctrlwatch plans on the chip) and their post-processing"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -9,4 +9,5 @@ license.workspace = true
 link.workspace = true
 modes.workspace = true
 aerohop = { path = "../aerohop" }
+ctrlwatch = { path = "../ctrlwatch" }
 heapless.workspace = true

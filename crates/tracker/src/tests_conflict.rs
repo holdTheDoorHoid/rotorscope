@@ -12,7 +12,7 @@ use rid::Transport;
 const M_PER_DEG: f64 = 111_000.0;
 
 /// A helicopter (category 7) `north_m` north of City Hall, heading `dir`.
-fn heli(
+pub(crate) fn heli(
     icao: u32,
     north_m: f64,
     baro_ft: i32,

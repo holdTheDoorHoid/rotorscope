@@ -71,8 +71,12 @@ pub enum Modem {
     },
     /// (G)FSK, fixed-length packets after a sync word of up to 64 bits.
     Fsk { bitrate: u32, shaping: u8, rx_bw: u8, fdev: u32, preamble_tx: u16, sync: u64, sync_bits: u8, len: u16 },
-    /// LoRa. Codes as in [`cmd::set_lora_modulation`].
-    Lora { sf: u8, bw: u8, cr: u8, ldro: bool, sync: u8, preamble: u16, implicit_len: Option<u8>, crc: bool, invert_iq: bool },
+    /// LoRa. Codes as in [`cmd::set_lora_modulation`] ([`cmd::lora_bw`],
+    /// [`cmd::lora_cr`]). `side`: spreading factors for up to three side
+    /// detectors (0 = unused), received at the same time as `sf` with every
+    /// other setting the same ("multi-SF"); the packet status says which
+    /// detector a packet came in on.
+    Lora { sf: u8, bw: u8, cr: u8, ldro: bool, sync: u8, preamble: u16, implicit_len: Option<u8>, crc: bool, invert_iq: bool, side: [u8; 3] },
     /// No packets: the receiver runs (FSK engine, a sync word that never
     /// matches) only so the instantaneous RSSI can be read during a dwell.
     RssiOnly { rx_bw: u8 },
@@ -163,8 +167,19 @@ pub fn apply(board: &Board, cfg: &RxConfig) -> Seq {
             push(&mut s, cmd::set_fsk_packet_fixed(preamble_tx, len));
             push(&mut s, cmd::set_fsk_sync_word(sync, sync_bits));
         }
-        Modem::Lora { sf, bw, cr, ldro, sync, preamble, implicit_len, crc, invert_iq } => {
+        Modem::Lora { sf, bw, cr, ldro, sync, preamble, implicit_len, crc, invert_iq, side } => {
             push(&mut s, cmd::set_lora_modulation(sf, bw, cr, ldro));
+            // Side detectors after the modulation (the `lr2021` crate's
+            // order); always sent, so a previous multi-SF set is cleared.
+            let mut det: Vec<u8, 3> = Vec::new();
+            for &x in side.iter().filter(|&&x| x != 0) {
+                let _ = det.push(cmd::sidedet(x, ldro, invert_iq));
+            }
+            push(&mut s, cmd::set_lora_sidedet_cfg(&det));
+            if !det.is_empty() {
+                let words: Vec<u8, 3> = det.iter().map(|_| sync).collect();
+                push(&mut s, cmd::set_lora_sidedet_syncword(&words));
+            }
             push(&mut s, cmd::set_lora_packet(preamble, implicit_len.unwrap_or(0), implicit_len.is_some(), crc, invert_iq));
             push(&mut s, cmd::set_lora_syncword(sync));
         }
@@ -251,6 +266,7 @@ mod tests {
                     implicit_len: Some(8),
                     crc: true,
                     invert_iq: false,
+                    side: [7, 8, 0],
                 },
             },
         ] {

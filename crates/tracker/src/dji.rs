@@ -59,6 +59,9 @@ pub enum Source {
     DroneId,
     /// DJI legacy Wi-Fi DroneID element.
     DjiWifi,
+    /// Protocol 12: telemetry decoded from a drone control link (ELRS,
+    /// mLRS, SiK), with the owner's content opt-in (`ctrllinks`).
+    ControlLink,
 }
 
 /// Reception of one DJI broadcast family.

@@ -538,6 +538,25 @@ fn with_signals() -> UiState {
             .unwrap();
     }
     st.total_wifi_drones = 3;
+    for (key, sys, band, sure, rssi, detail, stale) in [
+        (1, "ELRS", "915", ControlSure::Confirmed, -64, "1500 1500 988 1500", false),
+        (2, "SiK", "915", ControlSure::Confirmed, -88, "64k", false),
+        (3, "ELRS?", "2.4", ControlSure::Energy, -71, "24ch 1000k 4.0ms", true),
+    ] {
+        st.control
+            .push(ControlView {
+                key,
+                system: s(sys),
+                band,
+                sure,
+                rssi,
+                detail: s(detail),
+                stale,
+                last_seen_ms: NOW - u64::from(key) * 1_500,
+            })
+            .unwrap();
+    }
+    st.total_control = 4;
     st
 }
 

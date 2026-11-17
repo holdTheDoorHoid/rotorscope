@@ -110,25 +110,29 @@ pub const fn ogn(freq_hz: u32) -> RxConfig {
     }
 }
 
-/// The protocol a mode's frames are reported as.
-pub const fn proto(mode: AeroMode) -> AirProto {
+/// The protocol a mode's frames are reported as; `None` for the control
+/// modes (they report `Frame::Control`, see [`crate::ctrl`]).
+pub const fn proto(mode: AeroMode) -> Option<AirProto> {
     match mode {
-        AeroMode::Es1090 => AirProto::Es1090,
-        AeroMode::Uat978 => AirProto::Uat978,
-        AeroMode::FlarmHop { ogn: false, .. } => AirProto::Flarm,
-        AeroMode::FlarmHop { ogn: true, .. } => AirProto::Ogn,
+        AeroMode::Es1090 => Some(AirProto::Es1090),
+        AeroMode::Uat978 => Some(AirProto::Uat978),
+        AeroMode::FlarmHop { ogn: false, .. } => Some(AirProto::Flarm),
+        AeroMode::FlarmHop { ogn: true, .. } => Some(AirProto::Ogn),
+        AeroMode::Control { .. } | AeroMode::ControlFlags { .. } => None,
     }
 }
 
-/// The configuration for `mode`, at `freq_hz` for the hopping modes (the
-/// fixed modes ignore it).
-pub const fn config(mode: AeroMode, freq_hz: u32) -> RxConfig {
-    match mode {
+/// The configuration for an aircraft `mode`, at `freq_hz` for the hopping
+/// modes (the fixed modes ignore it). `None` for the control modes, whose
+/// configurations come from the scan plan ([`crate::ctrl`]).
+pub const fn config(mode: AeroMode, freq_hz: u32) -> Option<RxConfig> {
+    Some(match mode {
         AeroMode::Es1090 => es1090(),
         AeroMode::Uat978 => uat978(),
         AeroMode::FlarmHop { ogn: false, .. } => flarm(freq_hz),
         AeroMode::FlarmHop { ogn: true, .. } => ogn(freq_hz),
-    }
+        AeroMode::Control { .. } | AeroMode::ControlFlags { .. } => return None,
+    })
 }
 
 #[cfg(test)]
@@ -148,8 +152,10 @@ mod tests {
 
     #[test]
     fn modes_map() {
-        assert_eq!(proto(AeroMode::FlarmHop { band: 2, ogn: true }), AirProto::Ogn);
-        assert_eq!(config(AeroMode::FlarmHop { band: 2, ogn: false }, 910_200_000).freq_hz, 910_200_000);
-        assert_eq!(config(AeroMode::Es1090, 0).freq_hz, ES1090_HZ);
+        assert_eq!(proto(AeroMode::FlarmHop { band: 2, ogn: true }), Some(AirProto::Ogn));
+        assert_eq!(config(AeroMode::FlarmHop { band: 2, ogn: false }, 910_200_000).unwrap().freq_hz, 910_200_000);
+        assert_eq!(config(AeroMode::Es1090, 0).unwrap().freq_hz, ES1090_HZ);
+        assert_eq!(proto(AeroMode::Control { regions: 1, energy: 0 }), None);
+        assert_eq!(config(AeroMode::Control { regions: 1, energy: 0 }, 0), None);
     }
 }

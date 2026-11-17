@@ -96,6 +96,19 @@ pub fn info(f: &Frame) -> Option<FrameInfo> {
             freq_100khz: a.freq_khz / 100,
             rssi: Some(a.rssi),
         },
+        // Protocol 12: a control link. Frequency in 100 kHz units.
+        Frame::Control(c) => FrameInfo {
+            frame_kind: frame_kind::CONTROL,
+            band: rf_band(c.sighting.freq_hz / 100_000),
+            channel: 0,
+            freq_100khz: c.sighting.freq_hz / 100_000,
+            rssi: Some(c.sighting.rssi_dbm.clamp(-128, 127) as i8),
+        },
+        // Protocol 12: a control band's energy window, at the band's start.
+        Frame::ControlEnergy(e) => {
+            let f = link::ctrlwatch::scan::band(e.region).0 / 100_000;
+            FrameInfo { frame_kind: frame_kind::CONTROL_ENERGY, band: rf_band(f), channel: 0, freq_100khz: f, rssi: None }
+        }
         _ => return None,
     })
 }
@@ -256,6 +269,58 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
             match a.utc_ms {
                 Some(t) => write!(w, " node_utc_ms={t}"),
                 None => write!(w, " node_utc=none"),
+            }
+        }
+        // Protocol 12. The link's identifier (present only with the
+        // owner's ID opt-in) stays out of the summary, as open-link IDs do;
+        // it is in the raw bytes.
+        Frame::Control(c) => {
+            use link::ctrlwatch::ControlContent as C;
+            let s = &c.sighting;
+            write!(
+                w,
+                "control {:?} {:?} f={}.{:03}MHz rssi{} snr{} {:?} best={:?} part={} pkts={}",
+                s.system,
+                s.region,
+                s.freq_hz / 1_000_000,
+                s.freq_hz / 1000 % 1000,
+                s.rssi_dbm,
+                s.snr_db,
+                s.confidence,
+                c.best,
+                c.part,
+                c.packets
+            )?;
+            if s.id.is_some() {
+                write!(w, " id=yes")?;
+            }
+            for item in &c.content {
+                match item {
+                    C::Channels(ch) => write!(w, " channels={}", ch.present.count_ones())?,
+                    C::Telemetry(_) => write!(w, " telemetry")?,
+                    C::Position(p) => write!(w, " pos={:.7},{:.7}", p.lat_e7 as f64 / 1e7, p.lon_e7 as f64 / 1e7)?,
+                    C::Opaque(o) => write!(w, " opaque={o:?}")?,
+                }
+            }
+            match &c.raw {
+                Some(r) => write!(w, " raw={}B", r.len()),
+                None => Ok(()),
+            }
+        }
+        Frame::ControlEnergy(e) => {
+            use link::EnergyActivity as E;
+            write!(w, "control_energy {:?} windows={} steady={}", e.region, e.windows, e.steady.len())?;
+            match &e.activity {
+                E::Quiet => write!(w, " quiet"),
+                E::Steady => write!(w, " steady"),
+                E::Background => write!(w, " background"),
+                E::Hopper(h) => {
+                    write!(w, " hopper {}-{}kHz ch{} rssi{}", h.low_khz, h.high_khz, h.channels, h.rssi)?;
+                    match h.candidates.first() {
+                        Some((sys, score)) => write!(w, " best={sys:?}:{score}"),
+                        None => Ok(()),
+                    }
+                }
             }
         }
         _ => write!(w, "not a data frame"),

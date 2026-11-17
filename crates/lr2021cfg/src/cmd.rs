@@ -189,6 +189,41 @@ pub mod bw {
     pub const BW_307: u8 = 33;
     pub const BW_153: u8 = 34;
     pub const BW_119: u8 = 83;
+
+    /// (kHz, code), narrowest first: a subset of the datasheet table (as
+    /// the `lr2021` crate's `RxBw`), enough to pick a filter for any
+    /// control-link or energy-sweep setting.
+    pub const TABLE: [(u16, u8); 24] = [
+        (48, 28),
+        (64, 20),
+        (83, 155),
+        (96, 27),
+        (119, 83),
+        (128, 19),
+        (153, 34),
+        (192, 26),
+        (222, 225),
+        (256, 18),
+        (307, 33),
+        (333, 153),
+        (384, 25),
+        (444, 224),
+        (512, 17),
+        (555, 216),
+        (666, 152),
+        (769, 24),
+        (888, 144),
+        (1111, 200),
+        (1333, 136),
+        (2222, 192),
+        (2666, 128),
+        (3076, 0),
+    ];
+
+    /// The narrowest filter at least `hz` wide (the widest if none is).
+    pub fn at_least(hz: u32) -> u8 {
+        TABLE.iter().find(|(k, _)| *k as u32 * 1000 >= hz).map_or(BW_3076, |e| e.1)
+    }
 }
 
 /// SetFskModulationParams: bitrate in bit/s, shaping, RX bandwidth code,
@@ -237,6 +272,64 @@ pub fn set_lora_syncword(sync: u8) -> Cmd {
 }
 
 pub const GET_LORA_PACKET_STATUS: [u8; 2] = [0x02, 0x2A];
+
+/// LoRa bandwidth codes for [`set_lora_modulation`] (the `lr2021` crate's
+/// `LoraBw`).
+pub mod lora_bw {
+    pub const BW_125: u8 = 4;
+    pub const BW_250: u8 = 5;
+    pub const BW_500: u8 = 6;
+    pub const BW_812: u8 = 15;
+}
+
+/// LoRa coding-rate codes for [`set_lora_modulation`] (the `lr2021`
+/// crate's `LoraCr`): 1-4 short interleaving 4/5..4/8, 5-7 long
+/// interleaving 4/5, 4/6, 4/8 (SX1280's `LI` rates).
+pub mod lora_cr {
+    pub const CR_4_5: u8 = 1;
+    pub const CR_4_6: u8 = 2;
+    pub const CR_4_7: u8 = 3;
+    pub const CR_4_8: u8 = 4;
+    pub const LI_4_5: u8 = 5;
+    pub const LI_4_6: u8 = 6;
+    pub const LI_4_8: u8 = 7;
+}
+
+/// SetLoraSideDetConfig: up to three extra detectors ("multi-SF"), each
+/// `(sf << 4) | (ldro << 2) | invert_iq`. An empty list turns them off.
+/// Sent after [`set_lora_modulation`] (the `lr2021` crate's
+/// `set_lora_sidedet_cfg`).
+pub fn set_lora_sidedet_cfg(cfgs: &[u8]) -> Cmd {
+    let mut c = cmd(&[0x02, 0x24]);
+    for &b in cfgs.iter().take(3) {
+        let _ = c.push(b);
+    }
+    c
+}
+
+/// One side-detector configuration byte.
+pub const fn sidedet(sf: u8, ldro: bool, invert_iq: bool) -> u8 {
+    ((sf & 0xF) << 4) | ((ldro as u8) << 2) | invert_iq as u8
+}
+
+/// SetLoraSideDetSyncword, basic format: one sync word per side detector.
+pub fn set_lora_sidedet_syncword(words: &[u8]) -> Cmd {
+    let mut c = cmd(&[0x02, 0x25]);
+    for &b in words.iter().take(3) {
+        let _ = c.push(b);
+    }
+    c
+}
+
+/// GetLoraPacketStatus: (packet RSSI dBm, SNR dB, detector bits: 1 main,
+/// 2/4/8 side detectors 1-3). Layout as the `lr2021` crate's
+/// `LoraPacketStatusRsp`: SNR in quarter dB at byte 4, RSSI half-dB code
+/// in byte 5 plus bit 1 of byte 7, detector in bits 2-5 of byte 7.
+pub fn parse_lora_status(rsp: &[u8; PKT_STATUS_RSP]) -> (i8, i8, u8) {
+    let rssi = rssi_dbm(((rsp[5] as u16) << 1) | ((rsp[7] >> 1) & 1) as u16);
+    let snr = (rsp[4] as i8) / 4;
+    (rssi, snr, (rsp[7] >> 2) & 0xF)
+}
 
 // ---- OOK (0x028x) ----------------------------------------------------------
 
@@ -379,6 +472,20 @@ mod tests {
         assert_eq!(set_lora_modulation(7, 5, 1, false).as_slice(), [0x02, 0x20, 0x75, 0x10]);
         assert_eq!(set_lora_packet(8, 0, false, true, false).as_slice(), [0x02, 0x21, 0, 8, 0, 2]);
         assert_eq!(calibrate_rx().as_slice(), [0x01, 0x22, 0x1F]);
+        // The lr2021 crate's set_lora_sidedet_cfg for SF7 and SF8, no LDRO,
+        // normal IQ; SF6 inverted.
+        assert_eq!(set_lora_sidedet_cfg(&[sidedet(7, false, false), sidedet(8, false, false)]).as_slice(), [0x02, 0x24, 0x70, 0x80]);
+        assert_eq!(sidedet(6, true, true), 0x65);
+        assert_eq!(set_lora_sidedet_cfg(&[]).as_slice(), [0x02, 0x24]);
+        assert_eq!(set_lora_sidedet_syncword(&[0x12, 0x12]).as_slice(), [0x02, 0x25, 0x12, 0x12]);
+        // SF6 BW500 CR4/7: ELRS 900 200 Hz.
+        assert_eq!(set_lora_modulation(6, lora_bw::BW_500, lora_cr::CR_4_7, false).as_slice(), [0x02, 0x20, 0x66, 0x30]);
+        assert_eq!(set_lora_modulation(7, lora_bw::BW_812, lora_cr::LI_4_6, false).as_slice(), [0x02, 0x20, 0x7F, 0x60]);
+        assert_eq!(bw::at_least(25_000), 28);
+        assert_eq!(bw::at_least(250_000), 18);
+        assert_eq!(bw::at_least(1_000_000), 200);
+        assert_eq!(bw::at_least(5_000_000), bw::BW_3076);
+        assert!(bw::TABLE.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     /// No transmit opcode can come out of this module: SetTx (0x020D),
@@ -412,5 +519,8 @@ mod tests {
         assert_eq!(parse_rssi_inst(&[0, 0, 0xFF, 1]), -128);
         assert_eq!(cmd_status(&[0x04, 0]), 2);
         assert_eq!(set_ook_threshold(-80).as_slice()[9..], [0x03, 0x00, 0x00, 0x00]);
+        // SNR -6 dB (-24 quarter dB), RSSI 181 half-dB = -90.5 -> -91, side
+        // detector 2 (bit 2 of the detector field = 4 << 2).
+        assert_eq!(parse_lora_status(&[0, 0, 0, 8, (-24i8) as u8, 90, 0, (4 << 2) | 2]), (-91, -6, 4));
     }
 }

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 rid = { workspace = true, features = ["serde"] }
 openlink = { workspace = true, features = ["serde"] }
+ctrlwatch = { path = "../ctrlwatch", features = ["serde"] }
 serde.workspace = true
 heapless.workspace = true
 postcard.workspace = true

@@ -98,7 +98,7 @@ Unknown codes are reported, not rejected (a newer firmware may add some).
 | 1 | node's link RSSI to the gateway, dBm (i8); 127 n/a |
 | 1 | node index on the hub (0 wired) |
 | 1 | band: 0 unknown, 1 Wi-Fi 2.4 GHz, 2 Wi-Fi 5 GHz, 3 Bluetooth, 4 raw-capture RF (see frequency) |
-| 1 | frame kind: 1 Remote ID, 2 open FPV link, 3 DJI DroneID, 4 RF signature, 5 DJI Wi-Fi beacon, 6 Wi-Fi drone network |
+| 1 | frame kind: 1 Remote ID, 2 open FPV link, 3 DJI DroneID, 4 RF signature, 5 DJI Wi-Fi beacon, 6 Wi-Fi drone network, 7 aircraft frame from an aero (LR2021) node, 8 drone control link (`Frame::Control`), 9 control-band energy window (`Frame::ControlEnergy`) |
 | 2 | channel (u16); 0 unknown |
 | 4 | frequency, 100 kHz units (u32); 0 unknown |
 | 1 | signal RSSI at the node, dBm (i8); 127 n/a |

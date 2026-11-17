@@ -10,6 +10,9 @@
 
 pub mod forward;
 
+/// The control-link types `Frame::Control` carries (protocol 12).
+pub use ctrlwatch;
+
 use heapless::Vec;
 use rid::{MAX_PACK, RawMessage, Transport};
 use serde::{Deserialize, Serialize};
@@ -57,7 +60,17 @@ use serde::{Deserialize, Serialize};
 ///   [`Assignment::plan`] entries are [`AeroMode`] codes. All appended, so
 ///   every v10 frame, command and role encodes exactly as before; a v10 hub
 ///   counts the new frames as corrupt and a v10 node ignores `TimeSync`.
-pub const PROTOCOL_VERSION: u8 = 11;
+/// - 12: drone control links on the same LR2021 node (`crates/ctrlwatch`,
+///   docs/CONTROL-LINKS.md). Adds [`Frame::Control`] (one control-link
+///   sighting, with decoded content and the raw packet only when the hub
+///   has turned content decoding on) and [`Frame::ControlEnergy`] (the
+///   node's energy map of one band: hoppers and steady carriers). Hub to
+///   node, two new [`AeroMode`] codes: [`AeroMode::Control`] (scan for
+///   control links) and [`AeroMode::ControlFlags`] (the two opt-ins). All
+///   appended, so every v11 frame and command encodes exactly as before; a
+///   v11 hub counts the new frames as corrupt, and a v11 node skips the new
+///   plan codes as unknown (and so never reads IDs or content).
+pub const PROTOCOL_VERSION: u8 = 12;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -122,6 +135,18 @@ pub struct Assignment {
 /// UAT). Hopping modes set bit 31, carry the region in bits 0-7 (SoftRF's
 /// `RF_BAND_*` numbers: 1 Europe, 2 USA/Canada, 3 Australia/South America,
 /// ...) and bit 8 = follow OGN trackers' channel instead of FLARM's.
+///
+/// Protocol 12 adds two codes:
+/// - [`AeroMode::Control`]: bit 30 set, bits 0-9 a mask of
+///   `ctrlwatch::Region::ALL` indices (bit 0 FCC915, 1 AU915, 2 EU868,
+///   3 IN866, 4 AU433, 5 EU433, 6 US433, 7 US433W, 8 TH920, 9 ISM 2.4 GHz):
+///   scan those regions' packet plans and sweep their bands for drone
+///   control links for the entry's dwell; bits 10-19 the same mask for
+///   bands swept for energy only (no packet plans).
+/// - [`AeroMode::ControlFlags`]: bit 29 set, bit 0 = read link IDs, bit 1 =
+///   decode content. Not a mode: the node takes the flags from it and skips
+///   it when walking the plan (its dwell is ignored). No such entry = both
+///   off, which is also what a node that does not know the code does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AeroMode {
     Es1090,
@@ -130,6 +155,13 @@ pub enum AeroMode {
     /// Needs UTC from [`Command::TimeSync`]; without it the node parks on
     /// one channel and says so in [`Frame::AeroStatus`].
     FlarmHop { band: u8, ogn: bool },
+    /// Protocol 12: scan these regions for control links (`regions`: bit
+    /// `i` = `ctrlwatch::Region::ALL[i]`; packet plans and energy sweeps)
+    /// and sweep the `energy` regions' bands for energy only.
+    Control { regions: u16, energy: u16 },
+    /// Protocol 12: the control-link opt-ins (both off unless the hub's
+    /// owner turned them on).
+    ControlFlags { read_ids: bool, decode_content: bool },
 }
 
 impl AeroMode {
@@ -137,12 +169,26 @@ impl AeroMode {
     pub const UAT978_CODE: u32 = 9_780;
     pub const HOP_FLAG: u32 = 1 << 31;
     pub const HOP_OGN: u32 = 1 << 8;
+    pub const CONTROL_FLAG: u32 = 1 << 30;
+    /// Region bits a [`AeroMode::Control`] code may carry.
+    pub const CONTROL_REGIONS: u32 = 0x3FF;
+    pub const FLAGS_FLAG: u32 = 1 << 29;
+    pub const FLAG_READ_IDS: u32 = 1;
+    pub const FLAG_DECODE_CONTENT: u32 = 2;
 
     pub const fn code(self) -> u32 {
         match self {
             AeroMode::Es1090 => Self::ES1090_CODE,
             AeroMode::Uat978 => Self::UAT978_CODE,
             AeroMode::FlarmHop { band, ogn } => Self::HOP_FLAG | if ogn { Self::HOP_OGN } else { 0 } | band as u32,
+            AeroMode::Control { regions, energy } => {
+                Self::CONTROL_FLAG | (regions as u32 & Self::CONTROL_REGIONS) | ((energy as u32 & Self::CONTROL_REGIONS) << 10)
+            }
+            AeroMode::ControlFlags { read_ids, decode_content } => {
+                Self::FLAGS_FLAG
+                    | if read_ids { Self::FLAG_READ_IDS } else { 0 }
+                    | if decode_content { Self::FLAG_DECODE_CONTENT } else { 0 }
+            }
         }
     }
 
@@ -154,8 +200,24 @@ impl AeroMode {
             c if c & Self::HOP_FLAG != 0 && c & !(Self::HOP_FLAG | Self::HOP_OGN | 0xFF) == 0 => {
                 Some(AeroMode::FlarmHop { band: c as u8, ogn: c & Self::HOP_OGN != 0 })
             }
+            c if c & Self::CONTROL_FLAG != 0 && c & !(Self::CONTROL_FLAG | Self::CONTROL_REGIONS | (Self::CONTROL_REGIONS << 10)) == 0 => {
+                Some(AeroMode::Control {
+                    regions: (c & Self::CONTROL_REGIONS) as u16,
+                    energy: ((c >> 10) & Self::CONTROL_REGIONS) as u16,
+                })
+            }
+            c if c & Self::FLAGS_FLAG != 0 && c & !(Self::FLAGS_FLAG | 3) == 0 => Some(AeroMode::ControlFlags {
+                read_ids: c & Self::FLAG_READ_IDS != 0,
+                decode_content: c & Self::FLAG_DECODE_CONTENT != 0,
+            }),
             _ => None,
         }
+    }
+
+    /// True for [`AeroMode::ControlFlags`]: settings, not something to
+    /// listen to.
+    pub const fn is_flags(self) -> bool {
+        matches!(self, AeroMode::ControlFlags { .. })
     }
 
     /// A plan entry: this mode for `dwell_ms` (0 = for good).
@@ -560,6 +622,101 @@ pub struct AeroStatus {
     pub rate_dropped: u32,
 }
 
+/// Protocol 12. A region's bit in an [`AeroMode::Control`] mask: its index
+/// in `ctrlwatch::Region::ALL`.
+pub const fn control_region_bit(r: ctrlwatch::Region) -> u16 {
+    use ctrlwatch::Region as R;
+    1 << match r {
+        R::Fcc915 => 0,
+        R::Au915 => 1,
+        R::Eu868 => 2,
+        R::In866 => 3,
+        R::Au433 => 4,
+        R::Eu433 => 5,
+        R::Us433 => 6,
+        R::Us433W => 7,
+        R::Th920 => 8,
+        R::Ism2g4 => 9,
+    }
+}
+
+/// Protocol 12. Content items one [`ControlReport`] carries; a packet with
+/// more is sent as several reports (`part` 1, 2, ...), the raw bytes in the
+/// first.
+pub const MAX_CONTROL_CONTENT: usize = 2;
+
+/// Protocol 12. One drone control link (ExpressLRS, mLRS, SiK, OpenLRSng)
+/// heard by an LR2021 node, built from `ctrlwatch` (docs/CONTROL-LINKS.md).
+///
+/// Two kinds, told apart by `part`:
+/// - `part == 0`: the link's running summary, at most every 2 s per link
+///   while it is heard (`ctrlwatch::Sightings`): the latest packet's
+///   sighting, best confidence, counts, strongest signal. No content, no
+///   raw bytes.
+/// - `part >= 1`: one packet's decoded content, only when the hub has
+///   turned content decoding on ([`AeroMode::ControlFlags`]). `raw` (the
+///   packet as received, for the evidence log) rides in part 1.
+///
+/// `sighting.id` is `None` unless the hub turned ID reading on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlReport {
+    pub sighting: ctrlwatch::ControlSighting,
+    pub best: ctrlwatch::Confidence,
+    /// Packets counted on this link since the node started tracking it
+    /// (running totals, like [`OpenLinkSighting::packets`]).
+    pub packets: u32,
+    pub confirmed: u32,
+    pub peak_rssi: i16,
+    pub part: u8,
+    pub content: Vec<ctrlwatch::ControlContent, MAX_CONTROL_CONTENT>,
+    pub raw: Option<Vec<u8, { ctrlwatch::MAX_RAW }>>,
+}
+
+/// Protocol 12. A hopping transmitter in an energy map, with the systems
+/// it could be (`ctrlwatch::energy::classify`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HopperReport {
+    pub low_khz: u32,
+    pub high_khz: u32,
+    pub channels: u16,
+    pub spacing_khz: Option<u32>,
+    pub occupied_khz: u32,
+    pub rssi: i8,
+    pub spread_db: i8,
+    /// Burst timing from a dwell on one of its channels: median burst
+    /// length and packet interval, µs, and how periodic (%).
+    pub burst_us: Option<u32>,
+    pub interval_us: Option<u32>,
+    pub periodic_pct: u8,
+    /// Candidate systems with their scores (0-100), best first.
+    pub candidates: Vec<(ctrlwatch::System, u8), 4>,
+}
+
+/// Protocol 12. What one energy window found.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EnergyActivity {
+    Quiet,
+    /// Only steady carriers.
+    Steady,
+    /// Hopping energy that does not look like one transmitter (meters,
+    /// LoRaWAN).
+    Background,
+    Hopper(HopperReport),
+}
+
+/// Protocol 12. One energy window of one band: sent when a hopper or a
+/// steady carrier is seen, and otherwise about every 30 s per band.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlEnergy {
+    pub region: ctrlwatch::Region,
+    /// Windows the node's map has seen (its background needs ~20).
+    pub windows: u32,
+    pub activity: EnergyActivity,
+    /// Steady carriers: (kHz, dBm).
+    pub steady: Vec<(u32, i8), 4>,
+    pub uptime_us: u64,
+}
+
 /// Protocol 5. A GPS receiver's state, as a hub reports it to a web head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GnssState {
@@ -748,6 +905,10 @@ pub enum Frame {
     Air(AirFrame),
     /// Protocol 11: an aero node's state.
     AeroStatus(AeroStatus),
+    /// Protocol 12: a drone control link heard by an LR2021 node.
+    Control(ControlReport),
+    /// Protocol 12: an LR2021 node's energy map of one band.
+    ControlEnergy(ControlEnergy),
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -1411,5 +1572,194 @@ mod tests {
             }
             dec.feed(&chunk[..(x % 98) as usize], |_| {});
         }
+    }
+
+    /// Protocol 12 appended `Frame::Control` (18), `Frame::ControlEnergy`
+    /// (19) and two `AeroMode` codes. Every v11 frame and command encodes
+    /// byte for byte as before: this hash of v11 samples was taken from the
+    /// v11 code (HEAD d10b2e6), with the hub's Hello saying 11.
+    #[test]
+    fn protocol_12_control_append_only() {
+        let mut buf = [0u8; 1024];
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut fnv = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        for mut f in samples() {
+            if let Frame::Hello { protocol, .. } = &mut f {
+                *protocol = 11;
+            }
+            fnv(encode(&f, &mut buf).unwrap());
+        }
+        for c in commands() {
+            fnv(encode_command(&c, &mut buf).unwrap());
+        }
+        for p in [AirProto::Es1090, AirProto::Uat978, AirProto::Flarm, AirProto::Ogn] {
+            fnv(encode(&Frame::Air(air(p, 26, 0xA5)), &mut buf).unwrap());
+        }
+        let st = AeroStatus {
+            mode: AeroMode::FlarmHop { band: 2, ogn: true }.code(),
+            freq_khz: 915_000,
+            time: AeroTime::HubPps,
+            parked: true,
+            radio_ok: true,
+            rx_restarts: 3,
+            rejected: 4,
+            rate_dropped: 5,
+        };
+        fnv(encode(&Frame::AeroStatus(st), &mut buf).unwrap());
+        fnv(encode_command(&Command::TimeSync { utc_ms: 1_763_337_600_123, pps: true }, &mut buf).unwrap());
+        let plan = [AeroMode::Es1090.entry(0), AeroMode::Uat978.entry(10_000), AeroMode::FlarmHop { band: 2, ogn: false }.entry(10_000)];
+        fnv(encode_command(&Command::Assign(Assignment { role: NodeRole::Aero, plan: plan.into_iter().collect(), id: 7 }), &mut buf).unwrap());
+        assert_eq!(h, 0x0e41_4e95_f735_c415, "a v11 frame or command changed encoding");
+
+        // New tags.
+        let c = Frame::Control(control_report(true, 1));
+        assert_eq!(postcard::to_slice(&c, &mut buf).unwrap()[0], 18);
+        let e = Frame::ControlEnergy(control_energy(true));
+        assert_eq!(postcard::to_slice(&e, &mut buf).unwrap()[0], 19);
+        // Round trips through the stream decoder.
+        let mut dec = Decoder::new();
+        for f in [c, e, Frame::Control(control_report(false, 0)), Frame::ControlEnergy(control_energy(false))] {
+            let mut got = None;
+            dec.feed(encode(&f, &mut buf).unwrap(), |r| got = Some(r));
+            assert_eq!(got, Some(Ok(f)));
+        }
+        // A control plan round-trips as an Assign.
+        let plan = [
+            AeroMode::Uat978.entry(10_000),
+            AeroMode::Control { regions: 0x3FF, energy: 0x3FF }.entry(25_000),
+            AeroMode::ControlFlags { read_ids: true, decode_content: true }.entry(0),
+        ];
+        let a = Command::Assign(Assignment { role: NodeRole::Aero, plan: plan.into_iter().collect(), id: 12 });
+        let mut cdec = CommandDecoder::new();
+        let mut got = None;
+        cdec.feed(encode_command(&a, &mut buf).unwrap(), |r| got = Some(r));
+        assert_eq!(got, Some(Ok(a)));
+    }
+
+    fn control_report(full: bool, part: u8) -> ControlReport {
+        use ctrlwatch::content::{AltRef, Channels, Position, PositionKind, PositionSource};
+        let sighting = ctrlwatch::ControlSighting {
+            system: ctrlwatch::System::FlyskyAfhds2a,
+            region: ctrlwatch::Region::Ism2g4,
+            probe: ctrlwatch::Probe::Elrs { rate: ctrlwatch::elrs::ElrsRate::L900_25, version: ctrlwatch::elrs::OtaVersion::V3 },
+            freq_hz: u32::MAX,
+            rssi_dbm: i16::MIN,
+            snr_db: i8::MIN,
+            t_us: u64::MAX,
+            confidence: ctrlwatch::Confidence::Confirmed,
+            direction: ctrlwatch::Direction::Downlink,
+            id: full.then_some(ctrlwatch::LinkId::ElrsUid { uid3: Some(0xFF), uid4: 0xFF, uid5: 0xFF, uid5_real: 0xFF }),
+            version: Some(u8::MAX),
+        };
+        let mut content = Vec::new();
+        if full {
+            let mut ch = Channels { us: [u16::MAX; 16], present: u32::MAX, armed: Some(true) };
+            ch.set(0, 0xFFFF);
+            let _ = content.push(ctrlwatch::ControlContent::Channels(ch));
+            let _ = content.push(ctrlwatch::ControlContent::Position(Position {
+                kind: PositionKind::Home,
+                lat_e7: i32::MIN,
+                lon_e7: i32::MIN,
+                alt_mm: Some((i32::MIN, AltRef::Home)),
+                rel_alt_mm: Some(i32::MIN),
+                ground_speed_cms: Some(u16::MAX),
+                heading_cdeg: Some(u16::MAX),
+                satellites: Some(u8::MAX),
+                fix_type: Some(u8::MAX),
+                source: PositionSource::MavHomePosition,
+            }));
+        }
+        ControlReport {
+            sighting,
+            best: ctrlwatch::Confidence::Likely,
+            packets: if full { u32::MAX } else { 1 },
+            confirmed: if full { u32::MAX } else { 0 },
+            peak_rssi: i16::MIN,
+            part,
+            content,
+            raw: full.then(|| core::iter::repeat_n(0xFF, ctrlwatch::MAX_RAW).collect()),
+        }
+    }
+
+    fn control_energy(full: bool) -> ControlEnergy {
+        let activity = if full {
+            EnergyActivity::Hopper(HopperReport {
+                low_khz: u32::MAX,
+                high_khz: u32::MAX,
+                channels: u16::MAX,
+                spacing_khz: Some(u32::MAX),
+                occupied_khz: u32::MAX,
+                rssi: i8::MIN,
+                spread_db: i8::MIN,
+                burst_us: Some(u32::MAX),
+                interval_us: Some(u32::MAX),
+                periodic_pct: u8::MAX,
+                candidates: core::iter::repeat_n((ctrlwatch::System::FlyskyAfhds2a, u8::MAX), 4).collect(),
+            })
+        } else {
+            EnergyActivity::Background
+        };
+        ControlEnergy {
+            region: ctrlwatch::Region::Ism2g4,
+            windows: u32::MAX,
+            activity,
+            steady: core::iter::repeat_n((u32::MAX, i8::MIN), if full { 4 } else { 0 }).collect(),
+            uptime_us: u64::MAX,
+        }
+    }
+
+    /// The largest control frames fit `MAX_FRAME`, and the new variants do
+    /// not make `Frame` (and so every hub queue of frames) bigger.
+    #[test]
+    fn largest_control_frames_fit() {
+        let mut buf = [0u8; 1024];
+        let worst = [
+            Frame::Control(control_report(true, 1)),
+            Frame::ControlEnergy(control_energy(true)),
+        ]
+        .iter()
+        .map(|f| encode(f, &mut buf).unwrap().len())
+        .max()
+        .unwrap();
+        std::println!("largest control frame: {worst} bytes; Frame {} bytes", core::mem::size_of::<Frame>());
+        assert!(worst <= MAX_FRAME, "{worst} > {MAX_FRAME}");
+        // A summary (no content, no raw) is small: it can be frequent.
+        let s = encode(&Frame::Control(control_report(false, 0)), &mut buf).unwrap().len();
+        assert!(s <= 48, "{s}");
+        assert!(core::mem::size_of::<Frame>() <= 288, "Frame grew: {}", core::mem::size_of::<Frame>());
+    }
+
+    #[test]
+    fn control_mode_codes() {
+        assert_eq!(AeroMode::Control { regions: 1, energy: 0 }.code(), 0x4000_0001);
+        assert_eq!(AeroMode::Control { regions: 0, energy: 4 }.code(), 0x4000_1000);
+        assert_eq!(AeroMode::Control { regions: 0xFFFF, energy: 0xFFFF }.code(), 0x400F_FFFF, "only defined region bits");
+        assert_eq!(AeroMode::ControlFlags { read_ids: false, decode_content: false }.code(), 0x2000_0000);
+        assert_eq!(AeroMode::ControlFlags { read_ids: true, decode_content: true }.code(), 0x2000_0003);
+        for m in [
+            AeroMode::Control { regions: 0, energy: 0 },
+            AeroMode::Control { regions: 0x241, energy: 0x004 },
+            AeroMode::ControlFlags { read_ids: true, decode_content: false },
+            AeroMode::ControlFlags { read_ids: false, decode_content: true },
+        ] {
+            assert_eq!(AeroMode::from_code(m.code()), Some(m));
+        }
+        for bad in [0x4010_0000, 0x2000_0004, 0x6000_0001, 0xC000_0002] {
+            assert_eq!(AeroMode::from_code(bad), None, "{bad:#x}");
+        }
+        assert!(AeroMode::ControlFlags { read_ids: false, decode_content: false }.is_flags());
+        // The documented bit order is ctrlwatch's Region::ALL.
+        use ctrlwatch::Region as R;
+        let order = [R::Fcc915, R::Au915, R::Eu868, R::In866, R::Au433, R::Eu433, R::Us433, R::Us433W, R::Th920, R::Ism2g4];
+        assert_eq!(order, R::ALL);
+        for (i, r) in order.into_iter().enumerate() {
+            assert_eq!(control_region_bit(r), 1 << i, "{r:?}");
+        }
+        assert!(!AeroMode::Control { regions: 1, energy: 0 }.is_flags());
     }
 }

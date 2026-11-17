@@ -1124,3 +1124,207 @@ pub fn parse_own_pos(body: &[u8]) -> Result<OwnPosRequest, OwnPosError> {
         alt: b.alt,
     }))
 }
+
+// ---------------------------------------------------------- control links --
+
+/// A control link's rate / mode as text: ELRS's rate name ("200Hz"), mLRS
+/// mode, SiK air speed, OpenLRSng rate index.
+pub struct ProbeText(pub ctrlwatch::Probe);
+
+impl core::fmt::Display for ProbeText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use ctrlwatch::Probe;
+        match self.0 {
+            Probe::Elrs { rate, version } => write!(f, "{} v{}", rate.info().name, version.id()),
+            Probe::Mlrs(m) => write!(f, "{m:?}"),
+            Probe::Sik { kbps } => write!(f, "{kbps}k"),
+            Probe::OpenLrs { rate, bind } => write!(f, "rate{rate}{}", if bind { " bind" } else { "" }),
+            Probe::Energy => f.write_str("energy"),
+        }
+    }
+}
+
+/// A control link's identifier as text (only ever present when the owner
+/// turned ID reading on at the node).
+pub struct LinkIdText(pub ctrlwatch::LinkId);
+
+impl core::fmt::Display for LinkIdText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use ctrlwatch::LinkId;
+        match self.0 {
+            LinkId::ElrsUid { uid3, uid4, uid5_real, .. } => match uid3 {
+                Some(u3) => write!(f, "uid ..{u3:02x}{uid4:02x}{uid5_real:02x}"),
+                None => write!(f, "uid ....{uid4:02x}{uid5_real:02x}"),
+            },
+            LinkId::MlrsSyncWord(w) => write!(f, "sync {w:04x}"),
+            LinkId::SikNetId(n) => write!(f, "netid {n}"),
+            LinkId::OpenLrsMagic(m) => write!(f, "magic {m:08x}"),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ControlLine<'a> {
+    t: &'static str,
+    id: crate::ctrllinks::ControlLinkId,
+    state: TrackState,
+    sys: ctrlwatch::System,
+    label: &'static str,
+    band: &'static str,
+    region: ctrlwatch::Region,
+    mhz: f64,
+    rate: heapless::String<24>,
+    conf: &'static str,
+    ver: Option<u8>,
+    link_id: Option<heapless::String<24>>,
+    rssi: i16,
+    peak: i16,
+    snr: i8,
+    pkts: u32,
+    confirmed: u32,
+    up: bool,
+    down: bool,
+    enc: bool,
+    sticks: Option<[u16; crate::ctrllinks::SHOWN_CHANNELS]>,
+    armed: Option<bool>,
+    sticks_age_ms: Option<u64>,
+    batt_mv: Option<u32>,
+    batt_pct: Option<u8>,
+    lq: Option<u8>,
+    mode: Option<&'a str>,
+    alt_dm: Option<i32>,
+    tlm_age_ms: Option<u64>,
+    track: Option<TrackId>,
+    node: u8,
+    first_ms: u64,
+    last_ms: u64,
+    age_ms: u64,
+}
+
+/// A buffer this size always holds one control line.
+pub const MAX_CONTROL_LINE: usize = 768;
+const _: () = assert!(MAX_CONTROL_LINE <= MAX_LINE);
+
+/// Write one control link as a JSON object followed by `\n` (`"t":"control"`).
+pub fn control_line(l: &crate::ctrllinks::ControlLink, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let state = if ctx.now_ms.saturating_sub(l.last_seen_ms) >= ctx.config.stale_after_ms { TrackState::Stale } else { TrackState::Active };
+    let tlm = l.telemetry.as_ref();
+    let line = ControlLine {
+        t: "control",
+        id: l.id,
+        state,
+        sys: l.system,
+        label: l.system.label(),
+        band: l.band(),
+        region: l.region,
+        mhz: libm::round(l.freq_hz as f64 / 1000.0) / 1000.0,
+        rate: crate::text::render(ProbeText(l.probe)),
+        conf: crate::ctrllinks::confidence_name(l.best),
+        ver: l.version,
+        link_id: l.link_id.map(|i| crate::text::render(LinkIdText(i))),
+        rssi: l.rssi,
+        peak: l.peak_rssi,
+        snr: l.snr_db,
+        pkts: l.packets,
+        confirmed: l.confirmed,
+        up: l.heard_up,
+        down: l.heard_down,
+        enc: l.encrypted,
+        sticks: l.sticks.map(|s| s.us),
+        armed: l.sticks.and_then(|s| s.armed),
+        sticks_age_ms: l.sticks.map(|s| ctx.now_ms.saturating_sub(s.rx_ms)),
+        batt_mv: tlm.and_then(|t| t.battery_mv),
+        batt_pct: tlm.and_then(|t| t.battery_pct),
+        lq: tlm.and_then(|t| t.lq),
+        mode: tlm.map(|t| t.mode.as_str()).filter(|m| !m.is_empty()),
+        alt_dm: tlm.and_then(|t| t.baro_dm),
+        tlm_age_ms: tlm.map(|t| ctx.now_ms.saturating_sub(t.rx_ms)),
+        track: l.track,
+        node: l.node,
+        first_ms: l.first_seen_ms,
+        last_ms: l.last_seen_ms,
+        age_ms: ctx.now_ms.saturating_sub(l.last_seen_ms),
+    };
+    let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
+    let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
+    *nl = b'\n';
+    Ok(n + 1)
+}
+
+#[derive(Serialize)]
+struct Cand {
+    sys: ctrlwatch::System,
+    label: &'static str,
+    score: u8,
+}
+
+#[derive(Serialize)]
+struct HopperLine {
+    low_mhz: f64,
+    high_mhz: f64,
+    ch: u16,
+    spacing_khz: Option<u32>,
+    bw_khz: u32,
+    rssi: i8,
+    spread_db: i8,
+    burst_us: Option<u32>,
+    interval_us: Option<u32>,
+    periodic: u8,
+    cands: heapless::Vec<Cand, 4>,
+    state: TrackState,
+    age_ms: u64,
+}
+
+#[derive(Serialize)]
+struct EnergyLine {
+    t: &'static str,
+    region: ctrlwatch::Region,
+    band: &'static str,
+    node: u8,
+    windows: u32,
+    activity: &'static str,
+    steady: u8,
+    hopper: Option<HopperLine>,
+    age_ms: u64,
+}
+
+/// Write one control band's energy as a JSON object followed by `\n`
+/// (`"t":"control_energy"`).
+pub fn control_energy_line(b: &crate::ctrllinks::EnergyBand, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    use link::EnergyActivity as E;
+    let hopper = b.hopper.as_ref().map(|(h, at)| HopperLine {
+        low_mhz: h.low_khz as f64 / 1000.0,
+        high_mhz: h.high_khz as f64 / 1000.0,
+        ch: h.channels,
+        spacing_khz: h.spacing_khz,
+        bw_khz: h.occupied_khz,
+        rssi: h.rssi,
+        spread_db: h.spread_db,
+        burst_us: h.burst_us,
+        interval_us: h.interval_us,
+        periodic: h.periodic_pct,
+        cands: h.candidates.iter().map(|&(sys, score)| Cand { sys, label: sys.label(), score }).collect(),
+        state: crate::ctrllinks::hopper_state(b, ctx.now_ms, &ctx.config).unwrap_or(TrackState::Stale),
+        age_ms: ctx.now_ms.saturating_sub(*at),
+    });
+    let line = EnergyLine {
+        t: "control_energy",
+        region: b.region,
+        band: crate::ctrllinks::band_name(b.region),
+        node: b.node,
+        windows: b.windows,
+        activity: match b.activity {
+            E::Quiet => "quiet",
+            E::Steady => "steady",
+            E::Background => "background",
+            E::Hopper(_) => "hopper",
+        },
+        steady: b.steady,
+        hopper,
+        age_ms: ctx.now_ms.saturating_sub(b.last_seen_ms),
+    };
+    let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
+    let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
+    *nl = b'\n';
+    Ok(n + 1)
+}

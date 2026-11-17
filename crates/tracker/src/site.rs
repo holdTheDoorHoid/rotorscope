@@ -19,6 +19,11 @@
 //! mute deauth target=ff:ff:ff:ff:ff:ff
 //! mute jam_broadband mhz=2437.0
 //! unmute all
+//!
+//! # Drone control links (LR2021 nodes; both off unless a line says on):
+//! control ids on          # read link identifiers (ELRS UID bytes, SiK NET ID...)
+//! control content on      # decode sticks, telemetry, positions; keep raw packets
+//! control content off
 //! ```
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
@@ -66,6 +71,26 @@ pub enum SiteLine {
     AllNodesHere,
     Mute(Mute),
     UnmuteAll,
+    /// `control ids on|off`, `control content on|off` (protocol 12 opt-ins).
+    Control { what: ControlSetting, on: bool },
+}
+
+/// The two control-link opt-ins (docs/CONTROL-LINKS.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlSetting {
+    /// Read link identifiers.
+    Ids,
+    /// Decode control content (sticks, telemetry, positions).
+    Content,
+}
+
+impl ControlSetting {
+    pub const fn word(self) -> &'static str {
+        match self {
+            ControlSetting::Ids => "ids",
+            ControlSetting::Content => "content",
+        }
+    }
 }
 
 /// Why a line was refused (shown to the operator).
@@ -119,6 +144,22 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         let (lat, lon) = lat_lon(a, b)?;
         return Ok(SiteLine::NodeAt { mac, lat, lon });
     }
+    if word.eq_ignore_ascii_case("control") {
+        let what = match it.next() {
+            Some(w) if w.eq_ignore_ascii_case("ids") => ControlSetting::Ids,
+            Some(w) if w.eq_ignore_ascii_case("content") => ControlSetting::Content,
+            _ => return Err("say: control ids on|off, or control content on|off"),
+        };
+        let on = match it.next() {
+            Some(w) if w.eq_ignore_ascii_case("on") => true,
+            Some(w) if w.eq_ignore_ascii_case("off") => false,
+            _ => return Err("say on or off after control ids / control content"),
+        };
+        if it.next().is_some() {
+            return Err("say: control ids on|off, or control content on|off");
+        }
+        return Ok(SiteLine::Control { what, on });
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -153,7 +194,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, mute, unmute)")
+    Err("unknown line (node, mute, unmute, control)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -166,6 +207,10 @@ pub struct SiteState {
     /// Station address -> (lat, lon).
     pub nodes: heapless::Vec<([u8; 6], f64, f64), MAX_PLACED>,
     pub mutes: heapless::Vec<Mute, { crate::threats::MAX_MUTES }>,
+    /// Control-link opt-ins as the file last set them (`None`: never
+    /// mentioned, which means off).
+    pub control_ids: Option<bool>,
+    pub control_content: Option<bool>,
     pub used: u32,
     pub ignored: u32,
 }
@@ -195,6 +240,8 @@ impl SiteState {
                 }
             }
             SiteLine::UnmuteAll => self.mutes.clear(),
+            SiteLine::Control { what: ControlSetting::Ids, on } => self.control_ids = Some(on),
+            SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
             SiteLine::AllNodesHere => {
                 self.ignored += 1;
                 return;
@@ -287,6 +334,11 @@ pub fn write_mute<W: Write>(w: &mut W, m: &Mute) -> core::fmt::Result {
     w.write_char('\n')
 }
 
+/// The line that sets a control-link opt-in (ends in `\n`).
+pub fn write_control<W: Write>(w: &mut W, what: ControlSetting, on: bool) -> core::fmt::Result {
+    writeln!(w, "control {} {}", what.word(), if on { "on" } else { "off" })
+}
+
 /// The line that places a node (ends in `\n`).
 pub fn write_node<W: Write>(w: &mut W, mac: &[u8; 6], lat: f64, lon: f64) -> core::fmt::Result {
     writeln!(w, "node {} {:.7} {:.7}", MacText(mac), lat, lon)
@@ -320,6 +372,25 @@ mod tests {
         assert_eq!(m.source, [2, 0x11, 0x22, 0x33, 0x44, 0x55]);
         let SiteLine::Mute(j) = parse_line("mute jam_broadband mhz=2437.0").unwrap() else { panic!() };
         assert_eq!(j.freq, 24_370);
+        assert_eq!(parse_line("control ids on"), Ok(SiteLine::Control { what: ControlSetting::Ids, on: true }));
+        assert_eq!(parse_line("CONTROL Content OFF # not today"), Ok(SiteLine::Control { what: ControlSetting::Content, on: false }));
+    }
+
+    #[test]
+    fn control_lines_last_one_wins_and_round_trip() {
+        let mut st = SiteState::default();
+        assert_eq!((st.control_ids, st.control_content), (None, None));
+        for l in ["control content on", "control ids on", "control ids off"] {
+            st.apply(parse_line(l).unwrap());
+        }
+        assert_eq!((st.control_ids, st.control_content), (Some(false), Some(true)));
+        for what in [ControlSetting::Ids, ControlSetting::Content] {
+            for on in [false, true] {
+                let mut s: heapless::String<32> = heapless::String::new();
+                write_control(&mut s, what, on).unwrap();
+                assert_eq!(parse_line(&s), Ok(SiteLine::Control { what, on }));
+            }
+        }
     }
 
     #[test]
@@ -333,6 +404,11 @@ mod tests {
             "mute deauth target=zz",
             "mute deauth colour=red",
             "unmute some",
+            "control",
+            "control ids",
+            "control ids maybe",
+            "control names on",
+            "control ids on please",
             "hello",
         ] {
             assert!(parse_line(bad).is_err(), "{bad}");
