@@ -14,6 +14,17 @@
 //! at each beacon, up to [`CMD_ATTEMPTS`] times. The hub resends every few
 //! seconds anyway.
 //!
+//! Authentication (docs/ESPNOW.md, "Securing the link"): built with the kit
+//! key (`tools/link.key`), every packet both ways is sealed (`airlink::auth`).
+//! The gateway then relays only node packets with a good tag and a fresh
+//! stamp, commands only nodes it has heard this boot (a command must echo the
+//! node's session), and answers a genuine but stale or out-of-order packet
+//! with a sync beacon so a node that rebooted, or outlived a gateway reboot,
+//! catches up. Rejected packets are counted per claimed address and reported
+//! to the hub once a second as `Frame::Threat` / `ThreatKind::ForgedLink`.
+//! A keyed gateway accepts keyed nodes only. Built without a key it runs
+//! open, as before, and says so at boot and in its `Hello` to the hub.
+//!
 //! This board transmits (the beacons); see docs/ESPNOW.md.
 #![no_std]
 #![no_main]
@@ -24,6 +35,7 @@ use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use airlink::auth::{self, Reject, Verdict};
 use embassy_time::{Duration, Instant, Ticker, with_timeout};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
@@ -49,7 +61,21 @@ const CMD_ATTEMPTS: u8 = 4;
 /// Do not retry one node's command more often than this.
 const CMD_RETRY_MS: u64 = 20;
 /// Nodes tracked for stats. More can still relay; they just are not counted.
+/// With a key, a node must be in this table to be relayed (its replay state
+/// lives here), so it is also the most keyed nodes one gateway serves.
 const MAX_NODES: usize = 16;
+/// Answer a node's stale or out-of-order packets with a sync at most this often.
+const SYNC_EVERY_MS: u64 = 1000;
+/// Report rejected packets to the hub at most once per this window.
+const THREAT_WINDOW_MS: u32 = 1000;
+/// Packets from before our boot (stale epoch) are expected for a few seconds
+/// after a gateway restart, until each node has had its sync: not reported
+/// as an attack before this uptime.
+const STALE_GRACE_MS: u64 = 60_000;
+/// Our own Hello to the hub (key state), this often.
+const HELLO_EVERY_MS: u64 = 5000;
+/// 2437 MHz in the 100 kHz units of `ThreatSighting::freq`.
+const CHANNEL_FREQ: u32 = 24_370;
 
 #[derive(Clone, Copy)]
 struct Node {
@@ -59,6 +85,24 @@ struct Node {
     bytes: u32,
     rssi: i8,
     last_ms: u64,
+    /// Replay state and the echo its commands need (keyed builds).
+    auth: auth::Peer,
+    last_sync_ms: Option<u64>,
+}
+
+impl Node {
+    fn new(mac: [u8; 6], rssi: i8) -> Self {
+        Node { mac, seq: Default::default(), frames: 0, bytes: 0, rssi, last_ms: 0, auth: Default::default(), last_sync_ms: None }
+    }
+}
+
+/// Index of `mac` in the node table, adding it if there is room.
+fn node_index(nodes: &mut heapless::Vec<Node, MAX_NODES>, mac: [u8; 6], rssi: i8) -> Option<usize> {
+    if let Some(i) = nodes.iter().position(|n| n.mac == mac) {
+        return Some(i);
+    }
+    nodes.push(Node::new(mac, rssi)).ok()?;
+    Some(nodes.len() - 1)
 }
 
 static NODES: Mutex<RefCell<heapless::Vec<Node, MAX_NODES>>> = Mutex::new(RefCell::new(heapless::Vec::new()));
@@ -71,6 +115,14 @@ static FOREIGN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 static DECODED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static DETECTIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static CORRUPT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Authentication (keyed builds): rejected packets per address and reason,
+/// duplicates dropped, syncs sent, commands held for want of an echo.
+static REJECTS: Mutex<RefCell<auth::RejectLog<8>>> = Mutex::new(RefCell::new(auth::RejectLog::new()));
+static AUTH_DUPS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static SYNCS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static THREATS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Open builds: sealed packets relayed without checking (we have no key).
+static UNVERIFIED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// One node's downlink: the latest command from the hub not yet delivered.
 #[derive(Clone)]
@@ -95,8 +147,16 @@ struct Down {
 }
 
 static DOWN: Mutex<RefCell<heapless::Vec<Down, MAX_NODES>>> = Mutex::new(RefCell::new(heapless::Vec::new()));
-/// Nodes whose pending command should be tried now.
-static KICK: Channel<CriticalSectionRawMutex, [u8; 6], 16> = Channel::new();
+
+/// Work for `air_tx`, the only task that transmits.
+#[derive(Clone, Copy)]
+enum Job {
+    /// Try this node's pending command now.
+    Command([u8; 6]),
+    /// Send this node a sync beacon echoing `(session, counter)`.
+    Sync([u8; 6], u32, u32),
+}
+static KICK: Channel<CriticalSectionRawMutex, Job, 16> = Channel::new();
 static HUB_BYTES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static HUB_CMDS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static HUB_CORRUPT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -130,18 +190,49 @@ async fn main(spawner: Spawner) -> ! {
     let mut mac = [0u8; 6];
     // SAFETY: 6-byte buffer; Wi-Fi is initialised.
     unsafe { sys::esp_wifi_get_mac(sys::wifi_interface_t_WIFI_IF_STA, mac.as_mut_ptr()) };
+    // The radio is on, so the hardware RNG is a true RNG: a fresh epoch.
+    let gw_auth = auth::Key::kit().map(|k| auth::Gateway::new(k, esp_hal::rng::Rng::new().random()));
     println!(
-        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}"}}"#,
+        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}"}}"#,
         env!("CARGO_PKG_VERSION"),
         lr == 0,
-        Mac(mac)
+        Mac(mac),
+        auth::KEY_TAG
     );
+    if gw_auth.is_none() {
+        println!(
+            r#"{{"t":"warn","what":"link_key","note":"built WITHOUT a link key: anyone nearby can inject or replay node packets and commands. See docs/ESPNOW.md 'Securing the link'."}}"#
+        );
+    }
     let (manager, sender, receiver) = esp_now.split();
+    let relay_key = gw_auth.as_ref().map(|g| (g.key.clone(), g.epoch()));
 
-    spawner.spawn(air_tx(manager, sender).expect("spawn air_tx"));
+    spawner.spawn(air_tx(manager, sender, gw_auth, mac).expect("spawn air_tx"));
     spawner.spawn(hub_commands(hub_rx).expect("spawn hub_commands"));
     spawner.spawn(stats().expect("spawn stats"));
-    relay(receiver, hub).await
+    relay(receiver, hub, relay_key, mac).await
+}
+
+/// Next stamp from the gateway's clock; restart for a new epoch once it has
+/// run out (after 2^32 packets, decades).
+fn stamp(a: &mut auth::Gateway, echo: Option<(u32, u32)>) -> auth::Stamp {
+    match a.stamp(echo) {
+        Some(s) => s,
+        None => esp_hal::system::software_reset(),
+    }
+}
+
+/// Make sure `mac` is an ESP-NOW peer, so unicast to it works.
+fn ensure_peer(manager: &EspNowManager, mac: [u8; 6]) {
+    if !manager.peer_exists(&mac) {
+        let _ = manager.add_peer(PeerInfo {
+            interface: EspNowWifiInterface::Station,
+            peer_address: mac,
+            lmk: None,
+            channel: None,
+            encrypt: false,
+        });
+    }
 }
 
 /// Add Espressif Long Range to the station's 2.4 GHz protocols (keeping b/g/n),
@@ -163,19 +254,41 @@ impl core::fmt::Display for Mac {
 /// Everything the gateway transmits: beacons every 500 ms, and hub commands
 /// to nodes when kicked (new command, or the node just spoke) or at a beacon.
 #[embassy_executor::task]
-async fn air_tx(manager: EspNowManager, mut sender: EspNowSender) {
+async fn air_tx(manager: EspNowManager, mut sender: EspNowSender, mut auth: Option<auth::Gateway>, me: [u8; 6]) {
     let mut seq: u16 = 0;
     let period = Duration::from_millis(500);
     let mut next_beacon = Instant::now();
     loop {
         let wait = next_beacon.saturating_duration_since(Instant::now());
-        if let Ok(mac) = with_timeout(wait, KICK.receive()).await {
-            send_command(&manager, &mut sender, mac).await;
-            continue;
+        match with_timeout(wait, KICK.receive()).await {
+            Ok(Job::Command(mac)) => {
+                send_command(&manager, &mut sender, &mut auth, me, mac).await;
+                continue;
+            }
+            Ok(Job::Sync(mac, session, counter)) => {
+                // Only keyed gateways queue syncs.
+                if let Some(a) = auth.as_mut() {
+                    ensure_peer(&manager, mac);
+                    let mut buf = [0u8; airlink::BEACON_LEN + auth::TRAILER];
+                    let len = airlink::beacon(&mut buf, seq, CHANNEL).len();
+                    let st = stamp(a, Some((session, counter)));
+                    if let Some(n) = auth::seal(&a.key, &me, &mut buf, len, st)
+                        && sender.send_async(&mac, &buf[..n]).await.is_ok()
+                    {
+                        SYNCS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                continue;
+            }
+            Err(_) => {}
         }
-        let mut buf = [0u8; airlink::HEADER + 1];
-        let pkt = airlink::beacon(&mut buf, seq, CHANNEL);
-        if sender.send_async(&BROADCAST_ADDRESS, pkt).await.is_ok() {
+        let mut buf = [0u8; airlink::BEACON_LEN + auth::TRAILER];
+        let mut n = airlink::beacon(&mut buf, seq, CHANNEL).len();
+        if let Some(a) = auth.as_mut() {
+            let st = stamp(a, None);
+            n = auth::seal(&a.key, &me, &mut buf, n, st).unwrap_or(n);
+        }
+        if sender.send_async(&BROADCAST_ADDRESS, &buf[..n]).await.is_ok() {
             BEACONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
         seq = seq.wrapping_add(1);
@@ -191,14 +304,20 @@ async fn air_tx(manager: EspNowManager, mut sender: EspNowSender) {
             }
         });
         for mac in due {
-            send_command(&manager, &mut sender, mac).await;
+            send_command(&manager, &mut sender, &mut auth, me, mac).await;
         }
     }
 }
 
-/// One attempt at delivering `mac`'s pending command.
-async fn send_command(manager: &EspNowManager, sender: &mut EspNowSender, mac: [u8; 6]) {
+/// One attempt at delivering `mac`'s pending command. Keyed: only once the
+/// node has been heard this boot (the command must echo its session); until
+/// then it stays pending, and hearing the node kicks it.
+async fn send_command(manager: &EspNowManager, sender: &mut EspNowSender, auth: &mut Option<auth::Gateway>, me: [u8; 6], mac: [u8; 6]) {
     let now = Instant::now().as_millis();
+    let echo = critical_section::with(|cs| NODES.borrow_ref(cs).iter().find(|n| n.mac == mac).and_then(|n| n.auth.echo));
+    if auth.is_some() && echo.is_none() {
+        return;
+    }
     let job = critical_section::with(|cs| {
         let mut down = DOWN.borrow_ref_mut(cs);
         let d = down.iter_mut().find(|d| d.mac == mac)?;
@@ -210,18 +329,16 @@ async fn send_command(manager: &EspNowManager, sender: &mut EspNowSender, mac: [
         Some((frames, d.seq))
     });
     let Some((frames, seq)) = job else { return };
-    if !manager.peer_exists(&mac) {
-        let _ = manager.add_peer(PeerInfo {
-            interface: EspNowWifiInterface::Station,
-            peer_address: mac,
-            lmk: None,
-            channel: None,
-            encrypt: false,
-        });
+    ensure_peer(manager, mac);
+    let mut buf = [0u8; airlink::HEADER + link::MAX_FRAME + auth::TRAILER];
+    let Some(len) = airlink::command(&mut buf, seq, &frames).map(<[u8]>::len) else { return };
+    let mut n = len;
+    if let Some(a) = auth.as_mut() {
+        let st = stamp(a, echo);
+        let Some(sealed) = auth::seal(&a.key, &me, &mut buf, len, st) else { return };
+        n = sealed;
     }
-    let mut buf = [0u8; airlink::HEADER + link::MAX_FRAME];
-    let Some(pkt) = airlink::command(&mut buf, seq, &frames) else { return };
-    let ok = sender.send_async(&mac, pkt).await.is_ok();
+    let ok = sender.send_async(&mac, &buf[..n]).await.is_ok();
     critical_section::with(|cs| {
         let mut down = DOWN.borrow_ref_mut(cs);
         let Some(d) = down.iter_mut().find(|d| d.mac == mac) else { return };
@@ -309,7 +426,7 @@ async fn hub_commands(mut rx: UartRx<'static, esp_hal::Async>) {
                     true
                 });
                 if queued {
-                    let _ = KICK.try_send(mac);
+                    let _ = KICK.try_send(Job::Command(mac));
                 } else {
                     HUB_ORPHANS.fetch_add(1, Relaxed);
                 }
@@ -322,11 +439,26 @@ async fn hub_commands(mut rx: UartRx<'static, esp_hal::Async>) {
     }
 }
 
-/// Receive forever; write `Via` + frame for each frame of each packet.
-async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>) -> ! {
+/// Receive forever; write `Via` + frame for each frame of each packet. Also
+/// the gateway's own frames to the hub (written here, so they never land in
+/// the middle of a relayed one): `Threat` reports for rejected packets, once
+/// a second, and a `Hello` naming the key state every few seconds.
+async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>, auth: Option<(auth::Key, u32)>, me: [u8; 6]) -> ! {
     use core::sync::atomic::Ordering::Relaxed;
+    let mut next_hello = Instant::now();
+    let mut next_report = Instant::now() + Duration::from_millis(u64::from(THREAT_WINDOW_MS));
     loop {
-        let got = rx.receive_async().await;
+        let now = Instant::now();
+        if now >= next_hello {
+            next_hello = now + Duration::from_millis(HELLO_EVERY_MS);
+            hello(&mut hub).await;
+        }
+        if now >= next_report {
+            next_report = now + Duration::from_millis(u64::from(THREAT_WINDOW_MS));
+            report_threats(&mut hub, me).await;
+        }
+        let wait = next_report.min(next_hello).saturating_duration_since(Instant::now());
+        let Ok(got) = with_timeout(wait, rx.receive_async()).await else { continue };
         let Some(pkt) = airlink::parse(got.data()) else {
             FOREIGN.fetch_add(1, Relaxed);
             continue;
@@ -336,35 +468,77 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>)
         }
         let src = got.info.src_address;
         let rssi = got.info.rx_control.rssi as i8;
+        // Keyed: the tag first (no state is touched for a bad one), then
+        // freshness against this node's last accepted packet.
+        let stamp = match &auth {
+            Some((key, _)) => match auth::verify(key, &src, got.data()) {
+                Ok(st) => Some(st),
+                Err(r) => {
+                    reject(src, r, rssi);
+                    continue;
+                }
+            },
+            None => {
+                if pkt.sealed {
+                    UNVERIFIED.fetch_add(1, Relaxed);
+                }
+                None
+            }
+        };
+        let now_ms = Instant::now().as_millis();
         let fresh = critical_section::with(|cs| {
             let mut nodes = NODES.borrow_ref_mut(cs);
-            let i = match nodes.iter().position(|n| n.mac == src) {
-                Some(i) => i,
-                None => {
-                    let n = Node { mac: src, seq: Default::default(), frames: 0, bytes: 0, rssi, last_ms: 0 };
-                    if nodes.push(n).is_err() {
-                        return true; // table full: relay, do not count
-                    }
-                    nodes.len() - 1
-                }
+            let Some(i) = node_index(&mut nodes, src, rssi) else {
+                // Table full. Open: relay, do not count. Keyed: no replay
+                // state for it, so it cannot be relayed safely.
+                return if auth.is_some() { Err(None) } else { Ok(true) };
             };
             let n = &mut nodes[i];
+            if let (Some((_, epoch)), Some(st)) = (&auth, &stamp) {
+                match n.auth.check(*epoch, st) {
+                    Verdict::Accept => {}
+                    Verdict::Duplicate => return Ok(false),
+                    Verdict::Reject(r) => {
+                        // Genuine but stale or old: answer with a sync, so a
+                        // node that rebooted (or outlived our reboot) catches up.
+                        let sync = n.last_sync_ms.is_none_or(|t| now_ms.saturating_sub(t) >= SYNC_EVERY_MS);
+                        if sync {
+                            n.last_sync_ms = Some(now_ms);
+                        }
+                        return Err(Some((r, sync.then_some((st.session, st.counter)))));
+                    }
+                }
+            }
             n.rssi = rssi;
-            n.last_ms = Instant::now().as_millis();
+            n.last_ms = now_ms;
             let fresh = n.seq.on_packet(pkt.seq);
             if fresh {
                 n.bytes = n.bytes.wrapping_add(pkt.payload.len() as u32);
                 n.frames = n.frames.wrapping_add(pkt.payload.iter().filter(|&&b| b == 0).count() as u32);
             }
-            fresh
+            Ok(fresh)
         });
+        let fresh = match fresh {
+            Ok(f) => f,
+            Err(None) => continue,
+            Err(Some((r, sync))) => {
+                reject(src, r, rssi);
+                if let Some((session, counter)) = sync {
+                    let _ = KICK.try_send(Job::Sync(src, session, counter));
+                }
+                continue;
+            }
+        };
         if !fresh {
+            if stamp.is_some() {
+                AUTH_DUPS.fetch_add(1, Relaxed);
+            }
             continue;
         }
         // The node is on our channel right now: a good moment for its command.
         let waiting = critical_section::with(|cs| DOWN.borrow_ref(cs).iter().any(|d| d.mac == src && d.pending.is_some()));
         if waiting {
-            let _ = KICK.try_send(src);
+            let _ = KICK.try_send(Job::Command(src));
         }
         let mut via = [0u8; 16];
         let Ok(via) = link::encode(&link::Frame::Via { node: src, rssi }, &mut via) else { continue };
@@ -391,6 +565,84 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>)
     }
 }
 
+/// Count a rejected packet for the next `Threat` report. Stale-epoch packets
+/// right after our own boot are expected (nodes still on our previous epoch
+/// until their sync) and only counted in the log line.
+fn reject(src: [u8; 6], r: Reject, rssi: i8) {
+    let quiet = r == Reject::Stale && Instant::now().as_millis() < STALE_GRACE_MS;
+    critical_section::with(|cs| {
+        let mut log = REJECTS.borrow_ref_mut(cs);
+        if quiet {
+            let i = r.code() as usize - 1;
+            log.totals[i] = log.totals[i].saturating_add(1);
+        } else {
+            log.record(src, r, rssi);
+        }
+    });
+}
+
+/// One `Threat` / `ForgedLink` frame per claimed address and reason rejected
+/// in the last window. `detail` = the reason (`airlink::auth::Reject` code:
+/// 1 bad tag, 2 replay, 3 unauthenticated, 4 stale).
+async fn report_threats(hub: &mut UartTx<'static, esp_hal::Async>, me: [u8; 6]) {
+    let mut out: heapless::Vec<auth::RejectReport, 32> = heapless::Vec::new();
+    let now = Instant::now();
+    critical_section::with(|cs| {
+        REJECTS.borrow_ref_mut(cs).drain(now.as_millis(), THREAT_WINDOW_MS, |r| {
+            let _ = out.push(r);
+        })
+    });
+    for r in out {
+        let f = link::Frame::Threat(link::ThreatSighting {
+            kind: link::ThreatKind::ForgedLink,
+            channel: CHANNEL,
+            freq: CHANNEL_FREQ,
+            width_khz: 0,
+            level: r.rssi,
+            count: r.count,
+            window_ms: r.window_ms,
+            source: r.source,
+            target: me,
+            detail: r.reason.code(),
+            ssid: heapless::String::new(),
+            uptime_us: now.as_micros(),
+        });
+        let mut buf = [0u8; link::MAX_FRAME];
+        if let Ok(b) = link::encode(&f, &mut buf) {
+            let b: &[u8] = b;
+            if write_all(hub, b).await.is_ok() {
+                THREATS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        println!(
+            r#"{{"t":"threat","kind":"forged_link","src":"{}","why":"{}","count":{},"rssi":{}}}"#,
+            Mac(r.source),
+            r.reason.name(),
+            r.count,
+            r.rssi
+        );
+    }
+}
+
+/// The gateway's own `Hello` (no `Via` before it, so it is the link's own):
+/// role Gateway, and in the firmware string the key state, "gw key <id>" or
+/// "gw OPEN no key". Relayed nodes keep their own Hellos.
+async fn hello(hub: &mut UartTx<'static, esp_hal::Async>) {
+    use core::fmt::Write as _;
+    let mut firmware = heapless::String::<16>::new();
+    if auth::KIT_KEY.is_some() {
+        let _ = write!(firmware, "gw key {}", auth::KEY_ID);
+    } else {
+        let _ = firmware.push_str("gw OPEN no key");
+    }
+    let f = link::Frame::Hello { role: link::NodeRole::Gateway, protocol: link::PROTOCOL_VERSION, firmware };
+    let mut buf = [0u8; 48];
+    if let Ok(b) = link::encode(&f, &mut buf) {
+        let b: &[u8] = b;
+        let _ = write_all(hub, b).await;
+    }
+}
+
 async fn write_all(uart: &mut UartTx<'static, esp_hal::Async>, mut b: &[u8]) -> Result<(), ()> {
     while !b.is_empty() {
         let n = uart.write_async(b).await.map_err(|_| ())?;
@@ -407,8 +659,10 @@ async fn stats() {
         ticker.next().await;
         let now = Instant::now().as_millis();
         let nodes = critical_section::with(|cs| NODES.borrow_ref(cs).clone());
+        let rej = critical_section::with(|cs| REJECTS.borrow_ref(cs).totals);
         println!(
-            r#"{{"t":"gw","up_ms":{now},"beacons":{},"decoded":{},"detections":{},"corrupt":{},"foreign":{},"uart_dropped":{},"nodes":{},"hub_bytes":{},"hub_cmds":{},"hub_corrupt":{},"hub_orphans":{}}}"#,
+            r#"{{"t":"gw","up_ms":{now},"key":"{}","beacons":{},"decoded":{},"detections":{},"corrupt":{},"foreign":{},"uart_dropped":{},"nodes":{},"hub_bytes":{},"hub_cmds":{},"hub_corrupt":{},"hub_orphans":{},"bad_tag":{},"replay":{},"unauth":{},"stale":{},"auth_dups":{},"syncs":{},"threats":{},"unverified":{}}}"#,
+            auth::KEY_ID,
             BEACONS.load(Relaxed),
             DECODED.load(Relaxed),
             DETECTIONS.load(Relaxed),
@@ -419,7 +673,15 @@ async fn stats() {
             HUB_BYTES.load(Relaxed),
             HUB_CMDS.load(Relaxed),
             HUB_CORRUPT.load(Relaxed),
-            HUB_ORPHANS.load(Relaxed)
+            HUB_ORPHANS.load(Relaxed),
+            rej[0],
+            rej[1],
+            rej[2],
+            rej[3],
+            AUTH_DUPS.load(Relaxed),
+            SYNCS.load(Relaxed),
+            THREATS.load(Relaxed),
+            UNVERIFIED.load(Relaxed)
         );
         let down = critical_section::with(|cs| DOWN.borrow_ref(cs).clone());
         for d in &down {

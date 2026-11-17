@@ -406,6 +406,50 @@ impl Node {
     }
 }
 
+/// A node's whole receive check for one gateway packet (`kind` from
+/// [`crate::parse`]). `node` None = an open build: everything is taken, as
+/// before keys existed. Keyed: the tag, then [`Node::on_gateway`].
+pub fn node_accept(node: Option<&mut Node>, src: &[u8; 6], data: &[u8], kind: Kind) -> Verdict {
+    let Some(n) = node else { return Verdict::Accept };
+    match verify(&n.key, src, data) {
+        Ok(st) => n.on_gateway(kind, &st),
+        Err(r) => Verdict::Reject(r),
+    }
+}
+
+/// Whether a node may (re)learn or refresh its gateway from a packet with
+/// this verdict: a good one, or a genuine beacon of another epoch (the gateway
+/// rebooted; sending to it earns the sync that moves the node over).
+pub fn proves_gateway(v: Verdict) -> bool {
+    matches!(v, Verdict::Accept | Verdict::Duplicate | Verdict::Reject(Reject::Stale))
+}
+
+/// Counts of gateway packets a node did not take, by [`Reject`] reason
+/// (index = code - 1), and duplicates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NodeRejects {
+    pub by_reason: [u32; 4],
+    pub dups: u32,
+}
+
+impl NodeRejects {
+    /// Count `v`; true if the packet is to be used.
+    pub fn take(&mut self, v: Verdict) -> bool {
+        match v {
+            Verdict::Accept => true,
+            Verdict::Duplicate => {
+                self.dups = self.dups.wrapping_add(1);
+                false
+            }
+            Verdict::Reject(r) => {
+                let i = r.code() as usize - 1;
+                self.by_reason[i] = self.by_reason[i].wrapping_add(1);
+                false
+            }
+        }
+    }
+}
+
 /// One report the gateway owes the hub: packets claiming to be from `source`
 /// rejected for `reason` during the last window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -796,6 +840,34 @@ mod tests {
         let c2 = b.gw_packet(Kind::Command, b.peer.echo);
         assert_eq!(b.node_hears(&c2), Verdict::Accept);
         assert_eq!(b.node_hears(&c1), Verdict::Reject(Reject::Replay));
+    }
+
+    #[test]
+    fn node_accept_open_and_keyed() {
+        let mut b = Bench::new();
+        let bc = b.gw_packet(Kind::Beacon, None);
+        // Open build: anything parsed is taken, sealed or not.
+        assert_eq!(node_accept(None, &GW, &bc, Kind::Beacon), Verdict::Accept);
+        assert_eq!(node_accept(Some(&mut b.node), &GW, &bc, Kind::Beacon), Verdict::Accept);
+        let mut forged = bc.clone();
+        forged[7] ^= 1;
+        let v = node_accept(Some(&mut b.node), &GW, &forged, Kind::Beacon);
+        assert_eq!(v, Verdict::Reject(Reject::BadTag));
+        assert!(!proves_gateway(v));
+        let mut plain = [0u8; BEACON_LEN];
+        let plain = beacon(&mut plain, 0, 6).to_vec();
+        let v = node_accept(Some(&mut b.node), &GW, &plain, Kind::Beacon);
+        assert_eq!(v, Verdict::Reject(Reject::Unauthenticated), "a keyed node ignores open gateways");
+        let mut c = NodeRejects::default();
+        assert!(!c.take(v));
+        assert!(c.take(Verdict::Accept));
+        assert_eq!(c.by_reason, [0, 0, 1, 0]);
+        // A genuine beacon of a newer epoch still proves the gateway is there.
+        b.gw = Gateway::new(Key::new(&K1), 0xc3);
+        let other = b.gw_packet(Kind::Beacon, None);
+        let v = node_accept(Some(&mut b.node), &GW, &other, Kind::Beacon);
+        assert_eq!(v, Verdict::Reject(Reject::Stale));
+        assert!(proves_gateway(v));
     }
 
     #[test]

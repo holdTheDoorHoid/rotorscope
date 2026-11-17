@@ -10,7 +10,9 @@
 //! Output (in `OUT_DIR`, inside the git-ignored target directory):
 //! `KIT_KEY: Option<[u8; 32]>` and `KEY_ID` (8 hex digits of
 //! HMAC(key, "rotorscope link key id"), safe to print; it identifies the key
-//! without revealing it). The key itself is never printed.
+//! without revealing it) and `KEY_TAG` ("link-key:<id>" or "link-key:none",
+//! which firmware prints at boot so `tools/dev-board.sh` can find it in an
+//! ELF). The key itself is never printed.
 
 #[path = "src/hmac.rs"]
 mod hmac;
@@ -47,7 +49,7 @@ fn main() {
             println!(
                 "cargo:warning=airlink: no link key (tools/link.key): this build's ESP-NOW link is NOT authenticated. See docs/ESPNOW.md \"Securing the link\"."
             );
-            "/// No key: unauthenticated ESP-NOW (docs/ESPNOW.md).\npub const KIT_KEY: Option<[u8; 32]> = None;\n/// See [`KIT_KEY`].\npub const KEY_ID: &str = \"none\";\n".to_string()
+            "/// No key: unauthenticated ESP-NOW (docs/ESPNOW.md).\npub const KIT_KEY: Option<[u8; 32]> = None;\n/// See [`KIT_KEY`].\npub const KEY_ID: &str = \"none\";\n/// Printed at boot; `tools/dev-board.sh` finds it in an ELF.\npub const KEY_TAG: &str = \"link-key:none\";\n".to_string()
         }
         Some(p) => {
             println!("cargo:rerun-if-changed={}", p.display());
@@ -64,7 +66,7 @@ fn main() {
             println!("cargo:warning=airlink: ESP-NOW link key {id} from {}", p.display());
             let bytes: Vec<String> = key.iter().map(|b| format!("0x{b:02x}")).collect();
             format!(
-                "/// The kit's link key (from a local file, never committed).\npub const KIT_KEY: Option<[u8; 32]> = Some([{}]);\n/// See [`KIT_KEY`].\npub const KEY_ID: &str = \"{id}\";\n",
+                "/// The kit's link key (from a local file, never committed).\npub const KIT_KEY: Option<[u8; 32]> = Some([{}]);\n/// See [`KIT_KEY`].\npub const KEY_ID: &str = \"{id}\";\n/// Printed at boot; `tools/dev-board.sh` finds it in an ELF.\npub const KEY_TAG: &str = \"link-key:{id}\";\n",
                 bytes.join(", ")
             )
         }

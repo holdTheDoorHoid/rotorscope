@@ -13,10 +13,16 @@
 //!
 //! Frames come from `out::UART`, the byte pipe the UART task drains in a
 //! wired build: whole COBS frames, split here on their zero delimiters.
+//!
+//! Built with the kit key (`tools/link.key`, docs/ESPNOW.md "Securing the
+//! link"), batches are sealed and only gateway packets with a good tag and a
+//! fresh stamp are believed (`airlink::auth`). Without a key it runs open,
+//! as before, and says so at boot.
 
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
+use airlink::auth;
 use embassy_time::{Duration, Instant, Timer};
 use esp_radio::esp_now::{EspNow, EspNowWifiInterface, PeerInfo};
 
@@ -65,6 +71,19 @@ pub static SEND_US: AtomicU32 = AtomicU32::new(0);
 
 type Frame = heapless::Vec<u8, { link::MAX_FRAME }>;
 
+/// A fresh random session per boot (hardware RNG; true random with the radio on).
+fn rng() -> u32 {
+    esp_hal::rng::Rng::new().random()
+}
+
+/// One JSON line on USB.
+fn usb_line(args: core::fmt::Arguments<'_>) {
+    let mut s: heapless::String<256> = heapless::String::new();
+    let _ = s.write_fmt(args);
+    let _ = s.push('\n');
+    out::emit(&out::USB, s.as_bytes(), &crate::adv::COUNTERS.usb_drops);
+}
+
 /// `src` is the gateway: add it as a peer the first time, and note it heard.
 fn learn(now: &EspNow, gateway: &mut Option<([u8; 6], Instant)>, src: [u8; 6]) {
     if gateway.is_none_or(|(m, _)| m != src) {
@@ -91,6 +110,17 @@ fn learn(now: &EspNow, gateway: &mut Option<([u8; 6], Instant)>, src: [u8; 6]) {
 
 #[embassy_executor::task]
 pub async fn run(mut now: EspNow) {
+    let me = esp_radio::wifi::Interface::station().mac_address();
+    let mut auth = auth::Key::kit().map(|k| auth::Node::new(k, rng));
+    let mut rejects = auth::NodeRejects::default();
+    if auth.is_some() {
+        usb_line(format_args!(r#"{{"t":"uplink","auth":"{}"}}"#, auth::KEY_TAG));
+    } else {
+        usb_line(format_args!(
+            r#"{{"t":"warn","what":"link_key","auth":"{}","note":"built WITHOUT a link key: ESP-NOW reports and hub commands are not authenticated (docs/ESPNOW.md 'Securing the link')"}}"#,
+            auth::KEY_TAG
+        ));
+    }
     let mut batch = airlink::Batch::new();
     let mut batch_since = Instant::now();
     let mut seq: u16 = 0;
@@ -109,6 +139,18 @@ pub async fn run(mut now: EspNow) {
         while let Some(got) = now.receive() {
             let Some(pkt) = airlink::parse(got.data()) else { continue };
             let src = got.info.src_address;
+            if pkt.kind == airlink::Kind::Frames {
+                continue; // another node's batch
+            }
+            // Keyed: tag and freshness before anything else looks at it.
+            let v = auth::node_accept(auth.as_mut(), &src, got.data(), pkt.kind);
+            // A genuine beacon of another epoch (the gateway rebooted) still
+            // names our gateway: sending to it earns the sync that moves us
+            // to its new epoch. Nothing else is taken from it.
+            let beacon_ok = pkt.kind == airlink::Kind::Beacon && auth::proves_gateway(v);
+            if !rejects.take(v) && !beacon_ok {
+                continue;
+            }
             match pkt.kind {
                 airlink::Kind::Beacon => {
                     BEACONS.fetch_add(1, Relaxed);
@@ -183,7 +225,15 @@ pub async fn run(mut now: EspNow) {
                 TRIES.fetch_add(1, Relaxed);
                 let t0 = Instant::now();
                 let frames = batch.frames();
-                let r = now.send_async(&mac, batch.packet(seq)).await;
+                // Keyed: no stamp until a gateway epoch is known (or after
+                // a counter wrap, until a newer gateway clock).
+                let r = match auth.as_mut() {
+                    None => now.send_async(&mac, batch.packet(seq)).await,
+                    Some(a) => match a.next_up() {
+                        Some(st) => now.send_async(&mac, batch.sealed(seq, &a.key, &me, st)).await,
+                        None => Err(esp_radio::esp_now::EspNowError::SendFailed),
+                    },
+                };
                 SEND_US.fetch_add(t0.elapsed().as_micros() as u32, Relaxed);
                 if r.is_ok() {
                     gateway = Some((mac, Instant::now()));
@@ -222,6 +272,13 @@ pub async fn run(mut now: EspNow) {
                 },
                 &mut line,
             );
+            if rejects != auth::NodeRejects::default() {
+                let r = rejects.by_reason;
+                usb_line(format_args!(
+                    r#"{{"t":"link_auth","bad_tag":{},"replay":{},"unauth":{},"stale":{},"dups":{}}}"#,
+                    r[0], r[1], r[2], r[3], rejects.dups
+                ));
+            }
         }
         Timer::after(POLL).await;
     }
