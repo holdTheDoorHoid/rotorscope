@@ -103,6 +103,9 @@ pub struct LinkStats {
     pub ring_full: u32,
     /// Frames with no `Via` before them: a node wired straight to this link.
     pub direct: u32,
+    /// The gateway's own Hello firmware string: `"gw key <id>"` when the
+    /// ESP-NOW link is signed, `"gw OPEN no key"` when it is not.
+    pub gw_hello: heapless::String<16>,
 }
 
 pub struct GatewayLink<'d> {
@@ -277,6 +280,9 @@ impl<'d> GatewayLink<'d> {
         }
         let Some((mac, rssi)) = via.take() else {
             stats.direct += 1;
+            if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
+                stats.gw_hello = firmware.clone();
+            }
             if is_data(&f) && out.push_back((0, f)).is_err() {
                 *out_full += 1;
             }
@@ -329,5 +335,8 @@ fn is_data(f: &Frame) -> bool {
             | Frame::Rf(_)
             | Frame::DjiWifi { .. }
             | Frame::WifiDrone(_)
+            // Protocol 9: attacks and jamming from nodes, and forged-link
+            // reports from the gateway itself.
+            | Frame::Threat(_)
     )
 }
