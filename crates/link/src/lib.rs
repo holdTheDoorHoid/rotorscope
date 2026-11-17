@@ -284,6 +284,10 @@ pub enum ThreatKind {
     /// loud: it is effectively blind. `detail` = percent of the usual
     /// frame rate still arriving.
     Blinded,
+    /// Frames claiming to come from one of our own nodes failed
+    /// authentication (ESP-NOW gateway): someone is injecting fake nodes or
+    /// commands. `source` = the claimed node, `count` = rejected frames.
+    ForgedLink,
 }
 
 impl ThreatKind {
@@ -305,6 +309,7 @@ impl ThreatKind {
             JamSweep => "jam_sweep",
             JamPulsed => "jam_pulsed",
             Blinded => "blinded",
+            ForgedLink => "forged_link",
         }
     }
 
@@ -853,7 +858,7 @@ mod tests {
     fn protocol_9_threat_appended() {
         let mut buf = [0u8; MAX_FRAME];
         let mut dec = Decoder::new();
-        for k in 0..=14u8 {
+        for k in 0..=15u8 {
             let kind: ThreatKind = postcard::from_bytes(&[k]).unwrap();
             let f = Frame::Threat(ThreatSighting {
                 kind,
@@ -876,7 +881,7 @@ mod tests {
             dec.feed(wire, |r| got = Some(r));
             assert_eq!(got, Some(Ok(f)));
         }
-        assert!(postcard::from_bytes::<ThreatKind>(&[15]).is_err());
+        assert!(postcard::from_bytes::<ThreatKind>(&[16]).is_err());
         assert!(ThreatKind::Blinded.is_jamming() && !ThreatKind::Deauth.is_jamming());
     }
 

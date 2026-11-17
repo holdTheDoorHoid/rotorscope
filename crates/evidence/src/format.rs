@@ -211,6 +211,25 @@ pub enum EventCode {
     /// ciphertext). Data: session key ID (4), record selector (1). Text:
     /// what it decrypted to (serial, positions). Never the key.
     O4Decrypted = 16,
+    /// An attack or jamming reported by a node (link protocol 9
+    /// `Frame::Threat`, kept raw in the frame record just before it). Data:
+    /// kind (1, `link::ThreatKind` index), node station address (6). Text:
+    /// what it was, where, how strong.
+    Threat = 17,
+    /// The hub's own GPS shows signs of jamming. Data: kind (1, receiver
+    /// specific indicator), level (i16). Text: the evidence.
+    GnssJamming = 18,
+    /// The hub's own GPS shows signs of spoofing. Data: kind (1), level
+    /// (i32). Text: the evidence.
+    GnssSpoofing = 19,
+    /// A drone track failed a consistency check that suggests its
+    /// broadcast is forged or replayed. Data: check (1), confidence 0-100
+    /// (1). Text: the track and the evidence.
+    SpoofSuspect = 20,
+    /// Frames that claimed to come from one of our own nodes failed
+    /// authentication on the ESP-NOW link. Data: claimed station address
+    /// (6), count (u32).
+    LinkForgery = 21,
 }
 
 impl EventCode {
@@ -233,6 +252,11 @@ impl EventCode {
             14 => Shutdown,
             15 => GpsReceiver,
             16 => O4Decrypted,
+            17 => Threat,
+            18 => GnssJamming,
+            19 => GnssSpoofing,
+            20 => SpoofSuspect,
+            21 => LinkForgery,
             _ => return None,
         })
     }
@@ -255,6 +279,11 @@ impl EventCode {
             Shutdown => "shutdown",
             GpsReceiver => "gps_receiver",
             O4Decrypted => "o4_decrypted",
+            Threat => "threat",
+            GnssJamming => "gnss_jamming",
+            GnssSpoofing => "gnss_spoofing",
+            SpoofSuspect => "spoof_suspect",
+            LinkForgery => "link_forgery",
         }
     }
 }
