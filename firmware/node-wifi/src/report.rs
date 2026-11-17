@@ -162,10 +162,21 @@ pub struct StatsLine {
     /// DJI DroneID elements / Wi-Fi drone networks reported (rate-limited), total.
     pub dji: u32,
     pub wdrone: u32,
+    /// Attack detection totals (`wifiwatch`): deauth + disassoc frames,
+    /// authentication / association requests, probe requests, channel-switch
+    /// frames, threats reported.
+    pub kill: u32,
+    pub auth: u32,
+    pub probe: u32,
+    pub csa: u32,
+    pub threat: u32,
+    /// Scouting visits off the plan (`coverage::plans::scout_channel`) and the
+    /// last channel scouted.
+    pub scout: (u32, u8),
 }
 
 pub fn stats_json(line: &StatsLine) {
-    emit(line, &mut [0u8; 1024], "stats");
+    emit(line, &mut [0u8; 1280], "stats");
 }
 
 pub fn stats_hub(line: &StatsLine) {
@@ -396,6 +407,49 @@ pub fn wifi_drone_hub(f: &crate::rx::RxFrame, maker: u8, src: [u8; 6], ssid: &[u
         rssi: f.rssi,
         uptime_us: f.up_us,
     }));
+}
+
+// ----------------------------------------------------------------- threats --
+
+/// `{"t":"threat",...}`: an attack seen on the air (`wifiwatch`). Same fields
+/// as `link::ThreatSighting`; `tool` names an attack tool's index.
+#[derive(Serialize)]
+struct ThreatLine<'a> {
+    t: &'static str,
+    kind: &'static str,
+    ch: u8,
+    rssi: i8,
+    n: u32,
+    win_ms: u32,
+    src: Mac,
+    dst: Mac,
+    detail: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<&'static str>,
+    ssid: &'a str,
+    up_us: u64,
+}
+
+pub fn threat(s: &link::ThreatSighting) {
+    let tool = (s.kind == link::ThreatKind::AttackTool)
+        .then(|| wifiwatch::TOOLS.get(s.detail as usize).copied())
+        .flatten();
+    let line = ThreatLine {
+        t: "threat",
+        kind: s.kind.name(),
+        ch: s.channel,
+        rssi: s.level,
+        n: s.count,
+        win_ms: s.window_ms,
+        src: Mac(s.source),
+        dst: Mac(s.target),
+        detail: s.detail,
+        tool,
+        ssid: &s.ssid,
+        up_us: s.uptime_us,
+    };
+    emit(&line, &mut [0u8; 384], "threat");
+    to_hub(&link::Frame::Threat(s.clone()));
 }
 
 // --------------------------------------------------------------------- hub --

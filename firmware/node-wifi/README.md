@@ -183,6 +183,34 @@ in `ota_2` when built) with `tools/flash-node.sh <board>`; layout in
 - Neither has been seen from a real drone yet (no DJI Wi-Fi drone or listed
   maker's drone on the bench).
 
+## Attack detection (protocol 9)
+
+`crates/wifiwatch` looks for hostile Wi-Fi activity; see `docs/WIFI-ATTACKS.md`
+for what each detector looks for, thresholds and known false alarms.
+
+- **Header-only frames never use the queue.** Deauthentication,
+  disassociation, authentication, (re)association and probe requests are
+  counted in the receive callback from their headers (`rx::FLOODS`, under a
+  critical section) and dropped; only beacons, probe responses and action
+  frames take a slot. A deauth flood cannot crowd Remote ID out. The
+  `threats` task closes the flood windows four times a second.
+- Beacons, probe responses and action frames go through
+  `wifiwatch::beacons` in `drain` (beacon floods, Karma, evil twins,
+  channel-switch abuse, known tools).
+- Each finding: USB `{"t":"threat","kind":"deauth","ch":6,"rssi":-48,"n":412,"win_ms":1000,"src":..,"dst":..,"detail":7,"ssid":"","up_us":..}`
+  (`tool` names an `attack_tool`), and `Frame::Threat` to the hub.
+- Stats: `kill` (deauth + disassoc frames), `auth`, `probe`, `csa`, `threat`
+  totals; `scout` `[visits, last channel]`. `per_ch` now also counts the
+  header-only frames.
+- **Scouting.** Every 3 s the hopper leaves its plan for 105 ms to visit the
+  next channel of its band(s) the plan skips (`coverage::plans::scout_channel`):
+  2.4 GHz 1-14, 5 GHz 36-177. For that the radio's receive regulatory domain is
+  opened up (`chip::RX_ALL_CHANNELS`: manual policy, 2.4 GHz 1-14, every 5 GHz
+  channel); a failure prints `{"t":"err","what":"esp_wifi_set_country"}` and the
+  node carries on with the US set. Nothing new is transmitted.
+- Not yet checked on hardware: tuning 12-14 and 169-177, the scouting cost on
+  Remote ID, and behaviour under a real deauth flood.
+
 ## ESP-NOW uplink (experimental)
 
 `cargo fw24-now` (from `c5/`) builds the 2.4 GHz C5 node with the `espnow`

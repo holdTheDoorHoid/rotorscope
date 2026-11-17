@@ -6,7 +6,12 @@
 //! prints JSON lines on USB and sends `link` frames to the hub; `main` ends up
 //! as the channel hopper. Data frames are classified in the callback by the
 //! `openlink` crate (open FPV / telemetry links) and only counted there;
-//! `open_links` reports each stream at most once a second. Receive-only:
+//! `open_links` reports each stream at most once a second. Attack detection
+//! (`wifiwatch`, Frame::Threat) is split the same way: deauth / auth / probe
+//! floods are counted in the callback and judged by `threats`; beacons,
+//! probe responses and action frames are checked in `drain`. The hopper
+//! also leaves its plan now and then to scout a channel the plan skips
+//! (`coverage::plans::scout_channel`). Receive-only:
 //! nothing here transmits on the air, except with the `espnow` feature, where
 //! `uplink` sends hub frames to an ESP-NOW gateway instead of the UART.
 #![no_std]
@@ -55,11 +60,18 @@ static CHANNEL_ERRORS: AtomicU32 = AtomicU32::new(0);
 static IE_FIT: [AtomicU32; 3] = [const { AtomicU32::new(0) }; 3];
 /// Management frames heard, and hopper visits, per channel number (1-177).
 /// Shows the hop plan is really being followed.
-static PER_CHANNEL: [AtomicU32; CHANNELS] = [const { AtomicU32::new(0) }; CHANNELS];
+pub(crate) static PER_CHANNEL: [AtomicU32; CHANNELS] = [const { AtomicU32::new(0) }; CHANNELS];
 static VISITS: [AtomicU32; CHANNELS] = [const { AtomicU32::new(0) }; CHANNELS];
 const CHANNELS: usize = 178;
 /// Failed band changes (C5).
 static BAND_ERRORS: AtomicU32 = AtomicU32::new(0);
+/// Scouting visits off the plan, and the last channel scouted.
+static SCOUT_VISITS: AtomicU32 = AtomicU32::new(0);
+static SCOUT_LAST: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+/// Beacon-side attack detection totals (`wifiwatch::beacons::Totals`),
+/// copied out of the drain task for the stats line.
+static BEACON_CSA: AtomicU32 = AtomicU32::new(0);
+static BEACON_THREATS: AtomicU32 = AtomicU32::new(0);
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -110,6 +122,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(drain().expect("spawn drain"));
     spawner.spawn(stats().expect("spawn stats"));
     spawner.spawn(role::control(images).expect("spawn control"));
+    spawner.spawn(threats().expect("spawn threats"));
     if chip::OPEN_LINKS {
         spawner.spawn(open_links().expect("spawn open_links"));
     }
@@ -119,47 +132,76 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 /// Walk the current channel plan forever; start over at once on a new plan
-/// (`role::CHANGED`). Runs in `main`, which owns the controller.
+/// (`role::CHANGED`). Every `SCOUT_EVERY_MS`, between two hops, visit one
+/// channel the plan skips for `SCOUT_MS`. Runs in `main`, which owns the
+/// controller.
 async fn hop_forever(wifi: &mut WifiController<'_>) -> ! {
-    // One error line per channel, then only the counter, so a channel the
-    // driver rejects (e.g. 149 under the wrong country) is visible without
-    // flooding the stream.
-    let mut reported = [false; CHANNELS];
-    let mut band: Option<bool> = None; // Some(true) = 5 GHz
+    use coverage::plans::{SCOUT_EVERY_MS, SCOUT_MS, scout_channel};
+    let mut tuner = Tuner { reported: [false; CHANNELS], band: None };
+    let mut last_scout = Instant::now();
+    let mut scout_n: usize = 0;
     loop {
         let plan = role::current().plan;
         'plan: loop {
             for hop in &plan {
-                let ch = hop.channel();
-                #[cfg(feature = "espnow")]
-                uplink::wait_idle().await;
-                let five = ch > 14;
-                if band != Some(five) {
-                    match chip::set_band(wifi, ch) {
-                        Ok(()) => band = Some(five),
-                        Err(e) => {
-                            BAND_ERRORS.fetch_add(1, Relaxed);
-                            esp_println::println!(r#"{{"t":"err","what":"set_band","ch":{ch},"e":"{e:?}"}}"#);
-                        }
-                    }
-                }
-                match wifi.set_channel(ch, SecondaryChannel::None) {
-                    Ok(()) => {
-                        rx::TUNED_CHANNEL.store(ch, Relaxed);
-                        if let Some(v) = VISITS.get(usize::from(ch)) {
-                            v.fetch_add(1, Relaxed);
-                        }
-                    }
-                    Err(e) => {
-                        CHANNEL_ERRORS.fetch_add(1, Relaxed);
-                        if let Some(seen @ false) = reported.get_mut(usize::from(ch)) {
-                            *seen = true;
-                            esp_println::println!(r#"{{"t":"err","what":"set_channel","ch":{ch},"e":"{e:?}"}}"#);
-                        }
-                    }
-                }
+                tuner.tune(wifi, hop.channel()).await;
                 if with_timeout(Duration::from_millis(hop.dwell_ms()), role::CHANGED.wait()).await.is_ok() {
                     break 'plan;
+                }
+                if last_scout.elapsed() < Duration::from_millis(u64::from(SCOUT_EVERY_MS)) {
+                    continue;
+                }
+                last_scout = Instant::now();
+                let Some(ch) = scout_channel(plan.iter().map(|h| h.channel()), scout_n) else { continue };
+                scout_n = scout_n.wrapping_add(1);
+                // Under ESP-NOW this can stretch one absence from channel 6
+                // by SCOUT_MS; the uplink only sends while tuned to 6 anyway.
+                tuner.tune(wifi, ch).await;
+                SCOUT_VISITS.fetch_add(1, Relaxed);
+                SCOUT_LAST.store(ch, Relaxed);
+                if with_timeout(Duration::from_millis(u64::from(SCOUT_MS)), role::CHANGED.wait()).await.is_ok() {
+                    break 'plan;
+                }
+            }
+        }
+    }
+}
+
+/// Channel changes, with the band switched as needed (C5).
+struct Tuner {
+    /// One error line per channel, then only the counter, so a channel the
+    /// driver rejects (e.g. 149 under the wrong country) is visible without
+    /// flooding the stream.
+    reported: [bool; CHANNELS],
+    band: Option<bool>, // Some(true) = 5 GHz
+}
+
+impl Tuner {
+    async fn tune(&mut self, wifi: &mut WifiController<'_>, ch: u8) {
+        #[cfg(feature = "espnow")]
+        uplink::wait_idle().await;
+        let five = ch > 14;
+        if self.band != Some(five) {
+            match chip::set_band(wifi, ch) {
+                Ok(()) => self.band = Some(five),
+                Err(e) => {
+                    BAND_ERRORS.fetch_add(1, Relaxed);
+                    esp_println::println!(r#"{{"t":"err","what":"set_band","ch":{ch},"e":"{e:?}"}}"#);
+                }
+            }
+        }
+        match wifi.set_channel(ch, SecondaryChannel::None) {
+            Ok(()) => {
+                rx::TUNED_CHANNEL.store(ch, Relaxed);
+                if let Some(v) = VISITS.get(usize::from(ch)) {
+                    v.fetch_add(1, Relaxed);
+                }
+            }
+            Err(e) => {
+                CHANNEL_ERRORS.fetch_add(1, Relaxed);
+                if let Some(seen @ false) = self.reported.get_mut(usize::from(ch)) {
+                    *seen = true;
+                    esp_println::println!(r#"{{"t":"err","what":"set_channel","ch":{ch},"e":"{e:?}"}}"#);
                 }
             }
         }
@@ -211,6 +253,8 @@ async fn drain() {
     // Declared outside the loop so it lives in the task's static state.
     let mut json = [0u8; report::JSON_BYTES];
     let mut detect = detect::Detect::new();
+    // Beacon-side attack detection (~4.3 KB, in the task's static state).
+    let mut watch = wifiwatch::beacons::Beacons::new();
     loop {
         let f = rx::next().await;
         if f.truncated() {
@@ -226,6 +270,9 @@ async fn drain() {
             continue;
         }
         detect.frame(&f, frame);
+        watch.frame(frame, f.rssi, f.channel, f.up_us, &mut |s| report::threat(&s));
+        BEACON_CSA.store(watch.totals.csa, Relaxed);
+        BEACON_THREATS.store(watch.totals.threats, Relaxed);
         if !maybe_rid(frame) {
             continue;
         }
@@ -288,6 +335,29 @@ async fn open_links() {
     }
 }
 
+/// Judge the flood counters the receive callback fills (`rx::FLOODS`) four
+/// times a second; each flood is reported at most once per one-second window.
+#[embassy_executor::task]
+async fn threats() {
+    let mut ticker = Ticker::every(Duration::from_millis(250));
+    // Copied out under the lock, reported after releasing it.
+    let mut due: heapless::Vec<link::ThreatSighting, { wifiwatch::floods::TABLE + 1 }> = heapless::Vec::new();
+    loop {
+        ticker.next().await;
+        let now = Instant::now().as_micros();
+        due.clear();
+        critical_section::with(|cs| {
+            rx::FLOODS.borrow_ref_mut(cs).poll(now, &mut |s| {
+                // Cannot overflow: one per table entry plus the probe counter.
+                let _ = due.push(s);
+            })
+        });
+        for s in &due {
+            report::threat(s);
+        }
+    }
+}
+
 /// Stats every second on both outputs; the hub also gets Hello + Status every
 /// 5 s so a hub that restarts learns who is attached and what it can do.
 #[embassy_executor::task]
@@ -309,6 +379,7 @@ async fn stats() {
                 let _ = per_ch.push((ch, PER_CHANNEL[i].load(Relaxed), VISITS[i].load(Relaxed)));
             }
         }
+        let floods = critical_section::with(|cs| rx::FLOODS.borrow_ref(cs).totals);
         let line = report::StatsLine {
             t: "stats",
             up_us: Instant::now().as_micros(),
@@ -333,6 +404,12 @@ async fn stats() {
             band_err: BAND_ERRORS.load(Relaxed),
             dji: detect::DJI.load(Relaxed),
             wdrone: detect::WIFI_DRONES.load(Relaxed),
+            kill: floods.deauth.wrapping_add(floods.disassoc),
+            auth: floods.auth,
+            probe: floods.probe,
+            csa: BEACON_CSA.load(Relaxed),
+            threat: floods.threats.wrapping_add(BEACON_THREATS.load(Relaxed)),
+            scout: (SCOUT_VISITS.load(Relaxed), SCOUT_LAST.load(Relaxed)),
         };
         last_seen = seen;
         report::stats_json(&line);

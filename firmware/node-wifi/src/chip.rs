@@ -188,6 +188,14 @@ pub fn set_band(_: &mut WifiController<'_>, _: u8) -> Result<(), esp_radio::wifi
 /// channel.
 pub const OPEN_LINKS: bool = true;
 
+/// Receive on every channel the radio can tune, not just the US set: 2.4 GHz
+/// 1-14 and every 5 GHz channel (UNII-1 to UNII-4), so a drone or attack tool
+/// set to a channel US gear avoids is still heard (see
+/// `coverage::plans::scout_channel`). Receive-only: the node never transmits
+/// on these channels. The `espnow` build still sends only on 2.4 GHz
+/// channel 6, as before.
+pub const RX_ALL_CHANNELS: bool = true;
+
 /// Hub UART speed. 921600 leaves ample headroom: a full 9-message Detection is
 /// ~250 bytes, under 3 ms on the wire.
 #[cfg_attr(feature = "espnow", allow(dead_code, reason = "no UART with espnow"))]
@@ -201,11 +209,34 @@ pub fn configure_radio(ctl: &mut WifiController<'_>) -> Result<(), &'static str>
     // rejects channel 149. `esp_wifi_set_country_code` fills in the per-country
     // channel rules, 5 GHz included. Receive-only, so this only decides which
     // channels the driver lets us tune to.
+    let mut soft = Ok(());
     let code = *b"US\0";
     // SAFETY: NUL-terminated string that outlives the call; Wi-Fi is initialised.
     let err = unsafe { sys::esp_wifi_set_country_code(code.as_ptr().cast(), false) };
     if err != 0 {
         return Err("esp_wifi_set_country_code");
+    }
+    if RX_ALL_CHANNELS {
+        // Manual policy: the driver uses these ranges as given (it does not
+        // validate them, and nothing here sends). 2.4 GHz channels 1-14; on
+        // the C5 every 5 GHz channel bit (WIFI_CHANNEL_36 = bit 1 up to
+        // WIFI_CHANNEL_177 = bit 28).
+        let country = sys::wifi_country_t {
+            cc: [b'U' as _, b'S' as _, 0],
+            schan: 1,
+            nchan: 14,
+            max_tx_power: 20,
+            policy: sys::wifi_country_policy_t_WIFI_COUNTRY_POLICY_MANUAL,
+            #[cfg(feature = "esp32c5")]
+            wifi_5g_channel_mask: sys::wifi_5g_channel_bit_t_WIFI_CHANNEL_177 * 2
+                - sys::wifi_5g_channel_bit_t_WIFI_CHANNEL_36,
+        };
+        // SAFETY: plain struct passed by pointer; Wi-Fi is initialised.
+        if unsafe { sys::esp_wifi_set_country(&country) } != 0 {
+            // Not fatal: the "US" channel set above still applies. Report it
+            // after the filter is set.
+            soft = Err("esp_wifi_set_country");
+        }
     }
 
     // The C5's band is set per hop by the hopper (`set_band`), since the
@@ -229,5 +260,5 @@ pub fn configure_radio(ctl: &mut WifiController<'_>) -> Result<(), &'static str>
     if unsafe { sys::esp_wifi_set_promiscuous_filter(&filter) } != 0 {
         return Err("esp_wifi_set_promiscuous_filter");
     }
-    Ok(())
+    soft
 }

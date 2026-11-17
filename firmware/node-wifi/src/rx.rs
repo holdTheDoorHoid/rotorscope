@@ -12,6 +12,13 @@
 //! 32 slots; the `open_links` task reads the table a few times a second. Slots are fixed buffers in a static pool; ownership moves by index
 //! through two channels (`FREE` -> callback -> `FULL` -> task -> `FREE`), so a
 //! frame is copied exactly once and nothing large lands on the driver's stack.
+//!
+//! Deauthentication, disassociation, authentication, (re)association and
+//! probe requests never take a slot either: `wifiwatch::floods` counts them
+//! from their headers right here ([`FLOODS`]) and the `threats` task reports
+//! floods. Only beacons, probe responses and action frames (what Remote ID
+//! and the other detectors read) are queued, so a deauth flood of thousands
+//! of frames a second cannot crowd Remote ID out.
 
 use core::cell::{RefCell, UnsafeCell};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
@@ -79,6 +86,10 @@ pub const OPEN_STREAMS: usize = 16;
 /// Per-stream packet counts, written by the callback, read by `open_links`.
 pub static SIGHTINGS: critical_section::Mutex<RefCell<openlink::Sightings<OPEN_STREAMS>>> =
     critical_section::Mutex::new(RefCell::new(openlink::Sightings::new()));
+/// Header-only management frames (deauth, disassoc, auth, association and
+/// probe requests), counted by the callback, judged by the `threats` task.
+pub static FLOODS: critical_section::Mutex<RefCell<wifiwatch::floods::Floods>> =
+    critical_section::Mutex::new(RefCell::new(wifiwatch::floods::Floods::new()));
 /// Management frames lost because every slot was in use.
 pub static DROPPED: AtomicU32 = AtomicU32::new(0);
 /// Callbacks for anything else: control (or other) frames past the filter,
@@ -114,6 +125,22 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         return;
     }
     MGMT_SEEN.fetch_add(1, Relaxed);
+    let channel = match pkt.rx_cntl.channel {
+        0 => TUNED_CHANNEL.load(Relaxed),
+        c => c.min(255) as u8,
+    };
+
+    // Header-only subtypes: count them here, never queue them.
+    if wifiwatch::mac::header_only(data[0] >> 4) {
+        let mpdu = &data[..data.len().saturating_sub(crate::chip::FCS_LEN)];
+        let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
+        let now = embassy_time::Instant::now().as_micros();
+        critical_section::with(|cs| FLOODS.borrow_ref_mut(cs).frame(mpdu, rssi, channel, now));
+        if let Some(c) = crate::PER_CHANNEL.get(usize::from(channel)) {
+            c.fetch_add(1, Relaxed);
+        }
+        return;
+    }
 
     let Ok(idx) = FREE.try_receive() else {
         DROPPED.fetch_add(1, Relaxed);
@@ -129,10 +156,7 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
     slot.copied = n as u16;
     slot.raw_len = data.len().min(u16::MAX as usize) as u16;
     slot.rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
-    slot.channel = match pkt.rx_cntl.channel {
-        0 => TUNED_CHANNEL.load(Relaxed),
-        c => c.min(255) as u8,
-    };
+    slot.channel = channel;
     slot.up_us = embassy_time::Instant::now().as_micros();
     // Cannot fail: FULL has room for every index.
     let _ = FULL.try_send(idx);

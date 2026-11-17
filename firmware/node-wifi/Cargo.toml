@@ -66,6 +66,8 @@ node-common = { path = "../node-common" }
 nodeimage = { path = "../../crates/nodeimage" }
 # Drone maker table (MAC prefixes, network names) for Frame::WifiDrone.
 wifidrone = { path = "../../crates/wifidrone" }
+# Attack detection (deauth / beacon floods, Karma, evil twins...) for Frame::Threat.
+wifiwatch = { path = "../../crates/wifiwatch" }
 
 esp-hal                = { version = "~1.2.2", features = ["unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
