@@ -29,3 +29,7 @@ evidence-data/
 O4KEY.TXT
 *.o4key
 *o4key*.txt
+
+# ESP-NOW link key (per kit, made by `cargo run -p link-key -- new`): never commit.
+tools/link.key
+*.linkkey

@@ -1,0 +1,9 @@
+[package]
+name = "link-key"
+description = "Make or identify the kit's ESP-NOW link key (tools/link.key; never committed)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+airlink = { path = "../../crates/airlink" }
