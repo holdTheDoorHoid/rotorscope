@@ -185,9 +185,9 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         o.no_session,
         o.rejected,
     );
-    let _ = writeln!(
+    let _ = write!(
         w.0,
-        "}},\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{},\"gw\":\"{}\"}},\"console_drops\":{}}}",
+        "}},\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{},\"gw\":\"{}\"}},\"console_drops\":{},",
         sd.state_name(),
         sd.file_name(),
         sd.rows,
@@ -201,5 +201,14 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         s.gw_hello,
         console::DROPS.load(core::sync::atomic::Ordering::Relaxed),
     );
+    // Wired bus (Phase 5a): a summary here, every node's counters on the
+    // `{"t":"bus"}` line after this one (16 nodes do not fit this buffer).
+    crate::bus::summary_json(w.0);
+    let _ = writeln!(w.0, "}}");
     console::json(&b.buf[..b.len]);
+    let mut n = LineBuf::new();
+    crate::bus::nodes_json(&mut n);
+    if n.len > 0 {
+        console::json(&n.buf[..n.len]);
+    }
 }

@@ -20,6 +20,12 @@ bench = false
 [workspace]
 
 [features]
+default = ["wirebus"]
+# PLAN.md Phase 5a: poll many nodes on UART3 as a wired bus (crates/wirebus,
+# docs/WIREBUS.md, src/bus.rs). An ESP-NOW gateway (or one point-to-point
+# node) on UART3 is still recognised at run time and read as before. Build
+# with --no-default-features to never poll.
+wirebus = []
 # Bring-up only: UART2 transmits sample link frames onto the gateway RX pin
 # (GPIO28) inside the chip, so the UART3 reader is tested without any wire.
 # Leave the UART3 header unconnected while this runs.
@@ -79,6 +85,8 @@ modesloop = ["modes"]
 
 [dependencies]
 link = { path = "../../crates/link" }
+# The wired bus master (Phase 5a).
+wirebus = { path = "../../crates/wirebus" }
 coverage = { path = "../../crates/coverage" }
 rid = { path = "../../crates/rid" }
 heapless = "0.8"
