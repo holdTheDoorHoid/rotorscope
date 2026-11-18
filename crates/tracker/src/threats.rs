@@ -899,9 +899,11 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.threats.all().iter().find(|t| t.id == id)
     }
 
-    /// Threats still being reported, silenced ones left out.
+    /// Threats still being reported, silenced ones and MAVLink suspicions
+    /// (one uncorroborated frame, [`Threat::suspect`]: listed, never
+    /// alerted on) left out. This is the screen's ATTACK count.
     pub fn active_threats(&self, now_ms: u64) -> impl Iterator<Item = &Threat> {
-        self.threats.all().iter().filter(move |t| t.active(now_ms) && !t.muted)
+        self.threats.all().iter().filter(move |t| t.active(now_ms) && !t.muted && !t.suspect())
     }
 
     /// Add a rule. A rule for good (a site-file line) must name one
@@ -1477,10 +1479,12 @@ mod tests {
         assert!(tr.get_threat(a).unwrap().suspect());
         assert_eq!(tr.get_threat(a).unwrap().label(), "Possible hostile drone telemetry (one frame)");
         assert_eq!(tr.take_new_threat(1_000), None, "no alert for a suspicion");
+        assert_eq!(tr.active_threats(1_000).count(), 0, "nor the ATTACK count");
         s.detail = 13;
         assert_eq!(tr.ingest_threat(4, &s, 1_500), Some(a), "escalation updates the same threat");
         assert!(!tr.get_threat(a).unwrap().suspect());
         assert_eq!(tr.take_new_threat(1_500), Some(a));
+        assert_eq!(tr.active_threats(1_500).count(), 1);
         // A later suspicion report does not demote it.
         s.detail = 13 | link::MAVLINK_SUSPECT;
         assert_eq!(tr.ingest_threat(4, &s, 2_000), Some(a));
