@@ -37,8 +37,9 @@
 //! previous evidence file's last record is read and named in the new file's
 //! first event, so the files link up. Console `r` replays the current file.
 //! The folder is not trusted (`evidence::files`): only real files with an
-//! in-range number count, and a taken top number (`EV999999.EVL`) makes the
-//! next file the lowest free number instead of failing every mount. If the
+//! in-range number count, a name taken by a folder is skipped, and a taken
+//! top number (`EV999999.EVL`) makes the next file the lowest free number
+//! instead of failing every mount. If the
 //! evidence folder or file cannot be opened while the CSV log records, the
 //! mount is retried every [`EV_RETRY_MS`], and the screen shows evidence
 //! as not written (`Logger::evidence_stop`) whenever it is not.
@@ -810,9 +811,9 @@ impl Logger {
     /// existing evidence file for writing.
     ///
     /// The card is not trusted (`evidence::files`): only regular files
-    /// named `EVnnnnnn.EVL` with a number in range count, and when the top
-    /// number is taken the lowest free one is used instead of failing every
-    /// mount. A previous file that cannot be read is noted, not fatal. On
+    /// named `EVnnnnnn.EVL` with a number in range count, a name taken by a
+    /// folder is never chosen, and when the top number is taken the lowest
+    /// free one is used instead of failing every mount. A previous file that cannot be read is noted, not fatal. On
     /// an error the folder handle is closed again, so the retry (every
     /// [`EV_RETRY_MS`] while the card records) cannot run out of handles.
     fn mount_evidence(&mut self, ev: &mut Evidence, now: u64) -> Result<(), FsError> {
@@ -845,11 +846,10 @@ impl Logger {
     #[allow(clippy::type_complexity)]
     fn new_evidence_file(vm: &Vm, dir: RawDirectory) -> Result<(RawFile, heapless::String<12>, u32, Option<(u32, u32, [u8; 32], u8)>), FsError> {
         use evidence::files::{self, Next};
-        let next = files::choose_next(|f: &mut dyn FnMut(u32)| {
+        let next = files::choose_next(|f: &mut dyn FnMut(u32, bool)| {
             vm.iterate_dir(dir, |e| {
-                let regular = !e.attributes.is_directory() && !e.attributes.is_volume();
-                if let Some(n) = files::file_no(e.name.base_name(), e.name.extension(), regular) {
-                    f(n);
+                if let Some(n) = files::number(e.name.base_name(), e.name.extension()) {
+                    f(n, !e.attributes.is_directory() && !e.attributes.is_volume());
                 }
                 ControlFlow::Continue(())
             })
@@ -882,7 +882,7 @@ impl Logger {
                 }
             }
             Next::Lowest { no } => println!(
-                "hub-p4: evidence: {DIR}/{EV_DIR}/EV999999.EVL exists (the top number); using the lowest free number {no}, with no previous file to link"
+                "hub-p4: evidence: no free number above the highest file in {DIR}/{EV_DIR} (EV999999.EVL taken); using the lowest free number {no}, with no previous file to link"
             ),
         }
         let no = next.no();
