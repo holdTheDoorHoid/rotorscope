@@ -734,10 +734,13 @@ software; neither has run on a chip yet.
   from the next publication on; four forged key IDs kept the node on attacker-chosen channels, a
   fifth evicted the real drone's session, and one packet with the real (cleartext) key ID wiped its
   hypotheses. Now (`crates/droneid/src/follow.rs`): a session is only visited after 3 packets that
-  agree in channel and time; new key IDs only ever replace a one-packet tentative session; a packet
-  that contradicts a followed session is ignored and counted; visits are paid from a credit that
-  earns half of the plan's time (at most 1 s). `stats` `"follow"` is now `[followed, visits, hits,
-  misses, tentative, contradictions, refused, declined]`; `follow` lines say `confirmed`,
+  agree in channel and time; key IDs not yet followed are candidates in a table of 128 that a flood
+  cannot cycle within their 30 s lifetime (the decode budget passes at most 87 new IDs in that
+  time); a session 2 s without a packet goes before the others; visits arrive 50 ms early, and
+  where hypotheses disagree an inconclusive visit sends the next one to the second-best channel; a
+  packet that contradicts a followed session is ignored and counted; visits are paid from a credit
+  that earns half of the plan's time (at most 1 s). `stats` `"follow"` is now `[followed, visits,
+  hits, misses, tentative, contradictions, evicted, declined]`; `follow` lines say `confirmed`,
   `restart` and (at most once a second) `contradicted`.
 
 **What an attacker can still do**: flood DroneID-shaped bursts so the budget is spent on them
@@ -746,7 +749,12 @@ first-come (real bursts are then decoded only in proportion; the node keeps capt
 CRC-valid bursts (decoded and reported as sightings, never flagged as pressure); create followed
 sessions by following the published schedule and spend the follower's half on them; keep a real
 drone's session unconfirmed by restarting it with forged packets carrying its key ID while it is
-still tentative.
+still tentative. With all four followed slots taken by forged sessions before the drone is
+confirmed, the drone is not followed (still heard by the plan). Followed sessions cost the plan
+hearing time in proportion to their share, and a drone in step with a forged session is heard by
+the plan under a third as often. On the air each forged packet also costs a ~165 ms decode, which
+slows confirmation (host model: 78 % within 60 s at the budget's maximum). A DroneID flood is at
+most ~2.8 new IDs a second per node, far below the hub's fast ID-flood line (20 a second).
 
 ### The scenarios (bench `bringup` build, nothing transmits)
 
@@ -766,15 +774,17 @@ export ROTORSCOPE_BENCH=1
    Expect what BRINGUP-RESULTS.md "HIL" measured: rms 200 and 150, 13/13 detected and CRC-valid
    per pass; with `trig 3`, rms 100 13/13 and rms 80 about 9/13; decode times 144-158 ms. No burst
    may report `"path":"gated"` or `{"err":"OffFrequency"}` when it decoded before. Every `hil`
-   line: `"intact":true`; record `stack_free` (it was ~6.9 KiB; expect at least 6.5 KiB).
+   line: `"intact":true`; record `stack_free` from the `link` line afterwards (2026-11-18, c5b:
+   5148 B after the recordings; 4.7 KiB after `hil train`; ~5.5 KiB on the live path). Expect at
+   least 4.5 KiB (node-sdr README "Stack").
 2. **Pulse train of white noise**, a 600 µs pulse covering the whole capture (no recording needed):
    ```sh
    tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 200,150 --pulse noise --rms 200' 300 c5b
    tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 400,20 --pulse noise --rms 200' 300 c5b
    ```
    Each prints two `hil_train` lines, `"budget":true` and `false`. Record `decode_ms` [min, max]:
-   this is what one noise pulse costs the decoder now (the coarse-frequency gate should refuse most
-   of them after 8 FFTs; nobody has measured it). Expect `full` 0 and `valid` 0. If `busy_pct`
+   this is what one noise pulse costs the decoder now (measured 2026-11-18: 100-101 ms per noise
+   pulse; the coarse-frequency gate does not make noise cheap). Expect `full` 0 and `valid` 0. If `busy_pct`
    without the budget is under ~40 %, the gates alone keep the node free and the budgeted line
    matches it (`skipped` 0, `flagged` 0). Where the unbudgeted line is above 40 % (at 20 ms gaps it
    should be), the budgeted one must stay at or below ~42 % with `skipped` > 0 and `flagged` close
@@ -784,29 +794,53 @@ export ROTORSCOPE_BENCH=1
    ```sh
    tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 200,150 --pulse burst --rms 200' 300 c5b
    ```
-   Without the budget: `busy_pct` 95-100, about half the pulses `missed` (they arrive while the
-   previous one decodes), `skipped` 0. With it: `busy_pct` at most ~42, `skipped` > 0, `decoded`
-   about 75-80 of 200, `decode_ms` as in step 1. `flagged` 0 both ways: valid bursts are not
+   Without the budget: `busy_pct` about 57 (a window costs ~173 ms with decimation and DC removal,
+   longer than the 150 ms gap, so every other pulse arrives during a decode: `missed` ~100,
+   `decoded` ~100), `skipped` 0. With it: `busy_pct` at most ~42 (measured 41-45), `skipped` > 0,
+   `decoded` about 72-80 of 200, `decode_ms` ~173 (it includes decimation and DC removal, ~20 ms
+   more than step 1's decode-only time). `flagged` 0 both ways: valid bursts are not
    jamming (the hub would see them as sightings; HIL sightings are never sent).
-4. **Forged sessions on the live follower**, 3 minutes:
+4. **Forged sessions on the live follower**, three cases, 3 minutes each, each at least twice:
    ```sh
-   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --forge 180' 400 c5b
+   for c in start flood late; do
+     tools/dev-board.sh --run "cargo run --release -p droneid-hil -- --port \"\$BOARD_PORT\" --forge 180,$c" 400 c5b
+   done
    ```
-   The node hops its built-in DroneID plan; a virtual drone (key ID `5ea10001`), four forged
-   schedule-perfect sessions, a new forged key ID every 0.7 s and (once the drone is followed)
-   a packet with its key ID every 1.3 s at a wrong time are "heard" whenever the node is tuned to
-   their channel. The `forge` line at the end: `real` = [followed, hits, contradictions];
-   `heard` per stream; `share_permille` = time the follower held the receiver.
-   Expect `real[0]` true (followed within about a minute, and still followed at the end),
-   `real[2]` about equal to both `contra` numbers and > 0 (every wrong-time packet was ignored,
-   none restarted it), `active` at most 4, `tentative` at most 4, `share_permille` at most ~550,
-   `declined` > 0 once two or more forged sessions are followed. `refused` counts new key IDs
-   turned away while every tentative slot held a session with a consistent match; it may grow.
-   If `real[0]` is false at the end, the drone's followed session ran 6 s without a granted
-   visit or a scanning hit and expired: record `heard[0]` and `declined` (the share is first
-   come, not per session).
-   In the `stats` lines during the run the `follow` array should move the same way, and
-   `dec`'s `skipped` should stay 0 (no real signal).
+   A virtual drone (key ID `5ea10001`) and, depending on the case, four forged schedule-perfect
+   sessions, a new forged key ID every 0.7 s, and (once the drone is followed) a packet with its
+   key ID every 1.3 s at a wrong time. Each is "heard" whenever the node is tuned to its channel;
+   nothing is decoded and nothing is transmitted. The follower is cleared at the start. The
+   `forge` line fields:
+   - `real` = [followed, hits, contradictions]
+   - `followed_s`: when the drone was first followed (-1 = never)
+   - `blocked`: three consistent packets but no free slot
+   - `heard`: per stream
+   - `unsettled` / `interrupted`: silent visits that could not count as misses
+   - `share_permille`: time the follower held the receiver
+   - `contra` = [wrong-time packets sent, contradictions counted]
+   - `evicted`: candidates pushed out of the table before they expired
+
+   The tool prints an `expect` line per run; the odds come from
+   `crates/rawcap/tests/follow_forge.rs` (docs/DRONEID-O4.md).
+   - `flood` (no forged sessions): `real[0]` true at the end, `followed_s` at most ~60 (model:
+     95 % within 60 s), `evicted` 0, `real[2]` = `contra[1]` > 0. The other wrong-time packets
+     fell within half a period of the drone's last packet or inside its window and were taken as
+     duplicates or as its own; none restarts it.
+   - `late` (all forgers once the drone is followed): `real[0]` true at the end (model 99.5 %),
+     `active` at most 4, `share_permille` at most ~550, `declined` > 0, `evicted` 0.
+   - `start` (everything from the start, the 2026-11-18 scenario): the drone is followed only if
+     the plan confirms it before the fourth forged session. With these fixed phases that happens
+     in about half the runs (model 45 %); otherwise `blocked` true and `forged_followed` 4. A run
+     where the drone is not followed is the documented limit, not a failure. Always `evicted` 0,
+     `active` at most 4, `share_permille` at most ~550.
+
+   In the `stats` lines, `follow` is [followed, visits, hits, misses, tentative (candidates, up
+   to 128), contradictions, evicted, declined], and `dec`'s `skipped` should stay 0.
+
+   Measured 2026-11-18 on c5b with the fixed follower: `flood` followed at 19 s and 43 s and kept
+   to the end (two runs, `evicted` 0); `late` kept to the end with three forged sessions followed
+   (`share_permille` 380); `start` blocked with four forged sessions followed (the limit above).
+   Recordings regression afterwards 13/13 at rms 200 and 150.
 5. Flash a normal build afterwards and check `"bench":[]`.
 
 ### Restarting the ring before the decode: deferred, to try on the bench
