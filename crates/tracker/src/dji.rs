@@ -34,8 +34,20 @@
 //! [`RID_PREFERRED_MS`]. [`crate::Track::location_src`] says which one is
 //! shown. DJI altitude is barometric, so it goes into `altitude_pressure`,
 //! never `altitude_geodetic`.
+//!
+//! # Trust
+//! Plaintext DroneID, decrypted O4 and Remote ID are separate claims about
+//! one serial, none authenticated ([`crate::claims`]). A DJI position is
+//! judged against the track's established path like any report: one that
+//! fits agrees (it may be shown when Remote ID is quiet); one that does not
+//! is a rival claim, never applied, and a dispute if both continue. The
+//! serial in a DJI record finds the track that has it; it never merges two
+//! tracks on its own, and a decrypted O4 session joins the serial's track
+//! only after [`crate::claims::MERGE_MIN_FRAMES`] records with compatible
+//! positions. "Decrypted" is not "authentic": a recording can be replayed
+//! and the position cipher is malleable (`djicrypt` refuses sequence and
+//! GPS-time regressions within a session; the rest is the dispute rule).
 
-use heapless::Vec;
 use libm::{atan2, hypot};
 use droneid::o4plain::Infp10;
 use link::{DroneIdRecord, DroneIdSighting};
@@ -45,6 +57,7 @@ use rid::message::{
     VerticalAccuracy,
 };
 
+use crate::claims::{self, ClaimSrc, Outcome, Verdict};
 use crate::{Stamped, Track, TrackId, Tracker, UasId};
 
 /// A Remote ID position younger than this is not replaced by a DroneID one.
@@ -356,26 +369,16 @@ impl Track {
 }
 
 impl<const N: usize, const A: usize> Tracker<N, A> {
-    /// The track for a DJI serial: one that has it (as a Remote ID or DJI
-    /// ID), else a new one if it is admitted ([`crate::probation`]). Every
-    /// other track with it is merged in.
+    /// The track for a DJI serial: the most established one that has it
+    /// (as a Remote ID or DJI ID), else a new one if it is admitted
+    /// ([`crate::probation`]). One record never merges tracks.
     fn dji_track_by_serial(&mut self, serial: FixedStr<20>, now: u64) -> Option<usize> {
         let id = UasId {
             id_type: IdType::SerialNumber,
             id: serial,
         };
-        let mut by_id: Vec<usize, N> = Vec::new();
-        for (i, t) in self.tracks.iter().enumerate() {
-            if t.has_id(&id) {
-                let _ = by_id.push(i);
-            }
-        }
-        let primary = by_id
-            .iter()
-            .copied()
-            .min_by_key(|&i| (self.tracks[i].first_seen_ms, self.tracks[i].id));
-        let i = match primary {
-            Some(p) => self.merge_into(p, by_id.iter().copied(), &[id]),
+        let i = match self.serial_track(&id, None) {
+            Some(p) => p,
             None => self.admit(crate::probation::hash(&[b"dji-sn", serial.as_bytes()]), now)?,
         };
         let t = &mut self.tracks[i];
@@ -384,6 +387,51 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             t.add_id(id);
         }
         Some(i)
+    }
+
+    /// The most established track holding `id`, other than `not`.
+    fn serial_track(&self, id: &UasId, not: Option<TrackId>) -> Option<usize> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| Some(t.id) != not && t.has_id(id))
+            .min_by_key(|(_, t)| (t.first_seen_ms, t.id))
+            .map(|(i, _)| i)
+    }
+
+    /// A DJI position for `tracks[i]` from `src`: applied if it fits the
+    /// track's path (and Remote ID is not fresher), else held as a rival
+    /// claim ([`crate::claims`]). `plain`: node and RSSI of a plaintext
+    /// OcuSync record, for the DroneID checks. Returns whether it was
+    /// applied.
+    #[allow(clippy::too_many_arguments)]
+    fn dji_fix(
+        &mut self,
+        i: usize,
+        f: &Fix,
+        src: crate::Source,
+        claim: ClaimSrc,
+        mac: [u8; 6],
+        plain: Option<(u8, i8)>,
+        now: u64,
+    ) -> bool {
+        let env = self.spoof_env(now);
+        let t = &mut self.tracks[i];
+        if let Some(p) = f.position {
+            if claims::judge(t, Some(p), None, now) == Verdict::Rival {
+                match t.rival_claim(p, None, claim, mac, now) {
+                    Outcome::Held => return false,
+                    Outcome::Follow => t.follow(p, now),
+                }
+            } else {
+                t.claims.original_report(now);
+                if let Some((node, rssi)) = plain {
+                    crate::spoof::droneid_position(t, p, node, rssi, &env, now);
+                }
+            }
+        }
+        t.apply_dji(f, src, now);
+        true
     }
 
     /// The most recently heard track that `f` picks, else a new one for
@@ -425,7 +473,6 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             DroneIdRecord::Detected => self.dji_track_where(now_ms, &[b"dji-undecoded"], |t| t.dji.undecoded)?,
         };
         self.heard(i, now_ms);
-        let env = self.spoof_env(now_ms);
         let t = &mut self.tracks[i];
         if t.uas_ids.is_empty() && t.dji.serial.is_none() && t.dji.key_id.is_none() {
             t.dji.undecoded = true;
@@ -439,6 +486,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             t.nodes |= 1 << node;
         }
         t.last_seen_ms = t.last_seen_ms.max(now_ms);
+        let id = t.id;
         if let DroneIdRecord::Flight {
             lat_raw,
             lon_raw,
@@ -463,15 +511,12 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 pilot: rad_e7_position(pilot_lat_raw, pilot_lon_raw),
                 home: rad_e7_position(home_lat_raw, home_lon_raw),
             };
-            if let Some(p) = fix.position {
-                crate::spoof::droneid_position(t, p, node, s.rssi, &env, now_ms);
-            }
-            t.apply_dji(&fix, crate::Source::DroneId, now_ms);
             if product_type != 0 {
                 t.dji.product_type = Some(product_type);
             }
+            self.dji_fix(i, &fix, crate::Source::DroneId, ClaimSrc::DroneId, [0; 6], Some((node, s.rssi)), now_ms);
         }
-        Some(t.id)
+        Some(id)
     }
 
     /// Feed one DJI legacy Wi-Fi DroneID element (as a Wi-Fi node sends it
@@ -542,15 +587,15 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             t.nodes |= 1 << node;
         }
         t.last_seen_ms = t.last_seen_ms.max(now_ms);
-        if let Some(fix) = fix {
-            t.apply_dji(&fix, crate::Source::DjiWifi, now_ms);
-        }
         if let Some(p) = product {
             t.dji.product_type = Some(p);
         }
+        // DJI's flight purpose fills an empty Self-ID; it never replaces
+        // one (Remote ID's, or an earlier one: see `claims`).
         if let Some(d) = purpose
             && !hide
             && !d.as_bytes().is_empty()
+            && t.self_id.is_none()
         {
             t.self_id = Some(Stamped {
                 value: SelfId {
@@ -560,17 +605,26 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 rx_ms: now_ms,
             });
         }
-        Some(t.id)
+        let id = t.id;
+        if let Some(fix) = fix {
+            self.dji_fix(i, &fix, crate::Source::DjiWifi, ClaimSrc::DjiWifi, mac, None, now_ms);
+        }
+        Some(id)
     }
 
     /// Apply one decrypted O4 record (the hub decrypts with the owner's
     /// key; see `crates/djicrypt`). Call it after [`Tracker::ingest_droneid`]
     /// fed the same record, which created or refreshed the session track.
     ///
-    /// The serial joins the session track to any track already known by
-    /// that serial (Remote ID, plaintext DroneID); positions land as a
-    /// plaintext DroneID record's do. The pilot's DJI account ID that
-    /// INFP-10 carries is personal data and is never taken in.
+    /// Decrypted is not authenticated (see [`crate::claims`]). The serial
+    /// is a claim: with no track holding it, the session track takes it;
+    /// when another track holds it, the record's position is judged against
+    /// that track's path (a rival claim if it does not fit) and the session
+    /// joins it only after [`crate::claims::MERGE_MIN_FRAMES`] records over
+    /// [`crate::claims::MERGE_SPAN_MS`] with compatible positions. Positions
+    /// land on the session's track, judged like any DJI fix. The pilot's DJI
+    /// account ID that INFP-10 carries is personal data and is never taken
+    /// in.
     ///
     /// `None` when the session has no track (it was not admitted, see
     /// [`crate::probation`]).
@@ -581,70 +635,83 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             O4Decrypted::Infp11(p) => p.serial_str(),
         }
         .and_then(|s| serial_id(s.as_bytes()));
+        let fix = match rec {
+            O4Decrypted::Cryp(a) => Some(Fix {
+                position: a.position_valid().then(|| rad_e7_position(a.lat_raw, a.lon_raw)).flatten(),
+                alt_m: None,
+                height_m: None,
+                motion: None,
+                pilot: None,
+                home: None,
+            })
+            .filter(|f| f.position.is_some()),
+            O4Decrypted::Infp10(r) => Some(Fix {
+                position: r.has(Infp10::STATE_POSITION_VALID).then(|| rad_e7_position(r.lat_raw, r.lon_raw)).flatten(),
+                // INFP-10 altitude is metres and height decimetres
+                // (not feet as in OcuSync 2).
+                alt_m: r.has(Infp10::STATE_ALTITUDE_VALID).then_some(f32::from(r.altitude_m)),
+                height_m: r.has(Infp10::STATE_HEIGHT_VALID).then_some(r.height_m() as f32),
+                motion: r.has(Infp10::STATE_HVEL_VALID).then(|| {
+                    let (s, tr, v) = motion(r.v_north, r.v_east, r.v_up);
+                    (s, tr, if r.has(Infp10::STATE_VVEL_VALID) { v } else { 0.0 })
+                }),
+                pilot: r
+                    .has(Infp10::STATE_APP_POSITION_VALID)
+                    .then(|| rad_e7_position(r.app_lat_raw, r.app_lon_raw))
+                    .flatten(),
+                home: r.home_set().then(|| rad_e7_position(r.home_lat_raw, r.home_lon_raw)).flatten(),
+            }),
+            O4Decrypted::Infp11(_) => None,
+        };
         let session = self.dji_track_where(now_ms, &[b"dji-o4", &key_id], |t| t.dji.key_id == Some(key_id))?;
         self.tracks[session].dji.key_id = Some(key_id);
-        let session_id = self.tracks[session].id;
-        let i = match serial {
-            Some(sn) => {
-                let j = self.dji_track_by_serial(sn, now_ms);
-                // dji_track_by_serial may have moved indices (or, refused,
-                // left the session track alone); find the session track
-                // again and fold it into the serial's.
-                let s = self.tracks.iter().position(|t| t.id == session_id)?;
-                match j {
-                    Some(j) if s != j => self.merge_into(j, core::iter::once(s), &[]),
-                    Some(j) => j,
-                    None => s,
+        let mut sid = self.tracks[session].id;
+        let hide = self.config.hide_droneid_ids;
+        if let Some(sn) = serial {
+            let uid = UasId { id_type: IdType::SerialNumber, id: sn };
+            match self.serial_track(&uid, Some(sid)) {
+                // Nobody else claims the serial: the session's own.
+                None => {
+                    let t = &mut self.tracks[session];
+                    t.dji.serial = Some(sn);
+                    if !hide && !t.uas_ids.iter().any(|u| u.id_type == IdType::SerialNumber) {
+                        t.add_id(uid);
+                    }
+                }
+                Some(o) => {
+                    let other = &self.tracks[o];
+                    let fits = fix.as_ref().and_then(|f| f.position).is_none_or(|p| {
+                        claims::judge(other, Some(p), None, now_ms) == Verdict::Apply
+                    });
+                    let oid = other.id;
+                    if fits {
+                        // Evidence the session is that drone's; the
+                        // survivor is the more established track.
+                        let kept = self.note_merge(oid, sid, now_ms);
+                        if self.tracks.iter().all(|t| t.id != sid) {
+                            sid = kept;
+                        }
+                    } else if let Some(p) = fix.as_ref().and_then(|f| f.position) {
+                        // A claim on that drone's ID from elsewhere.
+                        let _ = self.tracks[o].rival_claim(p, None, ClaimSrc::DroneIdO4, [0; 6], now_ms);
+                    }
                 }
             }
-            None => session,
-        };
-        let hide = self.config.hide_droneid_ids;
+        }
+        let i = self.tracks.iter().position(|t| t.id == sid)?;
         let t = &mut self.tracks[i];
         t.dji.key_id = Some(key_id);
         t.dji.o4_decrypted = true;
         t.dji.undecoded = false;
         t.last_seen_ms = t.last_seen_ms.max(now_ms);
         match rec {
-            O4Decrypted::Cryp(a) => {
-                let fix = Fix {
-                    position: a.position_valid().then(|| rad_e7_position(a.lat_raw, a.lon_raw)).flatten(),
-                    alt_m: None,
-                    height_m: None,
-                    motion: None,
-                    pilot: None,
-                    home: None,
-                };
-                if fix.position.is_some() {
-                    t.apply_dji(&fix, crate::Source::DroneId, now_ms);
-                }
-            }
-            O4Decrypted::Infp10(r) => {
-                let fix = Fix {
-                    position: r.has(Infp10::STATE_POSITION_VALID).then(|| rad_e7_position(r.lat_raw, r.lon_raw)).flatten(),
-                    // INFP-10 altitude is metres and height decimetres
-                    // (not feet as in OcuSync 2).
-                    alt_m: r.has(Infp10::STATE_ALTITUDE_VALID).then_some(f32::from(r.altitude_m)),
-                    height_m: r.has(Infp10::STATE_HEIGHT_VALID).then_some(r.height_m() as f32),
-                    motion: r.has(Infp10::STATE_HVEL_VALID).then(|| {
-                        let (s, tr, v) = motion(r.v_north, r.v_east, r.v_up);
-                        (s, tr, if r.has(Infp10::STATE_VVEL_VALID) { v } else { 0.0 })
-                    }),
-                    pilot: r
-                        .has(Infp10::STATE_APP_POSITION_VALID)
-                        .then(|| rad_e7_position(r.app_lat_raw, r.app_lon_raw))
-                        .flatten(),
-                    home: r.home_set().then(|| rad_e7_position(r.home_lat_raw, r.home_lon_raw)).flatten(),
-                };
-                t.apply_dji(&fix, crate::Source::DroneId, now_ms);
-                if r.product_type != 0 {
-                    t.dji.product_type = Some(r.product_type);
-                }
-            }
+            O4Decrypted::Infp10(r) if r.product_type != 0 => t.dji.product_type = Some(r.product_type),
             O4Decrypted::Infp11(p) => {
+                // Fills an empty Self-ID, never replaces one.
                 if let Some(text) = p.purpose_str()
                     && !hide
                     && !text.is_empty()
+                    && t.self_id.is_none()
                 {
                     let b = text.as_bytes();
                     if let Ok(d) = FixedStr::<23>::new(&b[..b.len().min(23)]) {
@@ -652,8 +719,12 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                     }
                 }
             }
+            _ => {}
         }
-        Some(t.id)
+        if let Some(f) = fix {
+            self.dji_fix(i, &f, crate::Source::DroneId, ClaimSrc::DroneIdO4, [0; 6], None, now_ms);
+        }
+        Some(sid)
     }
 }
 

@@ -24,6 +24,9 @@ fn serial16(s: &str) -> [u8; 16] {
     out
 }
 
+/// 20 m north of where [`flight`] puts the drone.
+const NEAR_FLIGHT: (f64, f64) = (CITY_HALL.0 + 320.0 / 111_320.0, CITY_HALL.1);
+
 /// A plaintext OcuSync record: drone 300 m north of City Hall, pilot at
 /// City Hall, home 10 m east of it. Altitude 3281 ft = 1000 m.
 fn flight(sn: &str) -> DroneIdSighting {
@@ -187,7 +190,9 @@ fn droneid_merges_with_remote_id_by_serial() {
             Transport::WifiBeacon,
             WIFI_MAC,
             -60,
-            &[serial(SN), location(39.0, -75.0, 140.0)],
+            // 20 m from where DroneID puts it (a real DJI drone sends the
+            // same position on both).
+            &[serial(SN), location(NEAR_FLIGHT.0, NEAR_FLIGHT.1, 140.0)],
         );
         if droneid_first {
             tr.ingest_droneid(2, &flight(SN), 1_000);
@@ -205,10 +210,7 @@ fn droneid_merges_with_remote_id_by_serial() {
         assert_eq!(names, ["WifiBeacon", "DroneId"]);
         // Remote ID's position, whichever came last.
         assert_eq!(t.location_src, Source::RemoteId);
-        assert_eq!(
-            t.location.as_ref().unwrap().value.position.unwrap().lat,
-            39.0
-        );
+        assert!((t.location.as_ref().unwrap().value.position.unwrap().lat - NEAR_FLIGHT.0).abs() < 1e-6);
         // The pilot position is DroneID's (that RID frame had no System).
         assert_eq!(t.system_src, Source::DroneId);
         // Remote ID goes quiet: DroneID takes the position over.
@@ -230,7 +232,7 @@ fn mac_keyed_rid_track_joins_the_droneid_track() {
             Transport::BleLegacy,
             ble,
             -70,
-            &[location(39.0, -75.0, 100.0)],
+            &[location(NEAR_FLIGHT.0, NEAR_FLIGHT.1, 100.0)],
         ),
         100,
     );
@@ -999,8 +1001,13 @@ fn decrypted_o4_joins_its_serial_and_gets_positions() {
     assert_eq!(tr.len(), 2, "session track apart until decrypted");
     let p = infp10_plain(SN);
     tr.ingest_droneid(2, &o4(link::O4Kind::Infp10, k), 1_640);
-    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_640).unwrap();
-    assert_eq!(tr.len(), 1, "session folded into the serial's track");
+    tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_640).unwrap();
+    assert_eq!(tr.len(), 2, "not on one record (`claims`)");
+    tr.ingest_droneid(2, &o4(link::O4Kind::Infp10, k), 2_640);
+    tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 2_640).unwrap();
+    tr.ingest_droneid(2, &o4(link::O4Kind::Infp10, k), 3_640);
+    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 3_640).unwrap();
+    assert_eq!(tr.len(), 1, "session folded into the serial's track after three records over 2 s");
     let t = tr.get(id).unwrap();
     assert!(t.dji.o4_decrypted);
     assert_eq!(t.dji.key_id, Some(k));

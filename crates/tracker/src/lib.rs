@@ -19,6 +19,13 @@
 //! adverts (another MAC, which may rotate) and its NAN frames end up as one
 //! track: the UAS ID is the only thing they share.
 //!
+//! None of this is authenticated, so a frame is evidence about a
+//! transmitter, not a command to the track ([`claims`]): a position report
+//! off a track's established path is held as a rival claim (a dispute when
+//! both continue), a changed text field or ID is adopted only when it
+//! persists, a frame with two IDs of one type is applied to nothing, and
+//! two tracks with their own IDs are merged only after repeated agreement.
+//!
 //! # Open FPV links
 //! Separately from drones, the tracker keeps a small table of open digital
 //! FPV / telemetry links (wfb-ng, OpenHD, RubyFPV, DroneBridge) that the
@@ -63,6 +70,7 @@
 
 pub mod aircraft;
 pub mod area_gnss;
+pub mod claims;
 pub mod continuity;
 pub mod ctrllinks;
 pub mod cot;
@@ -82,10 +90,11 @@ pub mod conflict;
 use heapless::Vec;
 use rid::Transport;
 use rid::message::{
-    BasicId, FixedStr, IdType, Location, Message, OperatorId, SelfId, System, UaType,
+    BasicId, FixedStr, IdType, LatLon, Location, Message, OperatorId, SelfId, System, UaType,
 };
 
 pub use aircraft::{AircraftGeometry, AircraftKey, AircraftTrack};
+pub use claims::{ClaimSrc, Claims, Dispute, DisputeEvent, Rival};
 pub use continuity::Continuity;
 pub use dji::{DjiInfo, DjiLink, O4Decrypted, O4Seen, O4State, Source};
 pub use geo::RangeBearing;
@@ -405,6 +414,8 @@ pub struct Track {
     pub spoof: SpoofState,
     /// Link to the track this one probably continues (see [`continuity`]).
     pub continuity: Continuity,
+    /// Rival claims on this track's ID and disputes (see [`claims`]).
+    pub claims: Claims,
     announced: bool,
     /// Frames counted towards standing ([`probation`]): every decoded frame
     /// once it has a track, and the sightings that earned it one.
@@ -434,6 +445,7 @@ impl Track {
             dji: DjiInfo::default(),
             spoof: SpoofState::default(),
             continuity: Continuity::default(),
+            claims: Claims::default(),
             announced: false,
             heard: 0,
             confirmed_ms: None,
@@ -617,16 +629,24 @@ impl Track {
         self.last_seen_ms = self.last_seen_ms.max(obs.rx_ms);
     }
 
-    fn apply(&mut self, msg: &Message, rx_ms: u64) {
+    /// Apply one message of a frame that is this track's own (on its path,
+    /// see [`claims`]). IDs in `foreign` belong to another track and are
+    /// not taken. A changed text field or ID is adopted only once it
+    /// persists ([`Claims::text_change`]).
+    fn apply(&mut self, msg: &Message, rx_ms: u64, foreign: &[UasId]) {
         fn put<T: Clone>(slot: &mut Option<Stamped<T>>, v: &T, rx_ms: u64) {
             *slot = Some(Stamped {
                 value: v.clone(),
                 rx_ms,
             });
         }
+        let h = claims::hash_bytes;
         match msg {
             Message::BasicId(b) => {
-                self.add_id(UasId::of(b));
+                let id = UasId::of(b);
+                if !foreign.contains(&id) {
+                    self.offer_id(id, rx_ms);
+                }
                 if b.ua_type != UaType::None || self.ua_type.is_none() {
                     self.ua_type = Some(b.ua_type);
                 }
@@ -639,10 +659,100 @@ impl Track {
                 put(&mut self.system, s, rx_ms);
                 self.system_src = Source::RemoteId;
             }
-            Message::SelfId(s) => put(&mut self.self_id, s, rx_ms),
-            Message::OperatorId(o) => put(&mut self.operator_id, o, rx_ms),
-            // Signatures are not verified on the hub; nothing to show yet.
+            Message::SelfId(s) => {
+                let est = self.self_id.as_ref().map(|e| h(e.value.description.as_bytes()));
+                let new = h(s.description.as_bytes());
+                if self.claims.text_change(claims::KIND_SELF_ID, est, new, rx_ms) || est == Some(new) {
+                    put(&mut self.self_id, s, rx_ms);
+                }
+            }
+            Message::OperatorId(o) => {
+                let est = self.operator_id.as_ref().map(|e| h(e.value.operator_id.as_bytes()));
+                let new = h(o.operator_id.as_bytes());
+                if self.claims.text_change(claims::KIND_OPERATOR_ID, est, new, rx_ms) || est == Some(new) {
+                    put(&mut self.operator_id, o, rx_ms);
+                }
+            }
+            // Signatures are not verified on the hub: "auth message
+            // present, not checked" is all anything may say about them.
             Message::Auth(_) => {}
+        }
+    }
+
+    /// A Basic ID from one of this track's own frames: a new ID type is
+    /// added; a different value of a type it has (a new session ID), or a
+    /// third type, only once it persists ([`Claims::text_change`]).
+    fn offer_id(&mut self, id: UasId, now: u64) {
+        let h = claims::hash_bytes;
+        let kind = claims::kind_id(id.id_type.code());
+        match self.uas_ids.iter().position(|o| o.id_type == id.id_type) {
+            Some(i) => {
+                let est = h(self.uas_ids[i].id.as_bytes());
+                if self.claims.text_change(kind, Some(est), h(id.id.as_bytes()), now) {
+                    self.uas_ids[i] = id;
+                }
+            }
+            None if !self.uas_ids.is_full() => {
+                let _ = self.uas_ids.push(id);
+            }
+            None => {
+                // A third ID type (F3411 allows two): it replaces the
+                // non-primary one only once it persists.
+                if self.claims.text_change(kind, Some(0), h(id.id.as_bytes()), now) {
+                    self.add_id(id);
+                }
+            }
+        }
+    }
+
+    /// The track followed its rival claim to `p` ([`claims`]): the old
+    /// path ends, and a single transmitter's jump is flagged.
+    pub(crate) fn follow(&mut self, p: LatLon, now: u64) {
+        let from = self.location.as_ref().and_then(|l| l.value.position);
+        if self.claims.followed(now)
+            && let Some(q) = from
+        {
+            self.spoof.followed_jump(spoof::dist_m(q, p));
+        }
+        self.location = None;
+        self.spoof.rebase();
+    }
+
+    /// A position report off this track's path ([`claims`]): held as the
+    /// rival claim. A report that starts a new rival is a jump in this ID's
+    /// reports; when nothing has been heard on the old path for
+    /// [`claims::FOLLOW_AFTER_MS`] and there is no dispute, it is one
+    /// transmitter jumping, and flagged as such.
+    pub(crate) fn rival_claim(
+        &mut self,
+        p: LatLon,
+        hacc: Option<f32>,
+        src: ClaimSrc,
+        mac: [u8; 6],
+        now: u64,
+    ) -> claims::Outcome {
+        let orig = self.location.as_ref().map(|l| (l.rx_ms, l.value.position));
+        let (out, jumped) = self.claims.rival_report(p, hacc, src, mac, orig.map_or(0, |o| o.0), now);
+        if jumped {
+            self.spoof.note_jump();
+            if let Some((ms, Some(q))) = orig
+                && now.saturating_sub(ms) >= claims::FOLLOW_AFTER_MS
+                && !self.claims.disputed(now)
+            {
+                self.spoof.followed_jump(spoof::dist_m(q, p));
+            }
+        }
+        out
+    }
+
+    /// The newest position claimed for this ID: the rival claim when it was
+    /// heard after the shown position, else the shown one.
+    pub fn claimed_position(&self, now: u64) -> Option<LatLon> {
+        let shown = self.location.as_ref().and_then(|l| l.value.position.map(|p| (p, l.rx_ms)));
+        match (self.claims.rival(now), shown) {
+            (Some(r), Some((_, ms))) if r.last_ms > ms => Some(r.position),
+            (Some(r), None) => Some(r.position),
+            (_, s) => s.map(|(p, _)| p),
         }
     }
 
@@ -697,6 +807,7 @@ impl Track {
         self.decode_errors = self.decode_errors.saturating_add(other.decode_errors);
         self.spoof.absorb(&other.spoof);
         self.continuity.absorb(&other.continuity);
+        self.claims.absorb(&other.claims);
         // Whoever was alerted on already, the drone has been announced.
         self.announced |= other.announced;
         self.heard = self.heard.saturating_add(other.heard);
@@ -854,6 +965,11 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     flood: probation::FloodWatch,
     /// Unproven aircraft replaced a second, for the aircraft flood alarm.
     aircraft_flood: probation::FloodWatch,
+    /// Pairs of tracks frames said were one drone, waiting for more
+    /// evidence ([`claims`]).
+    merges: heapless::Vec<claims::PendingMerge, { claims::MAX_PENDING_MERGES }>,
+    /// Frames with two different IDs of one type, applied to nothing.
+    contradictory: u32,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -884,6 +1000,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             candidates: probation::Candidates::new(),
             flood: probation::FloodWatch::new(),
             aircraft_flood: probation::FloodWatch::new(),
+            merges: heapless::Vec::new(),
+            contradictory: 0,
             next_id: 1,
             own: None,
             config,
@@ -1019,6 +1137,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     }
 
     fn ingest_decoded(&mut self, obs: &Observation, msgs: &[Message], errors: u32) -> Ingested {
+        use claims::{Outcome, Verdict};
         let now = obs.rx_ms;
         self.expire(now);
 
@@ -1032,15 +1151,31 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 }
             }
         }
+        // Two different IDs of one type: F3411 allows one per type and no
+        // honest drone sends two. Counted, applied to nothing (it would
+        // rename or merge whatever it named).
+        if ids.iter().enumerate().any(|(i, a)| ids[..i].iter().any(|b| b.id_type == a.id_type)) {
+            self.contradictory = self.contradictory.saturating_add(1);
+            for t in self.tracks.iter_mut().filter(|t| ids.iter().any(|id| t.has_id(id))) {
+                t.claims.contradictory_frame();
+            }
+            return Ingested::Ignored;
+        }
+        let frame_loc = msgs.iter().find_map(|m| match m {
+            Message::Location(l) => Some(l),
+            _ => None,
+        });
+        let fpos = frame_loc.and_then(|l| l.position);
+        let fhacc = frame_loc.and_then(|l| l.horizontal_accuracy.meters());
 
-        let by_mac = self.find_by_mac(obs.transport, &obs.mac);
+        let by_mac = self.find_by_mac(obs.transport, &obs.mac, fpos, fhacc, now);
         if msgs.is_empty() {
-            // Nothing decodable: count it against the transmitter if known,
-            // but never start a track (and an alert) on garbage.
+            // Nothing decodable: counted against the transmitter if known,
+            // but it refreshes nothing (anyone can send garbage from that
+            // address) and never starts a track (or an alert).
             return match by_mac {
                 Some(i) => {
                     let t = &mut self.tracks[i];
-                    t.observe(obs);
                     t.decode_errors = t.decode_errors.saturating_add(errors);
                     Ingested::Track(t.id)
                 }
@@ -1048,18 +1183,22 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             };
         }
 
-        // Tracks that share an ID with this frame. The most established
-        // (earliest first seen) becomes the survivor.
+        // Tracks that share an ID with this frame. It goes to the most
+        // established (earliest first seen) whose path it fits, else the
+        // most established.
         let mut by_id: Vec<usize, N> = Vec::new();
         for (i, t) in self.tracks.iter().enumerate() {
             if ids.iter().any(|id| t.has_id(id)) {
                 let _ = by_id.push(i);
             }
         }
+        let rank = |t: &Track| (t.first_seen_ms, t.id);
         let primary = by_id
             .iter()
             .copied()
-            .min_by_key(|&i| (self.tracks[i].first_seen_ms, self.tracks[i].id))
+            .filter(|&i| claims::judge(&self.tracks[i], fpos, fhacc, now) == Verdict::Apply)
+            .min_by_key(|&i| rank(&self.tracks[i]))
+            .or_else(|| by_id.iter().copied().min_by_key(|&i| rank(&self.tracks[i])))
             .or_else(|| by_mac.filter(|&i| self.tracks[i].compatible_with(&ids)));
         // A recently heard track on this address whose ID contradicts the
         // frame's: one transmitter, several IDs (see `spoof`).
@@ -1072,8 +1211,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             .map(|i| self.tracks[i].id);
 
         let created = primary.is_none();
-        let primary = match primary {
-            Some(p) => self.merge_into(p, by_id.iter().copied().chain(by_mac), &ids),
+        let mut primary = match primary {
+            Some(p) => p,
             None => {
                 // A new identity: the transmitter address and the frame's
                 // first ID (a fake with a fixed address and random IDs is
@@ -1091,6 +1230,60 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 }
             }
         };
+        let mut pid = self.tracks[primary].id;
+        // The other tracks this frame names, and an ID-less track on its
+        // address: never merged on this frame alone (`claims`).
+        let mut others: Vec<(TrackId, bool), N> = Vec::new();
+        for &i in by_id.iter().filter(|&&i| i != primary) {
+            let fits = claims::judge(&self.tracks[i], fpos, fhacc, now) == Verdict::Apply;
+            let _ = others.push((self.tracks[i].id, fits));
+        }
+        let mac_other = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| *i != primary && !by_id.contains(i) && t.heard_mac(obs.transport, &obs.mac))
+            .max_by_key(|(_, t)| t.last_seen_ms)
+            .map(|(_, t)| t.id);
+        // IDs another track holds are not given to this one.
+        let mut foreign: Vec<UasId, { rid::MAX_PACK }> = Vec::new();
+        for id in &ids {
+            if self.tracks.iter().any(|t| t.id != pid && t.has_id(id)) {
+                let _ = foreign.push(*id);
+            }
+        }
+
+        // Judge the frame against the track's established path.
+        let mut verdict = if created {
+            Verdict::Apply
+        } else {
+            claims::judge(&self.tracks[primary], fpos, fhacc, now)
+        };
+        if fpos.is_none() && !created {
+            // No position: from the rival's own address, it is the rival's.
+            let t = &self.tracks[primary];
+            if t.claims.from_rival_address(&obs.mac, now) && !t.heard_mac(obs.transport, &obs.mac) {
+                verdict = Verdict::Rival;
+            }
+        }
+        // A claim on every other track it names whose path it does not fit.
+        for &(o, fits) in &others {
+            if !fits && let Some(i) = self.index_of(o) {
+                let _ = self.rival_frame(i, obs, msgs, fpos, fhacc, now);
+            }
+        }
+        if verdict == Verdict::Rival {
+            match self.rival_frame(primary, obs, msgs, fpos, fhacc, now) {
+                Outcome::Held => return Ingested::Track(pid),
+                Outcome::Follow => {
+                    if let Some(p) = fpos {
+                        self.tracks[primary].follow(p, now);
+                    }
+                }
+            }
+        } else if fpos.is_some() && !created {
+            self.tracks[primary].claims.original_report(now);
+        }
 
         let env = self.spoof_env(now);
         spoof::before_frame(&mut self.tracks, primary, obs, msgs, mac_conflict, created, &env);
@@ -1098,22 +1291,149 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         t.observe(obs);
         t.decode_errors = t.decode_errors.saturating_add(errors);
         for m in msgs {
-            t.apply(m, now);
+            t.apply(m, now, &foreign);
         }
         t.heard_at(now);
-        let id = t.id;
         spoof::after_frame(&mut self.tracks, primary, &env, now);
-        Ingested::Track(id)
+
+        // Evidence that the other tracks are this drone.
+        for &(o, fits) in &others {
+            if fits {
+                pid = self.note_merge(pid, o, now);
+            }
+        }
+        if let Some(m) = mac_other
+            && let (Some(mi), Some(pi)) = (self.index_of(m), self.index_of(pid))
+        {
+            let (mt, pt) = (&self.tracks[mi], &self.tracks[pi]);
+            let id_less = mt.uas_ids.is_empty() && mt.dji.serial.is_none() && mt.dji.key_id.is_none();
+            if id_less && mt.compatible_with(&ids) && claims::same_place(mt, pt) {
+                // An ID-less track (a Bluetooth 4 advert carries one message
+                // at a time) whose own address now sends this ID, from
+                // where it is: the same drone.
+                primary = self.merge_into(pi, core::iter::once(mi), &ids);
+                pid = self.tracks[primary].id;
+            } else if mt.compatible_with(&pt.uas_ids) && mt.compatible_with(&ids) {
+                pid = self.note_merge(pid, m, now);
+            }
+        }
+        Ingested::Track(pid)
     }
 
-    /// The most recently heard track whose last MAC on this medium is `mac`.
-    fn find_by_mac(&self, transport: Transport, mac: &[u8; 6]) -> Option<usize> {
-        self.tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.heard_mac(transport, mac))
-            .max_by_key(|(_, t)| t.last_seen_ms)
-            .map(|(i, _)| i)
+    fn index_of(&self, id: TrackId) -> Option<usize> {
+        self.tracks.iter().position(|t| t.id == id)
+    }
+
+    /// A frame (or report) that is a rival claim on `tracks[i]`: held, its
+    /// differing text fields noted. Returns whether the track should
+    /// follow it ([`claims`]).
+    fn rival_frame(
+        &mut self,
+        i: usize,
+        obs: &Observation,
+        msgs: &[Message],
+        fpos: Option<LatLon>,
+        fhacc: Option<f32>,
+        now: u64,
+    ) -> claims::Outcome {
+        let t = &mut self.tracks[i];
+        let mut out = claims::Outcome::Held;
+        if let Some(p) = fpos {
+            out = t.rival_claim(p, fhacc, ClaimSrc::RemoteId, obs.mac, now);
+        }
+        for m in msgs {
+            match m {
+                Message::SelfId(s) if t.self_id.as_ref().is_some_and(|e| e.value.description != s.description) => {
+                    t.claims.rival_text_differs(claims::KIND_SELF_ID, now)
+                }
+                Message::OperatorId(o) if t.operator_id.as_ref().is_some_and(|e| e.value.operator_id != o.operator_id) => {
+                    t.claims.rival_text_differs(claims::KIND_OPERATOR_ID, now)
+                }
+                Message::BasicId(b) if t.uas_ids.iter().any(|u| u.id_type == b.id_type && u.id != b.uas_id) => {
+                    t.claims.rival_text_differs(claims::kind_id(b.id_type.code()), now)
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// One more frame saying tracks `a` and `b` are one drone. Merges them
+    /// (into the more established) once [`claims::merge_evidence`] has
+    /// enough, their positions agree and neither is disputed. Returns the
+    /// id `a`'s data now lives under.
+    pub(crate) fn note_merge(&mut self, a: TrackId, b: TrackId, now: u64) -> TrackId {
+        let tracks = &self.tracks;
+        let live = |id: TrackId| tracks.iter().any(|t| t.id == id);
+        self.merges.retain(|m| live(m.a) && live(m.b));
+        if !claims::merge_evidence(&mut self.merges, a, b, now) {
+            return a;
+        }
+        let (Some(i), Some(j)) = (self.index_of(a), self.index_of(b)) else {
+            return a;
+        };
+        let (ti, tj) = (&self.tracks[i], &self.tracks[j]);
+        if !claims::same_place(ti, tj)
+            || ti.claims.disputed(now)
+            || tj.claims.disputed(now)
+            || !ti.compatible_with(&tj.uas_ids)
+        {
+            return a;
+        }
+        self.merges.retain(|m| !((m.a == a && m.b == b) || (m.a == b && m.b == a)));
+        let (keep, fold) = if (ti.first_seen_ms, ti.id) <= (tj.first_seen_ms, tj.id) { (i, j) } else { (j, i) };
+        let k = self.merge_into(keep, core::iter::once(fold), &[]);
+        self.tracks[k].id
+    }
+
+    /// The next dispute to log (evidence event `IdDisputed`), once per
+    /// dispute and again when it grows (a text field joins it). Call after
+    /// ingesting, and ~1 Hz.
+    pub fn take_dispute(&mut self, now_ms: u64) -> Option<DisputeEvent> {
+        for t in self.tracks.iter_mut() {
+            if t.claims.take_new(now_ms).is_some()
+                && let Some(d) = t.claims.dispute(now_ms)
+            {
+                return Some(DisputeEvent { track: t.id, dispute: d, apart_m: claims::apart_m(t, now_ms) });
+            }
+        }
+        None
+    }
+
+    /// Tracks disputed right now.
+    pub fn disputed_count(&self, now_ms: u64) -> usize {
+        self.tracks.iter().filter(|t| t.claims.disputed(now_ms)).count()
+    }
+
+    /// Frames with two different IDs of one type since boot (applied to
+    /// nothing).
+    pub fn contradictory_frames(&self) -> u32 {
+        self.contradictory
+    }
+
+    /// The most recently heard track whose last MAC on this medium is `mac`;
+    /// when several are and the frame has a position, the one whose path
+    /// it fits (another drone's address in one forged frame must not pull
+    /// that drone's later frames onto the forged track).
+    fn find_by_mac(
+        &self,
+        transport: Transport,
+        mac: &[u8; 6],
+        pos: Option<LatLon>,
+        hacc: Option<f32>,
+        now: u64,
+    ) -> Option<usize> {
+        let cands = || self.tracks.iter().enumerate().filter(|(_, t)| t.heard_mac(transport, mac));
+        if pos.is_some()
+            && let Some((i, _)) = cands()
+                .filter(|(_, t)| {
+                    claims::established(t, now).is_some() && claims::judge(t, pos, hacc, now) == claims::Verdict::Apply
+                })
+                .max_by_key(|(_, t)| t.last_seen_ms)
+        {
+            return Some(i);
+        }
+        cands().max_by_key(|(_, t)| t.last_seen_ms).map(|(i, _)| i)
     }
 
     /// Fold every candidate that is the same drone into `primary`. A
@@ -1362,6 +1682,8 @@ mod tests;
 mod tests_aircraft;
 #[cfg(test)]
 mod tests_area_gnss;
+#[cfg(test)]
+mod tests_claims;
 #[cfg(test)]
 mod tests_conflict;
 #[cfg(test)]

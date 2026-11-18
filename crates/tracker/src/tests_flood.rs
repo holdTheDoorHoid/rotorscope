@@ -298,9 +298,10 @@ fn antipodal_positions_cost_a_bounded_number_of_iterations() {
 fn sizes() {
     use core::mem::size_of;
     std::println!(
-        "Tracker<64,32> {} B, Track {} B, Tracker<32,0> {} B, AircraftTrack {} B, Threat {} B, ControlTable {} B",
+        "Tracker<64,32> {} B, Track {} B, Claims {} B, Tracker<32,0> {} B, AircraftTrack {} B, Threat {} B, ControlTable {} B",
         size_of::<Tracker<64, 32>>(),
         size_of::<Track>(),
+        size_of::<Claims>(),
         size_of::<Tracker<32, 0>>(),
         size_of::<AircraftTrack>(),
         size_of::<threats::Threat>(),

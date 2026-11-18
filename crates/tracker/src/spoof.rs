@@ -599,6 +599,32 @@ impl SpoofState {
         self.jumps
     }
 
+    /// A report that did not fit the track's path started a new rival
+    /// claim (`claims`): one more jump seen in this ID's reports.
+    pub(crate) fn note_jump(&mut self) {
+        inc(&mut self.jumps);
+    }
+
+    /// The track followed a claim that jumped (`claims`: its original went
+    /// quiet and only the jumped one continued, with no dispute): a single
+    /// transmitter that really teleported. Each time is one step stronger
+    /// (25, 50, 75, 90), as the per-frame check counted.
+    pub(crate) fn followed_jump(&mut self, d_m: f64) {
+        let c = match self.flag(Check::PositionJump).map_or(0, |f| f.confidence) {
+            0..25 => 25,
+            25..50 => 50,
+            50..75 => 75,
+            _ => 90,
+        };
+        self.raise(Check::PositionJump, c, d_m as i32);
+    }
+
+    /// Start the kinematics window afresh (the track followed another
+    /// claim: its old window says nothing about the new path).
+    pub(crate) fn rebase(&mut self) {
+        self.anchor = Anchor::default();
+    }
+
     pub fn flag(&self, check: Check) -> Option<&Flag> {
         self.flags.iter().find(|f| f.check == check)
     }
@@ -720,6 +746,25 @@ const SWARM_WINDOW_MS: u64 = 10_000;
 /// ...on one node and slot, within this many dB of each other.
 const SWARM_RSSI_DB: i16 = 3;
 const SWARM_MIN: u8 = 4;
+/// Two positions further apart than this many seconds are not compared.
+pub(crate) const JUMP_WINDOW_MS: u64 = 120_000;
+
+/// The worse of two declared horizontal accuracies, metres: 30 when
+/// neither is declared, never more than 150.
+pub(crate) fn worst_hacc(a: Option<f32>, b: Option<f32>) -> f64 {
+    [a, b].into_iter().flatten().map(f64::from).reduce(f64::max).unwrap_or(30.0).min(150.0)
+}
+
+/// The furthest a drone can honestly move between two position reports
+/// `dt_ms` apart, metres: the [`Check::PositionJump`] limit. 60 m and twice
+/// the declared accuracy for GPS noise, plus [`MAX_DRONE_MPS`] for the time
+/// between them and 2 s more (a report may be up to ~2 s old when it
+/// arrives). `claims` uses the same limit to decide which reports belong
+/// to a track's established path.
+pub(crate) fn jump_limit_m(dt_ms: u64, hacc_m: f64) -> f64 {
+    60.0 + 2.0 * hacc_m + MAX_DRONE_MPS * (dt_ms as f64 / 1000.0 + 2.0)
+}
+
 /// Another track sharing the MAC counts if heard this recently.
 pub(crate) const SHARED_MAC_WINDOW_MS: u64 = 5_000;
 
@@ -868,31 +913,19 @@ fn location(
         }
     }
 
-    // Position jump.
+    // Position jump: counted (`area_gnss` watches the count), not flagged
+    // here. On an established track a report this far off is never applied
+    // (a rival claim, see `claims`); before that, two transmitters
+    // alternating from the start look exactly like this. The flag is
+    // raised by `claims` when one transmitter is seen to jump: the track
+    // follows a claim that continued alone, or reports keep jumping with no
+    // report on the old path ([`SpoofState::followed_jump`]).
     if let (Some(p1), Some(p0)) = (l.position, prev.value.position)
-        && dt_ms <= 120_000
+        && dt_ms <= JUMP_WINDOW_MS
     {
-        let hacc = [
-            l.horizontal_accuracy.meters(),
-            prev.value.horizontal_accuracy.meters(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(f64::from)
-        .reduce(f64::max)
-        .unwrap_or(30.0)
-        .min(150.0);
-        let d = dist_m(p0, p1);
-        // The report may be up to ~2 s old when it arrives.
-        if d > 60.0 + 2.0 * hacc + MAX_DRONE_MPS * (dt + 2.0) {
-            let n = inc(&mut s.jumps);
-            let c = match n {
-                1 => 25,
-                2 => 50,
-                3..=5 => 75,
-                _ => 90,
-            };
-            s.raise(Check::PositionJump, c, d as i32);
+        let hacc = worst_hacc(l.horizontal_accuracy.meters(), prev.value.horizontal_accuracy.meters());
+        if dist_m(p0, p1) > jump_limit_m(dt_ms, hacc) {
+            inc(&mut s.jumps);
         }
     }
 

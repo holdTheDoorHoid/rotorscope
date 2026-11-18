@@ -275,8 +275,10 @@ fn two_basic_ids_are_both_kept() {
     assert_eq!(t.uas_ids.len(), 2);
     assert_eq!(t.primary_id().unwrap().id_type, IdType::SerialNumber);
 
-    // And when the two IDs first arrive on separate tracks, a frame that
-    // links them (session on the serial track's MAC) merges the two.
+    // And when the two IDs first arrive on separate tracks, frames that
+    // link them (the serial from the session track's address) merge the
+    // two, but only once they have said so repeatedly (`claims`: one
+    // forged frame must not merge two drones).
     let mut tr: Tracker = Tracker::default();
     let s = tr.ingest(
         0,
@@ -285,11 +287,12 @@ fn two_basic_ids_are_both_kept() {
     );
     let x = tr.ingest(1, &det(Transport::BleLegacy, BLE_MAC, -70, &[session]), 10);
     assert_ne!(s, x);
-    let m = tr.ingest(
-        1,
-        &det(Transport::BleLegacy, BLE_MAC, -70, &[serial("SN-F")]),
-        20,
-    );
+    let link = det(Transport::BleLegacy, BLE_MAC, -70, &[serial("SN-F")]);
+    assert_eq!(tr.ingest(1, &link, 20), s);
+    assert_eq!(tr.len(), 2, "not on one frame");
+    tr.ingest(1, &link, 1_020);
+    assert_eq!(tr.len(), 2);
+    let m = tr.ingest(1, &link, claims::MERGE_SPAN_MS as u64 + 20);
     assert_eq!(m, s);
     assert_eq!(tr.len(), 1);
     assert_eq!(tr.tracks()[0].uas_ids.len(), 2);

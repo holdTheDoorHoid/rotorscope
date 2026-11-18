@@ -602,7 +602,10 @@ impl AreaWatch {
             if ctx.state(t) != TrackState::Active {
                 continue;
             }
-            let Some(p) = t.location.as_ref().and_then(|l| l.value.position) else { continue };
+            // The newest position claimed for it: a jump off its path is
+            // held as a rival claim (`claims`), not shown, until it is
+            // followed or disputed.
+            let Some(p) = t.claimed_position(now) else { continue };
             let here = Pt { lat: p.lat, lon: p.lon };
             let jumps = t.spoof.jumps();
             match self.drones.iter_mut().find(|d| d.id == t.id) {
