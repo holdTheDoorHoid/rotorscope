@@ -45,6 +45,21 @@ pub struct Ext {
     pub adsb: Option<(tracker::json::AdsbStatus, u32)>,
     /// The FLAGS page (Phase 12).
     pub flags: Option<screen::FlagsView>,
+    /// Key class, bench build, open link, evidence not written: kept on
+    /// screen while they hold.
+    pub caveats: screen::Caveats,
+}
+
+/// Over-the-air text (a drone ID, a callsign, an SSID, a decrypted serial)
+/// inside a hub-built line, copied with every character outside printable
+/// ASCII shown as `?` (`link::printable`), before it goes to the console or
+/// into evidence text. Nodes clean what they send; the hub does not rely on
+/// it.
+fn clean<const N: usize>(text: &str) -> heapless::String<N> {
+    use core::fmt::Write;
+    let mut out = heapless::String::new();
+    let _ = write!(out, "{}", link::printable::Printable(text));
+    out
 }
 /// A relayed node not heard for this long shows as down.
 const NODE_ALIVE_MS: u64 = 5_000;
@@ -470,6 +485,7 @@ impl App {
             screen::from_tracker::fill_control(ct, &ctx, &mut self.state);
         }
         self.state.sd = ext.sd;
+        self.state.caveats = ext.caveats;
         self.state.flags = ext.flags.clone();
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,

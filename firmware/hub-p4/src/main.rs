@@ -480,6 +480,7 @@ fn main() -> ! {
                 sd: sdlog.ui_state(),
                 adsb: Some((adsbee.status(ms), adsbee.stats.map_or(0, |s| s.uptime_s))),
                 flags: Some(faa.view(app.tracker)),
+                caveats: caveats(&ev, &gw, &sdlog),
             };
             app.draw(panel, &mut gw, &ext, ms, |gw| {
                 gw.poll(app::now_ms());
@@ -607,6 +608,21 @@ fn main() -> ! {
             loops = 0;
             max_gap_us = 0;
         }
+    }
+}
+
+/// What must stay on screen (`screen::Caveats`): the evidence key class,
+/// a bench build, an open gateway link, evidence not reaching the card.
+fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -> screen::Caveats {
+    screen::Caveats {
+        key: match ev.key_class() {
+            evidence::KeyClass::PublicTest => screen::EvidenceKey::Test,
+            evidence::KeyClass::DevelopmentSoftware => screen::EvidenceKey::Development,
+            evidence::KeyClass::HardwareEfuse => screen::EvidenceKey::NotShown,
+        },
+        bench: !evlog::BENCH.is_empty(),
+        link_open: gw.stats.gw_open(),
+        evidence: sd.evidence_stop(ev),
     }
 }
 

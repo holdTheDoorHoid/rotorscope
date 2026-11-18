@@ -36,6 +36,12 @@
 //! boundary, after which the flushed records leave the queue. At mount the
 //! previous evidence file's last record is read and named in the new file's
 //! first event, so the files link up. Console `r` replays the current file.
+//! The folder is not trusted (`evidence::files`): only real files with an
+//! in-range number count, and a taken top number (`EV999999.EVL`) makes the
+//! next file the lowest free number instead of failing every mount. If the
+//! evidence folder or file cannot be opened while the CSV log records, the
+//! mount is retried every [`EV_RETRY_MS`], and the screen shows evidence
+//! as not written (`Logger::evidence_stop`) whenever it is not.
 //!
 //! **Proof of writing.** While the file is small ([`READBACK_MAX`]) each
 //! flush reads the whole file back and counts its lines; at mount the
@@ -75,6 +81,9 @@ const FLUSH_EVERY_MS: u64 = 5_000;
 const PROBE_EVERY_MS: u64 = 3_000;
 /// A card that answered but could not be used: try again this much later.
 const ERROR_RETRY_MS: u64 = 15_000;
+/// The card records but the evidence folder or file could not be opened:
+/// try again this often (the screen says evidence is not written meanwhile).
+const EV_RETRY_MS: u64 = 15_000;
 /// ACMD41 spacing and limit (spec: ready within 1 s).
 const POLL_EVERY_MS: u64 = 10;
 const POLL_FOR_MS: u64 = 1_500;
@@ -202,6 +211,8 @@ pub struct Logger {
     pack_writing: Option<u32>,
     shown_flag_row: bool,
     ev_file: Option<EvFile>,
+    /// While recording without an evidence file: when to try again.
+    ev_retry_at: u64,
     replay: Option<Replay>,
     pub ev_flushes: u32,
     pub ev_errors: u32,
@@ -268,6 +279,7 @@ impl Logger {
             pack_writing: None,
             shown_flag_row: false,
             ev_file: None,
+            ev_retry_at: 0,
             replay: None,
             ev_flushes: 0,
             ev_errors: 0,
@@ -529,6 +541,21 @@ impl Logger {
         self.name.as_str()
     }
 
+    /// For the screen: why evidence is not reaching the card, and how much
+    /// waits; `None` while it is written (or briefly held at boot waiting
+    /// for GPS time, when nothing is written yet by design).
+    pub fn evidence_stop(&self, ev: &Evidence) -> Option<screen::EvidenceStop> {
+        use screen::EvidenceStopWhy as W;
+        let why = match self.state {
+            State::Recording if self.ev_file.is_some() => return None,
+            _ if self.holding => return None,
+            State::Recording => W::FileError,
+            State::Error(_) => W::CardError,
+            State::NoCard(_) | State::Waking(..) => W::NoCard,
+        };
+        Some(screen::EvidenceStop { why, waiting: ev.queued_records(), dropped: ev.not_logged_total })
+    }
+
     fn print_stats(&mut self, ev: &Evidence) {
         let state = self.state_name();
         let io = self.io_stats();
@@ -674,7 +701,11 @@ impl Logger {
                     Err(e) => {
                         self.ev_errors += 1;
                         self.ev_file = None;
-                        println!("hub-p4: evidence folder/file failed: {e:?}; records stay queued");
+                        self.ev_retry_at = now + EV_RETRY_MS;
+                        println!(
+                            "hub-p4: evidence folder/file failed: {e:?}; records stay queued, NOT written (screen says so); retry in {} s",
+                            EV_RETRY_MS / 1000
+                        );
                     }
                 }
                 if let Err(e) = self.open_pack(faa, now) {
@@ -777,6 +808,13 @@ impl Logger {
     /// Open `ROTORSCP/EVIDENCE` (creating it if missing), read the end of
     /// the highest-numbered file, create the next one. Never opens an
     /// existing evidence file for writing.
+    ///
+    /// The card is not trusted (`evidence::files`): only regular files
+    /// named `EVnnnnnn.EVL` with a number in range count, and when the top
+    /// number is taken the lowest free one is used instead of failing every
+    /// mount. A previous file that cannot be read is noted, not fatal. On
+    /// an error the folder handle is closed again, so the retry (every
+    /// [`EV_RETRY_MS`] while the card records) cannot run out of handles.
     fn mount_evidence(&mut self, ev: &mut Evidence, now: u64) -> Result<(), FsError> {
         let vm = self.vm.as_ref().unwrap();
         let Some(parent) = self.open.as_ref().map(|o| o.dir) else { return Ok(()) };
@@ -789,22 +827,79 @@ impl Logger {
             }
             Err(e) => return Err(e),
         };
-        let mut max = 0u32;
-        vm.iterate_dir(dir, |e| {
-            let base = e.name.base_name();
-            if e.name.extension() == b"EVL" && base.len() == 8 && base.starts_with(b"EV") {
-                let n = base[2..].iter().try_fold(0u32, |acc, &d| d.is_ascii_digit().then(|| acc * 10 + u32::from(d - b'0')));
-                if let Some(n) = n {
-                    max = max.max(n);
+        match Self::new_evidence_file(vm, dir) {
+            Ok((file, name, no, prev)) => {
+                ev.card_mounted(name.as_str(), no, prev);
+                self.ev_file = Some(EvFile { dir, file, name, pos: 0, dirty: false, flushed_at: now });
+                Ok(())
+            }
+            Err(e) => {
+                let _ = vm.close_dir(dir);
+                Err(e)
+            }
+        }
+    }
+
+    /// Choose and create the next evidence file in `dir`; the previous
+    /// file's link (number, length, last record hash, status) if it has one.
+    #[allow(clippy::type_complexity)]
+    fn new_evidence_file(vm: &Vm, dir: RawDirectory) -> Result<(RawFile, heapless::String<12>, u32, Option<(u32, u32, [u8; 32], u8)>), FsError> {
+        use evidence::files::{self, Next};
+        let next = files::choose_next(|f: &mut dyn FnMut(u32)| {
+            vm.iterate_dir(dir, |e| {
+                let regular = !e.attributes.is_directory() && !e.attributes.is_volume();
+                if let Some(n) = files::file_no(e.name.base_name(), e.name.extension(), regular) {
+                    f(n);
+                }
+                ControlFlow::Continue(())
+            })
+        })?;
+        let Some(next) = next else {
+            println!("hub-p4: evidence: no free file number in {DIR}/{EV_DIR}");
+            return Err(embedded_sdmmc::Error::FormatError("no free evidence file number"));
+        };
+        let mut prev = None;
+        match next {
+            Next::After { prev: 0, .. } => {}
+            Next::After { prev: p, .. } => {
+                let pname = files::name(p).unwrap_or(*b"EV000000.EVL");
+                let pname = core::str::from_utf8(&pname).unwrap_or("?");
+                match Self::previous_tail(vm, dir, pname) {
+                    Ok((len, hash, status)) => {
+                        println!(
+                            "hub-p4: evidence previous file {DIR}/{EV_DIR}/{pname}: {len} bytes, last record {:02x}{:02x}{:02x}{:02x}.. ({})",
+                            hash[0], hash[1], hash[2], hash[3],
+                            match status { 1 => "ends on a whole record", 2 => "ends in an incomplete record", _ => "no whole record in its last 2 KB" }
+                        );
+                        prev = Some((p, len, hash, status));
+                    }
+                    Err(e) => {
+                        // Linked as "unreadable" (status 3) rather than
+                        // stopping the evidence log over it.
+                        println!("hub-p4: evidence previous file {DIR}/{EV_DIR}/{pname} unreadable: {e:?}");
+                        prev = Some((p, 0, [0; 32], 3));
+                    }
                 }
             }
-            ControlFlow::Continue(())
-        })?;
-        let mut prev = None;
-        if max > 0 {
-            let mut pname: heapless::String<12> = heapless::String::new();
-            let _ = write!(pname, "EV{max:06}.EVL");
-            let f = vm.open_file_in_dir(dir, pname.as_str(), Mode::ReadOnly)?;
+            Next::Lowest { no } => println!(
+                "hub-p4: evidence: {DIR}/{EV_DIR}/EV999999.EVL exists (the top number); using the lowest free number {no}, with no previous file to link"
+            ),
+        }
+        let no = next.no();
+        let raw = files::name(no).unwrap_or(*b"EV000000.EVL");
+        let mut name: heapless::String<12> = heapless::String::new();
+        let _ = name.push_str(core::str::from_utf8(&raw).unwrap_or("?"));
+        // ReadWriteCreate refuses a name that exists: never rewrites a file.
+        let file = vm.open_file_in_dir(dir, name.as_str(), Mode::ReadWriteCreate)?;
+        Ok((file, name, no, prev))
+    }
+
+    /// Length, hash of the last whole record, and status (1 whole, 2 ends
+    /// in an incomplete record, 3 no whole record) of the evidence file
+    /// `name`. Closes it again whatever happens.
+    fn previous_tail(vm: &Vm, dir: RawDirectory, name: &str) -> Result<(u32, [u8; 32], u8), FsError> {
+        let f = vm.open_file_in_dir(dir, name, Mode::ReadOnly)?;
+        let r = (|| {
             let len = vm.file_length(f)?;
             let n = (len as usize).min(EV_TAIL);
             let mut tail = [0u8; EV_TAIL];
@@ -817,7 +912,6 @@ impl Logger {
                 }
                 got += r;
             }
-            vm.close_file(f)?;
             let (hash, status) = match evidence::format::last_complete(&tail[..got]) {
                 Some((at, partial)) => {
                     let l = evidence::format::peek_len(&tail[at..]).unwrap_or(0);
@@ -825,21 +919,10 @@ impl Logger {
                 }
                 None => ([0; 32], 3),
             };
-            println!(
-                "hub-p4: evidence previous file {DIR}/{EV_DIR}/{pname}: {len} bytes, last record {:02x}{:02x}{:02x}{:02x}.. ({})",
-                hash[0], hash[1], hash[2], hash[3],
-                match status { 1 => "ends on a whole record", 2 => "ends in an incomplete record", _ => "no whole record in its last 2 KB" }
-            );
-            prev = Some((max, len, hash, status));
-        }
-        let no = max + 1;
-        let mut name: heapless::String<12> = heapless::String::new();
-        let _ = write!(name, "EV{no:06}.EVL");
-        // ReadWriteCreate refuses a name that exists: never rewrites a file.
-        let file = vm.open_file_in_dir(dir, name.as_str(), Mode::ReadWriteCreate)?;
-        ev.card_mounted(name.as_str(), no, prev);
-        self.ev_file = Some(EvFile { dir, file, name, pos: 0, dirty: false, flushed_at: now });
-        Ok(())
+            Ok((len, hash, status))
+        })();
+        let _ = vm.close_file(f);
+        r
     }
 
     /// One evidence step, if one is due: a chunk, a flush, or (console `r`)
@@ -1028,6 +1111,22 @@ impl Logger {
         if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
             self.busy_skips += 1;
             return "busy";
+        }
+        // Recording without an evidence file (its folder or file failed at
+        // mount): try again now and then rather than leave it stopped.
+        if self.ev_file.is_none() && now >= self.ev_retry_at {
+            self.ev_retry_at = now + EV_RETRY_MS;
+            return match self.mount_evidence(ev, now) {
+                Ok(()) => {
+                    println!("hub-p4: evidence recording to {DIR}/{EV_DIR}/{} (retry)", self.ev_name());
+                    "ev_mount"
+                }
+                Err(e) => {
+                    self.ev_errors += 1;
+                    println!("hub-p4: evidence folder/file failed again: {e:?}; {} records waiting; retry in {} s", ev.queued_records(), EV_RETRY_MS / 1000);
+                    "ev_mount_err"
+                }
+            };
         }
         // Evidence first: its queue only shrinks once flushed.
         let t = Instant::now();

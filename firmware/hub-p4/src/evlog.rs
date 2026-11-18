@@ -136,6 +136,8 @@ pub struct Evidence {
     pub max_sign_us: u64,
     pub last_sign_us: u64,
     pub drained: u32,
+    /// Records in `q` (see `queued_records`).
+    queued_records: u32,
 }
 
 impl Evidence {
@@ -203,7 +205,18 @@ impl Evidence {
             max_sign_us: 0,
             last_sign_us: 0,
             drained: 0,
+            queued_records: 0,
         }
+    }
+
+    /// The class of the key actually signing (for the screen).
+    pub fn key_class(&self) -> KeyClass {
+        self.signer.key_class()
+    }
+
+    /// Records in the queue not yet flushed to a card file.
+    pub fn queued_records(&self) -> u32 {
+        self.queued_records
     }
 
     pub fn fw_hash(&self) -> [u8; 32] {
@@ -222,6 +235,7 @@ impl Evidence {
     fn keep(&mut self, buf: &[u8], n: usize) {
         self.q[self.len..self.len + n].copy_from_slice(&buf[..n]);
         self.len += n;
+        self.queued_records += 1;
         self.chain.commit();
         self.records += 1;
         self.bytes += n as u32;
@@ -488,6 +502,17 @@ impl Evidence {
     /// records leave the queue.
     pub fn flushed(&mut self) {
         let w = self.written;
+        // Whole records only are flushed (sd.rs flushes at a record boundary).
+        let mut at = 0;
+        while at < w {
+            match format::peek_len(&self.q[at..w]) {
+                Ok(l) if l > 0 => {
+                    at += l;
+                    self.queued_records = self.queued_records.saturating_sub(1);
+                }
+                _ => break,
+            }
+        }
         self.q.copy_within(w..self.len, 0);
         self.len -= w;
         self.written = 0;

@@ -118,6 +118,15 @@ pub struct LinkStats {
     pub gw_hello: heapless::String<16>,
 }
 
+impl LinkStats {
+    /// The gateway's last Hello says its ESP-NOW link is open (built
+    /// without a link key): anyone nearby can inject node reports and
+    /// commands. Shown on the screen for as long as it holds.
+    pub fn gw_open(&self) -> bool {
+        self.gw_hello.starts_with("gw OPEN")
+    }
+}
+
 pub struct GatewayLink<'d> {
     _uart: core::marker::PhantomData<&'d ()>,
     dec: Decoder,
