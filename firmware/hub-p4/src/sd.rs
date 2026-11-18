@@ -1227,6 +1227,8 @@ fn bench_count(vm: &Vm, file: RawFile) -> Result<(crate::bench::CsvCount, u32), 
     let mut line: heapless::Vec<u8, 600> = heapless::Vec::new();
     let mut lines = 0u32;
     loop {
+        // A long file takes many seconds bit-banged: keep the watchdog fed.
+        crate::fault::feed();
         let n = vm.read(file, &mut buf)?;
         if n == 0 {
             break;

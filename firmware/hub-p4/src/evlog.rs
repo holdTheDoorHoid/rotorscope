@@ -210,14 +210,15 @@ impl Evidence {
     }
 
     /// The first record: who signs, which firmware.
-    pub fn boot(&mut self, chip: (u8, u8)) {
+    /// `reset` is why the chip last reset (`fault::reset_reason`).
+    pub fn boot(&mut self, chip: (u8, u8), reset: &str) {
         let mut data = [0u8; 1 + format::PUBKEY_LEN + 2];
         data[0] = self.signer.key_class() as u8;
         data[1..66].copy_from_slice(&self.signer.public_key());
         data[66] = chip.0;
         data[67] = chip.1;
-        let mut text: heapless::String<64> = heapless::String::new();
-        let _ = write!(text, "hub-p4 {} {}", env!("CARGO_PKG_VERSION"), option_env!("ROTORSCOPE_GIT").unwrap_or(""));
+        let mut text: heapless::String<96> = heapless::String::new();
+        let _ = write!(text, "hub-p4 {} {} last reset: {reset}", env!("CARGO_PKG_VERSION"), option_env!("ROTORSCOPE_GIT").unwrap_or(""));
         self.event(EventCode::Boot, text.as_bytes(), &data);
     }
 

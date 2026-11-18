@@ -42,8 +42,8 @@ to be the GPS / ADSBee on its own pins), never with the real modules.
 | TAK CoT multicast | built (web head) | From the web head, stamped with the P4's GPS time (`HubFix`) |
 | Station mode (join a Wi-Fi network) | built (web head) | The S3 hub's own station mode, unchanged |
 | Captive portal, DHCP, DNS | built (web head) | Part of the web head's hotspot (channel 11) |
-| Watchdog (reboot if the loop hangs) | not ported | The S3 uses the RTC watchdog; it has not been checked on this pre-v3 chip and esp-hal patch. A wrong setting means reboot loops, so it needs its own bench test |
-| Reboot after a panic (`custom-halt`) | not ported | The P4 halts and prints the panic; same reason as the watchdog |
+| Watchdog (reboot if the loop hangs) | **built, not yet bench-tested** (WP-01, branch `sec/lane-a`) | RTC watchdog (LP_WDT) through the patched HAL's P4 `Rwdt`, armed just before the main loop and fed once per loop (`src/fault.rs`). Timeout 30 s: the longest legitimate stops are ~0.2 s (SD mount, counting the previous log) and ~1-2 s (the airspace pack's CRC when it finishes loading). Guarded against a reboot loop: it stays off (and says `watchdog LEFT OFF`) unless the slow-clock calibration is plausible and the timeout read back from LP_WDT is within 2x of 30 s. Boot line prints `watchdog on: ... N s`. Bench test: docs/BENCH.md "Crash recovery" (`--features faulttest`, `fault hang`) |
+| Reboot after a panic (`custom-halt`) | **built, not yet bench-tested** (WP-01) | Backtrace printed, then 500 ms (5 s if the panic came within 10 s of boot, so a repeating start-up panic loops slowly) and the HAL's P4 `software_reset`. If that reset did not work, the armed watchdog still resets the chip 30 s later. The `hello` line and the evidence boot event say why the chip last reset (`last reset: power_on / software / watchdog ...`). Bench test: `fault panic` |
 | Demo mode (made-up drones) | done (different) | `--features fakedrone` / `fakenode`; the S3's two-circle demo is not ported |
 
 ## Pins chosen (all on connectors the board already has)
