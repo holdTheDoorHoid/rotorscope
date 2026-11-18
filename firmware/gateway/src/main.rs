@@ -34,6 +34,12 @@
 //! skew the node's clock. The `To` + `Assign` path is unchanged.
 //!
 //! This board transmits (the beacons); see docs/ESPNOW.md.
+//!
+//! Crash recovery (docs/BENCH.md "Crash recovery"): a panic prints its
+//! backtrace on USB and reboots (`custom_halt`); the RTC watchdog
+//! ([`WATCHDOG`]) is fed by the relay loop while the beacon loop is alive
+//! ([`BEACON_ALIVE_MS`]), so a stuck radio, a task that never yields or a
+//! dead beacon resets the chip. The `hello` line says why it last reset.
 #![no_std]
 #![no_main]
 
@@ -57,6 +63,25 @@ use esp_wifi_sys_esp32c5::include as sys;
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Unattended relay: after a panic (backtrace already printed to USB),
+/// reboot rather than sit halted until someone power-cycles the box.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    node_common::fault::reboot_after_panic()
+}
+
+/// Hang watchdog timeout. The relay loop goes round at least once a second
+/// (its receive wait ends at the next threat report) and the beacon loop
+/// twice a second; nothing legitimate holds either for more than a few
+/// hundred milliseconds once the radio is up.
+const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(10);
+/// The relay loop feeds the watchdog only while the beacon loop (`air_tx`)
+/// has gone round this recently: a send that never completes stops the
+/// beacons, and nodes then lose the gateway.
+const BEACON_ALIVE_MS: u32 = 5_000;
+/// When `air_tx` last went round (uptime ms, wrapping).
+static AIR_TX_AT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// The gateway's channel. The 2.4 GHz node dwells on 6 for 300 of every
 /// 400 ms of its hop plan, so it can send without leaving its plan.
@@ -228,11 +253,13 @@ async fn main(spawner: Spawner) -> ! {
     // The radio is on, so the hardware RNG is a true RNG: a fresh epoch.
     let gw_auth = auth::Key::kit().map(|k| auth::Gateway::new(k, esp_hal::rng::Rng::new().random()));
     println!(
-        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}"}}"#,
+        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}","reset":"{}","faulttest":{}}}"#,
         env!("CARGO_PKG_VERSION"),
         lr == 0,
         Mac(mac),
-        auth::KEY_TAG
+        auth::KEY_TAG,
+        node_common::fault::reset_reason(),
+        cfg!(feature = "faulttest")
     );
     if gw_auth.is_none() {
         println!(
@@ -245,7 +272,28 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(air_tx(manager, sender, gw_auth, mac).expect("spawn air_tx"));
     spawner.spawn(hub_commands(hub_rx).expect("spawn hub_commands"));
     spawner.spawn(stats().expect("spawn stats"));
+    #[cfg(feature = "faulttest")]
+    {
+        let (rx, tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(p.USB_DEVICE).split();
+        spawner.spawn(faulttest(rx, tx).expect("spawn faulttest"));
+    }
+    alive_now(&AIR_TX_AT);
+    node_common::fault::arm(WATCHDOG);
     relay(receiver, hub, relay_key, mac).await
+}
+
+/// Bench only: `fault panic` / `fault hang` typed on USB (docs/BENCH.md).
+#[cfg(feature = "faulttest")]
+#[embassy_executor::task]
+async fn faulttest(
+    mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    _tx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Blocking>,
+) {
+    node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| println!("{l}")).await
+}
+
+fn alive_now(at: &core::sync::atomic::AtomicU32) {
+    at.store(Instant::now().as_millis() as u32, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Next stamp from the gateway's clock; restart for a new epoch once it has
@@ -294,6 +342,7 @@ async fn air_tx(manager: EspNowManager, mut sender: EspNowSender, mut auth: Opti
     let period = Duration::from_millis(500);
     let mut next_beacon = Instant::now();
     loop {
+        alive_now(&AIR_TX_AT);
         let wait = next_beacon.saturating_duration_since(Instant::now());
         match with_timeout(wait, KICK.receive()).await {
             Ok(Job::Command(mac)) => {
@@ -545,6 +594,11 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
     let mut next_report = Instant::now() + Duration::from_millis(u64::from(THREAT_WINDOW_MS));
     loop {
         let now = Instant::now();
+        // Fed here, at least once a second, while the beacon loop is alive too.
+        let air_age = (now.as_millis() as u32).wrapping_sub(AIR_TX_AT.load(Relaxed));
+        if air_age < BEACON_ALIVE_MS {
+            node_common::fault::feed();
+        }
         if now >= next_hello {
             next_hello = now + Duration::from_millis(HELLO_EVERY_MS);
             hello(&mut hub).await;
