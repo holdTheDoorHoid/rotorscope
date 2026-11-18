@@ -128,6 +128,12 @@ pub struct NodeStats {
 /// index in `nodes` for relayed nodes, 0 for a node wired to the link.
 pub type Out = heapless::Deque<(u8, Frame), 8>;
 
+/// A node's latest `Stats` for the tracker (deaf-node and node-shed
+/// checks): node number, uptime us, frames seen, drop total. Kept apart from
+/// `out` so a flood that fills `out` cannot cost the very report that shows
+/// it, and never logged as evidence. One per node (the latest wins).
+pub type StatsDue = heapless::Vec<(u8, u64, u32, u32), { MAX_RELAYED + 1 }>;
+
 #[derive(Default)]
 pub struct LinkStats {
     pub bytes: u32,
@@ -176,6 +182,8 @@ pub struct GatewayLink<'d> {
     pub out: Out,
     /// Frames dropped because `out` was full.
     pub out_full: u32,
+    /// Nodes' Stats waiting for the tracker.
+    pub stats_due: StatsDue,
     /// Aero nodes' raw aircraft frames (protocol 11), in their own queue in
     /// PSRAM (`aero::Store`): they come up to 200 a second and `out` is
     /// sized for drone detections. `None` (no PSRAM): they share `out`.
@@ -220,6 +228,7 @@ impl<'d> GatewayLink<'d> {
             nodes: heapless::Vec::new(),
             out: Out::new(),
             out_full: 0,
+            stats_due: StatsDue::new(),
             air: None,
             air_full: 0,
             tx_bytes: 0,
@@ -291,7 +300,13 @@ impl<'d> GatewayLink<'d> {
             self.stats.bytes += n as u32;
             let (stats, nodes, sorter, refusals, feed) =
                 (&mut self.stats, &mut self.nodes, &mut self.sorter, &mut self.refusals, &mut self.feed);
-            let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
+            let mut q = Queues {
+                out: &mut self.out,
+                out_full: &mut self.out_full,
+                air: &mut self.air,
+                air_full: &mut self.air_full,
+                stats: &mut self.stats_due,
+            };
             self.dec.feed(&buf[..n], |r| {
                 handled += 1;
                 match r {
@@ -346,7 +361,13 @@ impl<'d> GatewayLink<'d> {
             if let Some(feed) = self.feed.as_mut() {
                 feed.fwd.send(&f);
             }
-            let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
+            let mut q = Queues {
+                out: &mut self.out,
+                out_full: &mut self.out_full,
+                air: &mut self.air,
+                air_full: &mut self.air_full,
+                stats: &mut self.stats_due,
+            };
             q.push(0, f);
             self.stats.refusal_threats += 1;
         }
@@ -376,6 +397,9 @@ impl<'d> GatewayLink<'d> {
                 stats.direct += 1;
                 if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
                     stats.gw_hello = firmware.clone();
+                }
+                if let Frame::Stats { uptime_us, frames_seen, dropped, .. } = &f {
+                    q.stats_due(0, *uptime_us, *frames_seen, *dropped);
                 }
                 if is_data(&f) {
                     q.push(0, f);
@@ -420,10 +444,11 @@ impl<'d> GatewayLink<'d> {
                 n.can = *can;
                 n.plan = *plan;
             }
-            Frame::Stats { uptime_us, rid_found, dropped, .. } => {
+            Frame::Stats { uptime_us, frames_seen, rid_found, dropped, .. } => {
                 n.rid_found = *rid_found;
                 n.dropped = *dropped;
                 n.uptime_s = (*uptime_us / 1_000_000) as u32;
+                q.stats_due(i as u8 + 1, *uptime_us, *frames_seen, *dropped);
             }
             _ => {}
         }
@@ -439,9 +464,20 @@ struct Queues<'a> {
     out_full: &'a mut u32,
     air: &'a mut Option<&'static mut crate::aero::AirQueue>,
     air_full: &'a mut u32,
+    stats: &'a mut StatsDue,
 }
 
 impl Queues<'_> {
+    fn stats_due(&mut self, node: u8, uptime_us: u64, frames_seen: u32, dropped: u32) {
+        let e = (node, uptime_us, frames_seen, dropped);
+        match self.stats.iter_mut().find(|x| x.0 == node) {
+            Some(x) => *x = e,
+            None => {
+                let _ = self.stats.push(e);
+            }
+        }
+    }
+
     fn push(&mut self, node: u8, f: Frame) {
         match (f, self.air.as_deref_mut()) {
             (Frame::Air(a), Some(q)) => {

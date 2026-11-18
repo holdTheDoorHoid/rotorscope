@@ -147,6 +147,10 @@ impl App {
             };
             self.take(gw, ev, actx, node, f, now);
         }
+        // Nodes' Stats: the deaf-node and node-shed checks (not evidence).
+        while let Some((node, up, seen, dropped)) = gw.stats_due.pop() {
+            let _ = self.tracker.ingest_node_stats(node, up, seen, dropped, now);
+        }
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
