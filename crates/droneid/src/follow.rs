@@ -25,10 +25,10 @@
 //! **Fallback.** The spec's schedule is not the only report: King-Of-Knights
 //! lists eight frequencies including 2459.5 MHz and calls the hopping random
 //! per drone. So the follower is an optimisation, never a dependency: a
-//! session that is not yet confirmed restarts from a packet no hypothesis
+//! candidate that is not yet followed restarts from a packet no hypothesis
 //! explains, [`MAX_MISSES`] silent windows in a row or [`LOST_US`] without a
-//! packet drop a followed one, and the receiver goes back to scanning its
-//! plan (which keeps 2459.5 MHz). Channel phase never identifies or
+//! packet drop a followed session, and the receiver goes back to scanning
+//! its plan (which keeps 2459.5 MHz). Channel phase never identifies or
 //! authenticates a drone; the key ID is what groups packets.
 //!
 //! # Hostile packets (docs/DRONEID-O4.md "The follower under forged packets")
@@ -37,29 +37,52 @@
 //! channel at any time. Nothing here can tell them from a drone. What the
 //! rules below do is bound what a forger gets:
 //!
-//! - **Confirmation.** A new key ID starts a *tentative* session. It is
-//!   never visited: it only grows from packets the plan's scanning happens
-//!   to hear. It is followed once it holds [`CONFIRM_HITS`] packets that are
-//!   mutually consistent in channel *and* time (each one inside the window
-//!   the earlier ones predict, [`guard_us`]). Tentative and followed
-//!   sessions live in separate slots ([`MAX_TENTATIVE`], [`MAX_SESSIONS`]).
-//! - **No eviction or restart of a followed session.** A new key ID only
-//!   ever replaces a tentative session holding a single packet; when none
-//!   is free it is refused (counted). A packet that contradicts a followed
-//!   session (wrong channel, or off its predicted time) is ignored and
-//!   counted, never obeyed: the session keeps its hypotheses and timing and
-//!   ends only by its own misses or silence.
+//! - **Confirmation.** A key ID that is not followed is a *candidate*, a
+//!   16-byte entry in a table of [`CANDIDATES`] (its hypotheses are rebuilt
+//!   from its last two packets, never stored). It is never visited: it only
+//!   grows from packets the plan's scanning happens to hear. It is followed
+//!   once it holds [`CONFIRM_HITS`] packets that are mutually consistent in
+//!   channel *and* time (each inside the window the earlier ones predict,
+//!   [`guard_us`]) and one of the [`MAX_SESSIONS`] followed slots is free.
+//! - **A flood of new key IDs cannot push a real drone out.** When the
+//!   table is full a new key ID takes the entry with the oldest last packet
+//!   (counted in [`Follower::evicted`]). Every new key ID costs the node one
+//!   full decode of a valid burst, and the decode budget
+//!   (`rawcap::budget`) lets through at most 87 of those in
+//!   [`TENTATIVE_LOST_US`] (30 s at the fastest measured decode, 144 ms;
+//!   `crates/rawcap/tests/follow_forge.rs` checks it), fewer than
+//!   [`CANDIDATES`]. So a flood only ever displaces candidates older than
+//!   that, which would have expired anyway, and the forger has nothing to
+//!   steer: no rate, timing or choice of key IDs gets a younger entry
+//!   evicted. Before 2026-11-18 there were four such slots and a forged key
+//!   ID every 0.7 s replaced a real drone's first packet within ~3 s, long
+//!   before the plan heard it again (~8 s): the drone was never followed.
+//! - **No eviction or restart of a followed session.** A packet that
+//!   contradicts a followed session (wrong channel, or off its predicted
+//!   time) is ignored and counted, never obeyed: the session keeps its
+//!   hypotheses and timing and ends only by its own misses or silence. A
+//!   confirmed candidate never displaces a followed session; with every
+//!   slot held it waits (still counting packets) until one ends.
 //! - **Time share.** Every visit is paid from a credit ([`Share`]) that
 //!   earns [`SHARE_PERMILLE`] of the time spent on the plan and holds at most
 //!   [`SHARE_CREDIT_US`], so however many sessions there are, the follower
 //!   takes at most about half of the receiver's time from the plan.
 //!
-//! A forger who follows the published schedule exactly can still create
-//! followed sessions and spend the follower's share on its own channels,
-//! and one who copies a real drone's key ID can feed its session packets
-//! that agree with the hypotheses. Detection by the plan is not affected.
+//! What a forger can still do: follow the published schedule exactly and
+//! create followed sessions; with all [`MAX_SESSIONS`] slots held before a
+//! real drone is confirmed, the drone is not followed (it is still heard by
+//! the plan, which is then cut into the gaps between the forged sessions'
+//! visits: see docs/DRONEID-O4.md for what that costs). Copy a real drone's
+//! key ID and feed its candidate inconsistent packets (it keeps restarting),
+//! or its followed session consistent ones. And the plan's own hearing is
+//! not uniform in time: while sessions are followed it is away from the
+//! plan around their publication times, so a drone that publishes at the
+//! same moments as a followed (forged) session is heard by the plan only
+//! when that session's visit is declined.
 //!
-//! `no_std`, integer time in microseconds, no heap, ~70 bytes per session.
+//! `no_std`, integer time in microseconds, no heap: [`MAX_SESSIONS`] x ~64
+//! bytes of sessions and [`CANDIDATES`] x 16 bytes of candidates (~2.3 KiB
+//! with the share, `size_of::<Follower>()`).
 
 /// Seven O4 channel centres in spec table order (index `i`), 100 kHz units.
 pub const CHANNELS: [u32; 7] = [24295, 24445, 57565, 57765, 57965, 58165, 24145];
@@ -67,8 +90,9 @@ pub const CHANNELS: [u32; 7] = [24295, 24445, 57565, 57765, 57965, 58165, 24145]
 pub const PERIOD_US: u64 = 640_000;
 /// Sessions followed (confirmed) at once.
 pub const MAX_SESSIONS: usize = 4;
-/// Sessions being confirmed at once, in slots of their own.
-pub const MAX_TENTATIVE: usize = 4;
+/// Key IDs remembered while not followed (see the module docs: more than
+/// the decode budget can let new key IDs through in [`TENTATIVE_LOST_US`]).
+pub const CANDIDATES: usize = 128;
 /// Mutually consistent packets (the first one included) before a session
 /// is followed. Until then the plan's scanning is the only way it grows: a
 /// parked receiver hears about one publication in seven, the DroneID plan
@@ -76,9 +100,9 @@ pub const MAX_TENTATIVE: usize = 4;
 /// after its first packet. A forger must place three packets on the right
 /// channels within the predicted windows instead of one anywhere.
 pub const CONFIRM_HITS: u32 = 3;
-/// A tentative session is dropped this long after its last consistent
-/// packet (longer than [`LOST_US`]: it is never visited, so its packets
-/// come only from scanning).
+/// A candidate is dropped this long after its last consistent packet
+/// (longer than [`LOST_US`]: it is never visited, so its packets come only
+/// from scanning).
 pub const TENTATIVE_LOST_US: u64 = 30_000_000;
 /// Share of the receiver's time the follower may take from the plan, per
 /// mille: following one drone costs about a fifth (a ~50 ms window, the
@@ -92,6 +116,9 @@ pub const SHARE_CREDIT_US: u64 = 1_000_000;
 pub const MAX_MISSES: u8 = 4;
 /// A session with no valid packet for this long is dropped (about 9 periods).
 pub const LOST_US: u64 = 6_000_000;
+/// A followed session this long without a packet goes before the others
+/// ([`Follower::next`]), so the share cannot starve it into [`LOST_US`].
+pub const STARVE_US: u64 = 2_000_000;
 /// Window half-width at one period out, and its growth per further period.
 pub const GUARD_US: u64 = 25_000;
 pub const GUARD_PER_PERIOD_US: u64 = 4_000;
@@ -160,7 +187,7 @@ pub const fn guard_us(k: u64) -> u64 {
     if g < 3 * GUARD_US { g } else { 3 * GUARD_US }
 }
 
-/// One session (one O4 key ID), tentative or followed.
+/// One followed session (one O4 key ID).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Session {
     pub id: u32,
@@ -171,32 +198,13 @@ pub struct Session {
     /// Measured publication period (starts at [`PERIOD_US`]).
     pub period_us: u64,
     pub misses: u8,
-    /// Mutually consistent packets (1 = just acquired).
+    /// Mutually consistent packets.
     pub hits: u32,
-    /// Times a packet contradicted every hypothesis and restarted the
-    /// session (tentative sessions only).
-    pub restarts: u32,
-    /// Followed: [`CONFIRM_HITS`] consistent packets, and a followed slot.
-    pub confirmed: bool,
-    /// Packets that contradicted the followed session and were ignored.
+    /// Packets that contradicted the session and were ignored.
     pub contradictions: u32,
 }
 
 impl Session {
-    fn new(id: u32, t: u64, freq: u32) -> Self {
-        Session {
-            id,
-            cand: Set::on(freq),
-            anchor_us: t,
-            period_us: PERIOD_US,
-            misses: 0,
-            hits: 1,
-            restarts: 0,
-            confirmed: false,
-            contradictions: 0,
-        }
-    }
-
     /// Publications between the anchor and `t`, rounded.
     fn ordinal(&self, t: u64) -> u64 {
         (t.saturating_sub(self.anchor_us) + self.period_us / 2) / self.period_us
@@ -230,6 +238,49 @@ impl Session {
     }
 }
 
+/// A key ID heard but not followed: its last packet, and the one before
+/// (enough to rebuild its hypotheses). 16 bytes; `hits` 0 = an empty entry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: u32,
+    /// Time of the last consistent packet.
+    pub t_us: u64,
+    /// Channel index ([`CHANNELS`]) of the last packet and of the one
+    /// before, and the publications between them.
+    pub ch: u8,
+    pub prev_ch: u8,
+    pub gap: u8,
+    /// Mutually consistent packets (1 = just heard; saturates).
+    pub hits: u8,
+}
+
+impl Candidate {
+    fn new(id: u32, t_us: u64, ch: usize) -> Self {
+        Candidate { id, t_us, ch: ch as u8, prev_ch: 0, gap: 0, hits: 1 }
+    }
+
+    /// Counter hypotheses for the last packet, from the last two (a
+    /// superset of what every packet would leave, which only makes
+    /// matching a little more lenient).
+    pub fn hypotheses(&self) -> Set {
+        let last = CHANNELS[self.ch as usize];
+        if self.hits <= 1 { Set::on(last) } else { Set::on(CHANNELS[self.prev_ch as usize]).advance(self.gap as u64, last) }
+    }
+
+    /// As a session anchored on its last packet (for predictions).
+    fn as_session(&self) -> Session {
+        Session {
+            id: self.id,
+            cand: self.hypotheses(),
+            anchor_us: self.t_us,
+            period_us: PERIOD_US,
+            misses: 0,
+            hits: self.hits as u32,
+            contradictions: 0,
+        }
+    }
+}
+
 /// Where and when to listen for a predicted publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Appointment {
@@ -249,21 +300,19 @@ pub struct Appointment {
 /// What an observation did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Observed {
-    /// First packet of a session: a tentative session started.
+    /// First packet of a key ID: a candidate started.
     Acquired,
-    /// Consistent with the session; the hypotheses left.
+    /// Consistent with the session or candidate; the hypotheses left.
     Matched { hypotheses: u32 },
     /// Consistent, and the session is now followed.
     Confirmed { hypotheses: u32 },
     /// Same publication heard again (e.g. two bursts in one capture).
     Duplicate,
-    /// A tentative session that no hypothesis explained it for (or the gap
-    /// was too long): restarted from this packet.
+    /// A candidate that no hypothesis explained it for (or the gap was too
+    /// long): restarted from this packet.
     Restarted,
     /// It contradicts a followed session: ignored (counted).
     Contradicted,
-    /// A new key ID with no tentative slot it may take: ignored (counted).
-    Refused,
 }
 
 /// The follower's share of the receiver's time ([`SHARE_PERMILLE`]): a
@@ -321,53 +370,79 @@ impl Share {
     }
 }
 
-const SLOTS: usize = MAX_SESSIONS + MAX_TENTATIVE;
-
-/// Followed and tentative sessions, and the time share.
-#[derive(Clone, Debug, Default)]
+/// Followed sessions, candidates, and the time share.
+#[derive(Clone, Debug)]
 pub struct Follower {
-    pub sessions: [Option<Session>; SLOTS],
+    pub sessions: [Option<Session>; MAX_SESSIONS],
+    pub candidates: [Candidate; CANDIDATES],
     pub share: Share,
-    /// Packets that contradicted a followed session (ignored), and new key
-    /// IDs refused for want of a tentative slot.
+    /// Packets that contradicted a followed session (ignored), and
+    /// candidates displaced by a new key ID before they expired (with the
+    /// decode budget in front, a flood cannot make this grow: see the
+    /// module docs).
     pub contradictions: u32,
-    pub refused: u32,
+    pub evicted: u32,
+}
+
+impl Default for Follower {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Follower {
     pub const fn new() -> Self {
-        Follower { sessions: [None; SLOTS], share: Share::new(), contradictions: 0, refused: 0 }
+        Follower {
+            sessions: [None; MAX_SESSIONS],
+            candidates: [Candidate { id: 0, t_us: 0, ch: 0, prev_ch: 0, gap: 0, hits: 0 }; CANDIDATES],
+            share: Share::new(),
+            contradictions: 0,
+            evicted: 0,
+        }
     }
 
+    /// Forget every session and candidate (counters and share kept): the
+    /// bench's `hil forge` starts from nothing. In place, so no copy of the
+    /// table passes through the stack.
+    pub fn clear(&mut self) {
+        self.sessions = [None; MAX_SESSIONS];
+        for c in self.candidates.iter_mut() {
+            *c = Candidate::default();
+        }
+    }
+
+    /// The followed session of key ID `id`.
     pub fn session(&self, id: u32) -> Option<&Session> {
         self.sessions.iter().flatten().find(|s| s.id == id)
+    }
+
+    /// The candidate (not yet followed) of key ID `id`.
+    pub fn candidate(&self, id: u32) -> Option<&Candidate> {
+        self.candidates.iter().find(|c| c.hits > 0 && c.id == id)
     }
 
     fn slot(&self, id: u32) -> Option<usize> {
         self.sessions.iter().position(|s| s.is_some_and(|s| s.id == id))
     }
 
-    /// Followed (confirmed) sessions.
+    /// Followed sessions.
     pub fn active(&self) -> usize {
-        self.sessions.iter().flatten().filter(|s| s.confirmed).count()
+        self.sessions.iter().flatten().count()
     }
 
-    /// Sessions still being confirmed.
+    /// Candidates (key IDs heard, not followed).
     pub fn tentative(&self) -> usize {
-        self.sessions.iter().flatten().filter(|s| !s.confirmed).count()
+        self.candidates.iter().filter(|c| c.hits > 0).count()
     }
 
     /// A valid packet of session `id` heard at `t_us` on `freq`. Packets
     /// on frequencies outside the seven-channel table are ignored (None).
     pub fn observe(&mut self, id: u32, t_us: u64, freq: u32) -> Option<Observed> {
-        if !CHANNELS.contains(&freq) {
-            return None;
-        }
+        let ch = CHANNELS.iter().position(|&c| c == freq)?;
         self.expire(t_us);
         let Some(slot) = self.slot(id) else {
-            return Some(self.acquire(id, t_us, freq));
+            return Some(self.observe_candidate(id, t_us, ch));
         };
-        let followed = self.active();
         let s = self.sessions[slot].as_mut()?;
         if t_us < s.anchor_us {
             return Some(Observed::Duplicate);
@@ -377,17 +452,11 @@ impl Follower {
             return Some(Observed::Duplicate);
         }
         let Some(next) = s.fits(k, t_us, freq) else {
-            if s.confirmed {
-                // Never obeyed: a forged packet with this key ID would
-                // otherwise wipe the real drone's hypotheses.
-                s.contradictions += 1;
-                self.contradictions += 1;
-                return Some(Observed::Contradicted);
-            }
-            let r = s.restarts + 1;
-            *s = Session::new(id, t_us, freq);
-            s.restarts = r;
-            return Some(Observed::Restarted);
+            // Never obeyed: a forged packet with this key ID would
+            // otherwise wipe the real drone's hypotheses.
+            s.contradictions += 1;
+            self.contradictions += 1;
+            return Some(Observed::Contradicted);
         };
         // Refine the period from this gap, within +-1% of nominal.
         let measured = (t_us - s.anchor_us) / k;
@@ -400,49 +469,85 @@ impl Follower {
         s.anchor_us = t_us;
         s.misses = 0;
         s.hits += 1;
-        let hypotheses = next.len();
-        if !s.confirmed && s.hits >= CONFIRM_HITS && followed < MAX_SESSIONS {
-            s.confirmed = true;
-            return Some(Observed::Confirmed { hypotheses });
+        Some(Observed::Matched { hypotheses: next.len() })
+    }
+
+    /// A packet of key ID `id`, not followed.
+    fn observe_candidate(&mut self, id: u32, t_us: u64, ch: usize) -> Observed {
+        let Some(i) = self.candidates.iter().position(|c| c.hits > 0 && c.id == id) else {
+            self.acquire(id, t_us, ch);
+            return Observed::Acquired;
+        };
+        let c = self.candidates[i];
+        if t_us < c.t_us {
+            return Observed::Duplicate;
         }
-        Some(Observed::Matched { hypotheses })
+        let s = c.as_session();
+        let k = s.ordinal(t_us);
+        if k == 0 {
+            return Observed::Duplicate;
+        }
+        let Some(next) = s.fits(k, t_us, CHANNELS[ch]) else {
+            self.candidates[i] = Candidate::new(id, t_us, ch);
+            return Observed::Restarted;
+        };
+        let hits = c.hits.saturating_add(1);
+        if hits as u32 >= CONFIRM_HITS
+            && let Some(free) = self.sessions.iter().position(|s| s.is_none())
+        {
+            self.sessions[free] = Some(Session {
+                id,
+                cand: next,
+                anchor_us: t_us,
+                period_us: PERIOD_US,
+                misses: 0,
+                hits: hits as u32,
+                contradictions: 0,
+            });
+            self.candidates[i] = Candidate::default();
+            return Observed::Confirmed { hypotheses: next.len() };
+        }
+        self.candidates[i] = Candidate { id, t_us, ch: ch as u8, prev_ch: c.ch, gap: k as u8, hits };
+        Observed::Matched { hypotheses: next.len() }
     }
 
-    /// A new key ID: a free tentative slot, else the stalest tentative
-    /// session that holds a single packet; never a followed session, nor
-    /// one with a consistent match.
-    fn acquire(&mut self, id: u32, t_us: u64, freq: u32) -> Observed {
-        let slot = if self.tentative() < MAX_TENTATIVE {
-            self.sessions.iter().position(|s| s.is_none())
-        } else {
-            (0..SLOTS)
-                .filter(|&i| self.sessions[i].is_some_and(|s| !s.confirmed && s.hits <= 1))
-                .min_by_key(|&i| self.sessions[i].map_or(0, |s| s.anchor_us))
+    /// A new key ID: an empty entry, else the one whose last packet is
+    /// oldest (counted: see the module docs for why a flood cannot steer
+    /// this onto a live candidate).
+    fn acquire(&mut self, id: u32, t_us: u64, ch: usize) {
+        let i = match self.candidates.iter().position(|c| c.hits == 0) {
+            Some(i) => i,
+            None => {
+                self.evicted += 1;
+                (0..CANDIDATES).min_by_key(|&i| self.candidates[i].t_us).unwrap_or(0)
+            }
         };
-        let Some(i) = slot else {
-            self.refused += 1;
-            return Observed::Refused;
-        };
-        self.sessions[i] = Some(Session::new(id, t_us, freq));
-        Observed::Acquired
+        self.candidates[i] = Candidate::new(id, t_us, ch);
     }
 
-    /// Drop followed sessions silent for [`LOST_US`] and tentative ones for
+    /// Drop followed sessions silent for [`LOST_US`] and candidates for
     /// [`TENTATIVE_LOST_US`].
     pub fn expire(&mut self, now_us: u64) {
         for s in self.sessions.iter_mut() {
-            let lost = |x: &Session| if x.confirmed { LOST_US } else { TENTATIVE_LOST_US };
-            if s.is_some_and(|x| now_us.saturating_sub(x.anchor_us) > lost(&x)) {
+            if s.is_some_and(|x| now_us.saturating_sub(x.anchor_us) > LOST_US) {
                 *s = None;
+            }
+        }
+        for c in self.candidates.iter_mut() {
+            if c.hits > 0 && now_us.saturating_sub(c.t_us) > TENTATIVE_LOST_US {
+                *c = Candidate::default();
             }
         }
     }
 
-    /// The prediction for session `id` whose window has not yet closed at
-    /// `now_us` (any session; only followed ones get appointments, see
-    /// [`Follower::next`]).
+    /// The prediction for key ID `id` (followed or candidate) whose window
+    /// has not yet closed at `now_us`. Only followed sessions get
+    /// appointments ([`Follower::next`]).
     pub fn predict(&self, id: u32, now_us: u64) -> Option<Appointment> {
-        let s = self.session(id)?;
+        let s = match self.session(id) {
+            Some(s) => *s,
+            None => self.candidate(id)?.as_session(),
+        };
         let mut k = s.ordinal(now_us).max(1);
         loop {
             let at = s.anchor_us + k * s.period_us;
@@ -463,18 +568,24 @@ impl Follower {
         }
     }
 
-    /// The earliest open appointment over the followed sessions (after
-    /// expiring the lost ones). With two drones whose windows overlap, the
-    /// earlier wins; the other is skipped this time (not counted as a miss).
+    /// The next appointment over the followed sessions (after expiring the
+    /// lost ones): the earliest open window, unless a session has gone
+    /// [`STARVE_US`] without a packet, in which case the window of the one
+    /// silent longest. With two drones whose windows overlap, the earlier
+    /// wins; the other is skipped this time (not counted as a miss).
     /// Whether the receiver may go is [`Follower::grant`]'s decision.
+    ///
+    /// Without the starvation rule the share went first come: with four
+    /// forged sessions taking every window, a real drone followed before
+    /// them had its visits declined until it expired ([`LOST_US`]), and
+    /// with every slot taken it was never followed again.
     pub fn next(&mut self, now_us: u64) -> Option<Appointment> {
         self.expire(now_us);
-        self.sessions
-            .iter()
-            .flatten()
-            .filter(|s| s.confirmed)
-            .filter_map(|s| self.predict(s.id, now_us))
-            .min_by_key(|a| a.start_us)
+        let starving = self.sessions.iter().flatten().filter(|s| now_us.saturating_sub(s.anchor_us) > STARVE_US).min_by_key(|s| s.anchor_us);
+        if let Some(s) = starving {
+            return self.predict(s.id, now_us);
+        }
+        self.sessions.iter().flatten().filter_map(|s| self.predict(s.id, now_us)).min_by_key(|a| a.start_us)
     }
 
     /// Whether leaving the plan at `depart_us` for `a` would be within the
@@ -521,6 +632,15 @@ impl Follower {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory() {
+        // The module docs' figures (static: the follower lives in node-sdr's
+        // boxed Radio, no heap of its own).
+        assert_eq!(core::mem::size_of::<Candidate>(), 16);
+        assert!(core::mem::size_of::<Option<Session>>() <= 72, "{}", core::mem::size_of::<Option<Session>>());
+        assert!(core::mem::size_of::<Follower>() <= 2_400, "{}", core::mem::size_of::<Follower>());
+    }
 
     #[test]
     fn schedule_matches_the_published_formula() {
@@ -692,10 +812,10 @@ mod tests {
         let mut f = Follower::new();
         f.observe(3, pubs[0].0, pubs[0].1);
         assert_eq!(f.observe(3, pubs[0].0 + 300, pubs[0].1), Some(Observed::Duplicate));
-        // 100 publications later (64 s): the tentative session expired
+        // 100 publications later (64 s): the candidate expired
         // (TENTATIVE_LOST_US) and starts again.
         assert_eq!(f.observe(3, pubs[100].0, pubs[100].1), Some(Observed::Acquired));
-        assert_eq!(f.session(3).unwrap().hits, 1);
+        assert_eq!(f.candidate(3).unwrap().hits, 1);
     }
 
     /// Confirm session `id` from publications `pubs` (heard back to back).
@@ -706,7 +826,7 @@ mod tests {
                 assert!(matches!(r, Some(Observed::Confirmed { .. })), "{r:?}");
             }
         }
-        assert!(f.session(id).unwrap().confirmed);
+        assert!(f.session(id).is_some());
     }
 
     #[test]
@@ -737,9 +857,9 @@ mod tests {
         // Right channel, 200 ms off its publication time.
         assert_eq!(f.observe(2, pubs[1].0 + 200_000, pubs[1].1), Some(Observed::Restarted));
         // Wrong channel at the right time.
-        let wrong = CHANNELS.iter().copied().find(|&c| c != pubs[3].1 && f.session(2).unwrap().cand.advance(2, c).is_empty()).unwrap();
+        let wrong = CHANNELS.iter().copied().find(|&c| c != pubs[3].1 && f.candidate(2).unwrap().hypotheses().advance(2, c).is_empty()).unwrap();
         assert_eq!(f.observe(2, pubs[1].0 + 200_000 + 2 * PERIOD_US, wrong), Some(Observed::Restarted));
-        assert!(!f.session(2).unwrap().confirmed);
+        assert!(f.session(2).is_none());
         // Random channels at publication times confirm only by luck: a
         // channel matches about one time in seven, so three in a row about
         // one in fifty; random times almost never.
@@ -751,7 +871,7 @@ mod tests {
             x ^= x >> 17;
             x ^= x << 5;
             let t = p * 2 * PERIOD_US + (x >> 8) as u64 % PERIOD_US;
-            if g.observe(9, t, CHANNELS[(x % 7) as usize]) == Some(Observed::Confirmed { hypotheses: 0 }) || g.session(9).is_some_and(|s| s.confirmed) {
+            if g.observe(9, t, CHANNELS[(x % 7) as usize]) == Some(Observed::Confirmed { hypotheses: 0 }) || g.session(9).is_some() {
                 confirmed += 1;
                 g = Follower::new();
             }
@@ -770,24 +890,27 @@ mod tests {
         let t = real[2].0;
         for k in 1..=40u32 {
             let r = f.observe(0x100 + k, t + k as u64 * 1000, CHANNELS[k as usize % 7]);
-            assert!(matches!(r, Some(Observed::Acquired | Observed::Refused)), "{r:?}");
+            assert_eq!(r, Some(Observed::Acquired));
         }
-        assert!(f.session(0xD0).is_some_and(|s| s.confirmed));
-        assert_eq!((f.active(), f.tentative()), (1, MAX_TENTATIVE));
-        // Single-packet tentatives are replaced (stalest first), so new IDs
-        // keep being taken; none of them is visited.
-        assert_eq!(f.refused, 0);
+        assert!(f.session(0xD0).is_some());
+        assert_eq!((f.active(), f.tentative()), (1, 40));
+        assert_eq!(f.evicted, 0);
+        // None of them is visited.
         let a = f.next(t + 50_000).unwrap();
         assert_eq!((a.id, a.at_us, a.freq), (0xD0, real[3].0, real[3].1));
-        // A tentative session with a consistent match is not replaced either.
-        let other = drone(99, t + 100_000, 10, PERIOD_US);
+        // A full candidate table gives up the entry whose last packet is
+        // oldest, whatever its hits: never a followed session.
         let mut g = Follower::new();
-        for id in 0..MAX_TENTATIVE as u32 {
-            g.observe(id, other[0].0 + id as u64, other[0].1);
-            g.observe(id, other[1].0 + id as u64, other[1].1);
+        confirm(&mut g, 0xD0, &real);
+        g.observe(0xC0, t + 1_000, real[3].1);
+        for k in 1..CANDIDATES as u32 {
+            g.observe(0x100 + k, t + 2_000 + k as u64 * 1000, CHANNELS[k as usize % 7]);
         }
-        assert_eq!(g.observe(77, other[2].0, other[2].1), Some(Observed::Refused));
-        assert_eq!(g.refused, 1);
+        assert_eq!((g.tentative(), g.evicted), (CANDIDATES, 0));
+        g.observe(0x999, t + 500_000, CHANNELS[0]);
+        assert_eq!(g.evicted, 1);
+        assert!(g.candidate(0xC0).is_none() && g.candidate(0x101).is_some() && g.candidate(0x999).is_some());
+        assert!(g.session(0xD0).is_some());
     }
 
     #[test]
@@ -807,7 +930,7 @@ mod tests {
         // first, but even so it is never restarted by a packet).
         let s = f.session(0xAB).unwrap();
         assert_eq!((s.cand, s.anchor_us, s.period_us, s.hits), (before.cand, before.anchor_us, before.period_us, before.hits));
-        assert_eq!((s.contradictions, f.contradictions, s.restarts), (2, 2, 0));
+        assert_eq!((s.contradictions, f.contradictions), (2, 2));
         // The real drone's next packets still match.
         assert!(matches!(f.observe(0xAB, real[4].0, real[4].1), Some(Observed::Matched { .. })));
         assert!(matches!(f.observe(0xAB, real[5].0, real[5].1), Some(Observed::Matched { .. })));
@@ -870,6 +993,51 @@ mod tests {
         assert!(!s.affordable(100_000_000, 102_500_000));
     }
 
+    fn followed(f: &Follower, id: u32) -> bool {
+        f.session(id).is_some()
+    }
+
+    /// A real drone heard by scanning every `every`-th publication, and a new
+    /// forged key ID every `flood_us` on some O4 channel. Returns the
+    /// publication at which the drone was followed.
+    fn flooded(c0: u8, every: usize, flood_us: u64, pubs_n: usize) -> Option<usize> {
+        let pubs = drone(c0, 3_000_000, pubs_n, PERIOD_US);
+        let mut f = Follower::new();
+        let mut next_new = 1_000_000u64;
+        let mut new_id = 0x1000_0000u32;
+        for (p, &(t, freq)) in pubs.iter().enumerate() {
+            while next_new < t {
+                f.observe(new_id, next_new, CHANNELS[new_id as usize % 7]);
+                new_id += 1;
+                next_new += flood_us;
+            }
+            if p % every == 0 {
+                f.observe(5, t, freq);
+                if followed(&f, 5) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_flood_of_new_key_ids_cannot_keep_a_real_drone_from_being_followed() {
+        // Bench 2026-11-18 (docs/BENCH.md step 4): with a new forged key ID
+        // every 0.7 s the real drone's one-packet session was replaced long
+        // before the plan heard it again (about every 8 s), so it never
+        // reached CONFIRM_HITS. Same at the most valid decodes the node's
+        // decode budget lets through (rawcap::budget, ~2.8 a second at the
+        // fastest measured decode, 144 ms; tests/follow_forge.rs).
+        for flood_us in [700_000u64, 350_000] {
+            for (c0, every) in [(5u8, 13usize), (77, 11), (200, 17), (31, 23)] {
+                // Heard every `every` publications (7-15 s apart).
+                let p = flooded(c0, every, flood_us, 200);
+                assert_eq!(p, Some(every * (CONFIRM_HITS as usize - 1)), "c0 {c0} every {every} flood {flood_us}");
+            }
+        }
+    }
+
     #[test]
     fn a_real_drone_heard_by_scanning_is_confirmed_and_followed() {
         // Heard every 13th publication (the plan's chance on one channel),
@@ -877,7 +1045,7 @@ mod tests {
         let pubs = drone(5, 0, 200, PERIOD_US);
         let mut f = Follower::new();
         let mut p = 0;
-        while !f.session(4).is_some_and(|s| s.confirmed) {
+        while !f.session(4).is_some() {
             f.observe(4, pubs[p].0, pubs[p].1);
             p += 13;
         }
@@ -892,6 +1060,6 @@ mod tests {
                 assert!(f.missed(&a));
             }
         }
-        assert!(f.session(4).is_some_and(|s| s.confirmed));
+        assert!(f.session(4).is_some());
     }
 }
