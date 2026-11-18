@@ -18,6 +18,14 @@
 //! - `time`/`start` are when the position was received, not when the event
 //!   was written, and `stale` is that plus twice the track's stale time.
 //! - One event per line with no pretty-printing, to fit one UDP datagram.
+//! - Every drone and operator event says in its remarks that it is a claim:
+//!   `Claim: unverified broadcast`, or `Claim: DISPUTED, ...` with the other
+//!   claimed position when two transmitters claim the ID (`crate::claims`).
+//!   The uid stays `drone-<UAS ID>` (other sensors and tools key the same
+//!   drone on it), so a forger who keeps the ID moves nothing here: the
+//!   track's position is the established one, and the dispute is in the
+//!   remarks. An authentication message is reported as present, not
+//!   checked: the hub verifies no signature.
 
 use core::fmt::Write;
 
@@ -231,6 +239,23 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
     if !summary.is_empty() {
         write!(w, "; Note: {}", Xml(&summary))?;
     }
+    if track.spoof.auth_pages != 0 {
+        w.write_str("; Auth: message present, not checked")?;
+    }
+    claim(w, track, ctx.now_ms)
+}
+
+/// `; Claim: unverified broadcast`, or the dispute with the other claimed
+/// position (`crate::claims`).
+fn claim(w: &mut Buf<'_>, track: &Track, now: u64) -> core::fmt::Result {
+    let d: heapless::String<192> = render(crate::claims::Summary(track, now));
+    if d.is_empty() {
+        return w.write_str("; Claim: unverified broadcast");
+    }
+    write!(w, "; Claim: {}", Xml(&d))?;
+    if let Some(r) = track.claims.rival(now) {
+        write!(w, "; Other claim: {:.6},{:.6}", r.position.lat, r.position.lon)?;
+    }
     Ok(())
 }
 
@@ -264,8 +289,7 @@ pub fn operator_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<us
             "<detail><contact callsign=\"{}\"/>\
              <precisionlocation geopointsrc=\"gps\" altsrc=\"{}\"/>\
              <usericon iconsetpath=\"com.atakmap.android.maps.public/Civilian/Person.png\"/>\
-             <remarks>Pilot location for drone drone-{}; Source: {:?}</remarks>\
-             </detail></event>",
+             <remarks>Pilot location for drone drone-{}; Source: {:?}",
             Xml(&uid),
             if sys.value.operator_altitude.is_some() {
                 "gps"
@@ -274,7 +298,13 @@ pub fn operator_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<us
             },
             Xml(&base),
             sys.value.operator_location_type
-        )
+        )?;
+        w.write_str(if track.claims.disputed(ctx.now_ms) {
+            "; Claim: DISPUTED, two transmitters claim this ID"
+        } else {
+            "; Claim: unverified broadcast"
+        })?;
+        w.write_str("</remarks></detail></event>")
     })();
     w.finish()
 }

@@ -18,6 +18,9 @@ tracker.set_node_position(node, lat, lon);                    // optional (signa
 while let Some(ev) = tracker.take_spoof_flag(now_ms) {        // spoof flags, once each
     log(SpoofSuspect, &ev.data(), spoof::event_text(&ev, tracker.get(ev.track)));
 }
+while let Some(d) = tracker.take_dispute(now_ms) {            // two transmitters, one ID
+    log(IdDisputed, &d.data(), claims::event_text(&d, tracker.get(d.track)));
+}
 tracker.expire(now_ms);                                       // call ~1 Hz
 
 let ctx = tracker.context(now_ms, utc_ms);  // utc_ms: Option<u64>, from GPS time
@@ -107,6 +110,7 @@ the nodes' `{"t":"rid",...}` lines use.
 | `spoof` | object \| null | Spoofing / consistency checks (`spoof` module, `docs/SPOOFING.md`); null when no check fired and no authentication page was heard: `score` (0-100 combined suspicion; below 30 when every flag is weak), `flags` (array of `{check, conf, detail}`: `check` a snake-case name such as `"position_jump"`, `conf` 0-100, `detail` a number whose unit depends on the check), `auth` (authentication pages heard; not verified). Added 2026-11-17 |
 | `cont` | object \| null | The track this one probably continues under a new identity (`continuity` module): `prev` (its id; it may since have expired), `conf` (0-100), `id_changed` (true when the ID changed mid-flight, which is suspicious; false for a new identity between flights). Added 2026-11-17 |
 | `confirmed` | bool | Heard again at least a second after it was first heard (`probation`). False: not announced, not sent to TAK, possibly forged; list it last and quietly. A reader that does not know the field treats every track as confirmed. Added with WP-09 (2026-11-18) |
+| `claims` | object \| null | Rival claims on this ID (`claims` module, docs/SPOOFING.md "Impersonation and disputes"); null when there is nothing to say, which is the usual case: `disputed` (bool: two transmitters claim this ID right now; not an accusation of either), `what` (array of `"position"`, `"self_id"`, `"op_id"`, `"id"`), `since_ms` (hub ms the dispute began \| null), `followed` (the track switched to the other claim after its original went quiet), `ever` (disputed at some time), `rival` (the other claimed position while it is heard, `{lat, lon, src, n, age_ms, apart_m}`: `src` one of `"RemoteId"`, `"DroneId"`, `"DjiWifi"`, `"ControlLink"`, `"DroneIdO4"` (decrypted, not authenticated); `n` reports along its path; `apart_m` from the shown position \| null), `rejected` (position reports not shown because they did not fit the track's path, saturating at 255), `contradictory` (frames that named this ID beside another ID of the same type, applied to nothing). `loc` and `op` are always the established claim, never the rival's. Added with WP-10 (2026-11-18) |
 
 Example:
 
@@ -114,8 +118,12 @@ Example:
 {"t":"track","id":1,"state":"active","ids":[{"type":"SerialNumber","id":"1581F5FKD229400D"}],"ua":"HelicopterOrMultirotor","first_ms":4000,"last_ms":4500,"age_ms":500,"rssi":-83,"links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"band":"2.4","mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"band":"2.4","mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"loc":{"lat":39.948889,"lon":-75.15,"alt_geo":140.0,"alt_baro":130.0,"height":50.0,"height_ref":"AboveTakeoff","speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0}}
 ```
 
-A typical line is about 900 bytes (about 1.1 KB with a `dji` object). The worst case is 2702 bytes, with all seven slots, two IDs, escaped text, both DJI sources, four spoof flags and a continuity link. Size buffers with `json::MAX_LINE` (2816; 2432 before the `spoof`/`cont` objects, 1792 before protocol 4). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512). The `confirmed` field adds
-up to 19 bytes (worst case 2721).
+A typical line is about 900 bytes (about 1.1 KB with a `dji` object). The worst case is 2897 bytes, with all seven slots, two IDs, escaped text, both DJI sources, four spoof flags, a continuity link and a dispute over everything with a rival claim. Size buffers with `json::MAX_LINE` (3008; 2816 before the `claims` object, 2432 before the `spoof`/`cont` objects, 1792 before protocol 4). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512). `"claims":null` adds 14 bytes to every line; a full `claims` object up to 195.
+
+Nothing in a line is verified: every field is what a transmitter claimed (a
+dispute is the only thing that says two transmitters disagree). `spoof.auth`
+counts authentication pages heard; the hub checks no signature, so the most a
+display may say about them is "auth message present, not checked".
 
 ## Bands (added 2026-11-09)
 
@@ -470,6 +478,15 @@ bridge), so ATAK users see what they already know:
 
 Before a Basic ID arrives, `<UAS ID>` is `mac-<hex>`.
 
+Every event's remarks end with what the position is (WP-10): `Claim:
+unverified broadcast`, or, when two transmitters claim the ID, `Claim:
+DISPUTED: two transmitters claim this ID; another <source> claim <n> m from
+the shown one` and `Other claim: <lat>,<lon>` (operator events: `Claim:
+DISPUTED, two transmitters claim this ID`). The uid stays `drone-<UAS ID>`, as
+other sensors and tools key the same drone on it; the event's position is the
+track's established claim, never the rival's. `Auth: message present, not
+checked` when an authentication message was heard.
+
 | UA type | CoT type |
 |---|---|
 | Multirotor, helicopter, gyroplane, hybrid lift, none/unknown | `a-u-A-M-H-R` (as DragonSync) |
@@ -504,6 +521,12 @@ An empty field means unknown. `transports` is `|`-separated. A field is quoted
 - the `/api/state` object (golden, no fix, many tracks, every too-small buffer) and `own-pos` parsing
 - open FPV links (`tests_openlinks.rs`): kept apart from drones, merged per link, bounded, expired,
   golden JSON and CSV, and no identifier in any output unless `show_link_ids`
+- impersonation (`tests_claims.rs`, WP-10): a forged twin alternating with a real drone for 60 s
+  never moves it and gives it no spoof flag, only a dispute naming both claims; the track follows
+  a rival alone after 10 s; no merge, rename or fold on one frame; forged text fields; forged DJI
+  Wi-Fi, OcuSync and decrypted O4 positions; and the honest look-alikes (one drone on three
+  transmitters, Bluetooth address rotation, a new session ID, a GPS glitch, two nodes, a changed
+  Self-ID, an honest O4 drone, a quiet site)
 - floods (`tests_flood.rs`, WP-09): a real drone through 60 s of 200 fake IDs a second keeps
   its track, history and single alert; a new drone during a flood is confirmed within 2 s;
   repeating fakes; the flood alarm and its threshold (a 40-drone race does not raise it);

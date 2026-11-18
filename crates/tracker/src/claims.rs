@@ -534,6 +534,29 @@ impl Claims {
         self.disputed(now) || self.rival_alive(now) || self.rejected > 0 || self.contradictory > 0 || self.ever_disputed()
     }
 
+    /// Every field at its widest, a rival heard at `now` far away: for
+    /// the formatters' worst-case tests.
+    #[cfg(test)]
+    pub(crate) fn worst_for_tests(now: u64) -> Self {
+        let now32 = now as u32;
+        Claims {
+            rival_pos: e7(LatLon { lat: -89.123_456_7, lon: -179.123_456_7 }),
+            rival_first: now32.wrapping_sub(1_000_000),
+            rival_last: now32.wrapping_sub(99_999),
+            rival_addr: 1,
+            rival_frames: 255,
+            rival_src: ClaimSrc::DroneIdO4 as u8,
+            switches: 255,
+            bits: what::ALL | B_FOLLOWED | B_EVER,
+            marks: 0,
+            rejected: 255,
+            contradictory: 255,
+            last: now32.wrapping_sub(14_999),
+            open_s: u16::MAX,
+            guard: Guard::default(),
+        }
+    }
+
     /// New dispute aspects to hand out: marks them handed out.
     pub(crate) fn take_new(&mut self, now: u64) -> Option<u8> {
         let w = self.active(now);

@@ -609,7 +609,9 @@ fn json_golden() {
         r#""loc_src":"RemoteId","op_src":"RemoteId","home":null,"dji":null,"#,
         // The made-up serial's length character says 15, and 11 follow:
         // a weak flag, so the score stays below the report level.
-        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null,"confirmed":false}"#,
+        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null,"confirmed":false,"#,
+        // Nothing disputed, nothing held: no `claims` object.
+        r#""claims":null}"#,
         "\n"
     );
     assert_eq!(got, want);
@@ -649,7 +651,7 @@ fn cot_golden() {
         r#"<remarks>MAC: c0:11:22:33:44:55, RSSI: -83dBm; ID Type: SerialNumber; UA Type: HelicopterOrMultirotor (2); "#,
         r#"Operator ID: FIN87astrdge12k8; Speed: 5.25 m/s; Vert Speed: 0.5 m/s; Altitude: 140 m; Height: 50 m AboveTakeoff; "#,
         r#"Course: 90°; Status: Airborne; Description: Bench &lt;test&gt; &amp; co; Transport: WifiBeacon+BleLongRange; "#,
-        r#"Range: 1364 m; Bearing: 107°</remarks><color argb="-256"/></detail></event>"#,
+        r#"Range: 1364 m; Bearing: 107°; Claim: unverified broadcast</remarks><color argb="-256"/></detail></event>"#,
     );
     assert_eq!(s(&buf, n), want);
 
@@ -661,7 +663,7 @@ fn cot_golden() {
         r#"<point lat="39.9525830" lon="-75.1652220" hae="15.0" ce="9999999.0" le="9999999.0"/>"#,
         r#"<detail><contact callsign="pilot-1581F5FKD229400D"/><precisionlocation geopointsrc="gps" altsrc="gps"/>"#,
         r#"<usericon iconsetpath="com.atakmap.android.maps.public/Civilian/Person.png"/>"#,
-        r#"<remarks>Pilot location for drone drone-1581F5FKD229400D; Source: Takeoff</remarks></detail></event>"#,
+        r#"<remarks>Pilot location for drone drone-1581F5FKD229400D; Source: Takeoff; Claim: unverified broadcast</remarks></detail></event>"#,
     );
     assert_eq!(s(&buf, n), want);
 
@@ -836,6 +838,8 @@ fn json_worst_case_fits() {
     t.continuity.previous = Some(TrackId(u32::MAX));
     t.continuity.link_confidence = 100;
     t.continuity.identity_changed = false;
+    // A dispute over everything, with a far rival claim.
+    t.claims = claims::Claims::worst_for_tests(u64::MAX / 2);
     tr.set_own_position(
         89.999_999_9,
         179.999_999_9,

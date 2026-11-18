@@ -877,3 +877,56 @@ fn quiet_honest_site_raises_nothing() {
     assert!(tr.take_dispute(ms).is_none());
     assert_eq!(tr.disputed_count(ms), 0);
 }
+
+/// What a disputed track looks like outside: `/api/state` carries the
+/// `claims` object with both positions, CoT keeps the uid and says so in
+/// the remarks; a quiet track says "unverified broadcast" and nothing else.
+#[test]
+fn outputs_say_disputed_and_unverified() {
+    let mut tr = hub();
+    let mut ms = 0;
+    while ms < 20_000 {
+        real_frame(&mut tr, ms);
+        if ms >= 5_000 {
+            forged_frame(&mut tr, ms + 250);
+        }
+        ms += 500;
+    }
+    let id = by_serial(&tr, SN).id;
+    let ctx = tr.context(ms, Some(1_794_232_987_250 + ms));
+    let t = tr.get(id).unwrap();
+    let mut buf = [0u8; json::MAX_LINE];
+    let n = json::track_line(t, &ctx, &mut buf).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+    let c = &v["claims"];
+    assert_eq!(c["disputed"], true, "{v}");
+    assert_eq!(c["what"], serde_json::json!(["position"]));
+    assert_eq!(c["rival"]["src"], "RemoteId");
+    assert!(c["rival"]["apart_m"].as_f64().unwrap() > 2_000.0);
+    assert!((c["rival"]["lat"].as_f64().unwrap() - fake_at(ms - 250).lat).abs() < 1e-3);
+    assert!((v["loc"]["lat"].as_f64().unwrap() - real_at(ms - 500).lat).abs() < 1e-4, "shown position is the real one");
+    assert_eq!(c["rejected"], 30);
+    let mut big = [0u8; cot::MAX_EVENT];
+    let n = cot::drone_event(t, &ctx, &mut big).unwrap();
+    let x = core::str::from_utf8(&big[..n]).unwrap();
+    assert!(x.contains("uid=\"drone-1ZZZ9FAKE00001\""), "{x}");
+    assert!(x.contains("; Claim: DISPUTED: two transmitters claim this ID; another Remote ID claim "), "{x}");
+    assert!(x.contains("; Other claim: 39.96"), "{x}");
+    let n = cot::operator_event(t, &ctx, &mut big).unwrap();
+    let x = core::str::from_utf8(&big[..n]).unwrap();
+    assert!(x.contains("; Claim: DISPUTED, two transmitters claim this ID</remarks>"), "{x}");
+
+    // A quiet drone: no `claims` object, "unverified broadcast" in CoT.
+    let mut tr = hub();
+    for ms in (0..5_000).step_by(500) {
+        real_frame(&mut tr, ms);
+    }
+    let ctx = tr.context(5_000, Some(1_794_232_987_250 + 5_000));
+    let t = by_serial(&tr, SN);
+    let n = json::track_line(t, &ctx, &mut buf).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+    assert!(v["claims"].is_null(), "{v}");
+    let n = cot::drone_event(t, &ctx, &mut big).unwrap();
+    let x = core::str::from_utf8(&big[..n]).unwrap();
+    assert!(x.ends_with("; Claim: unverified broadcast</remarks><color argb=\"-256\"/></detail></event>"), "{x}");
+}
