@@ -183,7 +183,8 @@ async fn main(spawner: Spawner) -> ! {
             (k.rate_ppm(), k.last_error_ms, k.age_us(up).map_or(-1, |a| (a / 1000) as i64))
         });
         let (cp, cr, crep, cdrop, csw, cfol) = control::stats();
-        out::line(format_args!(r#"{{"t":"ctrl_stats","packets":{cp},"recognised":{cr},"reports":{crep},"dropped":{cdrop},"windows":{csw},"follows":{cfol}}}"#));
+        let (fref, fcut) = (c.follows_refused.load(Relaxed), c.follows_cut.load(Relaxed));
+        out::line(format_args!(r#"{{"t":"ctrl_stats","packets":{cp},"recognised":{cr},"reports":{crep},"dropped":{cdrop},"windows":{csw},"follows":[{cfol},{fref},{fcut}]}}"#));
         out::line(format_args!(
             r#"{{"t":"stats","up_us":{up},"packets":{packets},"air":{air},"rejected":{},"rate_dropped":{},"uart_drops":{},"usb_drops":{},"radio_err":{},"retunes":{},"rx_restarts":{},"syncs":{},"utc":{},"clock_ppm":{clock_rate:.1},"clock_err_ms":{clock_err},"sync_age_ms":{clock_age},"plan_id":{},"cmds":[{},{},{}]}}"#,
             c.rejected.load(Relaxed),
