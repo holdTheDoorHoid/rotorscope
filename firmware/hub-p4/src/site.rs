@@ -27,6 +27,10 @@ use crate::sd::Logger;
 pub struct Site {
     /// Node positions (the mute rules live in the tracker).
     st: SiteState,
+    /// The placed hub home changed (file load or an operator line): the
+    /// main loop hands it to the GPS checks (`take_home`). `Some(None)`:
+    /// cleared.
+    home_changed: Option<Option<(f64, f64, Option<f64>)>>,
 }
 
 impl Site {
@@ -34,6 +38,11 @@ impl Site {
     /// and the operator's lines last said; off when never said.
     pub fn control(&self) -> (bool, bool) {
         (self.st.control_ids.unwrap_or(false), self.st.control_content.unwrap_or(false))
+    }
+
+    /// The placed hub home (`home` line), if it changed since the last call.
+    pub fn take_home(&mut self) -> Option<Option<(f64, f64, Option<f64>)>> {
+        self.home_changed.take()
     }
 }
 
@@ -106,6 +115,17 @@ impl Site {
         if refused > 0 {
             crate::println!("hub-p4: site file: {refused} mute rules refused by the tracker");
         }
+        if st.home != self.st.home {
+            let mut t: heapless::String<128> = heapless::String::new();
+            let _ = match st.home {
+                Some((lat, lon, _)) => write!(t, "site file changed: hub home placed at {lat:.7} {lon:.7}; GPS spoofing checks use it"),
+                None => write!(t, "site file changed: placed hub home cleared"),
+            };
+            ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+            crate::println!("hub-p4: {t}");
+            self.home_changed = Some(st.home);
+        }
+        self.st.home = st.home;
         self.st.nodes = st.nodes.clone();
         self.st.control_ids = st.control_ids;
         self.st.control_content = st.control_content;
@@ -122,6 +142,10 @@ impl Site {
             }
             SiteLine::UnmuteAll => app.tracker.unmute_all(now),
             l @ SiteLine::Control { .. } => self.st.apply(l),
+            l @ (SiteLine::Home { .. } | SiteLine::HomeClear) => {
+                self.st.apply(l);
+                self.home_changed = Some(self.st.home);
+            }
             SiteLine::AllNodesHere | SiteLine::Nothing => {}
         }
     }

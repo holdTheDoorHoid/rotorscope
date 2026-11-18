@@ -132,8 +132,12 @@ impl Chain {
         b[off::PREV..off::PREV + 32].copy_from_slice(&self.head);
         b[off::UPTIME..off::UPTIME + 8].copy_from_slice(&ctx.uptime_ms.to_le_bytes());
         b[off::UTC..off::UTC + 8].copy_from_slice(&ctx.utc_ms.unwrap_or(0).to_le_bytes());
-        // No UTC means no time source, whatever the caller said.
-        b[off::TIME_SRC] = if ctx.utc_ms.is_some() { ctx.time_source as u8 } else { TimeSource::None as u8 };
+        // No UTC means no time source, whatever the caller said, except
+        // "untrusted": GPS gives a time the hub withholds (WP-12).
+        b[off::TIME_SRC] = match (ctx.utc_ms, ctx.time_source) {
+            (Some(_), t) | (None, t @ TimeSource::Untrusted) => t as u8,
+            (None, _) => TimeSource::None as u8,
+        };
         b[off::GPS_STATE] = ctx.gps_state;
         b[off::POS_SRC] = ctx.pos_source as u8;
         b[off::SATS] = ctx.sats.unwrap_or(u8::MAX);

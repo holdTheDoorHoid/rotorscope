@@ -127,6 +127,9 @@ pub const SETTINGS_ROWS: usize = 6;
 pub enum Request {
     /// "Hub moved": forget the GPS home the spoofing checks learned.
     HubMoved,
+    /// "New home" (the row's label while the hub waits for one): accept
+    /// the place the hub found as its home (WP-12).
+    AcceptHome,
     /// "Alarms": mute, for two hours, the nuisance alarms sounding in the
     /// frame the operator was looking at (`seen_ms`, the state's
     /// `now_ms`). Never a safety-critical one (those are only snoozed).
@@ -421,6 +424,10 @@ impl Ui {
             2 => s.buzzer = !s.buzzer,
             row => {
                 let r = match row {
+                    // One row, two meanings: while the hub has found a new
+                    // place and waits, SEL accepts it; otherwise SEL forgets
+                    // home (both say "the hub really is here").
+                    3 if state.gps.home_pending => Some(Request::AcceptHome),
                     3 => Some(Request::HubMoved),
                     4 if state.threats.mutable > 0 => Some(Request::MuteAlarms { seen_ms: state.now_ms }),
                     4 if state.threats.snoozable > 0 => Some(Request::SnoozeAlarms { seen_ms: state.now_ms }),

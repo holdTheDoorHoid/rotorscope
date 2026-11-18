@@ -197,6 +197,23 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     w.opt(gps::pps_last_us().map(|t| now_us.saturating_sub(t) / 1000));
     let _ = write!(w.0, ",\"fix_age_ms\":");
     w.opt(gps.fix.map(|f| now.saturating_sub(f.at_ms)));
+    // WP-12: what the hub trusts of its own GPS, and its home.
+    let ig = gps.integrity();
+    let _ = write!(
+        w.0,
+        ",\"trusted\":{},\"untrusted_pos\":{},\"untrusted_time\":{},\"time_held\":{},\"time_step_ms\":",
+        ig.trusted, gps.untrusted_pos, gps.untrusted_time, gps.time_held
+    );
+    w.opt(ig.metrics.time_step_ms);
+    let _ = write!(
+        w.0,
+        ",\"time_floor\":{},\"home\":{}{}{},\"home_pending\":{}",
+        ig.metrics.time_floor,
+        if gps.home_origin().is_some() { "\"" } else { "" },
+        gps.home_origin().map_or("null", |o| o.name()),
+        if gps.home_origin().is_some() { "\"" } else { "" },
+        gps.home_pending().is_some()
+    );
     let a = adsbee.status(now);
     let _ = write!(w.0, "}},\"adsb\":{{\"alive\":{},\"age_ms\":", a.alive);
     w.opt(a.age_ms);

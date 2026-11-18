@@ -564,6 +564,9 @@ impl Evidence {
             } else {
                 TimeSource::Gps
             };
+        } else if gps.untrusted_time {
+            // GPS gives a time the hub withholds (WP-12): say so, UTC 0.
+            c.time_source = TimeSource::Untrusted;
         }
         c.gps_state = match gps.status.state {
             GpsState::Absent => 0,

@@ -169,6 +169,8 @@ pub struct ChainSummary {
     pub utc_first: Option<u64>,
     pub utc_last: Option<u64>,
     pub no_time: u64,
+    /// Of those, records whose GPS time the hub withheld as untrusted (WP-12).
+    pub untrusted_time: u64,
     pub free_running: u64,
     pub no_position: u64,
     pub manual_position: u64,
@@ -449,6 +451,13 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
         }
         if c.sum.no_time > 0 {
             rep.add(Level::Note, w.clone(), format!("{} records have no UTC time (no GPS time yet): they carry uptime only, marked time source \"none\"", c.sum.no_time));
+            if c.sum.untrusted_time > 0 {
+                rep.add(
+                    Level::Note,
+                    w.clone(),
+                    format!("{} of them are marked \"untrusted\": the GPS gave a time the hub did not trust (suspected spoofing, or before the build date or the latest time it had trusted)", c.sum.untrusted_time),
+                );
+            }
         }
         if c.sum.no_position > 0 {
             rep.add(Level::Note, w.clone(), format!("{} records have no hub position (no GPS fix and none typed in)", c.sum.no_position));
@@ -546,7 +555,12 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
     }
     c.last_uptime = h.uptime_ms;
     match h.utc_ms {
-        None => c.sum.no_time += 1,
+        None => {
+            c.sum.no_time += 1;
+            if h.time_source == format::TimeSource::Untrusted as u8 {
+                c.sum.untrusted_time += 1;
+            }
+        }
         Some(u) => {
             if h.time_source == format::TimeSource::FreeRunning as u8 {
                 c.sum.free_running += 1;
@@ -740,6 +754,7 @@ pub fn describe(r: &Record<'_>) -> String {
         Some(u) => {
             let _ = write!(s, "{} [{}]", fmt_utc(u), format::TimeSource::from_u8(h.time_source).map_or("?", |t| t.name()));
         }
+        None if h.time_source == format::TimeSource::Untrusted as u8 => s.push_str("NO-UTC                   [untrusted]"),
         None => s.push_str("NO-UTC                   [none]   "),
     }
     match h.pos_source {

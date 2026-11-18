@@ -255,6 +255,13 @@ pub struct Gps {
     pub sats: u8,
     /// Signs that the hub's own GPS is being jammed or faked.
     pub integrity: GpsIntegrity,
+    /// GPS is not believed and nothing trusted is held: the hub has no
+    /// trusted position (`untrusted_pos`) / time (`untrusted_time`) (WP-12).
+    pub untrusted_pos: bool,
+    pub untrusted_time: bool,
+    /// The hub found a new place to stand that disagrees with its home and
+    /// waits for the operator to confirm it (Settings, "New home").
+    pub home_pending: bool,
 }
 
 /// The hub's verdict on its own GPS (`gnss::integrity` on the P4). While

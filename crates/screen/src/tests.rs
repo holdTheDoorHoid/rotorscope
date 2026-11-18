@@ -207,6 +207,11 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     assert_eq!(ui.done_row(), Some(3));
     assert_eq!(ui.take_request(), Some(Request::HubMoved));
     assert_eq!(ui.take_request(), None, "taken once");
+    // WP-12: while the hub waits on a new place, the same row accepts it.
+    let mut waiting = s.clone();
+    waiting.gps.home_pending = true;
+    ui.button(Button::Select, &waiting);
+    assert_eq!(ui.take_request(), Some(Request::AcceptHome));
     ui.button(Button::Down, &s);
     ui.button(Button::Select, &s); // alarms: nothing sounding, nothing muted
     assert_eq!(ui.take_request(), None);

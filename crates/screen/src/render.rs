@@ -1402,6 +1402,15 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         ("GPS", {
             let mut b = String::new();
             let _ = match s.gps.fix {
+                _ if s.gps.untrusted_pos || s.gps.untrusted_time => write!(
+                    b,
+                    "no trusted {}",
+                    match (s.gps.untrusted_pos, s.gps.untrusted_time) {
+                        (true, true) => "position/time",
+                        (true, false) => "position",
+                        _ => "time",
+                    }
+                ),
                 Fix::None => write!(b, "no fix, {} satellites", s.gps.sats),
                 Fix::Fix2D => write!(b, "2D fix, {} satellites", s.gps.sats),
                 Fix::Fix3D => write!(b, "3D fix, {} satellites", s.gps.sats),
@@ -1577,7 +1586,12 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
         ("Buzzer", if st.buzzer { "On" } else { "Off (muted)" }),
         // The hub learns where it stands and treats a GPS position far from
         // there as faked: after moving it on purpose, reset that.
-        ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" }),
+        // While the hub waits for a decision on a new place: accept it.
+        if s.gps.home_pending {
+            ("New home", if done(3) { "Accepted" } else { "Accept here" })
+        } else {
+            ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" })
+        },
         // Nuisance alarms: mute them for a while (a venue's known false
         // alarm goes in the site file). Jamming and the like: snooze only.
         ("Alarms", alarms.as_str()),

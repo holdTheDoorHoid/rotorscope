@@ -40,6 +40,7 @@ mod evlog;
 mod faa;
 mod fault;
 mod gps;
+mod gpsmem;
 #[cfg(feature = "gpsloop")]
 mod gpsloop;
 #[cfg(feature = "modesloop")]
@@ -367,6 +368,9 @@ fn main() -> ! {
     // Console `L`: one site-file line being typed (node position / mute).
     let mut site_line: Option<heapless::String<120>> = None;
     let mut site = site::Site::default();
+    let mut gpsmem = gpsmem::GpsMem::default();
+    #[cfg(feature = "gpsloop")]
+    gpsloop::boot_scenario(&mut gps);
 
     #[cfg(feature = "selftest")]
     let mut selftest = selftest::Sender::new(p.UART2);
@@ -430,7 +434,7 @@ fn main() -> ! {
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
-        let mut lines = Lines { note: &mut note, site: &mut site_line };
+        let mut lines = Lines { note: &mut note, site: &mut site_line, gm: &mut gpsmem };
         if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut down, &mut lines, ms) {
             let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
             site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev, ms);
@@ -451,6 +455,7 @@ fn main() -> ! {
             site.apply(&mut app, &gw);
             control_settings(&site, &mut down, &mut app, &mut ev);
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
+            gpsmem.tick(&mut gps, &mut sdlog, &mut ev, ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
             let max_age = app.tracker.config().own_fix_max_age_ms;
@@ -462,7 +467,8 @@ fn main() -> ! {
         }
         app.touch(&mut i2c, ms);
         match app.take_request() {
-            Some(screen::Request::HubMoved) => forget_gps_home(&mut gps, &mut ev, "screen"),
+            Some(screen::Request::HubMoved) => gpsmem.forget_home(&mut gps, &mut sdlog, &mut ev, "screen", ms),
+            Some(screen::Request::AcceptHome) => gpsmem.confirm_home(&mut gps, &mut sdlog, &mut ev, "screen", ms),
             Some(screen::Request::MuteAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, false, ms, &mut ev),
             Some(screen::Request::SnoozeAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, true, ms, &mut ev),
             Some(screen::Request::UnmuteAlarms) => site.unmute_operator(&mut app, ms, &mut ev),
@@ -492,6 +498,12 @@ fn main() -> ! {
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         if let Some((st, facts)) = sdlog.take_site() {
             site.load(&st, &facts, &mut app, &mut ev, ms);
+        }
+        if let Some(home) = site.take_home() {
+            gpsmem.placed(&mut gps, &mut sdlog, &mut ev, home, ms);
+        }
+        if let Some(m) = sdlog.take_gps_mem() {
+            gpsmem.loaded(&mut gps, &mut ev, m);
         }
         if let Some(k) = sdlog.take_o4_key() {
             let fp = k.fingerprint();
@@ -653,25 +665,24 @@ fn gps_view(app: &app::App, gps: &gps::Gps, now: u64) -> screen::Gps {
         I::SuspectSpoofing => G::SuspectSpoofing,
         I::Spoofing => G::Spoofing,
     };
-    screen::Gps { fix, sats: gps.status.sats.unwrap_or(0), integrity }
+    screen::Gps {
+        fix,
+        sats: gps.status.sats.unwrap_or(0),
+        integrity,
+        untrusted_pos: gps.untrusted_pos,
+        untrusted_time: gps.untrusted_time,
+        home_pending: gps.home_pending().is_some(),
+    }
 }
 
 /// One console command byte, if any (see `console.rs`). `n` starts an
 /// operator note: the text up to Enter goes into the evidence log.
-/// The operator moved the hub on purpose: forget the GPS home its
-/// spoofing checks learned, so the new place is not taken for a fake.
-fn forget_gps_home(gps: &mut gps::Gps, ev: &mut evlog::Evidence, from: &str) {
-    gps.integrity_forget_home();
-    let mut t: heapless::String<80> = heapless::String::new();
-    let _ = core::fmt::Write::write_fmt(&mut t, format_args!("hub moved: GPS home forgotten, relearning (from {from})"));
-    ev.event(evidence::EventCode::Setting, t.as_bytes(), &[2]);
-    println!("hub-p4: {}", t);
-}
-
 /// Console text being typed: an evidence note (`n`) or a site line (`L`).
 struct Lines<'a> {
     note: &'a mut Option<heapless::String<120>>,
     site: &'a mut Option<heapless::String<120>>,
+    /// GPS memory and the operator's GPS decisions (`m`, `H`, `T`).
+    gm: &'a mut gpsmem::GpsMem,
 }
 
 /// `faulttest` builds: the console line being typed after `f`.
@@ -856,14 +867,16 @@ fn command(
             ev.event(evidence::EventCode::Setting, t.as_bytes(), &[]);
             println!("hub-p4: cmd {t}");
         }
-        b'm' => forget_gps_home(gps, ev, "console"),
+        b'm' => lines.gm.forget_home(gps, sdlog, ev, "console", now),
+        b'H' => lines.gm.confirm_home(gps, sdlog, ev, "console", now),
+        b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
-        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

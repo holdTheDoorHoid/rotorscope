@@ -104,6 +104,10 @@ pub enum TimeSource {
     Gps = 2,
     /// GPS time anchored to the PPS edge (sub-millisecond at the edge).
     GpsPps = 3,
+    /// No UTC: the receiver gives a time but the hub does not trust it (GPS
+    /// spoofing suspected with no earlier trusted time to hold, or a time
+    /// before the build date or the remembered time, WP-12). UTC field is 0.
+    Untrusted = 4,
 }
 
 impl TimeSource {
@@ -113,6 +117,7 @@ impl TimeSource {
             1 => Self::FreeRunning,
             2 => Self::Gps,
             3 => Self::GpsPps,
+            4 => Self::Untrusted,
             _ => return None,
         })
     }
@@ -122,6 +127,7 @@ impl TimeSource {
             Self::FreeRunning => "free_running",
             Self::Gps => "gps",
             Self::GpsPps => "gps_pps",
+            Self::Untrusted => "untrusted",
         }
     }
 }

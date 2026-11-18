@@ -94,6 +94,12 @@ pub enum SiteLine {
     UnmuteAll,
     /// `control ids on|off`, `control content on|off` (protocol 12 opt-ins).
     Control { what: ControlSetting, on: bool },
+    /// `home LAT LON [HEIGHT]`: where the hub itself stands, placed by the operator (WP-12).
+    /// The strongest prior for the GPS spoofing checks: it replaces the home the hub learns.
+    /// Height in metres above the WGS-84 ellipsoid, optional.
+    Home { lat: f64, lon: f64, alt: Option<f64> },
+    /// `home clear`: no placed home (the hub learns one again).
+    HomeClear,
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -181,6 +187,28 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::Control { what, on });
     }
+    if word.eq_ignore_ascii_case("home") {
+        let a = it.next().ok_or("home needs a position (lat lon [height]) or clear")?;
+        if a.eq_ignore_ascii_case("clear") {
+            return if it.next().is_none() { Ok(SiteLine::HomeClear) } else { Err("say: home clear") };
+        }
+        let b = it.next().ok_or("home needs a longitude after the latitude")?;
+        let (lat, lon) = lat_lon(a, b)?;
+        let alt = match it.next() {
+            None => None,
+            Some(h) => {
+                let h: f64 = h.parse().map_err(|_| "home height is not a number (metres)")?;
+                if !(-500.0..=9_000.0).contains(&h) {
+                    return Err("home height out of range (metres above the ellipsoid)");
+                }
+                Some(h)
+            }
+        };
+        if it.next().is_some() {
+            return Err("say: home LAT LON [HEIGHT]");
+        }
+        return Ok(SiteLine::Home { lat, lon, alt });
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -217,7 +245,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, mute, unmute, control)")
+    Err("unknown line (node, home, mute, unmute, control)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -234,6 +262,8 @@ pub struct SiteState {
     /// mentioned, which means off).
     pub control_ids: Option<bool>,
     pub control_content: Option<bool>,
+    /// The hub's own placed position (`home` lines), `(lat, lon, height)`.
+    pub home: Option<(f64, f64, Option<f64>)>,
     pub used: u32,
     pub ignored: u32,
     /// `mute` lines not honoured: too broad, or for a kind that can only be
@@ -274,6 +304,8 @@ impl SiteState {
             SiteLine::UnmuteAll => self.mutes.clear(),
             SiteLine::Control { what: ControlSetting::Ids, on } => self.control_ids = Some(on),
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
+            SiteLine::Home { lat, lon, alt } => self.home = Some((lat, lon, alt)),
+            SiteLine::HomeClear => self.home = None,
             SiteLine::AllNodesHere => {
                 self.ignored += 1;
                 return;
@@ -604,6 +636,18 @@ mod tests {
         };
         assert_eq!(j.freq, 9_155);
         assert_eq!(parse_line("control ids on"), Ok(SiteLine::Control { what: ControlSetting::Ids, on: true }));
+        // WP-12: the hub's own placed position.
+        assert_eq!(parse_line("home 39.95210 -75.16380 12.5 # roof"), Ok(SiteLine::Home { lat: 39.9521, lon: -75.1638, alt: Some(12.5) }));
+        assert_eq!(parse_line("HOME 39.9521 -75.1638"), Ok(SiteLine::Home { lat: 39.9521, lon: -75.1638, alt: None }));
+        assert_eq!(parse_line("home clear"), Ok(SiteLine::HomeClear));
+        assert!(parse_line("home 91 0").is_err());
+        assert!(parse_line("home 39.9 -75.1 99999").is_err());
+        assert!(parse_line("home 39.9").is_err());
+        let mut st = SiteState::default();
+        st.apply(parse_line("home 1.5 2.5").unwrap());
+        assert_eq!(st.home, Some((1.5, 2.5, None)));
+        st.apply(parse_line("home clear").unwrap());
+        assert_eq!(st.home, None);
         assert_eq!(parse_line("CONTROL Content OFF # not today"), Ok(SiteLine::Control { what: ControlSetting::Content, on: false }));
     }
 
