@@ -72,6 +72,17 @@ pub struct Headers<'a> {
     pub content_type: Option<&'a str>,
 }
 
+/// Which rule a request falls under, by method and path: `None` for the
+/// captive-portal redirect (every path but `/` and `/api/...`), which
+/// answers any Host; `Read` for GET and HEAD; `Write` for anything else
+/// (POST, and methods no route takes, which then fail on the safe side).
+pub fn route_access(method: &str, path: &str) -> Option<Access> {
+    if path != "/" && !path.starts_with("/api/") {
+        return None;
+    }
+    Some(if method == "GET" || method == "HEAD" { Access::Read } else { Access::Write })
+}
+
 /// Decide a request. `own` is the hub's address on the network the request
 /// came in on (`None` while it has none, e.g. a station before DHCP);
 /// `writes` whether that network may change anything.
@@ -177,6 +188,20 @@ mod tests {
         for o in ["http://evil.example", "null", "https://192.168.4.1", "http://192.168.4.1.evil.example", "http://192.168.4.1/x"] {
             let req = h(Some("192.168.4.1"), Some(o), JSON);
             assert_eq!(check(Some(AP), Access::Write, true, &req), Verdict::CrossOrigin, "{o}");
+        }
+    }
+
+    #[test]
+    fn routes() {
+        assert_eq!(route_access("GET", "/"), Some(Access::Read));
+        assert_eq!(route_access("GET", "/api/state"), Some(Access::Read));
+        assert_eq!(route_access("HEAD", "/api/flags"), Some(Access::Read));
+        assert_eq!(route_access("POST", "/api/cot"), Some(Access::Write));
+        assert_eq!(route_access("POST", "/api/own-pos"), Some(Access::Write));
+        assert_eq!(route_access("PUT", "/api/cot"), Some(Access::Write));
+        // Captive-portal probes: redirected whatever the Host.
+        for p in ["/generate_204", "/hotspot-detect.html", "/connecttest.txt", "/canonical.html", "/api", "/apix"] {
+            assert_eq!(route_access("GET", p), None, "{p}");
         }
     }
 

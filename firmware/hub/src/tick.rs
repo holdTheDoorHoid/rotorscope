@@ -107,6 +107,8 @@ struct HubLine {
     cot_no_utc: u32,
     cot_err: u32,
     http_req: u32,
+    /// HTTP requests refused by the Host / Origin / Content-Type checks.
+    http_refused: u32,
     /// This tick's housekeeping + USB dump, microseconds.
     tick_us: u32,
     /// Longest CoT pass in the last second, microseconds.
@@ -254,6 +256,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             cot_no_utc: cot::NO_UTC.load(Relaxed),
             cot_err: cot::ERRORS.load(Relaxed),
             http_req: http::REQUESTS.load(Relaxed),
+            http_refused: http::REFUSED.load(Relaxed),
             tick_us: Instant::now().duration_since(t0).as_micros() as u32,
             cot_us: cot::TICK_MAX_US.swap(0, Relaxed),
             lag_max_us: LAG_MAX_US.swap(0, Relaxed),

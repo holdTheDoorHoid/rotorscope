@@ -319,7 +319,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(hotspot::dhcp(ap_stack).expect("spawn dhcp"));
     spawner.spawn(hotspot::dns(ap_stack).expect("spawn dns"));
     for i in 0..http::AP_TASKS {
-        spawner.spawn(http::task(i, ap_stack, hub).expect("spawn http"));
+        spawner.spawn(http::task(i, http::Side::hotspot(ap_stack), hub).expect("spawn http"));
     }
     spawner.spawn(cot::task(ap_stack, hub).expect("spawn cot"));
 
@@ -327,7 +327,7 @@ async fn main(spawner: Spawner) -> ! {
     {
         let (sta_stack, sta_runner) = station::stack(sta_iface, seed());
         spawner.spawn(hotspot::net_runner(sta_runner).expect("spawn sta net"));
-        spawner.spawn(http::task(http::AP_TASKS, sta_stack, hub).expect("spawn sta http"));
+        spawner.spawn(http::task(http::AP_TASKS, http::Side::station(sta_stack), hub).expect("spawn sta http"));
         spawner.spawn(cot::task(sta_stack, hub).expect("spawn sta cot"));
         spawner.spawn(station::task(wifi).expect("spawn station"));
     }

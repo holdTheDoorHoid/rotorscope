@@ -81,10 +81,15 @@ fn bench_fence() {
 struct WifiLocal {
     ssid: String,
     psk: String,
+    /// Let the station LAN change things (`POST /api/own-pos`, `/api/cot`).
+    /// Off by default: on someone else's network, anyone there could.
+    #[serde(default)]
+    allow_writes: bool,
 }
 
 fn station_mode() {
     println!("cargo::rustc-check-cfg=cfg(hub_station)");
+    println!("cargo::rustc-check-cfg=cfg(hub_station_writes)");
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let path = Path::new(&dir).join("wifi.local.toml");
     // When to rerun this script. Watching a file that does not exist makes
@@ -117,6 +122,10 @@ fn station_mode() {
         panic!("{}: psk must be empty (open network) or 8-63 characters", path.display());
     }
     println!("cargo:rustc-cfg=hub_station");
+    if cfg.allow_writes {
+        println!("cargo:rustc-cfg=hub_station_writes");
+        println!("cargo:warning=station mode: the LAN may change the own position and the CoT switch (allow_writes)");
+    }
     println!("cargo:rustc-env=HUB_STA_SSID={}", cfg.ssid);
     println!("cargo:rustc-env=HUB_STA_PSK={}", cfg.psk);
     // Deliberately not printed: build logs get pasted into issues.
