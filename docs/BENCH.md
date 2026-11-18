@@ -663,6 +663,132 @@ One `floodtest` node, wired to the P4 (or behind the gateway for step 5). Record
    has risen, and the hub kept getting the node's frames meanwhile (its frame count kept rising).
 7. Finish by flashing the normal build (no `floodtest`) and checking `"bench":[]`.
 
+## node-sdr under hostile signals (2026-11-18, compile-checked only)
+
+Anyone in radio range can make the DroneID node work for them. Two ways were found and closed in
+software; neither has run on a chip yet.
+
+* **Blind while decoding.** Any 450-800 µs energy run on the dwell channel passes the trigger's
+  length gate, the ring stops, and a DroneID-shaped burst takes ~150 ms to decode. One pulse every
+  ~150 ms kept the node blind almost all the time. Now (`crates/rawcap/src/budget.rs`): at most 3
+  full decodes per dwell and 4 a second, and a credit that earns 40 % of wall time (at most 450 ms)
+  pays for every decode, so the decoder holds the loop at most ~40 % of the time plus 0.75 s. A
+  window the budget refuses is dropped **before the ring is stopped**. Cheap gates come first
+  (`droneid::rx::Config::cfo_window` and `turbo_gate`, set for the tuned channel): a span whose
+  coarse frequency is more than 1 MHz from +500 kHz is refused before resampling, and the turbo
+  decoder runs only at reference SNR ≥ −5 dB within 300 kHz. The `stats` line has
+  `"dec":[decodes, full, skipped, busy_ms]`; a dwell where the budget refused windows and most full
+  decodes were not valid bursts counts towards `jam_pulsed` (`detail` = the decoder's busy
+  percent), which is how the hub hears of it (no new link field). A burst's `path` reads `gated`
+  when the turbo gate skipped it.
+* **The O4 follower could be steered.** One forged packet made a session that the node visited
+  from the next publication on; four forged key IDs kept the node on attacker-chosen channels, a
+  fifth evicted the real drone's session, and one packet with the real (cleartext) key ID wiped its
+  hypotheses. Now (`crates/droneid/src/follow.rs`): a session is only visited after 3 packets that
+  agree in channel and time; new key IDs only ever replace a one-packet tentative session; a packet
+  that contradicts a followed session is ignored and counted; visits are paid from a credit that
+  earns half of the plan's time (at most 1 s). `stats` `"follow"` is now `[followed, visits, hits,
+  misses, tentative, contradictions, refused, declined]`; `follow` lines say `confirmed`,
+  `restart` and (at most once a second) `contradicted`.
+
+**What an attacker can still do**: flood DroneID-shaped bursts so the budget is spent on them
+first-come (real bursts are then decoded only in proportion; the node keeps capturing and probing
+~60 % of the time and reports `jam_pulsed` when the flood is not valid bursts); replay real,
+CRC-valid bursts (decoded and reported as sightings, never flagged as pressure); create followed
+sessions by following the published schedule and spend the follower's half on them; keep a real
+drone's session unconfirmed by restarting it with forged packets carrying its key ID while it is
+still tentative.
+
+### The scenarios (bench `bringup` build, nothing transmits)
+
+`radio/hilsim.rs`, driven by `tools/droneid-hil`. Build and flash a bench image:
+
+```sh
+export ROTORSCOPE_BENCH=1
+(cd firmware/node-sdr/c5 && cargo fw --features bringup)
+```
+
+1. **No regression on the recordings** (needs `tools/fetch-droneid-samples.sh` run once). The
+   replay is outside the budget but goes through the new gates:
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --rms 200,150' 900 c5b
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --pre "trig 3" --rms 100,80' 900 c5b
+   ```
+   Expect what BRINGUP-RESULTS.md "HIL" measured: rms 200 and 150, 13/13 detected and CRC-valid
+   per pass; with `trig 3`, rms 100 13/13 and rms 80 about 9/13; decode times 144-158 ms. No burst
+   may report `"path":"gated"` or `{"err":"OffFrequency"}` when it decoded before. Every `hil`
+   line: `"intact":true`; record `stack_free` (it was ~6.9 KiB; expect at least 6.5 KiB).
+2. **Pulse train of white noise**, a 600 µs pulse covering the whole capture (no recording needed):
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 200,150 --pulse noise --rms 200' 300 c5b
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 400,20 --pulse noise --rms 200' 300 c5b
+   ```
+   Each prints two `hil_train` lines, `"budget":true` and `false`. Record `decode_ms` [min, max]:
+   this is what one noise pulse costs the decoder now (the coarse-frequency gate should refuse most
+   of them after 8 FFTs; nobody has measured it). Expect `full` 0 and `valid` 0. If `busy_pct`
+   without the budget is under ~40 %, the gates alone keep the node free and the budgeted line
+   matches it (`skipped` 0, `flagged` 0). Where the unbudgeted line is above 40 % (at 20 ms gaps it
+   should be), the budgeted one must stay at or below ~42 % with `skipped` > 0 and `flagged` close
+   to `dwells`.
+3. **Pulse train of a real burst** (the worst case: DroneID-shaped and expensive; a replayed
+   recording, so its CRC is valid):
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 200,150 --pulse burst --rms 200' 300 c5b
+   ```
+   Without the budget: `busy_pct` 95-100, about half the pulses `missed` (they arrive while the
+   previous one decodes), `skipped` 0. With it: `busy_pct` at most ~42, `skipped` > 0, `decoded`
+   about 75-80 of 200, `decode_ms` as in step 1. `flagged` 0 both ways: valid bursts are not
+   jamming (the hub would see them as sightings; HIL sightings are never sent).
+4. **Forged sessions on the live follower**, 3 minutes:
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --forge 180' 400 c5b
+   ```
+   The node hops its built-in DroneID plan; a virtual drone (key ID `5ea10001`), four forged
+   schedule-perfect sessions, a new forged key ID every 0.7 s and (once the drone is followed)
+   a packet with its key ID every 1.3 s at a wrong time are "heard" whenever the node is tuned to
+   their channel. The `forge` line at the end: `real` = [followed, hits, contradictions];
+   `heard` per stream; `share_permille` = time the follower held the receiver.
+   Expect `real[0]` true (followed within about a minute, and still followed at the end),
+   `real[2]` about equal to both `contra` numbers and > 0 (every wrong-time packet was ignored,
+   none restarted it), `active` at most 4, `tentative` at most 4, `share_permille` at most ~550,
+   `declined` > 0 once two or more forged sessions are followed. `refused` counts new key IDs
+   turned away while every tentative slot held a session with a consistent match; it may grow.
+   If `real[0]` is false at the end, the drone's followed session ran 6 s without a granted
+   visit or a scanning hit and expired: record `heard[0]` and `declined` (the share is first
+   come, not per session).
+   In the `stats` lines during the run the `follow` array should move the same way, and
+   `dec`'s `skipped` should stay 0 (no real signal).
+5. Flash a normal build afterwards and check `"bench":[]`.
+
+### Restarting the ring before the decode: deferred, to try on the bench
+
+Not done. By reading alone it looks safe in memory terms but would buy nothing on its own, so it
+was left out rather than guessed:
+
+* **Memory.** The decoder reads the 16,384 decimated samples from the capture bank
+  (0x40830000), which the ring's DMA never writes (ring and descriptors end below 0x4082e0c0), so
+  no copy to PSRAM is needed. But `Radio::restart` also re-arms the dump engine
+  (`engine::free_run`), which hands SRAM block 1 to the engine for a few register writes and could
+  drop or land writes in the bank while it owns it: a ring-only restart (`ring::start` without
+  `engine::free_run`, which keeps running across `ring::stop`) is required.
+* **Interrupt timing.** With the ring running, the DMA interrupt fires every 3584 bytes (~90 µs)
+  for the whole ~150 ms decode and runs on the main stack on top of the decoder's deepest frame
+  (~6.9 KiB left). The `burst` line (up to 2 KiB, ~6 ms over USB inside esp-println's critical
+  section) would hold the interrupt off for several laps, the 2026-11-12 failure (a late interrupt
+  clobbers a length write-back): it would have to go out with `out::paced`.
+* **No gain without probing during the decode.** The ring holds 1.43 ms. After a 150 ms decode
+  `probe` finds itself ~100 laps behind and skips to the newest data, exactly as when the ring is
+  restarted afterwards: the node would still see nothing that arrived during the decode. The gain
+  needs the decoder to call back into `Radio::probe` at least every ~1 ms (inside the resampler,
+  the CP search and each turbo half-iteration), and a second capture buffer for a burst that rises
+  meanwhile.
+
+To try, in this order, each with `wb_lost`, `lapped`, `skipped`, `dma_err` and `stack_free` read
+before and after: (1) ring-only restart after `remove_dc`, `burst` line paced; HIL step 1 must
+still give `"intact":true` (compare the capture CRC) and identical decodes, and `wb_lost` must stay
+0 over a ten-minute soak with a 10 Hz beacon; (2) a `poll` hook in `decode_span` stages; measure
+the longest gap between hook calls (it must stay under 1 ms) and the decode-time cost.
+
 ## Bench results, 2026-11-18
 
 The first hardware pass of the crash-recovery, bench-fence and origin-check work.
