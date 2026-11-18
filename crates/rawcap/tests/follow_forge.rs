@@ -23,7 +23,7 @@ use rawcap::budget::{Budget, Config};
 const PLAN: [u32; 13] = [57465, 57565, 57665, 57765, 57865, 57965, 58065, 58165, 24145, 24295, 24445, 24595, 23995];
 const DWELL_US: u64 = 700_000;
 /// `radio::FOLLOW_LEAD_US`, `radio::FOLLOW_MIN_DWELL_US`.
-const LEAD_US: u64 = 30_000;
+const LEAD_US: u64 = 50_000;
 const MIN_DWELL_US: u64 = 120_000;
 /// A DroneID retune with its DC calibration (~22 ms on 5 GHz).
 const RETUNE_US: u64 = 22_000;
@@ -125,6 +125,8 @@ pub struct Outcome {
     pub evicted: u32,
     pub contra_sent: u32,
     pub contradicted: u32,
+    /// Wrong-time packets the followed session accepted as its own.
+    pub contra_matched: u32,
     pub skipped: u32,
     pub visits: u32,
     pub declined: u32,
@@ -227,6 +229,9 @@ pub fn run(sc: &Scenario, seed: u64) -> Outcome {
         if r == Some(Observed::Contradicted) && id == REAL_ID {
             o.contradicted += 1;
         }
+        if !own && id == REAL_ID && matches!(r, Some(Observed::Matched { .. })) {
+            o.contra_matched += 1;
+        }
         if own {
             if f.session(REAL_ID).is_none() || matches!(r, Some(Observed::Confirmed { .. })) {
                 o.real_heard_unfollowed += 1;
@@ -297,10 +302,12 @@ pub fn run(sc: &Scenario, seed: u64) -> Outcome {
                 budget.begin_dwell(t);
                 if let Some(v) = visit.take()
                     && !v.heard
-                    && v.settled
-                    && !v.decoded
                 {
-                    f.missed(&v.a);
+                    if v.settled && !v.decoded {
+                        f.missed(&v.a);
+                    } else {
+                        f.inconclusive(&v.a);
+                    }
                 }
                 let mut cap = None;
                 let mut went = false;
@@ -551,6 +558,15 @@ fn every_followed_slot_taken_first_is_the_documented_limit() {
 #[ignore = "prints the simulation table (cargo test --release -p rawcap --test follow_forge -- --ignored --nocapture)"]
 fn print_table() {
     let seeds = 1000;
+    let fl = Scenario { forged: 0, bench_phases: false, ..Scenario::bench(180) };
+    let (mut cm, mut cs, mut lost) = (0, 0, 0);
+    for seed in 1..=seeds {
+        let o = run(&fl, seed);
+        cm += o.contra_matched;
+        cs += o.contra_sent;
+        lost += (o.confirmed_at.is_some() && !o.followed_at_end) as u32;
+    }
+    println!("flood case: wrong-time packets sent {cs}, taken as the drone's {cm}; drone lost after being followed in {lost} of {seeds}");
     println!("max new key IDs the budget passes in 30 s: {} at 144 ms, {} at 173 ms; steady gap {} ms", max_new_ids(30_000_000, 144_000), max_new_ids(30_000_000, 173_000), budget_rate_gap_us(144_000) / 1000);
     let b = Scenario::bench(180);
     report("bench step 4 as run (4 forged sessions from the start, bench phases)", &b, seeds);

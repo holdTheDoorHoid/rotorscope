@@ -83,9 +83,13 @@ fn droneid_freq_ok(f: u32) -> bool {
     (22_000..=26_500).contains(&f) || (51_800..=58_170).contains(&f)
 }
 
-/// O4 follower: arrive this long before a predicted window opens (a retune
-/// with a DC calibration costs about 22 ms on 5 GHz).
-pub const FOLLOW_LEAD_US: u64 = 30_000;
+/// O4 follower: arrive this long before a predicted window opens. A retune
+/// with its DC calibration takes ~23 ms on 5 GHz and ~5 ms on 2.4 GHz
+/// (c5b, 2026-11-18), and the capture loop notices a dwell's end a few ms
+/// late. At 30 ms 15 of 25 silent windows in a bench run began before the
+/// receiver was settled, so none counted as a miss and a followed drone was
+/// lost at its counter wrap (`hil forge 180 flood`, twice).
+pub const FOLLOW_LEAD_US: u64 = 50_000;
 /// A plan dwell cut shorter than this by an upcoming prediction is not
 /// worth the retune: go to the predicted channel early instead.
 pub const FOLLOW_MIN_DWELL_US: u64 = 120_000;
@@ -126,6 +130,10 @@ pub struct FollowStats {
     pub hits: u32,
     /// Settled windows with nothing (passed to the follower as misses).
     pub misses: u32,
+    /// Windows with nothing that could not count: the receiver arrived
+    /// after the window opened, or a decode stopped it during the window.
+    pub unsettled: u32,
+    pub interrupted: u32,
 }
 
 /// The predicted window the receiver is sitting in.
@@ -1462,7 +1470,13 @@ impl Radio {
         let Some(v) = self.visit.take() else { return };
         if v.heard {
             self.follow_stats.hits += 1;
-        } else if v.settled && self.n.accepted == v.accepted {
+        } else if !v.settled {
+            self.follow_stats.unsettled += 1;
+            self.follow.inconclusive(&v.a);
+        } else if self.n.accepted != v.accepted {
+            self.follow_stats.interrupted += 1;
+            self.follow.inconclusive(&v.a);
+        } else {
             self.follow_stats.misses += 1;
             if !self.follow.missed(&v.a) {
                 println!(r#"{{"t":"follow","ev":"lost","note":"back to scanning"}}"#);

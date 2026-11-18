@@ -106,7 +106,7 @@ pub const CONFIRM_HITS: u32 = 3;
 pub const TENTATIVE_LOST_US: u64 = 30_000_000;
 /// Share of the receiver's time the follower may take from the plan, per
 /// mille: following one drone costs about a fifth (a ~50 ms window, the
-/// 30 ms lead, up to 120 ms early), two about two fifths.
+/// 50 ms lead, up to 120 ms early), two about two fifths.
 pub const SHARE_PERMILLE: u64 = 500;
 /// Follower time the share may save up (µs of credit; a visit costs its
 /// length times `1 - share`). Over any stretch `T` the follower gets at most
@@ -202,6 +202,10 @@ pub struct Session {
     pub hits: u32,
     /// Packets that contradicted the session and were ignored.
     pub contradictions: u32,
+    /// Hypotheses disagree and the last visit proved nothing (see
+    /// [`Follower::inconclusive`]): the next one goes to the second-best
+    /// channel.
+    pub alt: bool,
 }
 
 impl Session {
@@ -227,13 +231,20 @@ impl Session {
     }
 
     /// Channel votes for publication `k` after the anchor: (channel, votes)
-    /// of the best-supported channel and the total.
+    /// of the best-supported channel (the second-best with [`Session::alt`]
+    /// when there is one) and the total.
     fn vote(&self, k: u64) -> (u32, u32, u32) {
         let mut n = [0u32; 7];
         for c in self.cand.iter() {
             n[channel_index(c.wrapping_add(k as u8))] += 1;
         }
-        let (i, &best) = n.iter().enumerate().max_by_key(|&(i, &v)| (v, 7 - i)).unwrap_or((0, &0));
+        let rank = |&(i, &v): &(usize, &u32)| (v, 7 - i);
+        let (i, &best) = n.iter().enumerate().max_by_key(rank).unwrap_or((0, &0));
+        if self.alt
+            && let Some((j, &second)) = n.iter().enumerate().filter(|&(j, &v)| j != i && v > 0).max_by_key(rank)
+        {
+            return (CHANNELS[j], second, n.iter().sum());
+        }
         (CHANNELS[i], best, n.iter().sum())
     }
 }
@@ -277,6 +288,7 @@ impl Candidate {
             misses: 0,
             hits: self.hits as u32,
             contradictions: 0,
+            alt: false,
         }
     }
 }
@@ -468,6 +480,7 @@ impl Follower {
         s.cand = next;
         s.anchor_us = t_us;
         s.misses = 0;
+        s.alt = false;
         s.hits += 1;
         Some(Observed::Matched { hypotheses: next.len() })
     }
@@ -503,6 +516,7 @@ impl Follower {
                 misses: 0,
                 hits: hits as u32,
                 contradictions: 0,
+                alt: false,
             });
             self.candidates[i] = Candidate::default();
             return Observed::Confirmed { hypotheses: next.len() };
@@ -600,6 +614,24 @@ impl Follower {
         self.share.take(now_us, until_us)
     }
 
+    /// The receiver visited `a` and heard nothing from that session, but
+    /// the visit proves nothing: it arrived after the window opened, or a
+    /// decode of something else held the loop during it. Not a miss (the
+    /// drone may well have been there). Where the hypotheses disagree (at a
+    /// counter wrap), the next visit tries the second-best channel instead:
+    /// without that, on a busy channel where every visit is interrupted,
+    /// nothing ever pruned the wrong majority and the session ran out at
+    /// [`LOST_US`] (bench 2026-11-18, `hil forge 180 flood`: 21 of 26 silent
+    /// visits interrupted, the drone lost at its wrap).
+    pub fn inconclusive(&mut self, a: &Appointment) {
+        if let Some(slot) = self.slot(a.id)
+            && let Some(s) = self.sessions[slot].as_mut()
+            && !a.unanimous
+        {
+            s.alt = !s.alt;
+        }
+    }
+
     /// The receiver sat on `a.freq` for the whole of appointment `a`, settled
     /// and capturing, and heard nothing valid from that session. Hypotheses
     /// that predicted `a.freq` are removed when others predicted another
@@ -616,6 +648,7 @@ impl Follower {
             self.sessions[slot] = None;
             return false;
         }
+        s.alt = false;
         if !a.unanimous {
             let mut keep = Set::default();
             for c in s.cand.iter() {
@@ -720,6 +753,35 @@ mod tests {
         let s = f.session(1).unwrap();
         let c_last = s.cand.iter().next().unwrap();
         assert_eq!(c_last, 253u8.wrapping_add(11));
+    }
+
+    #[test]
+    fn a_wrap_on_a_busy_channel_is_resolved_without_counted_misses() {
+        // Every visit that hears nothing is inconclusive (a decode of
+        // something else held the loop, as on a busy 2.4 GHz channel), so
+        // nothing is ever counted as a miss. Before Follower::inconclusive
+        // the wrong majority at the counter wrap was never pruned, every
+        // visit went to the wrong channel and the session ran out.
+        for c0 in [250u8, 251, 252, 253, 254] {
+            let pubs = drone(c0, 0, 40, PERIOD_US);
+            let mut f = Follower::new();
+            for p in &pubs[..CONFIRM_HITS as usize] {
+                f.observe(1, p.0, p.1);
+            }
+            let mut heard = 0;
+            for &(t, freq) in &pubs[CONFIRM_HITS as usize..] {
+                let Some(a) = f.next(t - 60_000) else { break };
+                assert_eq!(a.at_us, t);
+                if a.freq == freq {
+                    f.observe(1, t, freq);
+                    heard += 1;
+                } else {
+                    f.inconclusive(&a);
+                }
+            }
+            assert!(f.session(1).is_some(), "c0 {c0}: lost after {heard}");
+            assert!(heard >= 30, "c0 {c0}: {heard}");
+        }
     }
 
     #[test]

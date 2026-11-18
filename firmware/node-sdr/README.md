@@ -113,7 +113,7 @@ same fields) sets role and plan. Idempotent: the same role and plan id change no
 5816.5 / 2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 700 ms each (the LO sits on the whole MHz
 below, +0.5 MHz off the DC spike; 5816.5 is above the measured 5800 MHz reach, unverified). On top
 of the plan the DroneID job follows O4 drones: once three valid O4 packets of a session agree it
-retunes, 30 ms early, to each channel the published schedule predicts (`droneid::follow`,
+retunes, 50 ms early, to each channel the published schedule predicts (`droneid::follow`,
 docs/DRONEID-O4.md, at most about half the time) and scans the plan in between; the stats line's
 `"follow":[followed,visits,hits,misses,tentative,contradictions,evicted,declined]` counts it
 (`tentative` = key IDs heard but not followed, up to 128; `evicted` = those displaced by a newer
@@ -208,7 +208,16 @@ one window per ~5 s, so about 1.5 % of capture time. See BRINGUP-RESULTS.md "Hub
 the main stack (block 2) also carries the decoder and ends right above SRAM block 1. With the loop
 inline in `main`, main's future took 20 KiB and the decoder overflowed ~12 KiB into the capture bank
 (found by the HIL test). The `link` line reports `stack_free` (never-touched stack, painted at boot):
-about 6.9 KiB after decodes.
+about 6.9 KiB after decodes on 2026-11-14 (`cargo fw-now`). On 2026-11-18 (c5b, `bringup` build):
+5516 B after live decodes, 5148 B after the HIL recordings, 4700 B after `hil train`. Static frame
+sizes (function prologues, llvm-objdump): capture loop 3.5 KiB, `window` 4.0 KiB, `decode_into`
+9.1 KiB, `decode_span` 34.7 KiB. Against a pre-Phase-2 build the live path is 208 B shallower and
+the bench-only `hil train` path 304 B deeper than `hil run`, so the drop since 2026-11-14 predates
+Phase 2 (or is the build flavour). Nothing catches an overflow at run time: esp-hal's guard word
+is stepped over by `decode_span`'s frame, and below the stack is SRAM block 1, the decoder's input,
+so it would be corrupted silently (only the HIL `intact` check would see it). Floor: at least
+4.5 KiB after `hil train`; interrupt frames landing on the deepest frame are not measured
+separately.
 
 ### Hardware in the loop (DroneID without a drone)
 
