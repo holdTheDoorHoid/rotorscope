@@ -91,8 +91,10 @@ const HEAP_RECLAIMED: usize = 64 * 1024;
 static COMMANDS: Channel<CriticalSectionRawMutex, Cmd, 4> = Channel::new();
 
 /// Console commands baked in at build time and run after boot, one every
-/// 500 ms, separated by `;` (e.g. `NODE_SDR_BOOT="level;grab;dump" cargo fw`).
+/// 500 ms, separated by `;` (e.g.
+/// `ROTORSCOPE_BENCH=1 NODE_SDR_BOOT="level;grab;dump" cargo fw --features bringup`).
 /// For bring-up with a read-only serial capture such as tools/dev-board.sh.
+/// A bench build switch (build.rs): the build needs `ROTORSCOPE_BENCH=1`.
 const BOOT_SCRIPT: Option<&str> = option_env!("NODE_SDR_BOOT");
 
 unsafe extern "C" {
@@ -167,13 +169,22 @@ async fn main(spawner: Spawner) -> ! {
     let (stack_lo, stack_hi, bank) = unsafe { (addr(&_stack_end), addr(&_stack_start), addr(&_sdr_bank_start)) };
     paint_stack(stack_lo);
     println!(
-        r#"{{"t":"hello","fw":"node-sdr","ver":"{}","chip":"esp32c5","decode":{},"bank":"{bank:#x}","heap_gap":{gap},"heap_reclaimed":{HEAP_RECLAIMED},"stack":{},"reset":"{}","faulttest":{}}}"#,
+        r#"{{"t":"hello","fw":"node-sdr","ver":"{}","chip":"esp32c5","decode":{},"bank":"{bank:#x}","heap_gap":{gap},"heap_reclaimed":{HEAP_RECLAIMED},"stack":{},"reset":"{}","faulttest":{},"bench":{}}}"#,
         env!("CARGO_PKG_VERSION"),
         cfg!(feature = "decode"),
         stack_hi - stack_lo,
         node_common::fault::reset_reason(),
-        cfg!(feature = "faulttest")
+        cfg!(feature = "faulttest"),
+        env!("ROTORSCOPE_BENCH_JSON")
     );
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/flash-node.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        println!(
+            r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: never leave it on a fielded unit"}}"#,
+            env!("ROTORSCOPE_BENCH_TAG")
+        );
+    }
 
     // On the heap, not in main's future: the main stack also carries the
     // DroneID decoder (~30 KiB) and sits right above SRAM block 1, so every
@@ -631,7 +642,14 @@ async fn console(mut rx: UsbSerialJtagRx<'static, Blocking>, _tx: UsbSerialJtagT
         let n = rx.drain_rx_fifo(&mut buf);
         for &b in &buf[..n] {
             match line.push(b) {
-                Some(Ok(l)) if l.starts_with("@F ") => console::feed_line(l),
+                Some(Ok(l)) if l.starts_with("@F ") => {
+                    if cfg!(feature = "bringup") {
+                        console::feed_line(l)
+                    } else {
+                        console::FEED_ERR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        println!(r#"{{"t":"err","what":"cmd","e":"{}"}}"#, console::NEEDS_BRINGUP);
+                    }
+                }
                 Some(Ok(l)) => match console::parse(l) {
                     Ok(Some(c)) => {
                         if COMMANDS.try_send(c).is_err() {

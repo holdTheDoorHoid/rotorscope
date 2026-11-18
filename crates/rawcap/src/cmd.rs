@@ -98,6 +98,18 @@ pub enum Command {
     Bootloader,
 }
 
+impl Command {
+    /// A bring-up or test command: it retunes or parks the receiver,
+    /// changes its calibration, stops detection, captures and dumps raw
+    /// samples, un-redacts serial numbers or drops the chip into its ROM
+    /// download mode. node-sdr accepts these only in a `bringup` build (a
+    /// bench build, docs/BENCH.md "Bench builds"); a fielded node keeps
+    /// `help`, `stats` and `phy`, which only report.
+    pub const fn bringup_only(&self) -> bool {
+        !matches!(self, Command::Help | Command::Stats | Command::Phy)
+    }
+}
+
 /// Lowest and highest LO the C5 has been measured to receive on
 /// (RESEARCH.md "Can a C5 do it?": 2200-2650 and 5180-5800 MHz measured;
 /// C5VRX tunes to 5945). Requests outside are refused, not clamped.
@@ -330,6 +342,20 @@ mod tests {
         assert_eq!(parse("mode idle"), Ok(Some(Command::Mode(Mode::Idle))));
         assert_eq!(parse("mode hold"), Ok(Some(Command::Mode(Mode::Hold))));
         assert!(parse("transmit").is_err());
+    }
+
+    #[test]
+    fn fielded_nodes_keep_only_the_reports() {
+        for l in ["help", "?", "stats", "phy"] {
+            assert!(!parse(l).unwrap().unwrap().bringup_only(), "{l}");
+        }
+        for l in [
+            "freq 5756", "offset 10", "pins alt", "gain 60", "win fold", "lpf 12", "dcal", "dcal auto off",
+            "edge fall", "swap on", "trig 6", "mode idle", "mode hold", "mode detect", "snap", "grab", "level",
+            "decode", "dump", "resend 1", "reveal on", "reveal off", "resume", "bootloader",
+        ] {
+            assert!(parse(l).unwrap().unwrap().bringup_only(), "{l}");
+        }
     }
 
     #[test]

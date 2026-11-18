@@ -17,7 +17,13 @@
 //! redacts its own `burst` lines (`reveal` stays off), and its HIL sightings
 //! are built and checked but never sent to the hub.
 //!
+//! The board must run a node-sdr bench build with the feature `bringup`
+//! (`@F`, `hil run`, `hop` and `trig` are refused otherwise; BRINGUP.md
+//! "Bring-up builds"):
+//!
 //! ```sh
+//! export ROTORSCOPE_BENCH=1
+//! (cd firmware/node-sdr/c5 && cargo fw --features bringup)
 //! tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT"' 600 c5b
 //! ```
 //! Options: `--pre "trig 3"` console commands first, `--rms 200,100,60` burst levels (codes RMS; receiver noise is

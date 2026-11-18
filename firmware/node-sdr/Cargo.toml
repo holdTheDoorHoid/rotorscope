@@ -43,6 +43,12 @@ wirebus = ["node-common/wirebus"]
 # and `fault hang` to prove the reboot after a panic and the hang watchdog.
 # Never in a normal build.
 faulttest = []
+# Bench only (BRINGUP.md, docs/BENCH.md "Bench builds"): the bring-up and
+# test console commands (retune, gain, mode, snap / grab / dump, reveal,
+# role / hop / assign, `@F` + `hil run` for tools/droneid-hil, bootloader).
+# Without it the console only reports (help, stats, phy, plan, jam, uplink,
+# fpv verbose). build.rs stops the build unless ROTORSCOPE_BENCH=1.
+bringup = []
 
 [dependencies]
 rawcap  = { path = "../../crates/rawcap", default-features = false }

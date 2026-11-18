@@ -12,8 +12,16 @@
 //!
 //! The firmware repeats the check at run time against the version string the
 //! linked blob reports (`phy::abi_ok`).
+//!
+//! Also the bench fence (crates/link/src/benchfence.rs): a build with a
+//! bench-only feature (`faulttest`, `bringup`) or build switch
+//! (`NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY`) stops unless
+//! `ROTORSCOPE_BENCH=1`, and the list goes into the hello line.
 
 use std::path::{Path, PathBuf};
+
+#[path = "../../crates/link/src/benchfence.rs"]
+mod benchfence;
 
 /// SHA-256 of `esp-wifi-sys-esp32c5-0.3.0/libs/libphy.a`.
 const PHY_SHA256: &str = "dbf33c418c8d408d4005c849d12a1432deea82e2e5e57de3c8ddf914d104fffb";
@@ -24,6 +32,8 @@ fn main() {
         panic!("node-sdr is ESP32-C5 only: build from firmware/node-sdr/c5 with `cargo fw` (target `{target}`)");
     }
 
+    println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
+    benchfence::run("node-sdr", &["faulttest", "bringup"], &["NODE_SDR_BOOT", "NODE_SDR_ALLOW_UNVERIFIED_PHY"]);
     check_phy_blob();
 
     let ld = Path::new(env!("CARGO_MANIFEST_DIR")).join("ld");

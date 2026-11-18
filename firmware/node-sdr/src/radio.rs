@@ -1709,6 +1709,15 @@ fn err(what: &str) {
 }
 
 fn help() {
+    if !cfg!(feature = "bringup") {
+        for l in [
+            "help | stats | phy | plan | jam | uplink [now] | fpv verbose on|off",
+            "bring-up commands (freq, gain, mode, snap, grab, dump, reveal, role, hop, assign, hil, bootloader, ...) need a bringup build (BRINGUP.md)",
+        ] {
+            println!(r#"{{"t":"help","l":"{l}"}}"#);
+        }
+        return;
+    }
     for l in [
         "help | stats | phy",
         "freq <MHz> | gain <idx> | lpf <0-63>|off | win clip|fold5|fold | edge rise|fall | swap on|off",
