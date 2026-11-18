@@ -472,3 +472,24 @@ pub fn conflict_view(conflicts: &[tracker::conflict::Conflict], aircraft: &[trac
         count: conflicts.iter().filter(|c| c.level >= tracker::conflict::Level::Caution).count().min(255) as u8,
     })
 }
+
+/// GPS interference in the area, for the status bar and health page
+/// (`status` from `tracker::area_gnss::AreaWatch::status`); `None` when
+/// neither jamming nor spoofing is raised.
+pub fn area_gnss_view(status: &tracker::area_gnss::AreaStatus) -> Option<AreaGnssView> {
+    use tracker::area_gnss::detail;
+    if !status.jamming && !status.spoofing {
+        return None;
+    }
+    let own = |d: u32| d & detail::OWN_AGREES != 0;
+    let sd = status.spoof_detail;
+    Some(AreaGnssView {
+        jamming: status.jamming,
+        spoofing: status.spoofing,
+        degraded: detail::byte(status.jam_detail, 1),
+        counted: detail::byte(status.jam_detail, 2),
+        drones_moved: if status.spoofing { detail::byte(sd, 2) } else { 0 },
+        aircraft_moved: if status.spoofing { detail::byte(sd, 1) } else { 0 },
+        own_agrees: (status.jamming && own(status.jam_detail)) || (status.spoofing && own(sd)),
+    })
+}

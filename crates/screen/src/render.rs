@@ -110,6 +110,12 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         Some("AIRCRAFT")
     } else if s.threats.jammed {
         Some("JAMMED")
+    } else if s.area_gnss.is_some_and(|g| g.spoofing) {
+        // GPS around the unit is being faked or jammed (aircraft and
+        // drones say so): drone positions may be wrong.
+        Some("AREA FAKE")
+    } else if s.area_gnss.is_some_and(|g| g.jamming) {
+        Some("AREA JAM")
     } else if s.threats.active > 0 {
         Some("ATTACK")
     } else {
@@ -1371,6 +1377,8 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             text(d, &b, x, y, F_BODY, p.fg)?;
         }
     }
+    // These lines take the page hint's place.
+    let mut hint = true;
     if let Some(c) = &s.conflict {
         y += 17;
         text(d, "NEAR", 4, y + 2, F_SMALL, p.dim)?;
@@ -1386,10 +1394,38 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             let _ = write!(b, " {ft:+}ft");
         }
         let col = if c.level >= 2 { p.accent } else { p.fg };
-        // This line takes the page hint's place.
-        return text(d, &b, 70, y, F_BODY, col).map(drop);
+        text(d, &b, 70, y, F_BODY, col)?;
+        hint = false;
     }
-    text(d, "UP/DN: pages", 4, HEIGHT - 12, F_SMALL, p.dim).map(drop)
+    // With many nodes and a conflict line there may be no room left: the
+    // status bar still says AREA JAM / AREA FAKE (unless a near aircraft
+    // outranks it), and the evidence log has the details.
+    if let Some(g) = s.area_gnss.as_ref().filter(|_| y + 17 + 14 <= HEIGHT) {
+        y += 17;
+        text(d, "AREA GPS", 4, y + 2, F_SMALL, p.dim)?;
+        let mut b: String<48> = String::new();
+        if g.spoofing {
+            let _ = b.push_str("FAKED:");
+            if g.drones_moved > 0 {
+                let _ = write!(b, " {} drones", g.drones_moved);
+            }
+            if g.aircraft_moved > 0 {
+                let _ = write!(b, " {} aircraft", g.aircraft_moved);
+            }
+            let _ = b.push_str(" moved");
+        } else {
+            let _ = write!(b, "JAMMED: {}/{} aircraft", g.degraded, g.counted);
+        }
+        if g.own_agrees {
+            let _ = b.push_str(" +hub");
+        }
+        text(d, &b, 70, y, F_BODY, p.accent)?;
+        hint = false;
+    }
+    if hint {
+        text(d, "UP/DN: pages", 4, HEIGHT - 12, F_SMALL, p.dim)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

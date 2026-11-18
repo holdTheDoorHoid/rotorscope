@@ -667,6 +667,27 @@ fn health_conflict() {
 }
 
 #[test]
+fn health_area_gnss() {
+    // GPS jamming in the area: 4 of 6 aircraft lost GPS and the hub's own
+    // receiver agrees. AREA JAM in the status bar, a line on the health page.
+    let mut st = with_aircraft();
+    st.area_gnss = Some(AreaGnssView { jamming: true, degraded: 4, counted: 6, own_agrees: true, ..Default::default() });
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("health_area_gnss", &ui, &st);
+    // Spoofing: two drones moved together; AREA FAKE in the status bar.
+    st.area_gnss = Some(AreaGnssView { spoofing: true, drones_moved: 2, ..Default::default() });
+    shot("health_area_spoof", &ui, &st);
+    // With a near aircraft too there is no room for the line on this
+    // four-node hub: the NEAR line stays (nothing drawn off the panel).
+    let mut name = heapless::String::new();
+    name.push_str("N911PH").unwrap();
+    st.conflict = Some(ConflictView { level: 1, drone: 1, aircraft: name, range_m: 2400.0, dz_m: Some(300.0), count: 0 });
+    shot("health_area_conflict", &ui, &st);
+}
+
+#[test]
 fn page_toast() {
     let st = five_drones(true);
     let mut ui = Ui::default();
