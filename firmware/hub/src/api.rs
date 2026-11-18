@@ -20,6 +20,12 @@
 //! verifies it on the device (USB `s`, and once at boot in `demo` builds).
 //! Each piece fits in `json::MAX_LINE`, and the tracker is borrowed only while
 //! a piece is formatted, never across a socket write.
+//!
+//! Two fields only this hub has go first in the object, before `"t"`
+//! ([`hub_fields`]): `"bench"`, the bench-only features compiled in (the
+//! page shows a banner), and `"cot"`, whether the TAK multicast is on (one
+//! switch for every phone, so every phone shows it). The reference check
+//! inserts them the same way.
 
 use tracker::json::{self, GpsStatus, HubStatus, MAX_LINE, ManualPos, NodeStatus, OwnPosRequest};
 use tracker::openlinks::MAX_LINK_TRACKS;
@@ -56,6 +62,38 @@ fn node_statuses(hub: &Hub, now: u64) -> heapless::Vec<NodeStatus, { NODE_LINKS 
     out
 }
 
+/// Longest [`hub_fields`] text.
+const HUB_FIELDS_MAX: usize = 64;
+
+/// `"bench":[...],"cot":true,`, inserted after the object's opening `{`.
+fn hub_fields() -> heapless::String<HUB_FIELDS_MAX> {
+    let mut f = heapless::String::new();
+    let _ = f.push_str("\"bench\":[");
+    for (i, b) in crate::BENCH.iter().enumerate() {
+        if i > 0 {
+            let _ = f.push(',');
+        }
+        let _ = f.push('"');
+        let _ = f.push_str(b);
+        let _ = f.push('"');
+    }
+    let _ = f.push_str(if crate::cot::enabled() { "],\"cot\":true," } else { "],\"cot\":false," });
+    f
+}
+
+/// Insert [`hub_fields`] after the `{` that starts `buf[..n]`; the new
+/// length. Unchanged if it does not fit (the body stays valid JSON).
+fn insert_hub_fields(buf: &mut [u8], n: usize) -> usize {
+    let f = hub_fields();
+    let k = f.len();
+    if n == 0 || buf[0] != b'{' || n + k > buf.len() {
+        return n;
+    }
+    buf.copy_within(1..n, 1 + k);
+    buf[1..1 + k].copy_from_slice(f.as_bytes());
+    n + k
+}
+
 /// Write the envelope (everything before the first track) into `buf`.
 fn envelope(hub: &Hub, ctx: &Context, buf: &mut [u8]) -> usize {
     let now = ctx.now_ms;
@@ -74,7 +112,7 @@ fn envelope(hub: &Hub, ctx: &Context, buf: &mut [u8]) -> usize {
     };
     match json::state(&[], &[], &[], ctx, &status, buf) {
         // `...,"open_links":[],"tracks":[],"aircraft":[]}\n` -> `...,"open_links":[`
-        Ok(n) if n >= EMPTY_TAIL => n - EMPTY_TAIL,
+        Ok(n) if n >= EMPTY_TAIL => insert_hub_fields(buf, n - EMPTY_TAIL),
         // Cannot happen with MAX_LINE (head + 3 nodes is < 1 KB); still valid JSON.
         _ => {
             let fallback = br#"{"t":"state","v":1,"err":"envelope","open_links":["#;
@@ -237,7 +275,9 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
         nodes: &nodes,
         adsb: adsbee::status(hub, now),
     };
+    reference.resize(reference.len() + HUB_FIELDS_MAX, 0);
     let ref_len = json::state(tracker.tracks(), links, aircraft, &ctx, &status, &mut reference).ok()?;
+    let ref_len = insert_hub_fields(&mut reference, ref_len);
 
     let mut streamed: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(ref_len);
     streamed.extend_from_slice(&env[..env_len]);

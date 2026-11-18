@@ -90,6 +90,16 @@ compile_error!("`adsbee` and `gps-uart` both need the S3's third UART; use the I
 
 const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" };
 
+/// Bench-only features compiled in (`build.rs` refuses them without
+/// `ROTORSCOPE_BENCH=1`). Listed in the boot line and in `/api/state`
+/// (`bench`), where the phone page shows a banner.
+pub const BENCH: &[&str] = match (cfg!(feature = "demo"), cfg!(feature = "open-hotspot")) {
+    (true, true) => &["demo", "open-hotspot"],
+    (true, false) => &["demo"],
+    (false, true) => &["open-hotspot"],
+    (false, false) => &[],
+};
+
 /// Heap in RAM that the second-stage bootloader used and gives back (the
 /// largest block that is otherwise wasted), plus a block of ordinary DRAM.
 /// esp-radio allocates Wi-Fi buffers and its task stacks here; embassy-net
@@ -137,6 +147,8 @@ struct BootLine {
     ver: &'static str,
     chip: &'static str,
     proto: u8,
+    /// Bench-only features in this build (empty for a deployable one).
+    bench: &'static [&'static str],
     demo: bool,
     station: bool,
     open_hotspot: bool,
@@ -190,6 +202,7 @@ async fn main(spawner: Spawner) -> ! {
         ver: env!("CARGO_PKG_VERSION"),
         chip: CHIP,
         proto: link::PROTOCOL_VERSION,
+        bench: BENCH,
         demo: cfg!(feature = "demo"),
         station: cfg!(hub_station),
         open_hotspot: hotspot::OPEN,
