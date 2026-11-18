@@ -82,6 +82,19 @@ MAC-only track also waits 1 s (`announce_grace_ms`), so that BLE adverts about
 to merge into a known drone do not beep twice. Far more new identities than a
 real sky makes (20 a second over 5 s) raise a hub threat `id_flood`.
 
+**Mutes** (`threats`, WP-11b, docs/SITE.md). A rule names one thing
+(`threats::key_of`: node, source, target, name, centre or table, as the kind
+needs; no wildcards). `silence(id)`, `mute_seen(seen_ms, now)` and
+`snooze_seen(seen_ms, now)` make timed rules: operator mutes of nuisance kinds
+end after 2 h (`OPERATOR_MUTE_MS`), snoozes of the safety-critical kinds
+(`is_safety_kind`: jamming, Blinded, AreaGnss, IdFlood, ForgedLink) after
+5 min (`SNOOZE_MS`); an alarm still sounding when its rule ends is announced
+again. Rules for good come only from the site file and must pass
+`Mute::check_permanent`. `partly_blind` ignores every mute. Each
+`{"t":"threat"}` line gains `"mute"` (`"snooze"`, `"timed"` or `"site"`) and
+`"mute_until_ms"` while silenced, and `"claimed":true` when it shows an
+address or name taken from the attack frames (`MAX_THREAT_LINE` 640).
+
 ## JSON line schema (`json::track_line`)
 
 There is one object per track, ending with `\n`. Fields are always present, and

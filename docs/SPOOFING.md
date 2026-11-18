@@ -381,7 +381,8 @@ sighting) are counted per second. At **20 a second averaged over 5 s**
 rate (`detail` low 16 bits; JSON `table` and `per_s`), and ended 10 s after
 the rate falls. It goes through the ordinary threat path: one evidence
 `Threat` event with a sentence (`probation::describe`), the console, the
-threat count on the screen, mute rules. The screen's bar shows `ID FLOOD`;
+threat count on the screen. It can only be snoozed (5 min), never muted, and
+a snooze does not clear the bar (WP-11b). The screen's bar shows `ID FLOOD`;
 `/api/state` carries `"flood": {new_per_s, refused, since_ms}` and the page
 shows a banner.
 
@@ -428,7 +429,13 @@ table).
   nearer ones push out the farthest real ones (as nearer real aircraft
   always did).
 - **Muted floods.** A mute rule for one victim keeps that victim's floods
-  apart; a rule for the whole kind silences every node's aggregate.
+  apart; the screen's mute of a node's aggregate entry silences that node's
+  only, for two hours (WP-11b: there is no rule for the whole kind any
+  more, and the ID flood alarm can only be snoozed, docs/SITE.md).
+- **Provoke a mute.** Raising nuisance alarms to get the operator to press
+  Mute now costs the attacker exactly those alarms: the press takes only
+  alarms already on the screen, never a jamming, blinded, area-GPS, ID-flood
+  or forged-traffic one, and the mute ends after two hours.
 - **Unconfirmed clutter.** The list and the page still show the unconfirmed
   fakes, faint and last. They are never announced, never sent to TAK, and
   never ranked above a real drone.
@@ -601,6 +608,13 @@ multiplication.
   session after it has been unused for 30 min (the hub has forgotten it), or
   flip position bits in a new record: all decrypt. They are claims, judged
   like any other.
+- **Fake an area GPS spoof.** Rival claims and disputes never count as
+  drone jumps for the area check (WP-11b, docs/DRONE-ATTACKS.md "GPS
+  interference in the area"): impersonating two real drones and moving
+  them together raises nothing while the real ones keep transmitting. What
+  still works is confirmed fakes of the attacker's own, at least three,
+  heard as separate transmitters (different addresses, nodes or 6 dB of
+  RSSI, born 2 s apart), moved together: AREA FAKE at confidence 60.
 
 ## Known false-alarm cases
 

@@ -96,7 +96,8 @@ nothing except, in the `espnow` build, ESP-NOW on 2.4 GHz channel 6 as before.
 - **Evil twin**: a site that really does run an open network with the same
   name as its WPA2 network (rare; an OWE transition pair is recognised and not
   flagged). It will report once a second for as long as both are on the air;
-  mute it at the hub.
+  mute it for good with one specific line in the site file (its source and
+  name, docs/SITE.md), or for two hours on the hub.
 - **Deauth**: an access point shutting down several networks at once sends a
   broadcast deauth per network and per client; ten or more from one BSSID in a
   second would trip the broadcast rule. Band-steering access points send
@@ -113,6 +114,35 @@ nothing except, in the `espnow` build, ESP-NOW on 2.4 GHz channel 6 as before.
   impossible at a stadium gate.
 - **Channel switch**: an access point announcing a very long countdown (more
   than 10 s) on a DFS radar event.
+
+## What a forged frame can make an alarm say
+
+Every field of these alarms comes from frames anyone in range can send
+(WP-11b). The detectors are right that *frames like these were heard*;
+what the frames say about who sent them, and to whom, is a claim:
+
+- **`source` (the attacker).** Deauth, disassociation, beacon, login and
+  probe floods, Karma and attack tools carry the transmitter address the
+  frame states. It is set by the sender, so it can be a neighbour's access
+  point, the venue's router or a phone in the crowd. A deauth "from" the
+  cafe's own access point is what an attacker sends to frame it.
+- **`target` (the victim).** Equally a claim: a flood "against" a device
+  may never have reached it.
+- **`ssid` (the network name).** Any name can be beaconed; an evil twin of
+  "Cafe WiFi" proves only that someone sent that name from another
+  address, possibly to get the real one muted.
+- **The alarm itself.** Cheap to raise on purpose, to make an operator
+  press Mute while something else is happening. A mute therefore only ever
+  covers that one source, victim or name, ends after two hours (snoozes of
+  jamming-like alarms after five minutes), and never clears JAMMED
+  (docs/SITE.md "Silencing alarms").
+
+The hub labels these fields as claims: the threat JSON line carries
+`"claimed":true` whenever it shows `src`, `target` or `ssid` (addresses
+only with `show_link_ids`), the evidence text says `claimed "name"`, and
+the evidence text of a mute says `claimed source` / `claimed target` /
+`claimed name`. The raw frames in the evidence log are what can be checked
+later; the summary is not.
 
 ## What needs checking on hardware
 

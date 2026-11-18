@@ -5,7 +5,7 @@ detector: `DroneDeauth`, `DroneTakeover`, `DroneNetClone`, `ControlContested`,
 `MavlinkAttack` and `AreaGnss` (`crates/link`, `ThreatKind`). Each has its own
 section here. They are threats like the Wi-Fi attacks and jamming the hub already
 lists: kept in the hub's threat table, logged as evidence, shown on screen (the
-"ATTACK" box in the status bar, muteable from Settings > Alarms) and in the JSON
+"ATTACK" box in the status bar, muteable for two hours from Settings > Alarms, one alarm at a time, see docs/SITE.md) and in the JSON
 feed as `{"t":"threat",...}` lines. Area GPS interference also has its own
 AREA box and health-page line.
 
@@ -197,8 +197,11 @@ A `Frame::Threat` (`ThreatSighting`) with `kind = ControlContested`:
 
 On the hub: one table entry per node, link handle, identifier and system
 (`Threat::same`). A mute rule made from it (`Mute::for_threat`) keys on the
-identifier and the band (900 MHz or 2.4 GHz), not the handle; with ids off that
-silences contested-link alarms in that band from any link. The JSON threat line
+identifier and the band (900 MHz or 2.4 GHz), not the handle; with ids off
+(identifier all zero) it also keys on the node, the handle and the system, so
+it silences that one link, for two hours (WP-11b; before, it silenced every
+contested link in the band). A site-file mute for good must name the
+identifier, so needs ids on (docs/SITE.md). The JSON threat line
 adds `"ctrl_system"`, `"transmitters"` and `"rule"`; `src`/`target` appear only
 with `show_link_ids`. The console and evidence text read, for example,
 `Second controller on a link (node 3, 915.5 MHz, ExpressLRS, 2 transmitters,
@@ -208,7 +211,8 @@ interleaved timing, 4 events, -61 dBm)`.
 
 - **Same binding phrase / default NET ID.** Two pilots sharing an ExpressLRS
   phrase with Model Match off, or two SiK pairs left on NET ID 25 near each other.
-  Real second transmitters; reported. Mute (by band, or by identifier with ids on).
+  Real second transmitters; reported. Mute that link on the hub (2 h), or for good
+  in the site file by identifier and band (needs ids on).
 - **One GCS radio carrying two ground-station programs with the same system and
   component id** (MAVProxy forwarding QGroundControl and Mission Planner both as
   255/190): two sequence counts on one radio. Rare; mute.
@@ -475,7 +479,7 @@ random 16-character name and random addresses; the Remote ID side
 ### False alarms to expect
 
 - **Testing your own drone** with a deauther: it is a real `DroneDeauth`.
-  Mute it at the hub (the mute is per drone).
+  Mute it at the hub (the mute is per drone, for two hours).
 - **Two phones** joined to one drone on purpose (a second viewer): reported
   as `DroneTakeover` with bit 6. Toy drones normally accept one phone.
 - **A pilot's phone that changes its random address** while flying (rare;
@@ -542,6 +546,31 @@ random 16-character name and random addresses; the Remote ID side
    backgrounded and resumed, battery swaps, must give no drone alarms.
 5. **Cost:** with a drone known, `drop` and `qmax` must stay low during a
    video stream (the callback takes a lock per data frame then).
+
+## What a forged frame can make these alarms say
+
+Like the Wi-Fi alarms (docs/WIFI-ATTACKS.md, same heading), every address
+in these alarms is what a frame claimed (WP-11b):
+
+- **Drone Wi-Fi hijacking** (`drone_deauth`, `drone_takeover`,
+  `drone_net_clone`): the "attacker" address and the drone network's name
+  are whatever the frames carry. An owner's own phone reconnecting can be
+  made to look like a takeover by someone who sends a deauth in its name.
+- **Contested control link** (`control_contested`): two transmitters were
+  heard; which one is the owner is not known, and the link identifier (with
+  `control ids on`) is copied from the air.
+- **Hostile MAVLink** (`mavlink_attack`): the system and component IDs are
+  set by the sender; "from the ground station 255/190" means the frame
+  said so.
+- **GPS interference in the area** (`area_gnss`): built from drones'
+  broadcast positions and aircraft ADS-B, both unauthenticated. The rules
+  below make an attacker need several independent transmitters, but the
+  alarm still says what receivers *claim*.
+
+The threat JSON line marks shown addresses and names with `"claimed":true`;
+evidence and mute texts say `claimed`. A mute names one source or victim
+and ends (docs/SITE.md), so framing an innocent address costs the attacker
+that address, not every alarm of the kind.
 
 ## GPS interference in the area
 
