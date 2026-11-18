@@ -6,8 +6,11 @@
 //! the software one without changing the format. The signer is behind the
 //! [`Signer`] trait; the hub picks one at build time.
 //!
-//! The key's **class** is written into every checkpoint so nobody can
-//! mistake a bench log for evidence-grade output:
+//! The key's **class** is written into every checkpoint so an honest bench
+//! log says plainly that it is not evidence-grade. It is a claim, not a
+//! proof: whoever signs writes the byte, and a key made on any laptop can
+//! be labelled class 2. Only a key confirmed outside the log says who
+//! signed (see `verify`).
 //!
 //! | class | meaning |
 //! |---|---|
