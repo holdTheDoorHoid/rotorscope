@@ -31,6 +31,10 @@
 //! - `flood real on|off`: the "real" drone at [`REAL_MAC`]: one Remote ID
 //!   beacon a second (id `FLOODREAL0000000001`) and one DJI DroneID element
 //!   a second (serial `FLOODREAL0000001`, sequence number moving on);
+//! - `flood crowd <n>`: `n` fake drones kept alive, each one Remote ID
+//!   beacon a second from its own fixed address with its own id
+//!   (`FLOODFAKE` + 9 + nine digits); the hub's population rule (32 drone
+//!   IDs active at once) is the line it tests;
 //! - `flood off`: everything off; `flood`: print the state now.
 //!
 //! Rates are per second, up to [`MAX_RATE`] per kind, and kinds mix. Every
@@ -227,9 +231,28 @@ struct Injector {
     /// The test drone's clock started here; next steady beacon.
     hijack_boot: Instant,
     hijack_next: Instant,
+    /// `flood crowd`: fake drones kept alive, frames owed, next one.
+    crowd: u32,
+    crowd_acc: u32,
+    crowd_i: u32,
 }
 
 impl Injector {
+    /// One beacon of crowd member `i`: its own address and ID, every time.
+    fn crowd_one(&mut self, i: u32, f: &mut [u8; FRAME]) {
+        if let Some(at) = self.fake_digits {
+            let mut v = 9_000_000_000u64 + u64::from(i);
+            for d in self.fake_pack[at..at + 10].iter_mut().rev() {
+                *d = b'0' + (v % 10) as u8;
+                v /= 10;
+            }
+        }
+        let src = [0x02, 0xC2, 0x0D, 0x00, (i >> 8) as u8, i as u8];
+        if let Ok(len) = encode::beacon_frame(src, b"FLOOD", 6, i as u8, &self.fake_pack[..self.fake_len], f) {
+            inject(RxKind::Mgmt, f, len);
+        }
+    }
+
     fn one(&mut self, k: usize, f: &mut [u8; FRAME]) {
         self.n = self.n.wrapping_add(1);
         let n = self.n;
@@ -327,6 +350,12 @@ impl Injector {
             let len = drone_beacon(tsf, f);
             inject(RxKind::Mgmt, f, len);
         }
+        self.crowd_acc += self.crowd * TICK_MS as u32;
+        while self.crowd > 0 && self.crowd_acc >= 1000 {
+            self.crowd_acc -= 1000;
+            self.crowd_i = (self.crowd_i + 1) % self.crowd;
+            self.crowd_one(self.crowd_i, f);
+        }
         for k in 0..KINDS {
             self.acc[k] += self.rates[k] * TICK_MS as u32;
             while self.acc[k] >= 1000 {
@@ -363,6 +392,12 @@ impl Injector {
             (Some("off"), None) => {
                 self.rates = [0; KINDS];
                 self.real = false;
+                self.crowd = 0;
+            }
+            (Some("crowd"), Some(n)) => {
+                let Ok(n) = n.parse::<u32>() else { return false };
+                self.crowd = n.min(1000);
+                (self.crowd_acc, self.crowd_i) = (0, 0);
             }
             (Some("real"), Some("on")) => {
                 if !self.real {
@@ -412,6 +447,9 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
         n: 0,
         hijack_boot: Instant::now(),
         hijack_next: Instant::now(),
+        crowd: 0,
+        crowd_acc: 0,
+        crowd_i: 0,
     };
     inj.fake_len = rid_pack(b"FLOODFAKE0000000001", 40.0, -75.0, &mut inj.fake_pack).unwrap_or(0);
     inj.fake_digits = inj.fake_pack[..inj.fake_len].windows(9).position(|w| w == b"FLOODFAKE").map(|i| i + 9);
@@ -445,7 +483,7 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
             line.clear();
         }
         inj.tick(&mut frame);
-        let running = inj.real || inj.rates.iter().any(|&r| r > 0);
+        let running = inj.real || inj.crowd > 0 || inj.rates.iter().any(|&r| r > 0);
         if running && last_status.elapsed() >= Duration::from_secs(1) {
             last_status = Instant::now();
             inj.status();

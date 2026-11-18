@@ -476,6 +476,23 @@ fakes): raised at 12 s, by the population rule (30 fakes heard in the last
 (sent again every 5 s): under both rate lines, raised at 62 s when 31 fakes
 and the real drone are active at once, ended 18 s after the fakes stopped.
 
+**On the bench (2026-11-18, P4 + one ESP-NOW node-wifi `floodtest` +
+gateway).** Quiet 3 minutes with the test drone: no alarm. `flood rid 3`
+(3 new IDs a second, nothing shed by the node): raised 12 s after the start,
+first by the population rule ("32 drone IDs active at once": 30 one-frame
+fakes heard in the last 10 s plus the test drone's two tracks, Remote ID and
+DroneID), then read by the minute rule (124 new IDs in the last minute);
+ended 50 s after the flood stopped. The test drone kept its two confirmed
+tracks throughout. `flood rid 200`: the hub-wide drone alarm within 2 s
+(read as the minute rule) and the node-shed alarm 5 s after the start, as two entries (`table` `drones` and
+`node`); the node-shed one ended 15 s after the flood stopped, the minute one
+61 s after. `flood crowd 40` (40 fakes kept alive through one node) did not
+reach the population line: the node's 32-slot source table and its 8 a
+second new-source budget let about 28 of them through, so the hub held 30
+drone tracks. One Wi-Fi node cannot show the hub more than about 30
+kept-alive sources; the population rule is the catch-all for floods spread
+over several nodes or media, and is host-tested.
+
 **Cost.** One byte per second for 64 seconds plus the latest count: 96
 bytes in the tracker (75 848 bytes for `Tracker<64, 32>` in all), one pass
 over 60 bytes and one over the drone table once a second.
