@@ -164,14 +164,17 @@ impl Ear {
         let Self { tape, mic, det, chan, chan_fixed, energy, frames, heard, peak_conf, heard_pitch, last, max_us, sum_us, calls, .. } = self;
         mic.poll(|stereo| {
             if !*chan_fixed {
-                for (i, s) in stereo.iter().enumerate() {
+                for i in 0..mic::FRAMES * 2 {
+                    let s = stereo.sample(i);
                     energy[i & 1] += u64::from(s.unsigned_abs()) * u64::from(s.unsigned_abs());
                 }
                 *chan = usize::from(energy[1] > energy[0]);
             }
+            // Copied out first: everything after this works on `hop`, not
+            // on the DMA's buffer (mic.rs "Ring").
             let mut hop = [0i16; HOP];
             for (i, h) in hop.iter_mut().enumerate() {
-                *h = stereo[2 * i + *chan];
+                *h = stereo.sample(2 * i + *chan);
             }
             #[cfg(feature = "earfake")]
             fake::mix(&mut hop, tape.head);

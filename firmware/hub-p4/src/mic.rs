@@ -28,6 +28,17 @@
 //! DMA fills them in a circle without asking; [`Mic::poll`] takes the ones
 //! that are complete. If the loop stays away for a whole lap (a quarter of
 //! a second) sound is lost and counted in [`Mic::overruns`].
+//!
+//! The DMA's owner check (`in_check_owner`) is off, as in the version
+//! proven on the board: after an overrun the DMA may be refilling a buffer
+//! while it is read. So a buffer is never lent out as a `&[i16]` (that
+//! would be memory changing under a shared reference); [`Frames`] reads it
+//! sample by sample with volatile loads, and the caller copies what it
+//! needs before the buffer goes back. The worst an overrun can then do is
+//! mix old and new samples in that one buffer, which the overrun count
+//! already reports. Turning the owner check on would stop the DMA at the
+//! first overrun (descriptor error) and needs a restart path this driver
+//! does not have: docs/ACOUSTIC.md "Bench checks" says what to try.
 
 use esp_hal::gpio::{AnyPin, Input, InputConfig, Level, Output, OutputConfig, Pin};
 
@@ -154,6 +165,23 @@ fn pulse(a: usize, bit: u32) {
     set(a, bit, 0);
 }
 
+/// One completed buffer, read in place ([`Mic::poll`]): `FRAMES * 2`
+/// samples, left then right.
+pub struct Frames(*const i16);
+
+impl Frames {
+    /// Sample `i` (`i < FRAMES * 2`).
+    #[inline(always)]
+    pub fn sample(&self, i: usize) -> i16 {
+        assert!(i < FRAMES * 2);
+        // SAFETY: the pointer is a whole ring buffer of `FRAMES * 2` i16
+        // (`poll`), valid for the program's life (a static); a volatile load
+        // through a raw pointer, so no reference to DMA-written memory is
+        // ever made.
+        unsafe { self.0.add(i).read_volatile() }
+    }
+}
+
 pub struct Mic {
     /// Next buffer to hand out.
     head: usize,
@@ -259,8 +287,9 @@ impl Mic {
     }
 
     /// Hand each completed buffer to `f`, oldest first: [`FRAMES`] stereo
-    /// frames, left then right.
-    pub fn poll(&mut self, mut f: impl FnMut(&[i16; FRAMES * 2])) {
+    /// frames, left then right. The buffer goes back to the DMA when `f`
+    /// returns; copy what is needed out of it.
+    pub fn poll(&mut self, mut f: impl FnMut(&Frames)) {
         let raw = rd(IN_INT_RAW);
         if raw & DMA_ERR_MASK != 0 {
             self.dma_errors += 1;
@@ -283,7 +312,7 @@ impl Mic {
             }
             // SAFETY: as above, over the buffer the DMA has finished with.
             unsafe { Cache_Invalidate_Addr(CACHE_MAP_L1_DCACHE, (&raw const ring.buf[self.head]) as u32, BUF_BYTES as u32) };
-            f(&ring.buf[self.head].0);
+            f(&Frames((&raw const ring.buf[self.head].0).cast::<i16>()));
             // Hand the buffer back to the DMA.
             ring.desc[self.head].0[0] = BUF_BYTES as u32 | OWNER_DMA;
             write_back(ring, self.head);
