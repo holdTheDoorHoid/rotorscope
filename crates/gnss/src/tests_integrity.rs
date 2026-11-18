@@ -1176,3 +1176,13 @@ fn time_before_the_build_date_is_impossible() {
     assert!(st.cause.unwrap().value <= -400 * 86_400 + 60, "{st:?}");
     assert!(hub.trusted.iter().all(|t| !t));
 }
+
+/// The monitor lives inside the hub's `Gps`, on the main task's stack.
+#[test]
+fn monitor_size() {
+    let m = core::mem::size_of::<Monitor>();
+    let g = core::mem::size_of::<crate::timeguard::TimeGuard>();
+    let p = core::mem::size_of::<Publisher<(f64, f64, Option<f64>, u64, Option<f32>, Option<f32>, bool), (u64, u64, bool)>>();
+    std::println!("Monitor {m} bytes, TimeGuard {g}, Publisher(hub types) {p}");
+    assert!(m <= 1024, "{m}");
+}

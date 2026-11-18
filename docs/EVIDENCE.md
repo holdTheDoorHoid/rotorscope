@@ -30,7 +30,10 @@ laptop that built the firmware.
 - **that the times are true.** Times come from the unit's own GPS receiver
   and clock; nothing outside the unit vouches for them unless someone asked
   the server for an outside time-stamp, and that only shows the records
-  existed by the time of the stamp.
+  existed by the time of the stamp. Since WP-12 the hub only writes GPS time
+  it trusts, and its clock follows GPS by no more than a crystal could drift,
+  but a spoofer present from the very first boot, or walking the time by
+  under about 1.7-3.5 s a day, is not caught (docs/GNSS-INTEGRITY.md).
 
 **Still missing before it could be court-grade:**
 
@@ -135,6 +138,15 @@ the log (see "Who signed").
 - **No GPS**: records made without GPS time say "time source: none" and
   carry only time since power-on; records without a GPS position say so. The
   verifier counts and prints them. A typed-in position is marked "manual".
+- **Untrusted GPS** (WP-12, 2026-11-18): when the hub suspects its own GPS is
+  spoofed and has nothing trusted to hold (a spoofer on since power-up), or the
+  GPS time is before the firmware's build date or before the latest time the
+  hub remembers trusting, it records **no** UTC, with time source
+  "untrusted" (code 4) instead of "none", and no position. Only time the hub
+  trusted (ten clean epochs in a row, steered by at most 20 ppm against its
+  own clock: docs/GNSS-INTEGRITY.md "Time") is ever written as GPS time; held
+  time is "free running" with its age. The verifier counts "untrusted"
+  records separately.
 - **Outside time-stamp**: the server can have a public time-stamp authority
   (tested with DigiCert's free service, no account) sign a chain fingerprint,
   proving the records existed by that time. Only a fingerprint leaves the

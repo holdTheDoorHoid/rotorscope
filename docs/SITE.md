@@ -22,6 +22,21 @@ suspicious.
 
 * **Forget a node's position:** `node 10:bd:a3:ce:bd:18 clear`
 
+## Where the hub itself stands (`home`)
+
+The hub's GPS spoofing checks compare its fixes with *home*, where it
+normally stands (docs/GNSS-INTEGRITY.md). By default it learns home from 15
+minutes of steady fixes and remembers it on the card. At a fixed site you can
+place it instead, which is stronger (a spoofer present when the hub first
+learns cannot then become home):
+
+      home 39.95210 -75.16380 12.5   # mast; height in metres above the ellipsoid, optional
+      home clear                     # back to learning
+
+A placed home replaces the learned or remembered one at every mount and
+cannot be overridden from the screen or console: move the hub, edit the line.
+Each change is an evidence "setting" event.
+
 ## Silencing alarms
 
 A silenced alarm is still recorded in the evidence log and listed in the

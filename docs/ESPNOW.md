@@ -252,6 +252,29 @@ node. Boards with the old key go deaf to the kit (that is the point).
   newest counter, so it can only have been made during this node boot, after
   that packet; the node takes only increasing `(echoed counter, clock)`.
   Broadcast beacons carry no echo and never move a node to another epoch.
+* **Age** (WP-12, 2026-11-18): order alone does not bound how *old* a
+  command is. Someone who jams a node while recording a command to it (a
+  `TimeSync`, an `Assign`) and releases the recording later, before any newer
+  echoed packet reached the node, would get it taken. So each node also keeps
+  a **floor** under the gateway's clock: the highest gateway clock it has
+  accepted, plus one for every second of its own uptime since (the gateway
+  beacons twice a second, so its real clock always runs faster). A gateway
+  packet of the node's current epoch whose clock is more than **16** below
+  the floor is rejected as **late** (`Reject::Late`, code 7, counted only on
+  the node: `"late"` on its `link_auth` line, the fifth `auth_rej` entry on
+  node-sdr). Taking a packet raises the floor, never lowers it. Cases: a node
+  just booted has no floor (and no session a recording could echo); a gateway
+  that rebooted starts a new epoch, and the echoed sync that moves the node
+  there restarts the floor; a node back from another channel has had its
+  floor grow by its uptime, which the real gateway clock outruns; a command
+  retried by the gateway is stamped afresh at each attempt. No wire change.
+  **Limit:** a recording made while the node still heard the gateway is dead
+  16 s later. A node jammed for `J` seconds *before* the recording learned
+  nothing in that time, while the gateway's clock ran on at its real rate `R`
+  (2 a second plus one per command sent): such a recording stays acceptable
+  for about `J x (R - 1) + 16` seconds after it was made. For a `TimeSync` the
+  aero node's clock rule (three agreeing syncs to move it, docs/AERO-NODE.md)
+  is the next line.
 * **Resync**: a node packet with a good tag but a stale epoch (the gateway
   rebooted) or an old counter is answered with a sync, a beacon sent to that
   node echoing its session, at most once a second per node.
@@ -265,7 +288,8 @@ node. Boards with the old key go deaf to the kit (that is the point).
   ever matters.
 * **Reports**: `link::ThreatKind::ForgedLink`, `detail` 1 bad tag, 2 replay,
   3 unauthenticated, 4 stale (see its doc comment); since 2026-11-18 also
-  5 origin and 6 table full ("Who may send what" below).
+  5 origin and 6 table full ("Who may send what" below). Code 7 (late) is a
+  node-side count only; the gateway never reports it.
 
 Not verified on hardware yet (2026-11-17): everything above passes host
 tests and all four images build with and without a key; the radio behaviour

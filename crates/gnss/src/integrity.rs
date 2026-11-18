@@ -620,7 +620,8 @@ struct Learn {
     alt_n: u32,
 }
 
-/// The integrity monitor. About 400 bytes; no allocation.
+/// The integrity monitor. About 820 bytes (WP-12 added about 200: the time guard, a waiting
+/// home, the trust run); no allocation.
 pub struct Monitor {
     inds: [Ind; N_CAUSES],
     status: Status,
