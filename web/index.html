@@ -120,6 +120,8 @@ a.btn{color:var(--fg);display:inline-flex;align-items:center;text-decoration:non
   border-radius:10px;padding:10px 12px;margin:8px 0}
 .trk.new{border-color:var(--drone);border-width:3px}
 .trk.stale{opacity:.6;border-style:dashed}
+/* Unconfirmed (heard once, or for under a second): quiet, never alerted. */
+.trk.unc{opacity:.6;border-style:dotted}
 .trk .r1{display:flex;gap:8px;align-items:baseline;min-width:0}
 .trk .id{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
 .tag{flex:none;font-size:13px;font-weight:800;padding:1px 6px;border-radius:5px;border:2px solid currentColor}
@@ -176,6 +178,7 @@ input[type=text]{width:100%;min-height:48px;padding:8px 10px;border-radius:8px;b
   <div id="bench" class="ban" role="alert" hidden></div>
   <div id="lost" class="ban" role="alert" hidden></div>
   <div id="alert" class="ban" role="alert" hidden></div>
+  <div id="flood" class="ban" role="alert" hidden></div>
   <div id="nopos" class="ban" hidden>
     <span aria-hidden="true">&#8982;</span>
     <span class="grow">Your position is unknown<small>No distances or directions until the hub has GPS or you enter a position.</small></span>
@@ -197,7 +200,7 @@ input[type=text]{width:100%;min-height:48px;padding:8px 10px;border-radius:8px;b
       <span><svg viewBox="-8 -8 16 16"><path class="dr" d="M0,-7 L5.5,6 L0,3 L-5.5,6Z"/></svg> drone, pointing where it&#8217;s going</span>
       <span><svg viewBox="-8 -8 16 16"><circle class="dr" r="5"/></svg> drone, not moving</span>
       <span><svg viewBox="-8 -8 16 16"><rect class="op" x="-4.5" y="-4.5" width="9" height="9"/></svg> its operator (dashed link)</span>
-      <span><svg viewBox="-8 -8 16 16"><circle class="dr stale" r="5"/></svg> not heard for 60&nbsp;s</span>
+      <span><svg viewBox="-8 -8 16 16"><circle class="dr stale" r="5"/></svg> not heard for 60&nbsp;s, or unconfirmed</span>
     </div>
     <div id="radar-note" class="note"></div>
   </section>
@@ -411,12 +414,18 @@ const since = () => everOk ? Math.max(0, Date.now() - lastOk) : 0;
 const ago = ms => fmtAge(ms == null ? null : ms + since());
 const findTrack = id => tracks().find(t => t.id === id);
 const isStale = t => t.state === 'stale';
+// Not yet heard for a second (hub `probation`): possibly forged, never
+// alerted, listed after confirmed drones. Hubs older than the field send no
+// `confirmed`, and every track counts as confirmed.
+const isUnc = t => t.confirmed === false;
 const dist = t => t.own ? t.own.dist_m : null;
 
-// Active first; then nearest; then (no position) most recently heard.
+// Active first; confirmed before unconfirmed (a forged drone can claim to be
+// right beside you); then nearest; then (no position) most recently heard.
 function sorted() {
   return tracks().slice().sort((a, b) =>
     (isStale(a) - isStale(b)) ||
+    (isUnc(a) - isUnc(b)) ||
     ((dist(a) == null) - (dist(b) == null)) ||
     ((dist(a) ?? 0) - (dist(b) ?? 0)) ||
     (a.age_ms - b.age_ms));
@@ -460,7 +469,9 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) rend
 function checkNew() {
   const now = st.now_ms;
   for (const t of tracks()) {
-    if (known.has(t.id) || isStale(t)) continue;
+    // Unconfirmed tracks never alert; they do once confirmed (also when
+    // they were already there, unconfirmed, as the page loaded).
+    if (known.has(t.id) || isStale(t) || isUnc(t)) continue;
     if (!primed) { known.add(t.id); continue; }
     // A track with no ID yet may be about to merge into a known drone, so
     // wait a moment before alerting on it (as the hub's buzzer does).
@@ -528,7 +539,7 @@ function render() {
   document.body.classList.toggle('lost', lost && everOk);
   renderStrip(lost);
   renderBanners(lost);
-  const n = tracks().filter(t => !isStale(t)).length;
+  const n = tracks().filter(t => !isStale(t) && !isUnc(t)).length;
   $('tab-list').textContent = n ? `List (${n})` : 'List';
   if (tab === 'radar') renderRadar();
   if (tab === 'list') renderList();
@@ -606,6 +617,16 @@ function renderBanners(lost) {
       `<button type="button" data-open="${t.id}">View</button>` +
       `<button type="button" data-dismiss aria-label="Dismiss alert">&#10005;</button>`);
   }
+  // A flood of forged drone IDs (the hub's alarm, `st.flood`): say so, with
+  // the rate, so the operator is told rather than buried. Numbers only.
+  const fl = st && st.flood;
+  $('flood').hidden = !fl;
+  if (fl) {
+    const unc = tracks().filter(isUnc).length;
+    setHTML('flood', `<span aria-hidden="true">&#9888;</span><span class="grow">FAKE DRONE FLOOD?` +
+      `<small>${Number(fl.new_per_s) | 0} new drone IDs a second, far more than a real sky. ` +
+      `${unc} unconfirmed drone(s) listed last are probably fake; confirmed ones are unaffected.</small></span>`);
+  }
   $('nopos').hidden = !(st && !st.own && !lost && tab !== 'set');
 }
 
@@ -677,7 +698,8 @@ function renderRadar() {
 }
 
 function radarTrack(t, R) {
-  const s = [], stale = isStale(t) ? ' stale' : '';
+  // Unconfirmed drones are drawn like stale ones: faint.
+  const s = [], stale = isStale(t) || isUnc(t) ? ' stale' : '';
   const g = t.own;
   let dx = null;
   if (g.dist_m != null) dx = xy(g.brg, g.dist_m, R);
@@ -704,9 +726,12 @@ function radarTrack(t, R) {
 
 function renderList() {
   const all = sorted();
-  const active = all.filter(t => !isStale(t)).length;
+  const unc = all.filter(isUnc).length;
+  const active = all.filter(t => !isStale(t) && !isUnc(t)).length;
+  const stales = all.filter(isStale).length;
   const o = [`<div class="sum">${active} active drone${active === 1 ? '' : 's'}` +
-    (all.length > active ? ` &middot; ${all.length - active} not heard recently` : '') +
+    (stales ? ` &middot; ${stales} not heard recently` : '') +
+    (unc ? ` &middot; <span class="mut">${unc} unconfirmed</span>` : '') +
     (st && !st.own ? ` &middot; <span class="mut">sorted by last heard (no position)</span>` : '') + `</div>`];
   if (!all.length) {
     const ears = st ? (st.nodes || []).filter(n => n.alive).map(n => role(n.role)[1]).join(', ') : '';
@@ -714,7 +739,7 @@ function renderList() {
   }
   for (const t of all) {
     const g = t.own, l = t.loc || {};
-    const stale = isStale(t);
+    const stale = isStale(t), u = isUnc(t);
     const fl = flagList.find(f => f.who === idOf(t) && f.level >= 1);
     const tags = (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') +
       (fl ? `<span class="tag">${['', 'WATCH', 'WARNING', 'ALERT'][Math.min(fl.level, 3)]}</span>` : '');
@@ -722,8 +747,9 @@ function renderList() {
       : g.dist_m == null ? '<span class="mut">drone not sending a position yet</span>'
       : `<span class="big">${fmtDist(g.dist_m)}</span><span class="big">${bearing(g.brg)}</span>`;
     const h = l.height != null ? l.height : l.alt_geo;
-    o.push(`<button type="button" class="trk${stale ? ' stale' : ''}${isNew(t) && !stale ? ' new' : ''}" data-open="${t.id}">` +
-      `<div class="r1"><span class="num">#${t.id}</span><span class="id mono">${esc(idOf(t))}</span>${tags}</div>` +
+    o.push(`<button type="button" class="trk${stale ? ' stale' : ''}${u ? ' unc' : ''}${isNew(t) && !stale ? ' new' : ''}" data-open="${t.id}">` +
+      `<div class="r1"><span class="num">#${t.id}</span><span class="id mono">${esc(idOf(t))}</span>${tags}` +
+      (u ? `<span class="mut sm">unconfirmed</span>` : '') + `</div>` +
       `<div class="r2">${where}</div>` +
       `<div class="r2"><span>Height ${fmtAlt(h)}</span><span>Speed ${fmtSpd(l.speed)}</span>` +
       `<span class="mut">${esc((t.dji && t.dji.model) || uaName(t.ua))}</span></div>` +

@@ -215,4 +215,47 @@ mod tests {
             std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/index.html")).unwrap();
         assert!(out == src, "gzip does not round-trip to web/index.html");
     }
+
+    /// The `/api/state` reference (crates/tracker/README.md) as the page
+    /// reads it, for the fields WP-09 added: every track's `confirmed`
+    /// (missing on older hubs, so only an explicit `false` counts as
+    /// unconfirmed) and the head's optional `flood` object. Unconfirmed
+    /// tracks never alert, and the flood banner puts only numbers into the
+    /// page (nothing from the air reaches it unescaped).
+    #[test]
+    fn page_follows_the_state_reference_for_standing_and_floods() {
+        let src = page();
+        assert!(src.contains("const isUnc = t => t.confirmed === false;"));
+        // checkNew skips unconfirmed tracks before it remembers or alerts.
+        let check = &src[src.find("function checkNew()").unwrap()..];
+        let check = &check[..check.find("\n}\n").unwrap()];
+        assert!(check.contains("|| isUnc(t)) continue;"), "{check}");
+        // The list ranks standing before distance.
+        let sorted = &src[src.find("function sorted()").unwrap()..];
+        let sorted = &sorted[..sorted.find("\n}\n").unwrap()];
+        let (unc, dist) = (sorted.find("isUnc(a)").unwrap(), sorted.find("dist(a)").unwrap());
+        assert!(unc < dist, "{sorted}");
+        // The flood banner: reads st.flood, interpolates numbers only.
+        assert!(src.contains("const fl = st && st.flood;"));
+        let ban = &src[src.find("setHTML('flood'").unwrap()..];
+        let ban = &ban[..ban.find(");").unwrap()];
+        let mut rest = ban;
+        let mut n = 0;
+        while let Some(i) = rest.find("${") {
+            let e = &rest[i + 2..];
+            let end = e.find('}').unwrap();
+            let expr = &e[..end];
+            assert!(
+                ["Number(fl.new_per_s) | 0", "unc"].contains(&expr),
+                "flood banner interpolates {expr:?}: numbers only, or esc()"
+            );
+            rest = &e[end..];
+            n += 1;
+        }
+        assert_eq!(n, 2);
+        // The unconfirmed marking is a class and plain text (no style
+        // attribute, which the CSP would block).
+        assert!(src.contains(".trk.unc{"));
+        assert!(src.contains("${u ? ' unc' : ''}"));
+    }
 }
