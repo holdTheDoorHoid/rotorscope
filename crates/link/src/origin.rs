@@ -98,7 +98,7 @@ pub const fn threat_origin(kind: ThreatKind) -> Origin {
         // stream to the web head, the hub's).
         ForgedLink => Origin::Gateway,
         // Raised by the hub from aircraft and drone tracks.
-        AreaGnss => Origin::Hub,
+        AreaGnss | IdFlood => Origin::Hub,
     }
 }
 
@@ -640,6 +640,7 @@ mod tests {
         }
         t.push((threat(ForgedLink), Gateway));
         t.push((threat(AreaGnss), Hub));
+        t.push((threat(IdFlood), Hub));
         t
     }
 
@@ -725,9 +726,9 @@ mod tests {
 
     #[test]
     fn node_batch_refuses_hub_only_frames() {
-        let (relay, refused, _) = run(&batch(&[hub_fix(), csbee(), flags(), threat(ThreatKind::AreaGnss)]));
+        let (relay, refused, _) = run(&batch(&[hub_fix(), csbee(), flags(), threat(ThreatKind::AreaGnss), threat(ThreatKind::IdFlood)]));
         assert!(relay.is_empty());
-        assert_eq!(refused.iter().map(|r| r.1).collect::<std::vec::Vec<_>>(), [Origin::Hub; 4]);
+        assert_eq!(refused.iter().map(|r| r.1).collect::<std::vec::Vec<_>>(), [Origin::Hub; 5]);
     }
 
     #[test]
