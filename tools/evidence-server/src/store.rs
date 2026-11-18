@@ -287,7 +287,7 @@ impl Device {
 
     /// Next sequence number the server lacks, per boot.
     pub fn next_seq(&self) -> BTreeMap<String, u64> {
-        self.chains.iter().map(|(b, m)| (hex(b), m.keys().next_back().map_or(0, |s| s + 1))).collect()
+        self.chains.iter().map(|(b, m)| (hex(b), m.keys().next_back().map_or(0, |s| s.saturating_add(1)))).collect()
     }
 
     /// Stored ranges per boot (gaps visible).
@@ -298,7 +298,7 @@ impl Device {
                 let mut v: Vec<(u64, u64)> = Vec::new();
                 for &s in m.keys() {
                     match v.last_mut() {
-                        Some(r) if r.1 + 1 == s => r.1 = s,
+                        Some(r) if r.1.checked_add(1) == Some(s) => r.1 = s,
                         _ => v.push((s, s)),
                     }
                 }
@@ -326,7 +326,7 @@ impl Device {
         for (_, off, r) in &rep.records {
             let p = r.parse();
             let e = runs.entry(r.boot).or_insert((r.seq, r.seq, p.header.prev, r.hash));
-            if r.seq != e.1 && r.seq != e.1 + 1 {
+            if r.seq != e.1 && e.1.checked_add(1) != Some(r.seq) {
                 return Err(StoreError::Rejected(format!("batch byte {off}: record #{} does not follow #{} (a batch must be contiguous)", r.seq, e.1)));
             }
             e.1 = r.seq;
@@ -345,10 +345,14 @@ impl Device {
             return Err(StoreError::Rejected("a batch must end with a signed checkpoint".into()));
         }
         for (boot, &(first, last, first_prev, last_hash)) in &runs {
+            // `range(first..=last)` panics on an inverted range.
+            if first > last {
+                return Err(StoreError::Rejected(format!("records #{first}..#{last} are not in order")));
+            }
             let stored = self.chains.get(boot);
             if let Some(m) = stored {
                 if m.range(first..=last).next().is_some() {
-                    let next = m.keys().next_back().map_or(0, |s| s + 1);
+                    let next = m.keys().next_back().map_or(0, |s| s.saturating_add(1));
                     return Err(StoreError::Conflict(format!(
                         "records #{first}..#{last} overlap records already stored for boot {}; next new record is #{next}",
                         hex(boot)
@@ -360,10 +364,11 @@ impl Device {
                 {
                     return Err(StoreError::Rejected(format!("record #{first} does not link to stored record #{}", first - 1)));
                 }
-                if let Some(n) = m.get(&(last + 1))
+                if let Some(after) = last.checked_add(1)
+                    && let Some(n) = m.get(&after)
                     && n.prev != last_hash
                 {
-                    return Err(StoreError::Rejected(format!("stored record #{} does not link to this batch's last record #{last}", last + 1)));
+                    return Err(StoreError::Rejected(format!("stored record #{after} does not link to this batch's last record #{last}")));
                 }
             }
         }

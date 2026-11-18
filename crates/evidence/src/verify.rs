@@ -379,6 +379,20 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
         }
         _ => None,
     };
+    // A counter that has run to the end of u64 is not a real log (it would
+    // take millennia): refuse rather than let `seq + 1` wrap to 0, which would
+    // make the next record #0 look like its successor.
+    let Some(next) = h.seq.checked_add(1) else {
+        rep.add(
+            Level::Fail,
+            w.clone(),
+            format!(
+                "record number #{} cannot be real (the counter would wrap)",
+                h.seq
+            ),
+        );
+        return claim;
+    };
     // Order and links.
     if h.seq < c.next {
         match c.hashes.get(&h.seq) {
@@ -417,7 +431,7 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
             },
         );
     }
-    c.next = h.seq + 1;
+    c.next = next;
     c.head = hash;
     c.hashes.insert(h.seq, hash);
     c.sum.records += 1;
@@ -814,7 +828,7 @@ pub fn verify_bundle(json: &[u8]) -> Report {
             let Ok(r) = r else { break };
             if let Some((b, s)) = prev
                 && b == r.header.boot_id
-                && r.header.seq != s + 1
+                && s.checked_add(1) != Some(r.header.seq)
             {
                 rep.add(
                     Level::Fail,

@@ -93,6 +93,7 @@ fn log(boot: u8, signer: &mut SoftSigner) -> Vec<Vec<u8>> {
 
 struct T {
     app: axum::Router,
+    shared: Arc<App>,
     dir: std::path::PathBuf,
 }
 
@@ -101,8 +102,8 @@ impl T {
         let dir = std::env::temp_dir().join(format!("evsrv-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::open(&dir).unwrap();
-        let app = Arc::new(App { store: Mutex::new(store), token: None, server_name: "test".into(), tsa_url: None });
-        T { app: router(app), dir }
+        let app = Arc::new(App { store: Mutex::new(store), token: None, open_registration: true, server_name: "test".into(), tsa_url: None });
+        T { app: router(app.clone()), shared: app, dir }
     }
 
     async fn call(&self, method: &str, path: &str, body: Body, ct: &str) -> (StatusCode, Vec<u8>, Option<String>) {
@@ -307,4 +308,156 @@ async fn gaps_are_shown_not_hidden() {
     let rep = verify::verify_bundle(&t.export(&id).await);
     assert!(fails(&rep).is_empty(), "{:?}", fails(&rep));
     let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+/// A checkpoint or event rebuilt with another record number, previous hash
+/// and (for a checkpoint) count, then signed again: what a registered key
+/// holder can always do.
+fn forge(signer: &mut SoftSigner, rec: &[u8], seq: u64, prev: [u8; 32]) -> Vec<u8> {
+    use format::off;
+    let mut b = rec.to_vec();
+    b[off::SEQ..off::SEQ + 8].copy_from_slice(&seq.to_le_bytes());
+    b[off::PREV..off::PREV + 32].copy_from_slice(&prev);
+    if b[off::KIND] == format::Kind::Checkpoint as u8 {
+        let count_at = format::HEADER + 2 + 65;
+        b[count_at..count_at + 8].copy_from_slice(&seq.to_le_bytes());
+        let signed_end = b.len() - format::TRAILER - format::SIG_LEN;
+        let sig = signer
+            .sign_digest(&evidence::sha256(&b[..signed_end]))
+            .unwrap();
+        b[signed_end..signed_end + format::SIG_LEN].copy_from_slice(&sig);
+    }
+    b
+}
+
+#[tokio::test]
+async fn record_number_overflow_is_refused_and_the_server_keeps_answering() {
+    let t = T::new("seqwrap");
+    let mut signer = SoftSigner::new(&[0x45; 32], KeyClass::DevelopmentSoftware).unwrap();
+    let recs = log(3, &mut signer);
+    let id = t.register(&signer.public_key()).await;
+    let (s, m) = t.upload(&id, &recs[0..7]).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+
+    // Record #u64::MAX, then a checkpoint numbered 0 that links to it: the
+    // successor of u64::MAX wraps to 0, so the chain looks contiguous.
+    let last = forge(&mut signer, &recs[1], u64::MAX, [9; 32]);
+    let cp = forge(&mut signer, &recs[6], 0, evidence::sha256(&last));
+    let (s, m) = t.upload(&id, &[last, cp]).await;
+    assert!(
+        s == StatusCode::UNPROCESSABLE_ENTITY || s == StatusCode::CONFLICT,
+        "{s} {m}"
+    );
+
+    // Still serving, and the good data is intact.
+    let (s, b, _) = t
+        .call(
+            "GET",
+            &format!("/api/devices/{id}"),
+            Body::empty(),
+            "application/json",
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+    let (s, m) = t.upload(&id, &recs[7..13]).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+#[tokio::test]
+async fn a_poisoned_lock_does_not_take_the_server_down() {
+    let t = T::new("poison");
+    let app = t.shared.clone();
+    let _ = std::thread::spawn(move || {
+        let _g = app.store.lock().unwrap();
+        panic!("a handler died holding the lock");
+    })
+    .join();
+    assert!(t.shared.store.is_poisoned());
+    let (s, _, _) = t
+        .call("GET", "/api/devices", Body::empty(), "application/json")
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+fn app_with(name: &str, token: Option<&str>, open: bool) -> (axum::Router, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("evsrv-test-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(&dir).unwrap();
+    let app = Arc::new(App {
+        store: Mutex::new(store),
+        token: token.map(str::to_string),
+        open_registration: open,
+        server_name: "test".into(),
+        tsa_url: None,
+    });
+    (router(app), dir)
+}
+
+async fn send(
+    r: &axum::Router,
+    method: &str,
+    path: &str,
+    auth: Option<&str>,
+    body: String,
+) -> StatusCode {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(a) = auth {
+        req = req.header("authorization", format!("Bearer {a}"));
+    }
+    r.clone()
+        .oneshot(req.body(Body::from(body)).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn registration_needs_the_token_unless_opened_explicitly() {
+    let signer = SoftSigner::new(&[0x46; 32], KeyClass::DevelopmentSoftware).unwrap();
+    let body =
+        serde_json::json!({ "public_key": hex(&signer.public_key()), "name": "x" }).to_string();
+    let id = String::from_utf8(evidence::fingerprint(&signer.public_key()).to_vec()).unwrap();
+
+    // No token, not opened: refused.
+    let (r, dir) = app_with("reg-closed", None, false);
+    assert_eq!(
+        send(&r, "POST", "/api/devices", None, body.clone()).await,
+        StatusCode::FORBIDDEN
+    );
+    let _ = std::fs::remove_dir_all(dir);
+
+    // No token, opened explicitly: allowed.
+    let (r, dir) = app_with("reg-open", None, true);
+    assert_eq!(
+        send(&r, "POST", "/api/devices", None, body.clone()).await,
+        StatusCode::CREATED
+    );
+    let _ = std::fs::remove_dir_all(dir);
+
+    // With a token: it is required, and then registration works.
+    let (r, dir) = app_with("reg-token", Some("s3cret"), false);
+    assert_eq!(
+        send(&r, "POST", "/api/devices", None, body.clone()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&r, "POST", "/api/devices", Some("s3cret"), body).await,
+        StatusCode::CREATED
+    );
+    // The per-device status call needs it too.
+    let path = format!("/api/devices/{id}");
+    assert_eq!(
+        send(&r, "GET", &path, None, String::new()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&r, "GET", &path, Some("s3cret"), String::new()).await,
+        StatusCode::OK
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
