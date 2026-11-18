@@ -61,6 +61,36 @@
 //!   [`DroneLinks`]): `source` = `target` = the drone's address, `count` =
 //!   beacons on the second clock.
 //!
+//! # A full table
+//!
+//! [`NETS`] networks are followed. Until WP-11a a newcomer took the slot of
+//! the stalest network that was not "busy" (being reported on), and none at
+//! all when every one was: three forged drone networks, each kept "taken"
+//! with a data frame from one made-up station and two authentication
+//! requests from another, locked a real drone out for as long as they were
+//! refreshed; and a spray of single beacons from made-up drone networks
+//! threw out a real one holding two deauths of the three that raise an
+//! alarm. Now:
+//!
+//! - A newcomer heard once may only take the slot of a network holding
+//!   **no evidence** (no recent controller, deauths, newcomer, second clock)
+//!   or not heard for [`QUIET_EVICT_MS`].
+//! - Otherwise it waits ([`WAITING`] remembered, the least-heard replaced
+//!   first). Heard [`ADMIT_BEACONS`] times over [`ADMIT_SPAN_MS`], it may
+//!   take a slot that holds evidence: first one **busy for longer than
+//!   [`BUSY_HOLD_MS`]** (its alarm has been out for a minute), else one not
+//!   busy; within each, a locally administered address first, then the
+//!   network heard least since it was learned, then the stalest. A network
+//!   busy for less than [`BUSY_HOLD_MS`] is never displaced.
+//! - Displacing a network that holds evidence costs a token (one per
+//!   [`FORCE_GAP_MS`]), so forged networks evicting each other cannot churn
+//!   the table. [`Totals::evicted`] counts them, [`Totals::refused`]
+//!   newcomers turned away: both are signs of pressure on the table.
+//!
+//! Forged networks kept busy are therefore displaceable after a minute, and
+//! one that is displaced has to wait, prove itself and find a slot that is
+//! not a real drone's mid-attack, at most one every 30 s.
+//!
 //! # Restarts are believed slowly
 //!
 //! A drone that restarts drops its controller, so its beacon timestamp (its
@@ -88,8 +118,32 @@ use crate::util::{BROADCAST, Dups, Ms, NONE, RateLimit, elapsed, hash, ms};
 use crate::{ThreatKind, ThreatSighting, floods, sighting};
 
 /// Drone networks followed at once. A node rarely has more than one or two
-/// Wi-Fi drones in range; the stalest one not being reported makes room.
-pub const NETS: usize = 3;
+/// Wi-Fi drones in range. Raised from 3 to 4 in WP-11a (about 190 bytes a
+/// slot) so that an attacker needs one more forged "busy" network to fill
+/// the table; who may take a slot when it is full is in the module docs,
+/// "A full table".
+pub const NETS: usize = 4;
+/// Newcomers remembered while the table is full (16 bytes each).
+pub const WAITING: usize = 4;
+/// A newcomer may take an occupied slot that still holds evidence once it
+/// has been heard this many times...
+pub const ADMIT_BEACONS: u8 = 3;
+/// ...over at least this long (a real drone beacons ten times a second; a
+/// spray of made-up networks sends each one once).
+pub const ADMIT_SPAN_MS: Ms = 1000;
+/// A waiting newcomer not heard for this long is forgotten.
+pub const WAIT_FORGET_MS: Ms = 5000;
+/// A drone network not heard for this long holds nothing worth keeping
+/// against a newcomer (unless something is being reported on it).
+pub const QUIET_EVICT_MS: Ms = 15_000;
+/// A network being reported on ("busy": a deauth attack or a takeover on)
+/// cannot be displaced for this long after it became busy. After that it
+/// can, by a proven newcomer, so forged networks kept "taken" cannot hold
+/// the table for ever.
+pub const BUSY_HOLD_MS: Ms = 60_000;
+/// Displacing a network that holds evidence costs a token; one is earned
+/// every this long (at most one in hand).
+pub const FORCE_GAP_MS: Ms = 30_000;
 
 /// Deauth / disassoc frames aimed at one drone network within
 /// [`KILL_WINDOW_MS`] that make a [`ThreatKind::DroneDeauth`], counting a
@@ -249,6 +303,9 @@ struct Net {
     /// Beacons on the second clock since the last two-clocks report.
     alt_new: u8,
     c_reported: Ms,
+    /// Beacons on its clock since it was learned (history).
+    beacons: u16,
+    busy_since: Ms,
 
     /// The station flying it, `NONE` if not known.
     ctrl: [u8; 6],
@@ -309,6 +366,8 @@ const F_ALT_MIXED: u16 = 1 << 6;
 const F_ALT_QUIET: u16 = 1 << 7;
 /// Two clocks heard in turn: a `DroneNetClone` is on.
 const F_CLOCKS: u16 = 1 << 8;
+/// [`Net::busy`] was true at the last look; `busy_since` says since when.
+const F_BUSY: u16 = 1 << 9;
 
 impl Net {
     fn new(bssid: [u8; 6], now: Ms) -> Self {
@@ -329,6 +388,8 @@ impl Net {
             alt_ch: 0,
             alt_new: 0,
             c_reported: now,
+            beacons: 0,
+            busy_since: now,
             ctrl: NONE,
             ctrl_last: now,
             left_at: now,
@@ -374,6 +435,37 @@ impl Net {
 
     fn busy(&self) -> bool {
         self.has(F_ATTACK) || self.has(F_TAKEN)
+    }
+
+    /// Keep `busy_since` up to date; true while busy.
+    fn note_busy(&mut self, now: Ms) -> bool {
+        let b = self.busy();
+        if b && !self.has(F_BUSY) {
+            self.busy_since = now;
+        }
+        self.set(F_BUSY, b);
+        b
+    }
+
+    /// Busy, and not yet for [`BUSY_HOLD_MS`]: never displaced.
+    fn protected(&mut self, now: Ms) -> bool {
+        self.note_busy(now) && elapsed(now, self.busy_since) <= BUSY_HOLD_MS
+    }
+
+    /// Holds something a newcomer must not wipe (see "A full table").
+    fn evidence(&self, now: Ms) -> bool {
+        self.busy()
+            || self.has(F_CLOCKS)
+            || self.cand != NONE
+            || self.alt_n > 0
+            || (self.ring_len > 0 && elapsed(now, self.k_last) <= KILL_WINDOW_MS)
+            || (self.has(F_KICKED) && elapsed(now, self.kicked_at) <= KICK_RECENT_MS)
+            || (self.ctrl != NONE && elapsed(now, self.ctrl_last) <= KICK_RECENT_MS)
+    }
+
+    /// Eviction order within a tier: smaller goes first.
+    fn rank(&self, now: Ms) -> (bool, u16, Ms) {
+        (!crate::util::locally_administered(&self.bssid), self.beacons, Ms::MAX - elapsed(now, self.seen))
     }
 
     fn ssid(&self) -> &[u8] {
@@ -589,12 +681,36 @@ pub struct Totals {
     pub learned: u32,
     /// Sightings reported.
     pub threats: u32,
+    /// Networks holding evidence displaced by a proven newcomer.
+    pub evicted: u32,
+    /// Newcomers that found the table full of networks holding evidence
+    /// (counted once per newcomer while it waits).
+    pub refused: u32,
+}
+
+/// A newcomer waiting for a slot.
+#[derive(Clone, Copy, Debug)]
+struct Waiting {
+    /// `NONE`: free.
+    bssid: [u8; 6],
+    n: u8,
+    first: Ms,
+    last: Ms,
+}
+
+impl Waiting {
+    const FREE: Self = Self { bssid: NONE, n: 0, first: 0, last: 0 };
 }
 
 /// Deauth and takeover watch over the drone networks the node knows. See
 /// the module docs.
 pub struct DroneLinks {
     nets: heapless::Vec<Net, NETS>,
+    waiting: [Waiting; WAITING],
+    /// Token for displacing a network holding evidence, and when the last
+    /// one was spent.
+    token: bool,
+    token_at: Ms,
     pub totals: Totals,
 }
 
@@ -606,7 +722,13 @@ impl Default for DroneLinks {
 
 impl DroneLinks {
     pub const fn new() -> Self {
-        Self { nets: heapless::Vec::new(), totals: Totals { learned: 0, threats: 0 } }
+        Self {
+            nets: heapless::Vec::new(),
+            waiting: [Waiting::FREE; WAITING],
+            token: true,
+            token_at: 0,
+            totals: Totals { learned: 0, threats: 0, evicted: 0, refused: 0 },
+        }
     }
 
     /// Drone networks being followed (a node can skip [`Self::data`] and
@@ -630,15 +752,8 @@ impl DroneLinks {
         let i = match self.nets.iter().position(|n| n.bssid == d.bssid) {
             Some(i) => i,
             None => {
-                if self.nets.is_full() {
-                    // The stalest one not mid-report; all busy: keep them.
-                    let Some(v) = (0..self.nets.len())
-                        .filter(|&i| !self.nets[i].busy())
-                        .max_by_key(|&i| elapsed(now, self.nets[i].seen))
-                    else {
-                        return;
-                    };
-                    self.nets.swap_remove(v);
+                if self.nets.is_full() && !self.make_room(d.bssid, now) {
+                    return;
                 }
                 self.totals.learned = self.totals.learned.wrapping_add(1);
                 // Cannot fail: room was made above.
@@ -653,6 +768,7 @@ impl DroneLinks {
         if n.has(F_BOOTED) && (d.tsf_us == 0 || !n.timeline(d, now)) {
             return;
         }
+        n.beacons = n.beacons.saturating_add(1);
         let len = d.ssid.len().min(32);
         n.ssid[..len].copy_from_slice(&d.ssid[..len]);
         n.ssid_len = len as u8;
@@ -662,6 +778,85 @@ impl DroneLinks {
         if d.tsf_us > 0 && !n.has(F_BOOTED) {
             n.boot = now.wrapping_sub((d.tsf_us / 1000) as Ms);
             n.set(F_BOOTED, true);
+        }
+    }
+
+    /// Room for a newcomer in a full table (see "A full table"): true when
+    /// a slot was freed.
+    fn make_room(&mut self, bssid: [u8; 6], now: Ms) -> bool {
+        // A slot holding nothing (or long quiet) goes at once.
+        let free = (0..self.nets.len())
+            .filter(|&i| {
+                let n = &self.nets[i];
+                !n.busy() && (!n.evidence(now) || elapsed(now, n.seen) >= QUIET_EVICT_MS)
+            })
+            .min_by_key(|&i| self.nets[i].rank(now));
+        if let Some(v) = free {
+            self.nets.swap_remove(v);
+            self.unwait(&bssid);
+            return true;
+        }
+        if !self.wait(bssid, now) {
+            return false;
+        }
+        if !self.token && elapsed(now, self.token_at) >= FORCE_GAP_MS {
+            self.token = true;
+        }
+        if !self.token {
+            return false;
+        }
+        // Busy too long first, then not busy; never one busy for less
+        // than BUSY_HOLD_MS.
+        let mut victim: Option<(bool, (bool, u16, Ms), usize)> = None;
+        for i in 0..self.nets.len() {
+            let n = &mut self.nets[i];
+            if n.protected(now) {
+                continue;
+            }
+            let key = (!n.busy(), n.rank(now), i);
+            if victim.is_none_or(|v| key < v) {
+                victim = Some(key);
+            }
+        }
+        let Some((_, _, v)) = victim else {
+            return false;
+        };
+        self.nets.swap_remove(v);
+        self.unwait(&bssid);
+        self.token = false;
+        self.token_at = now;
+        self.totals.evicted = self.totals.evicted.wrapping_add(1);
+        true
+    }
+
+    /// Remember a waiting newcomer's beacon; true once it has proven itself
+    /// ([`ADMIT_BEACONS`] over [`ADMIT_SPAN_MS`]).
+    fn wait(&mut self, bssid: [u8; 6], now: Ms) -> bool {
+        let live = |w: &Waiting| w.bssid != NONE && elapsed(now, w.last) <= WAIT_FORGET_MS;
+        if let Some(w) = self.waiting.iter_mut().find(|w| live(w) && w.bssid == bssid) {
+            w.n = w.n.saturating_add(1);
+            w.last = now;
+            return w.n >= ADMIT_BEACONS && elapsed(now, w.first) >= ADMIT_SPAN_MS;
+        }
+        // A free (or forgotten) entry, else the least heard, locally
+        // administered first, oldest first.
+        let slot = (0..WAITING)
+            .min_by_key(|&i| {
+                let w = &self.waiting[i];
+                if !live(w) {
+                    return (0, 0, 0);
+                }
+                (1 + u8::from(!crate::util::locally_administered(&w.bssid)), w.n, Ms::MAX - elapsed(now, w.last))
+            })
+            .unwrap_or(0);
+        self.waiting[slot] = Waiting { bssid, n: 1, first: now, last: now };
+        self.totals.refused = self.totals.refused.wrapping_add(1);
+        false
+    }
+
+    fn unwait(&mut self, bssid: &[u8; 6]) {
+        for w in self.waiting.iter_mut().filter(|w| w.bssid == *bssid) {
+            *w = Waiting::FREE;
         }
     }
 
@@ -736,6 +931,7 @@ impl DroneLinks {
         let now = ms(now_us);
         let mut sent = 0u32;
         for n in self.nets.iter_mut() {
+            n.note_busy(now);
             // Deauth.
             let since_kill = elapsed(now, n.k_last);
             if n.has(F_ATTACK) {

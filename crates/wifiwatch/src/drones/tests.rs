@@ -521,6 +521,74 @@ fn table_is_bounded() {
     assert_eq!(s.w.drones.len(), NETS);
 }
 
+/// `NETS` forged drone networks (DJI addresses, Tello names), each kept
+/// "taken" the cheapest way: a data frame from one station, then
+/// authentication requests from another, refreshed every two seconds.
+fn fakes() -> Vec<Drone> {
+    (0..NETS as u8)
+        .map(|i| {
+            let ssid: &'static [u8] = std::boxed::Box::leak(std::format!("TELLO-9900{i:02X}").into_bytes().into_boxed_slice());
+            Drone { bssid: [0x60, 0x60, 0x1F, 0x99, 0x00, i], ssid, boot_ms: 0, ch: 6, privacy: false }
+        })
+        .collect()
+}
+
+fn keep_fakes_busy(s: &mut Sim, fakes: &[Drone]) {
+    for (k, f) in fakes.iter().enumerate() {
+        let a = [0x02, 0xAA, 0, 0, 0, k as u8];
+        let b = [0x02, 0xBB, 0, 0, 0, k as u8];
+        s.data(&data(a, f.bssid, true));
+        s.mgmt(&mgmt(AUTH, f.bssid, b, f.bssid, &[0, 0, 1, 0, 0, 0]));
+        s.mgmt(&mgmt(AUTH, f.bssid, b, f.bssid, &[0, 0, 1, 0, 0, 0]));
+    }
+}
+
+#[test]
+fn busy_forged_networks_do_not_lock_a_real_drone_out() {
+    let mut s = Sim::new();
+    let fakes = fakes();
+    // The fakes take every slot and stay "taken".
+    for _ in 0..10 {
+        s.fly(1000, &fakes, &[]);
+        keep_fakes_busy(&mut s, &fakes);
+    }
+    // The real drone arrives and flies; the fakes keep going.
+    let mut all = fakes.clone();
+    all.push(TELLO_NET);
+    for _ in 0..90 {
+        s.fly(1000, &all, &[(PILOT, TELLO)]);
+        keep_fakes_busy(&mut s, &fakes);
+    }
+    assert!(s.w.drones.nets.iter().any(|n| n.bssid == TELLO), "the real drone is followed");
+    assert!(s.w.drones.totals.evicted >= 1);
+    // Its deauth is seen.
+    s.out.clear();
+    aireplay(&mut s, 2, TELLO, PILOT);
+    s.tick(300);
+    let d = s.of(ThreatKind::DroneDeauth);
+    assert!(d.iter().any(|x| x.target == TELLO), "{:?}", s.out);
+}
+
+#[test]
+fn a_spray_of_drone_beacons_keeps_partial_evidence() {
+    // Two deauths of three at the real drone, then one beacon from each of
+    // forty made-up drone networks, then the third deauth.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+    s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+    for i in 0..40u8 {
+        let b = [0x60, 0x60, 0x1F, 0x55, 0x00, i];
+        let name = std::format!("TELLO-5500{i:02X}");
+        let mut f = beacon(b, name.as_bytes(), false, &ie(3, &[6]));
+        f[24] = 1;
+        s.mgmt(&f);
+    }
+    s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+    s.tick(300);
+    assert!(!s.of(ThreatKind::DroneDeauth).is_empty(), "{:?}", s.out);
+}
+
 // ------------------------------------------------------------- clones --
 
 const COPY: [u8; 6] = [0x00, 0x00, 0x5E, 0x10, 0x20, 0x30];
