@@ -352,6 +352,14 @@ on a laptop.
 The page polls `/api/state` about once a second, and says "connection lost"
 once no answer has arrived for 3.5 s.
 
+The hub (not `rid-view`) also puts two fields of its own at the start of the
+object: `"bench"`, a list of the bench-only features it was built with
+(`demo`, `open-hotspot`; empty normally), which the page shows as a banner,
+and `"cot"`, whether its TAK multicast is on (a **TAK off** chip). The page
+treats both as optional. The hub also refuses requests whose `Host` is not
+its own address, and POSTs without `Content-Type: application/json` or with
+a foreign `Origin` (`webui::request`).
+
 ### Hub side
 
 ```rust
