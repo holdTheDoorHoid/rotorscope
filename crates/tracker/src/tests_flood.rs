@@ -542,3 +542,216 @@ fn a_busy_real_sky_is_not_an_aircraft_flood() {
     assert_eq!(tr.aircraft().len(), 32);
     assert!(tr.threats().iter().all(|x| x.kind != link::ThreatKind::IdFlood));
 }
+
+// ------------------------------------------------- one node shedding a flood --
+
+/// A node's once-a-second health report: uptime and its drop total.
+fn stats(up_s: u64, dropped: u32) -> link::Frame {
+    link::Frame::Stats { uptime_us: up_s * 1_000_000 + 1, frames_seen: 500 * up_s as u32, rid_found: 0, dropped, by_transport: heapless::Vec::new() }
+}
+
+/// What one node delivers each second for `secs` seconds from `from_ms`:
+/// `fakes` new one-frame IDs (spread over the second), every drone in
+/// `reals` once, and a Stats frame whose drop total grows by `drops`.
+/// `up` and `dropped` are the node's uptime (s) and drop total, carried
+/// across calls. Returns the hub ms the node-shed alarm for `node` was first
+/// active, if it was.
+#[allow(clippy::too_many_arguments)]
+fn node_run(
+    tr: &mut Tracker,
+    node: u8,
+    from_ms: u64,
+    secs: u64,
+    fakes: u32,
+    drops: u32,
+    reals: &[u8],
+    next_fake: &mut u32,
+    up: &mut u64,
+    dropped: &mut u32,
+) -> Option<u64> {
+    let mut raised = None;
+    for k in 0..secs {
+        let t0 = from_ms + k * 1000;
+        for j in 0..fakes {
+            tr.ingest(node, &fake(*next_fake), t0 + u64::from(j) * 1000 / u64::from(fakes));
+            *next_fake += 1;
+        }
+        for &n in reals {
+            tr.ingest(node, &real(n), t0 + 7 + u64::from(n));
+        }
+        *up += 1;
+        *dropped = dropped.wrapping_add(drops);
+        tr.ingest_frame(node, &stats(*up, *dropped), t0 + 900);
+        tr.expire(t0 + 950);
+        if raised.is_none() && node_shed(tr, node, t0 + 950).is_some() {
+            raised = Some(t0 + 950);
+        }
+    }
+    raised
+}
+
+fn node_shed<const N: usize, const A: usize>(tr: &Tracker<N, A>, node: u8, now: u64) -> Option<&threats::Threat> {
+    tr.active_threats(now)
+        .find(|t| probation::flood_table(t) == Some(probation::FloodTable::NodeShed) && t.node == node)
+}
+
+fn no_flood_alarm_at_all(tr: &Tracker, now: u64) {
+    let any: std::vec::Vec<_> = tr.threats().iter().filter(|t| t.kind == link::ThreatKind::IdFlood).collect();
+    assert!(any.is_empty(), "no flood alarm of any table at {now}: {any:?}");
+}
+
+/// A 200-a-second fake-drone flood heard by one Wi-Fi node: the node lets
+/// its new-source budget (8 a second) through and sheds the rest, so the
+/// hub sees 8 new IDs a second, under the hub-wide line, and a drop total
+/// rising by 192 a second. The node-shed alarm names the node within
+/// `SHED_RAISE_MS`; the hub-wide drone alarm stays quiet (it is not 20 a
+/// second); a real drone on another node is unaffected; the alarm is
+/// snooze-only and a snooze of it covers that node only.
+#[test]
+fn a_flood_shed_by_one_node_raises_the_node_shed_alarm() {
+    let mut tr: Tracker = Tracker::default();
+    let (mut next, mut up2, mut drop2, mut up1, mut drop1) = (0, 0, 0, 0, 0);
+    // Ten quiet seconds: node 2 healthy (no drops), a real drone on node 1.
+    assert_eq!(node_run(&mut tr, 2, 0, 10, 0, 0, &[], &mut next, &mut up2, &mut drop2), None);
+    node_run(&mut tr, 1, 0, 10, 0, 0, &[1], &mut next, &mut up1, &mut drop1);
+    // The flood starts at 10 s, as node-wifi delivers it.
+    let mut at = None;
+    for s in 10..40u64 {
+        let r = node_run(&mut tr, 2, s * 1000, 1, 8, 192, &[], &mut next, &mut up2, &mut drop2);
+        node_run(&mut tr, 1, s * 1000, 1, 0, 0, &[1], &mut next, &mut up1, &mut drop1);
+        at = at.or(r);
+    }
+    let at = at.expect("node-shed alarm raised");
+    std::println!("node-shed alarm raised {} ms after the flood started", at - 10_000);
+    assert!(at <= 10_000 + probation::SHED_RAISE_MS, "raised at {at}");
+    let t = node_shed(&tr, 2, 40_000).unwrap();
+    assert!(t.by_hub);
+    assert_eq!(t.label(), "Node shedding a flood of drone IDs");
+    assert_eq!(probation::shed_rate(t), Some(192));
+    assert_eq!(probation::flood_rate(t), 8);
+    assert_eq!(
+        probation::describe(t).as_str(),
+        "Node shedding a flood of drone IDs (node 2): 192 frames a second discarded, 8 new drone IDs a second never confirmed, over 5 s"
+    );
+    let ctx = tr.context(40_000, None);
+    let mut buf = [0u8; threats::MAX_THREAT_LINE];
+    let n = threats::threat_line(t, &ctx, &mut buf).unwrap();
+    let text = core::str::from_utf8(&buf[..n]).unwrap();
+    assert!(text.contains("\"node\":2"), "{text}");
+    assert!(text.contains("\"table\":\"node\",\"per_s\":8,\"dropped_per_s\":192"), "{text}");
+    // The hub-wide line (20 new IDs a second) is not reached by one node.
+    assert!(tr.flood_status(40_000).is_none());
+    assert!(tr.threats().iter().all(|t| probation::flood_table(t) != Some(probation::FloodTable::Drones)));
+    // The real drone on node 1 is tracked and confirmed throughout.
+    assert!(track_of(&tr, 1).is_some_and(|t| t.confirmed()));
+    // Node 1 is not shedding anything.
+    assert!(node_shed(&tr, 1, 40_000).is_none());
+    // Safety kind: a snooze (5 min), never a mute; it names node 2 only.
+    let id = t.id;
+    let m = tr.silence(id, 40_000).unwrap();
+    assert!(m.snooze());
+    assert_eq!((m.node, m.sub), (2, probation::FloodTable::NodeShed as u8));
+    assert!(m.check_permanent().is_err(), "never from the site file");
+    // The same flood now reaches node 3 too: its own alarm, not snoozed.
+    let (mut up3, mut drop3) = (0, 0);
+    let mut at3 = None;
+    for s in 40..60u64 {
+        node_run(&mut tr, 2, s * 1000, 1, 8, 192, &[], &mut next, &mut up2, &mut drop2);
+        at3 = at3.or(node_run(&mut tr, 3, s * 1000, 1, 8, 192, &[], &mut next, &mut up3, &mut drop3));
+    }
+    assert!(at3.is_some(), "node 3's alarm is not covered by node 2's snooze");
+    assert!(tr.threats().iter().any(|t| t.node == 2 && t.snoozed));
+    // The flood stops: both alarms end within THREAT_ACTIVE_MS plus the window.
+    for s in 60..80u64 {
+        node_run(&mut tr, 2, s * 1000, 1, 0, 0, &[], &mut next, &mut up2, &mut drop2);
+        node_run(&mut tr, 3, s * 1000, 1, 0, 0, &[], &mut next, &mut up3, &mut drop3);
+    }
+    assert!(node_shed(&tr, 2, 80_000).is_none() && node_shed(&tr, 3, 80_000).is_none());
+}
+
+/// The same flood a little over the node's budget (12 a second: 8 through,
+/// 4 shed) is under the drop line, and so is not raised; a flood shedding at
+/// least `SHED_DROP_PER_S` is. The stated limit, tested.
+#[test]
+fn the_node_shed_alarm_starts_at_its_drop_line() {
+    for (drops, raised) in [(4, false), (probation::SHED_DROP_PER_S, true)] {
+        let mut tr: Tracker = Tracker::default();
+        let (mut next, mut up, mut dropped) = (0, 0, 0);
+        node_run(&mut tr, 2, 0, 3, 0, 0, &[], &mut next, &mut up, &mut dropped);
+        let r = node_run(&mut tr, 2, 3_000, 30, 8, drops, &[], &mut next, &mut up, &mut dropped);
+        assert_eq!(r.is_some(), raised, "{drops} dropped a second");
+    }
+}
+
+/// A quiet site: one real drone, a node that drops nothing. No alarm.
+#[test]
+fn quiet_site_raises_no_node_shed_alarm() {
+    let mut tr: Tracker = Tracker::default();
+    let (mut next, mut up, mut dropped) = (0, 0, 0);
+    assert_eq!(node_run(&mut tr, 1, 0, 120, 0, 0, &[3], &mut next, &mut up, &mut dropped), None);
+    no_flood_alarm_at_all(&tr, 120_000);
+}
+
+/// A node booting: its first Stats carries everything it lost while
+/// starting (a baseline, not a rate), it delivers the drones around it all
+/// at once (they confirm), and later it reboots (uptime and total go back).
+/// No alarm.
+#[test]
+fn a_booting_node_raises_no_node_shed_alarm() {
+    let mut tr: Tracker = Tracker::default();
+    let mut next = 0;
+    let reals: std::vec::Vec<u8> = (0..12).collect();
+    // First report: 2 s up, 900 frames already lost.
+    let (mut up, mut dropped) = (1, 900);
+    assert_eq!(node_run(&mut tr, 4, 0, 30, 0, 3, &reals, &mut next, &mut up, &mut dropped), None);
+    // Reboot: uptime from 0, a fresh total that starts high again.
+    let (mut up, mut dropped) = (0, 700);
+    assert_eq!(node_run(&mut tr, 4, 30_000, 30, 0, 3, &reals, &mut next, &mut up, &mut dropped), None);
+    // A link gap of a minute: the next total covers the whole gap, and is
+    // a new baseline rather than a minute's drops in one second.
+    let (mut up2, mut dropped2) = (up + 60, dropped + 60 * 40);
+    assert_eq!(node_run(&mut tr, 4, 120_000, 10, 0, 3, &reals, &mut next, &mut up2, &mut dropped2), None);
+    no_flood_alarm_at_all(&tr, 130_000);
+}
+
+/// A busy venue: the node's receive pool overflows steadily (40 frames a
+/// second, over the drop line) and now and then a stray Remote ID frame is
+/// heard once and never again (one a second). And a modest steady drop
+/// rate (5 a second) with the same strays. Neither is a flood.
+#[test]
+fn busy_venue_drops_raise_no_node_shed_alarm() {
+    for drops in [40, 5] {
+        let mut tr: Tracker = Tracker::default();
+        let (mut next, mut up, mut dropped) = (0, 0, 0);
+        assert_eq!(node_run(&mut tr, 1, 0, 120, 1, drops, &[2, 5], &mut next, &mut up, &mut dropped), None, "{drops}");
+        no_flood_alarm_at_all(&tr, 120_000);
+    }
+}
+
+/// The 40-drone race through one node, which also drops: the node's
+/// budget sheds some first frames as the drones switch on (8 new sources a
+/// second), and the venue's receive pool overflows (20 a second). Every
+/// new ID confirms, so no alarm of any table.
+#[test]
+fn a_drone_race_through_a_shedding_node_raises_no_alarm() {
+    let mut tr: Tracker = Tracker::default();
+    let mut t = 0;
+    let (mut up, mut dropped) = (0u64, 0u32);
+    while t < 64_000 {
+        for n in 0..40u8 {
+            if t >= u64::from(n) * 100 {
+                tr.ingest(0, &real(n), t + u64::from(n));
+            }
+        }
+        if t % 1000 == 0 {
+            up += 1;
+            // 10 drones a second switch on for 4 s: 2 a second over budget.
+            dropped += 20 + if t < 4_000 { 2 } else { 0 };
+            tr.ingest_frame(0, &stats(up, dropped), t + 900);
+        }
+        tr.expire(t);
+        t += 500;
+    }
+    assert_eq!(tr.tracks().iter().filter(|t| t.confirmed()).count(), 40);
+    no_flood_alarm_at_all(&tr, t);
+}

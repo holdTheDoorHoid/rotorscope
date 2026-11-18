@@ -317,7 +317,7 @@ pub mod key {
 /// | Blinded | node |
 /// | jamming | node, centre +/- 10 MHz |
 /// | AreaGnss | target (1 jamming, 2 spoofing) |
-/// | IdFlood | table |
+/// | IdFlood | table, node (0 for the hub-wide tables; the shedding node) |
 /// | ForgedLink | node, source |
 /// | EvilTwin, DroneNetClone, AttackTool | network name, source |
 /// | Karma, MavlinkAttack | source |
@@ -334,7 +334,7 @@ pub fn key_of(kind: ThreatKind, no_target: bool) -> u8 {
     }
     match kind {
         ThreatKind::AreaGnss => TARGET,
-        ThreatKind::IdFlood => SUB,
+        ThreatKind::IdFlood => SUB | NODE,
         ThreatKind::ForgedLink => NODE | SOURCE,
         ThreatKind::EvilTwin | ThreatKind::DroneNetClone | ThreatKind::AttackTool => SSID | SOURCE,
         ThreatKind::Karma | ThreatKind::MavlinkAttack => SOURCE,
@@ -864,9 +864,19 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.threats.dropped
     }
 
-    /// Feed a node's Stats report to the deaf-node check; a deaf node
-    /// becomes a hub-raised [`ThreatKind::Blinded`] threat.
-    pub fn ingest_node_stats(&mut self, node: u8, uptime_us: u64, frames_seen: u32, now_ms: u64) -> Option<ThreatId> {
+    /// Feed a node's Stats report to the deaf-node check (a deaf node
+    /// becomes a hub-raised [`ThreatKind::Blinded`] threat) and its drop
+    /// total to the node-shed check ([`crate::probation::ShedWatch`], raised
+    /// from [`Tracker::expire`]).
+    pub fn ingest_node_stats(
+        &mut self,
+        node: u8,
+        uptime_us: u64,
+        frames_seen: u32,
+        dropped: u32,
+        now_ms: u64,
+    ) -> Option<ThreatId> {
+        self.shed.stats(node, uptime_us, dropped, now_ms);
         let s = self.deaf.stats(node, uptime_us, frames_seen, now_ms)?;
         self.expire(now_ms);
         self.threats.ingest(node, true, &s, now_ms)
@@ -1112,12 +1122,17 @@ struct ThreatLine<'a> {
     /// latest victim). Only present when true. Added with WP-09.
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     per_node: bool,
-    /// `IdFlood` only: which table (`"drones"`, `"aircraft"`, `"control"`)
-    /// and the new identities a second. Added with WP-09.
+    /// `IdFlood` only: which table (`"drones"`, `"aircraft"`, `"control"`,
+    /// or `"node"`: one node shedding, `node` names it) and the new
+    /// identities a second (`"node"`: new drone IDs a second from it that
+    /// never confirmed). Added with WP-09.
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     per_s: Option<u32>,
+    /// `IdFlood` table `"node"` only: frames a second the node discarded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dropped_per_s: Option<u32>,
     n: u32,
     first_ms: u64,
     last_ms: u64,
@@ -1170,6 +1185,7 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         per_node: t.per_node,
         table: crate::probation::flood_table(t).map(|f| f.name()),
         per_s: crate::probation::flood_table(t).map(|_| crate::probation::flood_rate(t)),
+        dropped_per_s: crate::probation::shed_rate(t),
         n: t.reports,
         first_ms: t.first_seen_ms,
         last_ms: t.last_seen_ms,
@@ -1363,7 +1379,7 @@ mod tests {
         for _ in 0..90 {
             t += 1_000;
             frames += 200;
-            assert!(tr.ingest_node_stats(4, t * 1_000, frames, t).is_none());
+            assert!(tr.ingest_node_stats(4, t * 1_000, frames, 0, t).is_none());
         }
         let (normal, _) = tr.node_rates(4, t).unwrap();
         assert!((normal - 200.0).abs() < 1.0);
@@ -1372,7 +1388,7 @@ mod tests {
         for s in 0..15 {
             t += 1_000;
             frames += 5;
-            if let Some(id) = tr.ingest_node_stats(4, t * 1_000, frames, t) {
+            if let Some(id) = tr.ingest_node_stats(4, t * 1_000, frames, 0, t) {
                 raised.get_or_insert((s, id));
             }
         }
@@ -1394,25 +1410,25 @@ mod tests {
         for i in 0..200 {
             t += 1_000;
             f += if i < 100 { 5 } else { 0 };
-            assert!(tr.ingest_node_stats(1, t * 1_000, f, t).is_none());
+            assert!(tr.ingest_node_stats(1, t * 1_000, f, 0, t).is_none());
         }
         // A busy node that collapses before 60 s of learning.
         let (mut f, mut t) = (0u32, 0u64);
         for i in 0..60 {
             t += 1_000;
             f += if i < 30 { 300 } else { 0 };
-            assert!(tr.ingest_node_stats(2, t * 1_000, f, t).is_none());
+            assert!(tr.ingest_node_stats(2, t * 1_000, f, 0, t).is_none());
         }
         // A node that reboots: uptime and counters restart, no alarm.
         let (mut f, mut t) = (0u32, 0u64);
         for _ in 0..90 {
             t += 1_000;
             f += 300;
-            tr.ingest_node_stats(3, t * 1_000, f, t);
+            tr.ingest_node_stats(3, t * 1_000, f, 0, t);
         }
         for i in 0..30u64 {
             t += 1_000;
-            assert!(tr.ingest_node_stats(3, (i + 1) * 1_000_000, 0, t).is_none());
+            assert!(tr.ingest_node_stats(3, (i + 1) * 1_000_000, 0, 0, t).is_none());
         }
         assert!(tr.threats().is_empty());
     }

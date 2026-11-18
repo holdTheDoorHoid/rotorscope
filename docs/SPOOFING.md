@@ -400,6 +400,73 @@ A busy airport does not raise the aircraft alarm: real aircraft are heard
 every second and are never replaced (tested with 50 against a 32-entry
 table).
 
+### One node shedding a flood
+
+The hub-wide line above cannot be reached through one Wi-Fi node. Under a
+frame flood node-wifi lets at most **8 Remote ID frames a second from new
+sources** through (`wifiwatch::shed`, docs/BENCH.md "Frame flood") and sheds
+the rest, so a fake-drone flood heard by one node reaches the hub as a steady
+trickle of 8 new, never-confirmed drones a second: no alarm, and the
+node's shedding visible only in its `Stats.dropped` total. The per-kind shed
+counts stay on the node's USB line; no link format changed.
+
+So the hub also watches each node (`probation::ShedWatch`) with what
+already crosses the link: the node's `dropped` total, once a second, and the
+new drone IDs it delivers, with how many of them confirm. A node is
+**shedding a flood** when over 5 s (`SHED_WINDOW_S`) both hold:
+
+| Condition | Value | Why |
+|---|---|---|
+| It discarded frames (`Stats.dropped` rising) | at least 8 a second (`SHED_DROP_PER_S`) | one whole new-source budget thrown away |
+| New drone IDs it delivered that did not confirm | at least 4 a second (`SHED_NEW_PER_S`) | half of the node's 8 a second; counted 3 s back (`SHED_LAG_S`) so each ID had the 2 s a 1 Hz drone needs to confirm |
+
+The hub then raises `id_flood` with `table` **`node`** ("Node shedding a
+flood of drone IDs"): `by_hub`, `node` set to the shedding node, `per_s` the
+unconfirmed new IDs a second and `dropped_per_s` the frames discarded a
+second (`detail`: table in bits 24-31, unconfirmed a second in 16-23, drops
+a second in 0-15). It is the same hub-only kind (`link::origin`: a node
+cannot send `id_flood`; it can only make the hub raise it by actually
+flooding), refreshed once a second, ended 10 s after either condition stops,
+announced through the ordinary threat path (evidence `Threat` event with
+`probation::describe`'s sentence, console, screen count). It is
+safety-critical: snooze only (5 min), never muted, never from the site file.
+A snooze names the node (`key_of(IdFlood)` is table and node), so silencing
+node 2's alarm does not silence node 3's. The phone's `"flood"` banner stays
+the hub-wide one.
+
+A flood delivered at the node's budget is raised **within 10 s**
+(`SHED_RAISE_MS`; 7 s in the host test at 200 a second). The checks run on the
+P4 (the link reader keeps each node's latest `Stats` apart from the frame
+queue, so a full queue cannot cost the report, and hands it to the tracker
+each loop) and on the S3 web head (it gets every node's `Stats` forwarded).
+
+**What does not raise it** (host tests in `crates/tracker/src/tests_flood.rs`):
+
+- A quiet site: no drops.
+- A node booting: its first `Stats` is a baseline, not a rate (whatever it
+  lost while starting is not counted); a reboot (uptime or total going back)
+  or a gap of more than 5 s between reports starts a new baseline. The
+  drones it delivers all at once confirm.
+- A busy Wi-Fi venue: the receive pool overflowing steadily (tested at 40
+  and at 5 a second) with a stray one-frame Remote ID now and then.
+- The 40-drone race through a node that also drops (venue overflow plus
+  first frames over budget as the drones switch on): every new ID confirms.
+
+**The hub-wide line is not lowered.** It counts every new ID, confirmed or
+not, so lowering it to what one node can deliver (8) would make a race
+start raise it; the per-node check is the scaled-down version, and it asks
+whether the IDs confirm.
+
+**Limits.** A flood at or just above the node's budget (up to about 15 a
+second through one node: 8 delivered, under 8 shed) does not raise it (the
+drop line, tested), and neither does one under 4 new IDs a second. Fakes each
+sent twice, a second apart, confirm and do not count as unconfirmed (but
+then they are the "confirmed tier" case below). A flood of other kinds (fake
+drone networks, DJI elements) makes the node discard frames without new
+drone IDs reaching the tracker's drone table, so it is not this alarm; those
+kinds have their own budgets and alarms on the node. The table follows 16
+nodes (about 60 bytes each).
+
 ### The other tables
 
 | Table | Before | Now |
@@ -436,6 +503,10 @@ table).
   Mute now costs the attacker exactly those alarms: the press takes only
   alarms already on the screen, never a jamming, blinded, area-GPS, ID-flood
   or forged-traffic one, and the mute ends after two hours.
+- **Stay under the node-shed lines.** Through one Wi-Fi node, a flood of
+  up to about 15 new IDs a second (or one paced at under 4 a second) raises
+  no alarm at all; the probation rules above still keep every fake
+  unconfirmed and out of alerts.
 - **Unconfirmed clutter.** The list and the page still show the unconfirmed
   fakes, faint and last. They are never announced, never sent to TAK, and
   never ranked above a real drone.

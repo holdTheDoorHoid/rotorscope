@@ -422,6 +422,8 @@ pub struct Track {
     heard: u32,
     /// When it was confirmed ([`probation`]); `None` while unconfirmed.
     confirmed_ms: Option<u64>,
+    /// The node whose frame made the track ([`probation::ShedWatch`]).
+    first_node: u8,
 }
 
 impl Track {
@@ -449,6 +451,7 @@ impl Track {
             announced: false,
             heard: 0,
             confirmed_ms: None,
+            first_node: threats::NODE_ANY,
         }
     }
 
@@ -538,14 +541,17 @@ impl Track {
 
     /// One more frame from this drone: count it, and confirm the track
     /// once it has been heard long enough.
-    fn heard_at(&mut self, now_ms: u64) {
+    /// Count one frame; true when that confirmed the track.
+    fn heard_at(&mut self, now_ms: u64) -> bool {
         self.heard = self.heard.saturating_add(1);
         if self.confirmed_ms.is_none()
             && self.heard >= probation::CONFIRM_MIN_FRAMES
             && now_ms.saturating_sub(self.first_seen_ms) >= probation::CONFIRM_SPAN_MS
         {
             self.confirmed_ms = Some(now_ms);
+            return true;
         }
+        false
     }
 
     /// No two IDs of the same type disagree, so `other` may be the same drone.
@@ -969,6 +975,9 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     flood: probation::FloodWatch,
     /// Unproven aircraft replaced a second, for the aircraft flood alarm.
     aircraft_flood: probation::FloodWatch,
+    /// Per node: frames discarded and new IDs that never confirm, for the
+    /// node-shed alarm ([`probation::ShedWatch`]).
+    shed: probation::ShedWatch,
     /// Pairs of tracks frames said were one drone, waiting for more
     /// evidence ([`claims`]).
     merges: heapless::Vec<claims::PendingMerge, { claims::MAX_PENDING_MERGES }>,
@@ -1004,6 +1013,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             candidates: probation::Candidates::new(),
             flood: probation::FloodWatch::new(),
             aircraft_flood: probation::FloodWatch::new(),
+            shed: probation::ShedWatch::new(),
             merges: heapless::Vec::new(),
             contradictory: 0,
             next_id: 1,
@@ -1226,7 +1236,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                     Some(id) => probation::hash(&[&medium, &obs.mac, &[id.id_type.code()], id.id.as_bytes()]),
                     None => probation::hash(&[&medium, &obs.mac]),
                 };
-                match self.admit(key, now) {
+                match self.admit(key, obs.node, now) {
                     Some(i) => i,
                     // The table is busy and this identity has not earned a
                     // slot yet (see `probation`): remembered, not tracked.
@@ -1297,7 +1307,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         for m in msgs {
             t.apply(m, now, &foreign);
         }
-        t.heard_at(now);
+        if t.heard_at(now) {
+            let (node, first) = (t.first_node, t.first_seen_ms);
+            self.shed.confirmed(node, first, now);
+        }
         spoof::after_frame(&mut self.tracks, primary, &env, now);
 
         // Evidence that the other tracks are this drone.
@@ -1484,10 +1497,14 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     ///   another confirmed one.
     ///
     /// The new track's history starts at the identity's first sighting.
-    pub(crate) fn admit(&mut self, key: u32, now_ms: u64) -> Option<usize> {
+    ///
+    /// `node` delivered the frame (for [`probation::ShedWatch`];
+    /// [`threats::NODE_ANY`] when no node did).
+    pub(crate) fn admit(&mut self, key: u32, node: u8, now_ms: u64) -> Option<usize> {
         let s = self.candidates.sight(key, now_ms);
         if s.new {
             self.flood.note(now_ms);
+            self.shed.new_id(node, now_ms);
         }
         let stale_after = self.config.stale_after_ms;
         let victim = if !self.tracks.is_full() {
@@ -1541,6 +1558,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         // The sightings that earned it the slot count towards its standing;
         // the caller counts this frame.
         t.heard = s.count.saturating_sub(1);
+        t.first_node = node;
         // Cannot fail: there was room, or a victim was just removed.
         self.tracks.push(t).ok()?;
         Some(self.tracks.len() - 1)
@@ -1560,8 +1578,11 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// Count one frame (or DJI / control-link report) for track `i` towards
     /// its standing ([`probation`]).
     pub(crate) fn heard(&mut self, i: usize, now_ms: u64) {
-        if let Some(t) = self.tracks.get_mut(i) {
-            t.heard_at(now_ms);
+        if let Some(t) = self.tracks.get_mut(i)
+            && t.heard_at(now_ms)
+        {
+            let (node, first) = (t.first_node, t.first_seen_ms);
+            self.shed.confirmed(node, first, now_ms);
         }
     }
 
@@ -1653,6 +1674,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         {
             let _ = self.threats.ingest(0, true, &s, now_ms);
         }
+        let threats = &mut self.threats;
+        self.shed.check(now_ms, |node, s| {
+            let _ = threats.ingest(node, true, &s, now_ms);
+        });
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         // Unconfirmed tracks leave sooner (`probation`).

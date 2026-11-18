@@ -600,7 +600,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     ) -> Option<TrackId> {
         let ti = match want.and_then(|id| self.tracks.iter().position(|t| t.id == id)) {
             Some(ti) => ti,
-            None => self.admit(key, now_ms)?,
+            None => self.admit(key, node, now_ms)?,
         };
         self.heard(ti, now_ms);
         let t = &mut self.tracks[ti];

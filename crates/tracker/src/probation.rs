@@ -118,6 +118,9 @@ pub enum FloodTable {
     Drones = 0,
     Aircraft = 1,
     ControlLinks = 2,
+    /// One node discarding frames while the new drone IDs it does deliver
+    /// never confirm ([`ShedWatch`]): `node` names it.
+    NodeShed = 3,
 }
 
 impl FloodTable {
@@ -126,6 +129,7 @@ impl FloodTable {
             FloodTable::Drones => "Flood of new drone IDs",
             FloodTable::Aircraft => "Flood of new aircraft addresses",
             FloodTable::ControlLinks => "Flood of new control links",
+            FloodTable::NodeShed => "Node shedding a flood of drone IDs",
         }
     }
 
@@ -135,6 +139,7 @@ impl FloodTable {
             FloodTable::Drones => "drones",
             FloodTable::Aircraft => "aircraft",
             FloodTable::ControlLinks => "control",
+            FloodTable::NodeShed => "node",
         }
     }
 
@@ -142,6 +147,7 @@ impl FloodTable {
         match detail >> 24 {
             1 => FloodTable::Aircraft,
             2 => FloodTable::ControlLinks,
+            3 => FloodTable::NodeShed,
             _ => FloodTable::Drones,
         }
     }
@@ -153,9 +159,20 @@ pub fn flood_table(t: &Threat) -> Option<FloodTable> {
     (t.kind == ThreatKind::IdFlood).then(|| FloodTable::of_detail(t.detail))
 }
 
-/// New identities a second the latest report of an `IdFlood` saw.
+/// New identities a second the latest report of an `IdFlood` saw (for
+/// [`FloodTable::NodeShed`]: new drone IDs a second from that node that
+/// never confirmed).
 pub fn flood_rate(t: &Threat) -> u32 {
+    if FloodTable::of_detail(t.detail) == FloodTable::NodeShed {
+        return (t.detail >> 16) & 0xff;
+    }
     t.detail & 0xffff
+}
+
+/// Frames a second the node discarded, for a [`FloodTable::NodeShed`]
+/// alarm (`None` for any other threat).
+pub fn shed_rate(t: &Threat) -> Option<u32> {
+    (flood_table(t) == Some(FloodTable::NodeShed)).then_some(t.detail & 0xffff)
 }
 
 /// Plain text for the evidence log and console.
@@ -163,6 +180,18 @@ pub fn describe(t: &Threat) -> heapless::String<128> {
     use core::fmt::Write;
     let mut s = heapless::String::new();
     let table = FloodTable::of_detail(t.detail);
+    if table == FloodTable::NodeShed {
+        let _ = write!(
+            s,
+            "{} (node {}): {} frames a second discarded, {} new drone IDs a second never confirmed, over {} s",
+            table.label(),
+            t.node,
+            t.detail & 0xffff,
+            flood_rate(t),
+            SHED_WINDOW_S,
+        );
+        return s;
+    }
     let _ = write!(
         s,
         "{}: {} new a second over {} s (limit {}); unconfirmed ones are kept out of alerts",
@@ -173,6 +202,7 @@ pub fn describe(t: &Threat) -> heapless::String<128> {
             FloodTable::Drones => FLOOD_NEW_PER_S,
             FloodTable::Aircraft => AIRCRAFT_FLOOD_PER_S,
             FloodTable::ControlLinks => CONTROL_FLOOD_PER_S,
+            FloodTable::NodeShed => SHED_NEW_PER_S,
         },
     );
     s
@@ -422,6 +452,224 @@ impl FloodWatch {
         })
     }
 }
+
+// ------------------------------------------------------- one node shedding --
+
+/// The node-shed alarm's window, whole seconds (drops: the latest seconds;
+/// new and confirmed IDs: the same length, [`SHED_LAG_S`] earlier).
+pub const SHED_WINDOW_S: u64 = 5;
+/// How long a new ID is given to confirm before it counts as unconfirmed:
+/// a drone sending once a second is confirmed by its frame two seconds after
+/// its first ([`WORST_CASE_ANNOUNCE_MS`]), plus a second of slack.
+pub const SHED_LAG_S: u64 = WORST_CASE_ANNOUNCE_MS / 1000 + 1;
+/// Frames a second one node discards (its `Stats.dropped`, averaged over
+/// [`SHED_WINDOW_S`]) that count as shedding: one whole new-source Remote ID
+/// budget of node-wifi (`wifiwatch::shed`, 8 a second) thrown away.
+pub const SHED_DROP_PER_S: u32 = 8;
+/// New drone IDs a second from that node that did not confirm within
+/// [`SHED_LAG_S`] (averaged): half of what node-wifi lets through from new
+/// sources (8 a second).
+pub const SHED_NEW_PER_S: u32 = 4;
+/// A flood that one node sheds while still delivering at least
+/// [`SHED_NEW_PER_S`] new IDs a second is raised within this long of its
+/// start: the lagged window filled, plus up to a second of alignment.
+pub const SHED_RAISE_MS: u64 = (SHED_WINDOW_S + SHED_LAG_S + 2) * 1000;
+/// Nodes followed at once (the hub's node tables hold 16).
+pub const SHED_NODES: usize = 16;
+/// Seconds of history per node: the lagged window plus the current second.
+const SHED_RING: usize = (SHED_WINDOW_S + SHED_LAG_S + 2) as usize;
+/// A Stats report this long after the previous one starts again rather
+/// than spread a long gap's drops over one second.
+const SHED_MAX_GAP_US: u64 = SHED_WINDOW_S * 1_000_000;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NodeShed {
+    node: u8,
+    used: bool,
+    /// The previous Stats: node uptime (ms, low 32 bits) and drop total.
+    based: bool,
+    up_ms: u32,
+    dropped: u32,
+    /// The second the rings were last advanced to (hub seconds).
+    second: u32,
+    /// Hub second the latest check ran (once a second).
+    checked: u32,
+    /// Per hub second (`second % SHED_RING`): new drone IDs this node
+    /// delivered, how many of those (by first-heard second) have confirmed,
+    /// and frames it said it discarded.
+    new: [u8; SHED_RING],
+    conf: [u8; SHED_RING],
+    drop: [u16; SHED_RING],
+}
+
+impl NodeShed {
+    fn advance(&mut self, s: u32) {
+        if s <= self.second {
+            return;
+        }
+        for k in (self.second + 1)..=s.min(self.second + SHED_RING as u32) {
+            let i = k as usize % SHED_RING;
+            self.new[i] = 0;
+            self.conf[i] = 0;
+            self.drop[i] = 0;
+        }
+        self.second = s;
+    }
+
+    /// Sums over `from..to` (hub seconds, `to` exclusive).
+    fn sum(&self, from: u32, to: u32, f: impl Fn(&Self, usize) -> u32) -> u32 {
+        (from..to).map(|k| f(self, k as usize % SHED_RING)).sum()
+    }
+}
+
+/// One node discarding traffic at a flood-like rate (docs/SPOOFING.md
+/// "Floods"). A Wi-Fi node lets at most 8 Remote ID frames a second from
+/// new sources through (`wifiwatch::shed`) and sheds the rest, so a flood
+/// heard by one node reaches the hub as a trickle of new, never-confirmed
+/// IDs well under [`FLOOD_NEW_PER_S`]. What does cross the link: the node's
+/// drop total (once a second) and the IDs it delivers. The node is shedding
+/// a flood when, over [`SHED_WINDOW_S`]:
+///
+/// - it discarded at least [`SHED_DROP_PER_S`] frames a second, and
+/// - of the new drone IDs it delivered (counted [`SHED_LAG_S`] back, so each
+///   had time to confirm) at least [`SHED_NEW_PER_S`] a second never
+///   confirmed.
+///
+/// A busy venue (drops, no new IDs), a booting node (its first Stats is a
+/// baseline, a reboot starts again) and a crowd of real drones (new IDs
+/// that confirm) do not meet both.
+#[derive(Debug, Clone)]
+pub struct ShedWatch {
+    v: [NodeShed; SHED_NODES],
+}
+
+impl Default for ShedWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShedWatch {
+    pub const fn new() -> Self {
+        const E: NodeShed = NodeShed {
+            node: 0,
+            used: false,
+            based: false,
+            up_ms: 0,
+            dropped: 0,
+            second: 0,
+            checked: 0,
+            new: [0; SHED_RING],
+            conf: [0; SHED_RING],
+            drop: [0; SHED_RING],
+        };
+        Self { v: [E; SHED_NODES] }
+    }
+
+    /// The entry for `node`, made (in place of the one not touched
+    /// longest) if new. `None` for the unattributed node number.
+    fn entry(&mut self, node: u8, s: u32) -> Option<&mut NodeShed> {
+        if node == crate::threats::NODE_ANY {
+            return None;
+        }
+        let i = match self.v.iter().position(|e| e.used && e.node == node) {
+            Some(i) => i,
+            None => {
+                let i = self
+                    .v
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, e)| (e.used, e.second))
+                    .map(|(i, _)| i)?;
+                self.v[i] = NodeShed { node, used: true, second: s, checked: s, ..NodeShed::default() };
+                i
+            }
+        };
+        let e = &mut self.v[i];
+        e.advance(s);
+        Some(e)
+    }
+
+    /// `node` delivered a drone ID the hub had not heard.
+    pub fn new_id(&mut self, node: u8, now_ms: u64) {
+        let s = (now_ms / 1000) as u32;
+        if let Some(e) = self.entry(node, s) {
+            let c = &mut e.new[s as usize % SHED_RING];
+            *c = c.saturating_add(1);
+        }
+    }
+
+    /// A track first delivered by `node` at `first_ms` has confirmed.
+    pub fn confirmed(&mut self, node: u8, first_ms: u64, now_ms: u64) {
+        let s = (now_ms / 1000) as u32;
+        let first = (first_ms / 1000) as u32;
+        if node == crate::threats::NODE_ANY || s.saturating_sub(first) >= SHED_RING as u32 {
+            return;
+        }
+        if let Some(e) = self.v.iter_mut().find(|e| e.used && e.node == node) {
+            e.advance(s);
+            let c = &mut e.conf[first as usize % SHED_RING];
+            *c = c.saturating_add(1);
+        }
+    }
+
+    /// One Stats report from `node`: its uptime and drop total.
+    pub fn stats(&mut self, node: u8, uptime_us: u64, dropped: u32, now_ms: u64) {
+        let s = (now_ms / 1000) as u32;
+        let Some(e) = self.entry(node, s) else { return };
+        let up_ms = (uptime_us / 1000) as u32;
+        let gap_us = u64::from(up_ms.wrapping_sub(e.up_ms)) * 1000;
+        // A first report, a reboot (uptime back), a counter that went back
+        // or a long gap: a new baseline, nothing counted.
+        if e.based && up_ms > e.up_ms && dropped >= e.dropped && gap_us <= SHED_MAX_GAP_US {
+            let d = (dropped - e.dropped).min(u32::from(u16::MAX)) as u16;
+            let c = &mut e.drop[s as usize % SHED_RING];
+            *c = c.saturating_add(d);
+        }
+        e.based = true;
+        e.up_ms = up_ms;
+        e.dropped = dropped;
+    }
+
+    /// Called often: for each node at most once a second, `(node, sighting)`
+    /// to raise while it sheds a flood.
+    pub fn check(&mut self, now_ms: u64, mut raise: impl FnMut(u8, ThreatSighting)) {
+        let s = (now_ms / 1000) as u32;
+        let w = SHED_WINDOW_S as u32;
+        let lag = SHED_LAG_S as u32;
+        for e in self.v.iter_mut().filter(|e| e.used && e.checked != s) {
+            e.advance(s);
+            e.checked = s;
+            let dropped = e.sum(s.saturating_sub(w), s, |e, i| u32::from(e.drop[i]));
+            let (from, to) = (s.saturating_sub(w + lag), s.saturating_sub(lag));
+            let new = e.sum(from, to, |e, i| u32::from(e.new[i]));
+            let conf = e.sum(from, to, |e, i| u32::from(e.conf[i]));
+            let unconfirmed = new.saturating_sub(conf);
+            if dropped < SHED_DROP_PER_S * w || unconfirmed < SHED_NEW_PER_S * w {
+                continue;
+            }
+            let (drop_s, new_s) = (dropped / w, unconfirmed / w);
+            raise(
+                e.node,
+                ThreatSighting {
+                    kind: ThreatKind::IdFlood,
+                    channel: 0,
+                    freq: 0,
+                    width_khz: 0,
+                    level: 0,
+                    count: dropped,
+                    window_ms: w * 1000,
+                    source: [0; 6],
+                    target: [0; 6],
+                    detail: (FloodTable::NodeShed as u32) << 24 | new_s.min(0xff) << 16 | drop_s.min(0xffff),
+                    ssid: heapless::String::new(),
+                    uptime_us: 0,
+                },
+            );
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

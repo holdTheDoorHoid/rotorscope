@@ -372,14 +372,14 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// The track for a DJI serial: the most established one that has it
     /// (as a Remote ID or DJI ID), else a new one if it is admitted
     /// ([`crate::probation`]). One record never merges tracks.
-    fn dji_track_by_serial(&mut self, serial: FixedStr<20>, now: u64) -> Option<usize> {
+    fn dji_track_by_serial(&mut self, node: u8, serial: FixedStr<20>, now: u64) -> Option<usize> {
         let id = UasId {
             id_type: IdType::SerialNumber,
             id: serial,
         };
         let i = match self.serial_track(&id, None) {
             Some(p) => p,
-            None => self.admit(crate::probation::hash(&[b"dji-sn", serial.as_bytes()]), now)?,
+            None => self.admit(crate::probation::hash(&[b"dji-sn", serial.as_bytes()]), node, now)?,
         };
         let t = &mut self.tracks[i];
         t.dji.serial = Some(serial);
@@ -436,7 +436,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
 
     /// The most recently heard track that `f` picks, else a new one for
     /// identity `key` if it is admitted ([`crate::probation`]).
-    fn dji_track_where(&mut self, now: u64, key: &[&[u8]], f: impl Fn(&Track) -> bool) -> Option<usize> {
+    fn dji_track_where(&mut self, node: u8, now: u64, key: &[&[u8]], f: impl Fn(&Track) -> bool) -> Option<usize> {
         match self
             .tracks
             .iter()
@@ -445,7 +445,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             .max_by_key(|(_, t)| t.last_seen_ms)
         {
             Some((i, _)) => Some(i),
-            None => self.admit(crate::probation::hash(key), now),
+            None => self.admit(crate::probation::hash(key), node, now),
         }
     }
 
@@ -457,20 +457,20 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.expire(now_ms);
         let i = match &s.record {
             DroneIdRecord::Flight { serial, .. } => match serial_id(serial) {
-                Some(sn) => self.dji_track_by_serial(sn, now_ms)?,
+                Some(sn) => self.dji_track_by_serial(node, sn, now_ms)?,
                 // A record with an unreadable serial: no identity to key on.
-                None => self.dji_track_where(now_ms, &[b"dji-undecoded"], |t| t.dji.undecoded)?,
+                None => self.dji_track_where(node, now_ms, &[b"dji-undecoded"], |t| t.dji.undecoded)?,
             },
             DroneIdRecord::Encrypted { key_id } | DroneIdRecord::O4 { key_id, .. } => {
                 let k = *key_id;
-                let i = self.dji_track_where(now_ms, &[b"dji-o4", &k], |t| t.dji.key_id == Some(k))?;
+                let i = self.dji_track_where(node, now_ms, &[b"dji-o4", &k], |t| t.dji.key_id == Some(k))?;
                 self.tracks[i].dji.key_id = Some(k);
                 if let DroneIdRecord::O4 { kind, .. } = &s.record {
                     self.tracks[i].dji.o4.count(*kind, now_ms);
                 }
                 i
             }
-            DroneIdRecord::Detected => self.dji_track_where(now_ms, &[b"dji-undecoded"], |t| t.dji.undecoded)?,
+            DroneIdRecord::Detected => self.dji_track_where(node, now_ms, &[b"dji-undecoded"], |t| t.dji.undecoded)?,
         };
         self.heard(i, now_ms);
         let t = &mut self.tracks[i];
@@ -544,8 +544,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         let (i, fix, product, purpose) = match &record {
             Record::FlightInfo(f) => {
                 let i = match serial_id(f.serial.as_bytes()) {
-                    Some(sn) => self.dji_track_by_serial(sn, now_ms)?,
-                    None => self.dji_track_where(now_ms, &[b"dji-wifi", &mac], by_mac)?,
+                    Some(sn) => self.dji_track_by_serial(node, sn, now_ms)?,
+                    None => self.dji_track_where(node, now_ms, &[b"dji-wifi", &mac], by_mac)?,
                 };
                 let fix = Fix {
                     position: f.position,
@@ -561,8 +561,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             }
             Record::FlightPurpose(p) => {
                 let i = match serial_id(p.serial.as_bytes()) {
-                    Some(sn) => self.dji_track_by_serial(sn, now_ms)?,
-                    None => self.dji_track_where(now_ms, &[b"dji-wifi", &mac], by_mac)?,
+                    Some(sn) => self.dji_track_by_serial(node, sn, now_ms)?,
+                    None => self.dji_track_where(node, now_ms, &[b"dji-wifi", &mac], by_mac)?,
                 };
                 let text = p.purpose.0;
                 let desc = FixedStr::<23>::new(&text[..text.len().min(23)]).ok();
@@ -663,7 +663,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             }),
             O4Decrypted::Infp11(_) => None,
         };
-        let session = self.dji_track_where(now_ms, &[b"dji-o4", &key_id], |t| t.dji.key_id == Some(key_id))?;
+        let session = self.dji_track_where(crate::threats::NODE_ANY, now_ms, &[b"dji-o4", &key_id], |t| t.dji.key_id == Some(key_id))?;
         self.tracks[session].dji.key_id = Some(key_id);
         let mut sid = self.tracks[session].id;
         let hide = self.config.hide_droneid_ids;

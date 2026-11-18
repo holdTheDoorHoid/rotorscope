@@ -80,7 +80,11 @@ being heard. Until then it is only remembered (`Ingested::Ignored`).
 within 2 s of its first frame for a drone sending at least once a second. A
 MAC-only track also waits 1 s (`announce_grace_ms`), so that BLE adverts about
 to merge into a known drone do not beep twice. Far more new identities than a
-real sky makes (20 a second over 5 s) raise a hub threat `id_flood`.
+real sky makes (20 a second over 5 s) raise a hub threat `id_flood`; so does
+one node that discards frames (its `Stats.dropped`, 8 a second) while the new
+IDs it delivers do not confirm (4 a second): `id_flood` table `node`, naming
+the node (`probation::ShedWatch`, docs/SPOOFING.md "One node shedding a
+flood"). `ingest_node_stats` takes the drop total for it.
 
 **Mutes** (`threats`, WP-11b, docs/SITE.md). A rule names one thing
 (`threats::key_of`: node, source, target, name, centre or table, as the kind
