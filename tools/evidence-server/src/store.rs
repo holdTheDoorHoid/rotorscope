@@ -312,7 +312,13 @@ impl Device {
         if bytes.is_empty() {
             return Err(StoreError::Rejected("empty batch".into()));
         }
-        let rep = verify::verify(&[Input::new("batch", bytes.to_vec())], &Options { gaps_allowed: true, expect_key: Some(self.key) });
+        // The key registered for the device is the outside key. A device
+        // registered with the published test key is stored like any other
+        // (a bench hub with no development key signs with it): the server
+        // keeps what arrives and vouches for nothing; evidence-verify refuses
+        // the test key in a bundle unless --allow-test-key.
+        let opts = Options { gaps_allowed: true, expect_key: Some(self.key), allow_test_key: true, ..Options::default() };
+        let rep = verify::verify(&[Input::new("batch", bytes.to_vec())], &opts);
         let fails: Vec<String> = rep.findings.iter().filter(|f| f.level == Level::Fail).map(|f| format!("{}: {}", f.at, f.what)).collect();
         if !fails.is_empty() {
             return Err(StoreError::Rejected(format!("batch does not verify: {}", fails.join("; "))));

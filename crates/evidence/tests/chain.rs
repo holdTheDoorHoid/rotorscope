@@ -142,8 +142,13 @@ fn sample() -> Log {
     l
 }
 
+/// These logs are signed with the published test key: the tests opt in.
+fn test_opts() -> Options {
+    Options { allow_test_key: true, ..Options::default() }
+}
+
 fn check(bytes: &[u8]) -> verify::Report {
-    verify::verify(&[Input::new("EV000001.EVL", bytes.to_vec())], &Options::default())
+    verify::verify(&[Input::new("EV000001.EVL", bytes.to_vec())], &test_opts())
 }
 
 fn fails(rep: &verify::Report) -> Vec<String> {
@@ -338,20 +343,20 @@ fn card_files_link_to_each_other() {
     l2.push(&b, n);
     l2.checkpoint(&gps_ctx(71_000), CheckpointReason::Periodic);
     let files = vec![Input::new("EV000001.EVL", first.clone()), Input::new("EV000002.EVL", l2.bytes.clone())];
-    let rep = verify::verify(&files, &Options::default());
+    let rep = verify::verify(&files, &test_opts());
     assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
 
     // Records appended to the first file afterwards are caught...
     let mut grown = first.clone();
     grown.extend_from_slice(&l.bytes[l.spans[7].0..l.spans[7].1]);
-    let rep = verify::verify(&[Input::new("EV000001.EVL", grown), Input::new("EV000002.EVL", l2.bytes.clone())], &Options::default());
+    let rep = verify::verify(&[Input::new("EV000001.EVL", grown), Input::new("EV000002.EVL", l2.bytes.clone())], &test_opts());
     assert!(fails(&rep).iter().any(|s| s.contains("added to")), "{:?}", rep.findings);
     // ...and so is cutting the first file's last record.
     let cut = first[..l.spans[6].0].to_vec();
-    let rep = verify::verify(&[Input::new("EV000001.EVL", cut), Input::new("EV000002.EVL", l2.bytes.clone())], &Options::default());
+    let rep = verify::verify(&[Input::new("EV000001.EVL", cut), Input::new("EV000002.EVL", l2.bytes.clone())], &test_opts());
     assert!(fails(&rep).iter().any(|s| s.contains("cut short")), "{:?}", rep.findings);
     // A missing file in between is reported.
-    let rep = verify::verify(&[Input::new("EV000001.EVL", first), Input::new("EV000003.EVL", l2.bytes)], &Options::default());
+    let rep = verify::verify(&[Input::new("EV000001.EVL", first), Input::new("EV000003.EVL", l2.bytes)], &test_opts());
     assert!(rep.findings.iter().any(|f| f.what.contains("not supplied")));
 }
 

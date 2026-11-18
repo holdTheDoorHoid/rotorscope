@@ -192,7 +192,8 @@ async fn upload_store_export_verify_and_tamper() {
 
     // Export -> verifier passes.
     let bundle = t.export(&id).await;
-    let rep = verify::verify_bundle(&bundle);
+    let with_key = verify::Options { expect_key: Some(signer.public_key()), ..verify::Options::default() };
+    let rep = verify::verify_bundle(&bundle, &with_key);
     assert_eq!(rep.exit_code(), 0, "{:#?}", rep.findings);
     assert_eq!(rep.records.len(), 13);
     let audit: Vec<String> = serde_json::from_slice::<serde_json::Value>(&bundle).unwrap()["audit"]
@@ -208,7 +209,7 @@ async fn upload_store_export_verify_and_tamper() {
     let tamper = |f: &dyn Fn(&mut serde_json::Value)| {
         let mut c = v.clone();
         f(&mut c);
-        verify::verify_bundle(&serde_json::to_vec(&c).unwrap())
+        verify::verify_bundle(&serde_json::to_vec(&c).unwrap(), &with_key)
     };
     let edit_record = |c: &mut serde_json::Value| {
         let mut b = evidence::b64::decode_vec(c["batches"][0]["records"].as_str().unwrap()).unwrap();
@@ -270,6 +271,14 @@ async fn upload_store_export_verify_and_tamper() {
         c["device"]["public_key"] = hex(&other.public_key()).into();
     });
     assert_eq!(r.exit_code(), 1);
+    // Swap the key and its id consistently: the records still name the
+    // real signer, and the bundle no longer names a key you supplied.
+    let r = tamper(&|c| {
+        c["device"]["public_key"] = hex(&other.public_key()).into();
+        c["device"]["key_id"] = String::from_utf8(evidence::fingerprint(&other.public_key()).to_vec()).unwrap().into();
+    });
+    assert_eq!(r.exit_code(), 1);
+    assert!(fails(&r).iter().any(|s| s.contains("device key")), "{:?}", fails(&r));
 
     // Restart from disk: everything re-checks clean...
     let again = Store::open(&t.dir).unwrap();
@@ -299,14 +308,70 @@ async fn gaps_are_shown_not_hidden() {
     // Only the second half reached the server.
     let (s, m) = t.upload(&id, &recs[7..13]).await;
     assert_eq!(s, StatusCode::CREATED, "{m}");
-    let rep = verify::verify_bundle(&t.export(&id).await);
+    let bundle = t.export(&id).await;
+    let key = Some(signer.public_key());
+    // A gap fails by default...
+    let rep = verify::verify_bundle(&bundle, &verify::Options { expect_key: key, ..verify::Options::default() });
+    assert_eq!(rep.exit_code(), 1, "{:?}", rep.findings);
+    // ...and with --allow-gaps it is shown, and may hide removed records.
+    let gaps = verify::Options { expect_key: key, gaps_allowed: true, ..verify::Options::default() };
+    let rep = verify::verify_bundle(&bundle, &gaps);
     assert_eq!(rep.exit_code(), 3, "{:?}", rep.findings);
-    assert!(rep.findings.iter().any(|f| f.level == Level::Gap && f.what.contains("#0..#6")));
+    assert!(rep.findings.iter().any(|f| f.level == Level::Gap && f.what.contains("#0..#6") && f.what.contains("may have been removed")));
     // Filling the gap later must link at both ends.
     let (s, m) = t.upload(&id, &recs[0..7]).await;
     assert_eq!(s, StatusCode::CREATED, "{m}");
-    let rep = verify::verify_bundle(&t.export(&id).await);
+    let rep = verify::verify_bundle(&t.export(&id).await, &gaps);
     assert!(fails(&rep).is_empty(), "{:?}", fails(&rep));
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+/// A bundle is only VERIFIED against a key supplied from outside it: the
+/// device key it names is the server's word, and anyone can run a server.
+#[tokio::test]
+async fn a_forged_bundle_is_not_verified_without_an_outside_key() {
+    let t = T::new("forged");
+    // A key made up on the spot, claiming to be a hardware key.
+    let mut f = SoftSigner::new(&[0x5A; 32], KeyClass::HardwareEfuse).unwrap();
+    let recs = log(4, &mut f);
+    let id = t.register(&f.public_key()).await;
+    let (s, m) = t.upload(&id, &recs[0..7]).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let bundle = t.export(&id).await;
+
+    let rep = verify::verify_bundle(&bundle, &verify::Options::default());
+    assert!(fails(&rep).is_empty(), "{:?}", fails(&rep));
+    assert_eq!(rep.exit_code(), 4, "{:?}", rep.findings);
+    assert!(rep.verdict().starts_with("SELF-CONSISTENT, SIGNER NOT CHECKED"));
+    assert!(rep.findings.iter().any(|f| f.what.contains("log claims hardware_efuse")), "{:?}", rep.findings);
+
+    // The forger's key, supplied from outside: that is the trust decision.
+    let rep = verify::verify_bundle(&bundle, &verify::Options { expect_key: Some(f.public_key()), ..verify::Options::default() });
+    assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
+
+    // Another key: refused.
+    let real = SoftSigner::new(&[0x11; 32], KeyClass::DevelopmentSoftware).unwrap();
+    let rep = verify::verify_bundle(&bundle, &verify::Options { trusted_keys: vec![(real.public_key(), "unit 1".into())], ..verify::Options::default() });
+    assert_eq!(rep.exit_code(), 1, "{:?}", rep.findings);
+    let _ = std::fs::remove_dir_all(&t.dir);
+}
+
+/// The server stores a test-key device's uploads (bench hubs sign with it),
+/// but its bundle is refused unless the test key is explicitly allowed.
+#[tokio::test]
+async fn a_test_key_bundle_is_refused_by_default() {
+    let t = T::new("testkey");
+    let mut k = SoftSigner::public_test();
+    let recs = log(5, &mut k);
+    let id = t.register(&k.public_key()).await;
+    let (s, m) = t.upload(&id, &recs[0..7]).await;
+    assert_eq!(s, StatusCode::CREATED, "{m}");
+    let bundle = t.export(&id).await;
+    let rep = verify::verify_bundle(&bundle, &verify::Options { expect_key: Some(k.public_key()), ..verify::Options::default() });
+    assert_eq!(rep.exit_code(), 1, "{:?}", rep.findings);
+    assert!(fails(&rep).iter().any(|s| s.contains("published test key")), "{:?}", fails(&rep));
+    let rep = verify::verify_bundle(&bundle, &verify::Options { allow_test_key: true, ..verify::Options::default() });
+    assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
     let _ = std::fs::remove_dir_all(&t.dir);
 }
 

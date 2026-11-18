@@ -9,7 +9,20 @@
 //! - **Gap**: nothing contradicts the log, but part of it cannot be
 //!   vouched for (records after the last signed checkpoint; records a
 //!   server never received; a file not supplied).
-//! - **Note**: worth knowing (development key, records with no GPS time).
+//! - **Note**: worth knowing (the key class the log claims, records with no
+//!   GPS time).
+//!
+//! **Who signed.** A log names its own key (boot event, every checkpoint),
+//! so a log that checks against the key it names proves only that it is
+//! self-consistent: anyone can generate a key and write such a log. The
+//! verdict is VERIFIED only when the key came from outside the log
+//! ([`Options::expect_key`], [`Options::trusted_keys`]). The key class byte
+//! is shown as what the log *claims*; it proves nothing by itself. The
+//! published test key is refused unless [`Options::allow_test_key`].
+//!
+//! **What no verdict proves:** that the log is complete. Records after the
+//! last one supplied, newer files, a reformatted card or a boot never
+//! uploaded leave no trace in what is checked ([`NOT_PROVEN`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -96,12 +109,42 @@ pub fn file_number(path: &str) -> Option<u32> {
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    /// A missing run of sequence numbers is a Gap (records a server never
-    /// received) rather than a Fail (records removed from a card file).
+    /// A missing run of sequence numbers, or a missing card file, is a Gap
+    /// rather than a Fail. A gap cannot be told apart from records that were
+    /// removed, so this is for records collected from several places.
     pub gaps_allowed: bool,
-    /// Only accept checkpoints signed with this public key.
+    /// A signing key confirmed outside the log (`--key`, or the key a
+    /// server registered for the device). Checkpoints signed by any other
+    /// key fail.
     pub expect_key: Option<[u8; 65]>,
+    /// More keys confirmed outside the log, each with a label (`--keys`).
+    /// With [`expect_key`](Self::expect_key), the accepted set is the union.
+    pub trusted_keys: Vec<([u8; 65], String)>,
+    /// Accept the published test key ([`sign::public_test_key`]). For this
+    /// project's own tests only: anyone can sign with that key.
+    pub allow_test_key: bool,
 }
+
+impl Options {
+    /// Any key was supplied from outside the log.
+    pub fn outside_keys(&self) -> bool {
+        self.expect_key.is_some() || !self.trusted_keys.is_empty()
+    }
+
+    /// The label of an outside key, if `k` is one.
+    fn label_of(&self, k: &[u8; 65]) -> Option<String> {
+        if self.expect_key.as_ref() == Some(k) {
+            return Some("the key given with --key".into());
+        }
+        self.trusted_keys.iter().find(|(t, _)| t == k).map(|(_, l)| l.clone())
+    }
+}
+
+/// Printed with every verdict: what the checker cannot see.
+pub const NOT_PROVEN: &str = "NOT PROVEN: that the log is complete. Records after the last one checked, newer files, a reformatted card or a boot never uploaded leave no trace here.";
+
+/// What a chain trusted through [`Options::allow_test_key`] is labelled.
+pub const TEST_KEY_LABEL: &str = "the PUBLISHED TEST KEY (accepted by --allow-test-key; anyone can sign with it)";
 
 /// What one chain (one boot of one unit) holds.
 #[derive(Debug, Clone, Default)]
@@ -116,7 +159,12 @@ pub struct ChainSummary {
     /// Highest sequence number a valid checkpoint covers (records below it).
     pub signed_through: Option<u64>,
     pub key: Option<[u8; 65]>,
+    /// The key class byte the log claims (boot event / checkpoint). Written
+    /// by whoever signed: proves nothing by itself.
     pub key_class: Option<u8>,
+    /// Set when a checkpoint's signature checked against a key supplied from
+    /// outside the log: that key's label. `None`: the signer was not checked.
+    pub trusted_as: Option<String>,
     pub fw_hash: Option<[u8; 32]>,
     pub utc_first: Option<u64>,
     pub utc_last: Option<u64>,
@@ -157,12 +205,32 @@ impl Report {
         self.findings.iter().map(|f| f.level).max()
     }
 
-    /// 0 verified and all signed; 1 failed; 3 nothing wrong but gaps.
+    /// Every chain's signatures checked against a key supplied from
+    /// outside the log.
+    pub fn signer_checked(&self) -> bool {
+        !self.chains.is_empty() && self.chains.iter().all(|c| c.trusted_as.is_some())
+    }
+
+    /// 0 verified; 1 failed; 3 signer checked but gaps or unsigned records;
+    /// 4 self-consistent but the signer was not checked against an outside
+    /// key (anyone could have made the log). 2 is the tool's "could not run".
     pub fn exit_code(&self) -> i32 {
         match self.worst() {
             Some(Level::Fail) => 1,
+            _ if !self.signer_checked() => 4,
             Some(Level::Gap) => 3,
             _ => 0,
+        }
+    }
+
+    /// The one-line verdict for [`exit_code`](Self::exit_code). Always print
+    /// [`NOT_PROVEN`] with it.
+    pub fn verdict(&self) -> &'static str {
+        match self.exit_code() {
+            0 => "VERIFIED: every record links, every signature checks against a key you supplied, and a signature covers every record checked.",
+            1 => "FAILED: the log is not what its signer wrote, or it cannot be accepted. See the FAIL lines above.",
+            3 => "SIGNER CHECKED, WITH GAPS: what is signed checks against a key you supplied, but some records are missing or not covered by a signature (see GAP lines). Missing records may have been removed; that cannot be told apart from records never written or never received.",
+            _ => "SELF-CONSISTENT, SIGNER NOT CHECKED: anyone could have made this log. The key it was checked against came from the log itself; give the expected key with --key HEX or --keys FILE.",
         }
     }
 
@@ -218,6 +286,8 @@ struct ChainState {
     clock_event_since: bool,
     last_checkpoint_uptime: Option<u64>,
     last_signed_end: Option<u64>,
+    /// The key was refused (test key, or not an outside key): said once.
+    key_refused: bool,
 }
 
 /// Check `inputs` in order. Card files should be given in file-number
@@ -275,6 +345,7 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
                     clock_event_since: false,
                     last_checkpoint_uptime: None,
                     last_signed_end: None,
+                    key_refused: false,
                 });
                 chains.len() - 1
             });
@@ -290,6 +361,13 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
         }
     }
 
+    // A file not supplied may have been deleted: a failure unless gaps are
+    // allowed, and even then it cannot be told apart from one never written.
+    let (missing_level, missing_why) = if opts.gaps_allowed {
+        (Level::Gap, "; its records may have been removed, which cannot be told apart from records never written")
+    } else {
+        (Level::Fail, " (a missing file fails unless --allow-gaps)")
+    };
     // Each card file names the one before it.
     for (w, this_no, prev_no, prev_len, prev_hash, prev_status) in mounted_claims {
         if prev_no == 0 || prev_status == 0 {
@@ -297,7 +375,7 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
         }
         let Some(&(len, last, incomplete)) = file_tails.get(&prev_no) else {
             if !file_tails.is_empty() {
-                rep.add(Level::Gap, w, format!("file EV{this_no:06}.EVL says the file before it was EV{prev_no:06}.EVL ({prev_len} bytes), which was not supplied"));
+                rep.add(missing_level, w, format!("file EV{this_no:06}.EVL says the file before it was EV{prev_no:06}.EVL ({prev_len} bytes), which was not supplied{missing_why}"));
             }
             continue;
         };
@@ -323,9 +401,9 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
     for p in nos.windows(2) {
         if p[1] != p[0] + 1 {
             rep.add(
-                Level::Gap,
+                missing_level,
                 Where { source: format!("EV{:06}.EVL", p[1]), ..Default::default() },
-                format!("files EV{:06}..EV{:06} were not supplied", p[0] + 1, p[1] - 1),
+                format!("files EV{:06}..EV{:06} were not supplied{missing_why}", p[0] + 1, p[1] - 1),
             );
         }
     }
@@ -343,14 +421,19 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
             _ => {}
         }
         c.sum.signed_through = c.last_signed_end;
-        if let Some(k) = c.sum.key_class
-            && KeyClass::from_u8(k).is_none_or(|k| !k.evidence_grade())
-        {
-            let name = KeyClass::from_u8(k).map_or("unknown", |k| k.name());
+        if let Some(k) = c.sum.key_class {
+            let (name, note) = KeyClass::from_u8(k).map_or(("unknown", "unknown key class"), |k| (k.name(), k.note()));
             rep.add(
                 Level::Note,
                 w.clone(),
-                format!("signed with a {name} key: the signatures show the records are unchanged since signing, but not that only this unit could have signed them"),
+                format!("key class: the log claims {name} (\"{note}\"). Whoever signed wrote that byte; it proves nothing by itself"),
+            );
+        }
+        if c.sum.trusted_as.as_deref() == Some(TEST_KEY_LABEL) {
+            rep.add(
+                Level::Note,
+                w.clone(),
+                "signed with the published test key: accepted only because the test key was allowed. Its secret is in this project's source code; anyone can produce such a log",
             );
         }
         if c.sum.no_time > 0 {
@@ -362,6 +445,9 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
         if c.sum.manual_position > 0 {
             rep.add(Level::Note, w, format!("{} records carry a typed-in (manual) hub position, not a GPS fix", c.sum.manual_position));
         }
+    }
+    if rep.records.is_empty() && !rep.findings.iter().any(|f| f.level == Level::Fail) {
+        rep.add(Level::Fail, Where::default(), "no records: nothing to check");
     }
     rep.chains = chains.into_iter().map(|c| c.sum).collect();
     rep
@@ -414,7 +500,7 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
         let (a, b) = (c.next, h.seq - 1);
         let level = if opts.gaps_allowed { Level::Gap } else { Level::Fail };
         let what = if opts.gaps_allowed {
-            format!("records #{a}..#{b} are missing (not received); record #{} cannot be linked to the one before it", h.seq)
+            format!("records #{a}..#{b} are missing: they may have been removed, which cannot be told apart from records never received; record #{} cannot be linked to the one before it", h.seq)
         } else {
             format!("records #{a}..#{b} are missing: removed from the log (the sequence jumps from #{} to #{})", a.saturating_sub(1), h.seq)
         };
@@ -556,6 +642,10 @@ fn check_checkpoint(rep: &mut Report, c: &mut ChainState, cp: &CheckpointBody<'_
         ok = false;
     }
     let digest = crate::sha256(cp.signed);
+    if sign::is_high_s(&cp.signature) {
+        rep.add(Level::Fail, w.clone(), "checkpoint signature is in the high-S form: a lax checker would accept it, but it is not what a signer writes (a valid signature turned into a second one), so it is refused");
+        return false;
+    }
     if !sign::verify_digest(&cp.pubkey, &digest, &cp.signature) {
         rep.add(Level::Fail, w.clone(), "checkpoint signature does not verify: the checkpoint (or the chain head it signs) was changed");
         return false;
@@ -571,10 +661,35 @@ fn check_checkpoint(rep: &mut Report, c: &mut ChainState, cp: &CheckpointBody<'_
         }
         _ => {}
     }
-    if let Some(k) = opts.expect_key
-        && k != cp.pubkey
-    {
-        rep.add(Level::Fail, w.clone(), "checkpoint signed by a key other than the registered one");
+    // Who signed: only a key from outside the log can say.
+    if cp.pubkey == sign::public_test_key() {
+        if opts.allow_test_key {
+            c.sum.trusted_as = Some(TEST_KEY_LABEL.into());
+        } else {
+            if !c.key_refused {
+                rep.add(
+                    Level::Fail,
+                    w.clone(),
+                    "signed with the published test key: its secret is in this project's source code, so anyone can produce such a log. It is never accepted as evidence (this project's own tests opt in with --allow-test-key)",
+                );
+                c.key_refused = true;
+            }
+            ok = false;
+        }
+    } else if let Some(label) = opts.label_of(&cp.pubkey) {
+        c.sum.trusted_as = Some(label);
+    } else if opts.outside_keys() {
+        if !c.key_refused {
+            rep.add(
+                Level::Fail,
+                w.clone(),
+                format!(
+                    "checkpoint signed by key {}, which is not one of the keys you supplied (--key/--keys, or the key registered for this device)",
+                    std::str::from_utf8(&crate::fingerprint(&cp.pubkey)).unwrap_or("?")
+                ),
+            );
+            c.key_refused = true;
+        }
         ok = false;
     }
     if c.sum.key_class.is_some_and(|k| k != cp.key_class) {
@@ -750,8 +865,11 @@ pub mod bundle {
 }
 
 /// Check a bundle: its audit chain, that its batches are exactly the
-/// uploaded ones, then the records (missing runs between batches are Gaps).
-pub fn verify_bundle(json: &[u8]) -> Report {
+/// uploaded ones, then the records. The device key the bundle names is the
+/// server's word, not an outside key: the signer is only checked against
+/// `opts`' keys. Missing runs between batches fail unless
+/// `opts.gaps_allowed`.
+pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
     use bundle::*;
     let mut rep = Report::default();
     let w = |s: &str| Where { source: s.to_string(), ..Default::default() };
@@ -773,6 +891,12 @@ pub fn verify_bundle(json: &[u8]) -> Report {
         && std::str::from_utf8(&crate::fingerprint(&k)).ok() != Some(b.device.key_id.as_str())
     {
         rep.add(Level::Fail, w("bundle device"), "key id does not match the public key");
+    }
+    if let Some(k) = key
+        && opts.outside_keys()
+        && opts.label_of(&k).is_none()
+    {
+        rep.add(Level::Fail, w("bundle device"), "the bundle names a device key that is not one of the keys you supplied");
     }
     // Audit chain.
     let mut prev = [0u8; 32];
@@ -851,10 +975,21 @@ pub fn verify_bundle(json: &[u8]) -> Report {
     // chain order (each batch holds one boot's contiguous run; their arrival
     // order was checked against the audit log above).
     inputs.sort_by_key(|i| format::parse(&i.bytes).map(|r| (r.header.boot_id, r.header.seq)).unwrap_or(([0xFF; 8], u64::MAX)));
-    let inner = verify(&inputs, &Options { gaps_allowed: true, expect_key: key });
+    let inner = verify(&inputs, opts);
     rep.findings.extend(inner.findings);
     rep.chains = inner.chains;
     rep.records = inner.records;
+    for c in &rep.chains {
+        if let (Some(ck), Some(bk)) = (c.key, key)
+            && ck != bk
+        {
+            rep.findings.push(Finding {
+                level: Level::Fail,
+                at: Where { boot: Some(c.boot), ..Default::default() },
+                what: "this chain is signed by a key other than the device key the bundle names".into(),
+            });
+        }
+    }
     for c in &rep.chains {
         if let Some(f) = c.fw_hash
             && !b.firmware_hashes.contains(&hex(&f))
