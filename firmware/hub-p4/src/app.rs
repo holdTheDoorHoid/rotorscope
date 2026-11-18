@@ -73,8 +73,8 @@ pub struct App {
     last_touch: u64,
     pub frames_drawn: u32,
     pub max_band_us: u64,
-    /// Set over the console (`p`), kept until cleared (`c`). Not kept across
-    /// reboots.
+    /// Set over the console (`p`, bench builds with `testpoint` only), kept
+    /// until cleared (`c`). Not kept across reboots.
     pub manual: Option<OwnPos>,
     /// New drones since the last report, for the `{"t":"new"}` lines.
     pub new_drones: heapless::Deque<u32, 8>,

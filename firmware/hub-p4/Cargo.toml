@@ -87,6 +87,14 @@ modesloop = ["modes"]
 # `fault hang` (start with `f`, end with Enter) to prove the reboot after a
 # panic and the hang watchdog. Never in a normal build (not in `default`).
 faulttest = []
+# Bench only: console `p` sets the hub's own position to a fixed test point
+# (Philadelphia), for a bench with no GPS. Never in a normal build: in the
+# field it would put every distance and flag in the wrong place.
+testpoint = []
+#
+# Every feature above marked "Bench only" (and `selftest`) is fenced by
+# build.rs: the build stops unless ROTORSCOPE_BENCH=1, and the hello line,
+# the evidence boot event and the screen ("BENCH BUILD") say which are in.
 
 [dependencies]
 link = { path = "../../crates/link" }

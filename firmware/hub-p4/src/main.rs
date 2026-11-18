@@ -201,12 +201,18 @@ fn main() -> ! {
     // Console first: from here on log lines never block the loop.
     console::init(p.UART0, p.GPIO37, p.GPIO38);
     println!(
-        "hub-p4: hello, chip revision {:?}, last reset: {} (cause {:#04x}){}",
+        "hub-p4: hello, chip revision {:?}, last reset: {} (cause {:#04x}), evidence key: {} ({}), bench: [{}]{}",
         esp_hal::efuse::chip_revision(),
         fault::reset_reason(),
         fault::reset_code(),
+        evlog::built_key_class().name(),
+        evlog::built_key_class().note(),
+        evlog::BENCH,
         if cfg!(feature = "faulttest") { ", FAULT TEST BUILD: console 'fault panic' / 'fault hang'" } else { "" }
     );
+    if !evlog::BENCH.is_empty() {
+        println!("hub-p4: BENCH BUILD ({}): fakes data or opens debug doors; never leave it on a fielded hub", evlog::BENCH);
+    }
     // SAFETY: read-only CACHE register (IDF 5.4.2 cache_reg.h, rev<3 map):
     // L2_CACHE_CACHESIZE_CONF, bit 10 = 256 KB.
     let l2 = unsafe { (0x3FF1_0278 as *const u32).read_volatile() };
@@ -796,6 +802,9 @@ fn command(
             sdlog.flush_now();
             println!("hub-p4: cmd evidence shutdown checkpoint queued; the card is safe to remove after the next 'evidence ... flushes' line shows queued=0");
         }
+        // Bench only (`testpoint`): a fixed position would put every
+        // distance and flag in the wrong place in the field.
+        #[cfg(feature = "testpoint")]
         b'p' => {
             // The S3 hub's test point (300 m south of its demo circle).
             app.manual = Some(app::OwnPos {
@@ -831,7 +840,9 @@ fn command(
             *lines.site = Some(heapless::String::new());
             println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
         }
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
+        #[cfg(not(feature = "testpoint"))]
+        b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

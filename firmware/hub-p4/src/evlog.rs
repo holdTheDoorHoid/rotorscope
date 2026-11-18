@@ -23,9 +23,16 @@
 //!
 //! **Key.** A development key built into the firmware image
 //! (`ROTORSCOPE_DEV_KEY`, 64 hex digits, at build time), or the published
-//! test key when unset. Every checkpoint says which. Not evidence-grade:
-//! see docs/EVIDENCE.md for the hardware key design. Nothing here touches
-//! eFuses.
+//! test key when unset. A set but malformed value stops the build
+//! (build.rs). Every checkpoint says which, the hello line says which, and
+//! the screen keeps saying so ("TEST KEY: log not evidence" / "DEV KEY: not
+//! evidence-grade"). Not evidence-grade: see docs/EVIDENCE.md for the
+//! hardware key design. Nothing here touches eFuses. Key bytes are never
+//! printed or logged; only the public key and its fingerprint are.
+//!
+//! **Bench builds.** The boot event's text lists the bench features
+//! compiled in (`bench: none` for a normal build), so a log made by a build
+//! that can fake data says so in its first record.
 
 use core::fmt::Write as _;
 
@@ -55,8 +62,19 @@ const JUMP_MPS: f64 = 150.0;
 /// A clock correction smaller than this is not logged.
 const CLOCK_STEP_MS: i64 = 500;
 
-/// The dev key, if the build has one (`ROTORSCOPE_DEV_KEY`).
+/// The dev key, if the build has one (`ROTORSCOPE_DEV_KEY`; build.rs has
+/// checked it is 64 hex digits and not zero).
 const DEV_KEY_HEX: Option<&str> = option_env!("ROTORSCOPE_DEV_KEY");
+
+/// The key class this build means to sign with, for the hello line (before
+/// the signer exists). The signer's own class is what the screen shows.
+pub fn built_key_class() -> KeyClass {
+    if DEV_KEY_HEX.is_some() { KeyClass::DevelopmentSoftware } else { KeyClass::PublicTest }
+}
+
+/// Bench features compiled in (build.rs), comma separated, empty for a
+/// normal build.
+pub const BENCH: &str = env!("ROTORSCOPE_BENCH_LIST");
 
 fn dev_key() -> Option<[u8; 32]> {
     let h = DEV_KEY_HEX?.as_bytes();
@@ -134,7 +152,14 @@ impl Evidence {
         };
         let signer = match dev_key().and_then(|k| SoftSigner::new(&k, KeyClass::DevelopmentSoftware)) {
             Some(s) => s,
-            None => SoftSigner::public_test(),
+            None => {
+                if DEV_KEY_HEX.is_some() {
+                    // Well-formed digits (build.rs) but not a usable P-256
+                    // scalar: say so loudly; the screen shows TEST KEY.
+                    println!("hub-p4: evidence dev key REFUSED (not a valid P-256 private key): signing with the PUBLISHED TEST KEY");
+                }
+                SoftSigner::public_test()
+            }
         };
         let pk = signer.public_key();
         let fp = evidence::fingerprint(&pk);
@@ -217,8 +242,16 @@ impl Evidence {
         data[1..66].copy_from_slice(&self.signer.public_key());
         data[66] = chip.0;
         data[67] = chip.1;
-        let mut text: heapless::String<96> = heapless::String::new();
-        let _ = write!(text, "hub-p4 {} {} last reset: {reset}", env!("CARGO_PKG_VERSION"), option_env!("ROTORSCOPE_GIT").unwrap_or(""));
+        // Version (~6), git (~40), reset reason (~10) and the bench list
+        // (every hub-p4 bench feature at once is ~110): 256 holds them all.
+        let mut text: heapless::String<256> = heapless::String::new();
+        let _ = write!(
+            text,
+            "hub-p4 {} {} last reset: {reset}; bench: {}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("ROTORSCOPE_GIT").unwrap_or(""),
+            if BENCH.is_empty() { "none" } else { BENCH }
+        );
         self.event(EventCode::Boot, text.as_bytes(), &data);
     }
 
