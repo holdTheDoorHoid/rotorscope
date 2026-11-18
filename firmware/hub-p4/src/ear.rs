@@ -7,10 +7,20 @@
 //! printed.
 //!
 //! The detector (about 40 KB) lives in PSRAM at [`EAR_OFFSET`].
+//!
+//! **What sound is kept** (owner decisions 2026-11-18, docs/ACOUSTIC.md
+//! "What sound the hub keeps"). With audio clips off (the default) there
+//! is no tape: the only sound in memory is the DMA ring ([`crate::mic`],
+//! 256 ms, overwritten as it goes round) and the detector's analysis
+//! window (128 ms). With clips on, the [`Tape`] keeps the last
+//! [`TAPE_SAMPLES`] in PSRAM so a clip can include the seconds before the
+//! alert; switching clips off wipes it. The rules for when a clip starts
+//! and how much is kept are in `tracker::sound::clip`.
 
 use acoustic::{Detector, FrameOut, State, FRAMES_PER_S, HOP};
 use esp_hal::gpio::AnyPin;
 use esp_hal::time::Instant;
+use tracker::sound::clip;
 use tracker::sound::{SoundId, SoundKind, SoundReport};
 
 use crate::app::HubTracker;
@@ -28,6 +38,7 @@ const _: () = assert!(
     "ear overlaps the evidence queue"
 );
 const _: () = assert!(mic::FRAMES == HOP && mic::RATE == acoustic::SAMPLE_RATE);
+const _: () = assert!(mic::RATE as u64 == clip::SAMPLES_PER_S && acoustic::wav::HEADER_LEN as u64 == clip::WAV_HEADER);
 
 /// Where the tape lives in PSRAM: above the airspace pack.
 pub const TAPE_OFFSET: usize = 16 << 20;
@@ -35,40 +46,63 @@ pub const TAPE_OFFSET: usize = 16 << 20;
 pub const TAPE_SAMPLES: usize = 1 << 21;
 const _: () = assert!(crate::faa::PACK_OFFSET + crate::faa::PACK_MAX <= TAPE_OFFSET, "airspace pack overlaps the tape");
 
-/// The last two minutes of sound, going round in PSRAM. It is what an audio
-/// clip is cut from (the seconds before a detection included). Nothing reads
-/// it unless the detector hears a drone; it is gone at power-off.
+/// The last two minutes of sound, going round in PSRAM, **only while audio
+/// clips are on**. It is what an audio clip is cut from (the seconds before
+/// the alert included). Nothing reads it unless a contact alerts; switching
+/// clips off wipes it, and it is wiped at start-up (PSRAM keeps its contents
+/// through a software reset).
 pub struct Tape {
     base: *mut i16,
-    /// Samples recorded since start; sample `n` is at `n % TAPE_SAMPLES`.
+    /// Samples heard since start, kept or not; sample `n` is at
+    /// `n % TAPE_SAMPLES`.
     pub head: u64,
+    /// The first sample kept; `None` while clips are off (nothing is
+    /// written to the tape at all).
+    pub from: Option<u64>,
 }
 
 impl Tape {
     fn push(&mut self, hop: &[i16; HOP]) {
-        let at = (self.head % TAPE_SAMPLES as u64) as usize;
-        // SAFETY: the tape is [TAPE_OFFSET, + 2 * TAPE_SAMPLES) of PSRAM
-        // (size checked in `Ear::new`), used by nothing else; HOP divides
-        // TAPE_SAMPLES, so a hop never wraps.
-        unsafe { core::ptr::copy_nonoverlapping(hop.as_ptr(), self.base.add(at), HOP) };
+        if self.from.is_some() {
+            let at = (self.head % TAPE_SAMPLES as u64) as usize;
+            // SAFETY: the tape is [TAPE_OFFSET, + 2 * TAPE_SAMPLES) of PSRAM
+            // (size checked in `Ear::new`), used by nothing else; HOP divides
+            // TAPE_SAMPLES, so a hop never wraps.
+            unsafe { core::ptr::copy_nonoverlapping(hop.as_ptr(), self.base.add(at), HOP) };
+        }
         self.head += HOP as u64;
     }
 
-    /// Sample `n`, if it is still on the tape.
+    /// Sample `n`, if it is on the tape.
     pub fn get(&self, n: u64) -> Option<i16> {
-        if n >= self.head || self.head - n > TAPE_SAMPLES as u64 {
+        let from = self.from?;
+        if n < from || n >= self.head || self.head - n > TAPE_SAMPLES as u64 {
             return None;
         }
         // SAFETY: as `push`; the index is inside the tape.
         Some(unsafe { self.base.add((n % TAPE_SAMPLES as u64) as usize).read() })
     }
+
+    /// Start keeping sound (clips switched on).
+    fn start(&mut self) {
+        if self.from.is_none() {
+            self.from = Some(self.head);
+        }
+    }
+
+    /// Stop keeping sound and overwrite all of it with zeros. 4 MB of PSRAM
+    /// at the 37 MB/s measured in bring-up: about 0.1 s, once, far inside
+    /// the watchdog's 30 s.
+    fn wipe(&mut self) {
+        self.from = None;
+        // SAFETY: as `push`: exactly the tape's own PSRAM.
+        unsafe { core::ptr::write_bytes(self.base, 0, TAPE_SAMPLES) };
+        // Keep the compiler from dropping or moving the writes (nothing in
+        // this program reads the zeros back).
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
 }
 const _: () = assert!(TAPE_SAMPLES % HOP == 0);
-
-/// Sound kept from before the detection, after it ended, and at most.
-const PRE_ROLL: u64 = 5 * mic::RATE as u64;
-const POST_ROLL: u64 = 2 * mic::RATE as u64;
-pub const CLIP_MAX: u64 = 60 * mic::RATE as u64;
 
 /// A stretch of the tape to be saved as a clip (`sd.rs` writes it).
 #[derive(Debug, Clone, Copy)]
@@ -78,16 +112,20 @@ pub struct ClipJob {
     /// One past the last sample, once known.
     pub end: Option<u64>,
     pub contact: Option<SoundId>,
+    /// The card took it (limits and space checked, file created).
+    pub started: bool,
+    /// Clips were switched off: end the file where it is, read no more.
+    pub stop: bool,
 }
 
 pub struct Ear {
-    /// `audio clips on|off` (SITE.TXT). On by default (owner decision
-    /// 2026-11-17).
-    pub clips_on: bool,
+    /// `audio clips on|off` (SITE.TXT, console `L`). Off by default (owner
+    /// decision 2026-11-18); change it with [`Ear::set_clips`].
+    clips_on: bool,
     /// The clip being recorded or written out.
     pub clip: Option<ClipJob>,
-    /// The contact whose clip was last started: one clip per contact.
-    clipped: Option<SoundId>,
+    /// The hourly limit and what was refused (`tracker::sound::clip`).
+    pub budget: clip::Budget,
     pub tape: Tape,
     mic: Mic,
     det: &'static mut Detector,
@@ -127,11 +165,14 @@ impl Ear {
             Detector::init_in_place(slot)
         };
         // SAFETY: inside PSRAM (checked above); 16 MB is aligned for i16.
-        let tape = Tape { base: unsafe { base.cast::<u8>().add(TAPE_OFFSET).cast::<i16>() }, head: 0 };
+        let mut tape = Tape { base: unsafe { base.cast::<u8>().add(TAPE_OFFSET).cast::<i16>() }, head: 0, from: None };
+        // Sound from before a software reset (crash recovery, watchdog)
+        // may still be there: clips start off, so nothing may be kept.
+        tape.wipe();
         Some(Self {
-            clips_on: true,
+            clips_on: false,
             clip: None,
-            clipped: None,
+            budget: clip::Budget::new(),
             tape,
             mic: Mic::start(clk, data),
             det,
@@ -150,6 +191,32 @@ impl Ear {
             calls: 0,
             last_print_ms: 0,
         })
+    }
+
+    pub fn clips_on(&self) -> bool {
+        self.clips_on
+    }
+
+    /// For the screen's caveats strip.
+    pub fn ui(&self) -> screen::AudioClips {
+        screen::AudioClips { on: self.clips_on, recording: self.clip.is_some(), not_saved: self.budget.refused.total() }
+    }
+
+    /// Switch audio clips on (start the tape) or off (end any clip where it
+    /// is and wipe the tape). Detection is not affected either way.
+    pub fn set_clips(&mut self, on: bool) {
+        if on == self.clips_on {
+            return;
+        }
+        self.clips_on = on;
+        if on {
+            self.tape.start();
+        } else {
+            if let Some(c) = self.clip.as_mut() {
+                c.stop = true;
+            }
+            self.tape.wipe();
+        }
     }
 
     pub fn tick(&mut self, tracker: &mut HubTracker, ev: &mut crate::evlog::Evidence, ms: u64) {
@@ -218,11 +285,12 @@ impl Ear {
             small_props: if heard { self.heard_pitch.1 } else { out.class == Some(acoustic::SizeClass::SmallProps) },
         };
         let contact = tracker.ingest_sound(&report, ms);
-        self.clip_step(heard, contact);
+        let go_on = clip::keep_going(heard, self.clip.and_then(|j| j.contact).and_then(|id| tracker.get_sound(id)));
+        self.clip_step(go_on);
         // Alert once per contact that has lasted (and is not an aircraft we
         // already track): console line and evidence event.
         while let Some(id) = tracker.take_new_sound(ms) {
-            let Some(c) = tracker.get_sound(id) else { continue };
+            let Some(&c) = tracker.get_sound(id) else { continue };
             let mut text: heapless::String<160> = heapless::String::new();
             let _ = core::fmt::Write::write_fmt(
                 &mut text,
@@ -242,6 +310,7 @@ impl Ear {
             data[7] = c.peak_confidence;
             ev.event(evidence::format::EventCode::Sound, text.as_bytes(), &data);
             println!("hub-p4: SOUND {}", text);
+            self.clip_start(&c, ms);
         }
         let changed = out.state != self.state;
         self.state = out.state;
@@ -251,7 +320,7 @@ impl Ear {
         if changed || !quiet || ms.saturating_sub(self.last_print_ms) >= 10_000 {
             self.last_print_ms = ms;
             println!(
-                "hub-p4: ear {:?}{} pitch {:.0} Hz conf {} level {:.0} dBFS contact {:?} | bufs {} overruns {} dma_err {} detector avg {} max {} us",
+                "hub-p4: ear {:?}{} pitch {:.0} Hz conf {} level {:.0} dBFS contact {:?} | bufs {} overruns {} dma_err {} detector avg {} max {} us | clips {} tape {} s{} not_saved {} (no_card {} hour {} audio_cap {} space {} space_unknown {} cut {})",
                 out.state,
                 if out.steady { " (steady hum)" } else { "" },
                 out.f0_hz,
@@ -262,7 +331,17 @@ impl Ear {
                 self.mic.overruns,
                 self.mic.dma_errors,
                 self.sum_us / self.calls.max(1),
-                self.max_us
+                self.max_us,
+                if self.clips_on { "on" } else { "off" },
+                self.tape.from.map_or(0, |f| (self.tape.head - f).min(TAPE_SAMPLES as u64) / mic::RATE as u64),
+                if self.clip.is_some() { " RECORDING" } else { "" },
+                self.budget.refused.total(),
+                self.budget.refused.no_card,
+                self.budget.refused.hour,
+                self.budget.refused.audio_cap,
+                self.budget.refused.low_space,
+                self.budget.refused.space_unknown,
+                self.budget.refused.cut_short
             );
             self.max_us = 0;
             self.sum_us = 0;
@@ -328,24 +407,32 @@ mod fake {
 pub static DUMP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 impl Ear {
-    /// Start, extend or close the clip for what is being heard.
-    fn clip_step(&mut self, heard: bool, contact: Option<SoundId>) {
-        let head = self.tape.head;
-        match self.clip.as_mut() {
-            None => {
-                if heard && self.clips_on && contact.is_some() && contact != self.clipped {
-                    self.clipped = contact;
-                    self.clip = Some(ClipJob { from: head.saturating_sub(PRE_ROLL), end: None, contact });
-                }
-            }
-            Some(c) if c.end.is_none() => {
-                if !heard {
-                    c.end = Some((head + POST_ROLL).min(c.from + CLIP_MAX));
-                } else if head - c.from >= CLIP_MAX {
-                    c.end = Some(c.from + CLIP_MAX);
-                }
-            }
-            Some(_) => {}
+    /// A contact has just alerted: start its clip if clips are on and it
+    /// is one that may be clipped (`tracker::sound::clip::may_start`). The
+    /// clip reaches back over the pre-roll to before the contact began. The
+    /// limits and the card's space are checked when `sd.rs` opens the file.
+    fn clip_start(&mut self, c: &tracker::sound::SoundContact, ms: u64) {
+        if !clip::may_start(self.clips_on, c, ms) {
+            return;
+        }
+        let Some(tape_from) = self.tape.from else { return };
+        if self.clip.is_some() {
+            println!("hub-p4: ear: contact {} alerted while a clip is being made: no second clip", c.id.0);
+            return;
+        }
+        let from = clip::first_sample(self.tape.head, c.duration_ms(), tape_from);
+        self.clip = Some(ClipJob { from, end: None, contact: Some(c.id), started: false, stop: false });
+    }
+
+    /// Once a second: close the clip when the sound stops or its contact
+    /// no longer alerts (`clip::keep_going`; after the post-roll), or at the
+    /// longest clip.
+    fn clip_step(&mut self, go_on: bool) {
+        if let Some(c) = self.clip.as_mut()
+            && c.end.is_none()
+            && !c.stop
+        {
+            c.end = clip::end_sample(c.from, self.tape.head, go_on);
         }
     }
 }
@@ -356,8 +443,12 @@ impl Ear {
     /// `seconds` of the tape as hex, 32 samples a line, so recorded sound
     /// can be checked on a laptop. Blocks the loop while it prints.
     pub fn dump(&self, seconds: u32) {
+        let Some(kept) = self.tape.from else {
+            println!("EARPCM none: audio clips are off, so no sound is kept to dump");
+            return;
+        };
         let n = u64::from(seconds) * u64::from(mic::RATE);
-        let from = self.tape.head.saturating_sub(n);
+        let from = self.tape.head.saturating_sub(n).max(kept);
         println!("EARPCM begin rate {} samples {}", mic::RATE, self.tape.head - from);
         let mut line: heapless::String<160> = heapless::String::new();
         for i in from..self.tape.head {
@@ -366,6 +457,7 @@ impl Ear {
             if line.len() >= 128 {
                 println!("EARPCM {}", line);
                 line.clear();
+                crate::fault::feed();
             }
         }
         if !line.is_empty() {

@@ -56,6 +56,7 @@ use embedded_sdmmc::{Mode, RawDirectory, RawFile, RawVolume, TimeSource, Timesta
 use esp_hal::gpio::Flex;
 use esp_hal::time::Instant;
 use tracker::TrackState;
+use tracker::sound::clip::{self, Room};
 use tracker::csv::{self, MAX_ROW};
 
 use crate::app::HubTracker;
@@ -187,6 +188,8 @@ struct ClipFile {
     lost: u32,
     hash: sha2::Sha256,
     last_write: u64,
+    /// The card when the clip started (`tracker::sound::clip::Budget`).
+    room: Room,
 }
 
 /// Console `r`: the current evidence file, re-streamed from the start.
@@ -230,6 +233,11 @@ pub struct Logger {
     clip: Option<ClipFile>,
     /// The last clip number used on this card (0: folder not read yet).
     clip_no: u32,
+    /// Bytes in `ROTORSCP/AUDIO` (read with the clip numbers).
+    audio_bytes: u64,
+    /// Where this card's FAT32 free count is (`None`: not FAT32 with an
+    /// FSInfo sector: clips are refused, the space being unknown).
+    fat: Option<clip::card::Fat32>,
     pub clips: u32,
     pub clip_errors: u32,
     /// While recording without an evidence file: when to try again.
@@ -308,6 +316,8 @@ impl Logger {
             ev_file: None,
             clip: None,
             clip_no: 0,
+            audio_bytes: 0,
+            fat: None,
             clips: 0,
             clip_errors: 0,
             ev_retry_at: 0,
@@ -591,9 +601,10 @@ impl Logger {
         let state = self.state_name();
         let io = self.io_stats();
         println!(
-            "hub-p4: sd {state} file={}/{} rows={} dropped={} pending={} bytes={} flushes={} errors={} | blocks r={} w={} io_err={} busy_skips={} max_io={}us max_tick={}us ({})",
+            "hub-p4: sd {state} file={}/{} rows={} dropped={} pending={} bytes={} flushes={} errors={} | blocks r={} w={} io_err={} busy_skips={} max_io={}us max_tick={}us ({}) | audio clips saved={} errors={} audio_kib={}",
             DIR, self.name, self.rows, self.dropped, self.pending.len(), self.pos, self.flushes, self.errors,
-            io.blocks_read, io.blocks_written, io.errors, self.busy_skips, io.max_io_us, self.max_tick_us, self.max_tick_what
+            io.blocks_read, io.blocks_written, io.errors, self.busy_skips, io.max_io_us, self.max_tick_us, self.max_tick_what,
+            self.clips, self.clip_errors, self.audio_bytes >> 10
         );
         println!(
             "hub-p4: evidence file={}/{}/{} bytes={} seq={} queued={} records={} record_bytes={} drained={} flushes={} errors={} checkpoints={} sign={}us max_sign={}us max_build={}us max_sd_step={}us ({}) stream={} stream_drops={} not_logged={}",
@@ -677,6 +688,8 @@ impl Logger {
         self.ev_file = None;
         self.clip = None;
         self.clip_no = 0;
+        self.audio_bytes = 0;
+        self.fat = None;
         self.replay = None;
         self.pack_file = None;
         #[cfg(feature = "embedpack")]
@@ -717,6 +730,16 @@ impl Logger {
             "hub-p4: sd block 0 read {:?} in {us} us (~{} kHz clock, ~{} kB/s); partition 1 type 0x{:02x}, signature {:02x}{:02x}",
             r.map(|_| ()), 4180 * 1000 / us, 512 * 1000 / us, b[0][446 + 4], b[0][510], b[0][511]
         );
+        // Where the free-space count is, for the audio clips' reserve.
+        self.fat = clip::card::partition_start(&b[0]).and_then(|start| {
+            let mut boot = [[0u8; sdnative::BLOCK]];
+            card.read(start, &mut boot).ok()?;
+            clip::card::fat32(&boot[0], start)
+        });
+        match self.fat {
+            Some(f) => println!("hub-p4: sd FAT32, {} KiB clusters, free count in block {}", f.cluster_bytes / 1024, f.fsinfo_block),
+            None => println!("hub-p4: sd not FAT32 with a free-space count: audio clips will not be saved on this card"),
+        }
         self.vm = Some(VolumeManager::new_with_limits(SdDev::new(card), GpsClock, 1));
         match self.mount() {
             Ok(()) => {
@@ -1247,7 +1270,15 @@ impl Logger {
         what
     }
 
-    /// A write failed while recording: the card is taken to be gone.
+    /// Free bytes on the card, from its FSInfo sector (which the FAT
+    /// library rewrites on every file flush). `None`: unknown.
+    fn free_bytes(&self) -> Option<u64> {
+        let (fat, vm) = (self.fat?, self.vm.as_ref()?);
+        let mut blk = [embedded_sdmmc::Block::new()];
+        vm.device(|d| embedded_sdmmc::BlockDevice::read(d, &mut blk, embedded_sdmmc::BlockIdx(fat.fsinfo_block))).ok()?;
+        clip::card::free_bytes(&blk[0].contents, &fat)
+    }
+
     /// One step of saving an audio clip, if one is due (Phase 15d). Call
     /// every main-loop pass, after [`Logger::tick`].
     ///
@@ -1255,15 +1286,30 @@ impl Logger {
     /// block at a time, at most one block every [`CLIP_GAP_MS`], so the hub
     /// keeps doing everything else. That is a little slower than the sound
     /// arrives; the tape holds two minutes, so a one-minute clip is always
-    /// still there when its turn comes.
+    /// still there when its turn comes. Each pass does at most one block
+    /// write, or opening the clip (one folder scan and one sector read), or
+    /// closing it: milliseconds, far inside the watchdog's 30 s.
+    ///
+    /// Before the file is created the limits are checked
+    /// (`tracker::sound::clip::Budget`): clips this hour, audio on the card,
+    /// and the free space kept for the evidence log. A refusal is counted
+    /// (`ear.budget.refused`), printed, and shown on the screen.
     pub fn clip_tick(&mut self, ear: &mut crate::ear::Ear, tracker: &mut HubTracker, ev: &mut Evidence, now: u64) {
         let Some(job) = ear.clip else { return };
         if self.state != State::Recording || self.open.is_none() {
             // No card: the clip cannot be kept. (Detection carries on.)
-            if job.end.is_some() {
-                println!("hub-p4: sd audio clip dropped: no card");
-                ear.clip = None;
+            if job.started {
+                self.clip_errors += 1;
+                println!("hub-p4: sd audio clip lost with the card");
+            } else if !job.stop {
+                let _ = ear.budget.try_start(now, None);
+                println!("hub-p4: sd audio clip not saved: {}", clip::Refusal::NoCard.text());
             }
+            ear.clip = None;
+            return;
+        }
+        if job.stop && !job.started {
+            ear.clip = None;
             return;
         }
         if self.clip.as_ref().is_some_and(|c| now.saturating_sub(c.last_write) < CLIP_GAP_MS) {
@@ -1272,9 +1318,10 @@ impl Logger {
         if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
             return;
         }
-        match self.clip_step(&job, ear, now) {
+        let r = if job.started { self.clip_step(&job, ear, now) } else { self.clip_open(ear, now).map(|_| None) };
+        match r {
             Ok(None) => {}
-            Ok(Some((clip, digest))) => {
+            Ok(Some((clip, digest, cut))) => {
                 self.clips += 1;
                 ear.clip = None;
                 if let Some(id) = job.contact {
@@ -1287,12 +1334,16 @@ impl Logger {
                 data[12..16].copy_from_slice(&(clip.written as u32).to_le_bytes());
                 data[16..20].copy_from_slice(&clip.lost.to_le_bytes());
                 data[20..52].copy_from_slice(&digest);
-                let mut text: heapless::String<48> = heapless::String::new();
+                let mut text: heapless::String<96> = heapless::String::new();
                 let _ = write!(text, "{DIR}/{CLIP_DIR}/{}", clip.name);
+                if let Some(why) = cut {
+                    let _ = write!(text, " (cut short: {why})");
+                }
                 ev.event(evidence::EventCode::SoundClip, text.as_bytes(), &data);
                 println!(
-                    "hub-p4: sd audio clip {text} saved: {:.1} s, {} samples lost, sha256 {:02x}{:02x}{:02x}{:02x}..",
-                    clip.written as f32 / crate::mic::RATE as f32, clip.lost, digest[0], digest[1], digest[2], digest[3]
+                    "hub-p4: sd audio clip {text} saved: {:.1} s, {} samples lost, sha256 {:02x}{:02x}{:02x}{:02x}..; audio on card {} MiB",
+                    clip.written as f32 / crate::mic::RATE as f32, clip.lost, digest[0], digest[1], digest[2], digest[3],
+                    self.audio_bytes >> 20
                 );
             }
             Err(e) => {
@@ -1307,68 +1358,115 @@ impl Logger {
         }
     }
 
-    /// Open the clip file, write its next block, or finish it. `Some` when
-    /// the clip is complete.
-    fn clip_step(&mut self, job: &crate::ear::ClipJob, ear: &crate::ear::Ear, now: u64) -> Result<Option<(ClipFile, [u8; 32])>, FsError> {
+    /// Check the limits and the card's space, then create the clip file
+    /// (or refuse: `ear.clip` is dropped and the refusal counted).
+    fn clip_open(&mut self, ear: &mut crate::ear::Ear, now: u64) -> Result<(), FsError> {
+        let free = self.free_bytes();
+        let vm = self.vm.as_ref().unwrap();
+        let Some(parent) = self.open.as_ref().map(|o| o.dir) else { return Ok(()) };
+        let dir = match vm.open_dir(parent, CLIP_DIR) {
+            Ok(d) => d,
+            Err(embedded_sdmmc::Error::NotFound) => {
+                println!("hub-p4: sd creating folder {DIR}/{CLIP_DIR}");
+                vm.make_dir_in_dir(parent, CLIP_DIR)?;
+                vm.open_dir(parent, CLIP_DIR)?
+            }
+            Err(e) => return Err(e),
+        };
+        if self.clip_no == 0 {
+            // First clip since the card was mounted: the highest number in
+            // use, and how much audio is there (every file counts).
+            let (mut max, mut bytes) = (0u32, 0u64);
+            let r = vm.iterate_dir(dir, |e| {
+                if !e.attributes.is_directory() && !e.attributes.is_volume() {
+                    bytes += u64::from(e.size);
+                }
+                let base = e.name.base_name();
+                if e.name.extension() == b"WAV" && base.len() == 8 && base.starts_with(b"C") {
+                    let n = base[1..].iter().try_fold(0u32, |acc, &d| d.is_ascii_digit().then(|| acc * 10 + u32::from(d - b'0')));
+                    if let Some(n) = n {
+                        max = max.max(n);
+                    }
+                }
+                ControlFlow::Continue(())
+            });
+            if let Err(e) = r {
+                let _ = vm.close_dir(dir);
+                return Err(e);
+            }
+            self.clip_no = max;
+            self.audio_bytes = bytes;
+            println!("hub-p4: sd {DIR}/{CLIP_DIR}: {} MiB of audio, last clip C{:07}", bytes >> 20, max);
+        }
+        let room = Room { free_bytes: free, audio_bytes: self.audio_bytes };
+        if let Err(why) = ear.budget.try_start(now, Some(room)) {
+            let _ = vm.close_dir(dir);
+            ear.clip = None;
+            println!(
+                "hub-p4: sd audio clip not saved: {} (free {} MiB, audio {} MiB; {} not saved since boot)",
+                why.text(),
+                free.map_or(-1, |f| (f >> 20) as i64),
+                self.audio_bytes >> 20,
+                ear.budget.refused.total()
+            );
+            return Ok(());
+        }
+        self.clip_no += 1;
+        let mut name: heapless::String<12> = heapless::String::new();
+        let _ = write!(name, "C{:07}.WAV", self.clip_no);
+        // ReadWriteCreate refuses a name that exists: never rewrites a clip.
+        let file = match vm.open_file_in_dir(dir, name.as_str(), Mode::ReadWriteCreate) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = vm.close_dir(dir);
+                return Err(e);
+            }
+        };
+        // Length unknown yet: the header is rewritten when the clip ends.
+        self.clip = Some(ClipFile { dir, file, no: self.clip_no, name, written: 0, lost: 0, hash: <sha2::Sha256 as sha2::Digest>::new(), last_write: now, room });
+        if let Some(j) = ear.clip.as_mut() {
+            j.started = true;
+        }
+        vm.write(file, &acoustic::wav::header(crate::mic::RATE, 0))?;
+        self.audio_bytes += clip::WAV_HEADER;
+        self.last_io = now;
+        Ok(())
+    }
+
+    /// Write the clip's next block, or finish it. `Some` when the clip is
+    /// complete, with why it was cut short if it was.
+    #[allow(clippy::type_complexity)]
+    fn clip_step(
+        &mut self,
+        job: &crate::ear::ClipJob,
+        ear: &mut crate::ear::Ear,
+        now: u64,
+    ) -> Result<Option<(ClipFile, [u8; 32], Option<&'static str>)>, FsError> {
         use sha2::Digest;
         let vm = self.vm.as_ref().unwrap();
+        #[cfg(feature = "earfake")]
         let Some(parent) = self.open.as_ref().map(|o| o.dir) else { return Ok(None) };
-        let Some(c) = self.clip.as_mut() else {
-            let dir = match vm.open_dir(parent, CLIP_DIR) {
-                Ok(d) => d,
-                Err(embedded_sdmmc::Error::NotFound) => {
-                    println!("hub-p4: sd creating folder {DIR}/{CLIP_DIR}");
-                    vm.make_dir_in_dir(parent, CLIP_DIR)?;
-                    vm.open_dir(parent, CLIP_DIR)?
-                }
-                Err(e) => return Err(e),
-            };
-            if self.clip_no == 0 {
-                let mut max = 0u32;
-                let r = vm.iterate_dir(dir, |e| {
-                    let base = e.name.base_name();
-                    if e.name.extension() == b"WAV" && base.len() == 8 && base.starts_with(b"C") {
-                        let n = base[1..].iter().try_fold(0u32, |acc, &d| d.is_ascii_digit().then(|| acc * 10 + u32::from(d - b'0')));
-                        if let Some(n) = n {
-                            max = max.max(n);
-                        }
-                    }
-                    ControlFlow::Continue(())
-                });
-                if let Err(e) = r {
-                    let _ = vm.close_dir(dir);
-                    return Err(e);
-                }
-                self.clip_no = max;
-            }
-            self.clip_no += 1;
-            let mut name: heapless::String<12> = heapless::String::new();
-            let _ = write!(name, "C{:07}.WAV", self.clip_no);
-            // ReadWriteCreate refuses a name that exists: never rewrites a clip.
-            let file = match vm.open_file_in_dir(dir, name.as_str(), Mode::ReadWriteCreate) {
-                Ok(f) => f,
-                Err(e) => {
-                    let _ = vm.close_dir(dir);
-                    return Err(e);
-                }
-            };
-            // Length unknown yet: the header is rewritten when the clip ends.
-            self.clip = Some(ClipFile { dir, file, no: self.clip_no, name, written: 0, lost: 0, hash: sha2::Sha256::new(), last_write: now });
-            vm.write(file, &acoustic::wav::header(crate::mic::RATE, 0))?;
-            self.last_io = now;
-            return Ok(None);
-        };
+        let Some(c) = self.clip.as_mut() else { return Ok(None) };
         // Whole blocks only (the first one is short, after the 44-byte
         // header), except at the very end of the clip.
         let next = job.from + c.written;
         let block = if c.written == 0 { (512 - acoustic::wav::HEADER_LEN) / 2 } else { 256 } as u64;
         let ready = job.end.unwrap_or(u64::MAX).min(ear.tape.head);
         let n = match job.end {
+            _ if job.stop => 0,
             Some(end) if end - next < block => end.saturating_sub(next).min(ready.saturating_sub(next)),
             _ if ready.saturating_sub(next) >= block => block,
             _ => 0,
         } as usize;
-        if n > 0 {
+        // Clips switched off, or the card too full to go on: end it here.
+        let cut = if job.stop {
+            Some("audio clips switched off")
+        } else if n > 0 && !ear.budget.may_continue(c.room, 2 * c.written + clip::WAV_HEADER, 2 * n as u64) {
+            Some("card space or audio limit")
+        } else {
+            None
+        };
+        if n > 0 && cut.is_none() {
             let mut buf = [0u8; 512];
             for i in 0..n {
                 let v = ear.tape.get(next + i as u64).unwrap_or_else(|| {
@@ -1381,10 +1479,11 @@ impl Logger {
             c.hash.update(&buf[..2 * n]);
             c.written += n as u64;
             c.last_write = now;
+            self.audio_bytes += 2 * n as u64;
             self.last_io = now;
             return Ok(None);
         }
-        if job.end != Some(next) {
+        if cut.is_none() && job.end != Some(next) {
             return Ok(None);
         }
         // Done: the real length into the header, then close (which writes
@@ -1398,6 +1497,7 @@ impl Logger {
         self.last_io = now;
         let digest: [u8; 32] = c.hash.clone().finalize().into();
         // Bench only: read the file back and check the header and the hash.
+        // Blocks the loop for a few seconds (the watchdog is fed).
         #[cfg(feature = "earfake")]
         {
             let dir = vm.open_dir(parent, CLIP_DIR)?;
@@ -1408,6 +1508,7 @@ impl Logger {
             let mut buf = [0u8; 512];
             let mut at = 0usize;
             loop {
+                crate::fault::feed();
                 let r = vm.read(f, &mut buf)?;
                 if r == 0 {
                     break;
@@ -1431,9 +1532,10 @@ impl Logger {
                 if back == digest && data_len as u64 == 2 * c.written && len as u64 == 44 + 2 * c.written { "MATCH" } else { "MISMATCH" }
             );
         }
-        Ok(Some((c, digest)))
+        Ok(Some((c, digest, cut)))
     }
 
+    /// A write failed while recording: the card is taken to be gone.
     fn lost(&mut self, ev: &mut Evidence, e: &FsError, now: u64) -> &'static str {
         let rows_lost = self.pending.len();
         if self.ev_file.is_some() {

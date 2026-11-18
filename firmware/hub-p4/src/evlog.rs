@@ -256,12 +256,14 @@ impl Evidence {
         data[1..66].copy_from_slice(&self.signer.public_key());
         data[66] = chip.0;
         data[67] = chip.1;
-        // Version (~6), git (~40), reset reason (~10) and the bench list
-        // (every hub-p4 bench feature at once is ~110): 256 holds them all.
+        // Version (~6), git (~40), reset reason (~10), the bench list (every
+        // hub-p4 bench feature at once is ~125) and the audio note (~26):
+        // 256 holds them all. Audio clips always start off; the site file
+        // or the operator turning them on is a Setting event of its own.
         let mut text: heapless::String<256> = heapless::String::new();
         let _ = write!(
             text,
-            "hub-p4 {} {} last reset: {reset}; bench: {}",
+            "hub-p4 {} {} last reset: {reset}; bench: {}; audio clips off at boot",
             env!("CARGO_PKG_VERSION"),
             option_env!("ROTORSCOPE_GIT").unwrap_or(""),
             if BENCH.is_empty() { "none" } else { BENCH }

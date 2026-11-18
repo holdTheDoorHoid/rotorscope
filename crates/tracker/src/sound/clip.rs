@@ -73,6 +73,15 @@ pub fn first_sample(head: u64, contact_ms: u64, tape_from: u64) -> u64 {
     head.saturating_sub(back_ms * SAMPLES_PER_S / 1000).max(tape_from)
 }
 
+/// Once a second while a clip is open: whether it goes on. Only while the
+/// sound is heard and its contact still alerts: a contact that turns out
+/// to be a tracked aircraft (its kind only ever strengthens, and "Aircraft
+/// heard" outranks "no radio") is not recorded further. `contact`: `None`
+/// when the tracker has dropped it.
+pub fn keep_going(heard: bool, contact: Option<&SoundContact>) -> bool {
+    heard && contact.is_some_and(|c| c.kind.alerts())
+}
+
 /// Once a second while a clip is open: its end (one past the last sample),
 /// once known. `heard`: the detector heard the sound for most of the last
 /// second.
@@ -360,6 +369,16 @@ mod tests {
                 assert!(may_start(true, &c, s * 1000));
             }
         }
+    }
+
+    #[test]
+    fn a_clip_stops_when_its_contact_turns_out_to_be_an_aircraft() {
+        let (_, mut c) = contact(10);
+        assert!(keep_going(true, Some(&c)));
+        assert!(!keep_going(false, Some(&c)), "not heard");
+        assert!(!keep_going(true, None), "contact gone");
+        c.kind = SoundKind::Aircraft;
+        assert!(!keep_going(true, Some(&c)));
     }
 
     // ---- What the clip covers.

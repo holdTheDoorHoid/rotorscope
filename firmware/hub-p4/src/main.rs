@@ -465,13 +465,7 @@ fn main() -> ! {
             site.apply(&mut app, &gw);
             control_settings(&site, &mut down, &mut app, &mut ev);
             if let Some(e) = ear.as_mut() {
-                let on = site.audio_clips();
-                if e.clips_on != on {
-                    e.clips_on = on;
-                    let t: &[u8] = if on { b"audio clips on (SITE.TXT / console)" } else { b"audio clips off (SITE.TXT / console)" };
-                    ev.event(evidence::EventCode::Setting, t, &[on as u8]);
-                    println!("hub-p4: audio clips {}", if on { "on" } else { "off" });
-                }
+                audio_clips_setting(e, &site, &mut ev);
             }
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
@@ -504,7 +498,7 @@ fn main() -> ! {
                 sd: sdlog.ui_state(),
                 adsb: Some((adsbee.status(ms), adsbee.stats.map_or(0, |s| s.uptime_s))),
                 flags: Some(faa.view(app.tracker)),
-                caveats: caveats(&ev, &gw, &sdlog),
+                caveats: caveats(&ev, &gw, &sdlog, ear.as_ref()),
             };
             app.draw(panel, &mut gw, &ext, ms, |gw| {
                 gw.poll(app::now_ms());
@@ -638,9 +632,39 @@ fn main() -> ! {
     }
 }
 
+/// `audio clips on|off` from the site settings to the ear (start the tape,
+/// or end any clip and wipe the tape). A change made by the card's file is
+/// logged here as a Setting event; one typed at the console was logged
+/// when it was typed (`site::Site::save`), so it is not logged twice. The
+/// boot event says clips start off.
+#[inline(never)]
+fn audio_clips_setting(e: &mut ear::Ear, site: &site::Site, ev: &mut evlog::Evidence) {
+    let on = site.audio_clips();
+    if e.clips_on() == on {
+        return;
+    }
+    e.set_clips(on);
+    let from = site.audio_from();
+    if from == site::From::File {
+        let t: &[u8] = if on { b"site (file): audio clips on" } else { b"site (file): audio clips off" };
+        ev.event(evidence::EventCode::Setting, t, &[on as u8]);
+    }
+    println!(
+        "hub-p4: audio clips {} (from the {}): {}",
+        if on { "ON" } else { "off" },
+        from.name(),
+        if on {
+            "sound is now kept on a tape in PSRAM and a clip is saved when a drone-like sound alerts; the screen says AUDIO CLIPS ON"
+        } else {
+            "the tape is wiped and no sound is kept"
+        }
+    );
+}
+
 /// What must stay on screen (`screen::Caveats`): the evidence key class,
-/// a bench build, an open gateway link, evidence not reaching the card.
-fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -> screen::Caveats {
+/// a bench build, an open gateway link, evidence not reaching the card,
+/// audio clips on or recording.
+fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger, ear: Option<&ear::Ear>) -> screen::Caveats {
     screen::Caveats {
         key: match ev.key_class() {
             evidence::KeyClass::PublicTest => screen::EvidenceKey::Test,
@@ -650,6 +674,7 @@ fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -
         bench: !evlog::BENCH.is_empty(),
         link_open: gw.stats.gw_open(),
         evidence: sd.evidence_stop(ev),
+        audio: ear.map_or_else(screen::AudioClips::default, ear::Ear::ui),
     }
 }
 
@@ -883,11 +908,11 @@ fn command(
         b'm' => forget_gps_home(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | audio clips on|off");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
-        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off / audio clips on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

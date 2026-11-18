@@ -17,6 +17,9 @@ use crate::sd::Logger;
 pub struct Site {
     /// Node positions (the mute rules live in the tracker).
     st: SiteState,
+    /// What last set `audio clips`: the main loop logs a change made by the
+    /// file; one typed by the operator is logged by [`Site::save`] already.
+    audio_from: From,
 }
 
 impl Site {
@@ -26,23 +29,30 @@ impl Site {
         (self.st.control_ids.unwrap_or(false), self.st.control_content.unwrap_or(false))
     }
 
-    /// `audio clips on|off`: on unless the file or the operator said off.
+    /// `audio clips on|off`: off unless the file or the operator said on
+    /// (owner decision 2026-11-18).
     pub fn audio_clips(&self) -> bool {
-        self.st.audio_clips.unwrap_or(true)
+        self.st.audio_clips_on()
+    }
+
+    /// What last set `audio clips`.
+    pub fn audio_from(&self) -> From {
+        self.audio_from
     }
 }
 
 /// Where a change came from.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum From {
     /// The card's file at mount: nothing is written back or logged.
+    #[default]
     File,
     Console,
     Screen,
 }
 
 impl From {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             From::File => "file",
             From::Console => "console",
@@ -75,14 +85,16 @@ impl Site {
             app.tracker.mute(m.clone());
         }
         crate::println!(
-            "hub-p4: site file: {} lines used, {} ignored; {} nodes placed, {} alarm mutes; control links: IDs {}, content {}",
+            "hub-p4: site file: {} lines used, {} ignored; {} nodes placed, {} alarm mutes; control links: IDs {}, content {}; audio clips {}",
             st.used,
             st.ignored,
             st.nodes.len(),
             st.mutes.len(),
             if st.control_ids == Some(true) { "on" } else { "off" },
             if st.control_content == Some(true) { "on" } else { "off" },
+            if st.audio_clips_on() { "on" } else { "off" },
         );
+        self.audio_from = From::File;
         self.st.nodes = st.nodes;
         self.st.control_ids = st.control_ids;
         self.st.control_content = st.control_content;
@@ -123,6 +135,9 @@ impl Site {
         }
         let mut text: heapless::String<128> = heapless::String::new();
         let _ = writeln!(text, "{}", line.trim());
+        if let SiteLine::AudioClips(_) = parsed {
+            self.audio_from = From::Console;
+        }
         self.apply_line(parsed, app);
         self.save(&text, From::Console, sd, ev);
     }
