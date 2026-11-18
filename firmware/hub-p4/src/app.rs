@@ -209,7 +209,18 @@ impl App {
             if t.freq != 0 {
                 let _ = write!(text, ", {:.1} MHz", t.freq_mhz());
             }
-            let _ = if t.kind.is_jamming() {
+            let _ = if let Some(d) = t.contested() {
+                // A control link with more transmitters than it can have.
+                write!(
+                    text,
+                    ", {}, {} transmitters, {}, {} events, {} dBm)",
+                    d.system.map_or("?", |s| s.label()),
+                    d.transmitters,
+                    ctrlwatch::contested::rule_name(d.rules),
+                    t.count,
+                    t.level
+                )
+            } else if t.kind.is_jamming() {
                 write!(text, ", +{} dB, detail {})", t.level, t.detail)
             } else {
                 write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)

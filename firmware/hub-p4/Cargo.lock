@@ -1107,6 +1107,7 @@ dependencies = [
  "airspace",
  "coverage",
  "critical-section",
+ "ctrlwatch",
  "djicrypt",
  "droneid",
  "embedded-graphics",

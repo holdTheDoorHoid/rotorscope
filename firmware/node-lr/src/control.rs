@@ -14,6 +14,12 @@
 //! - **Follow** (ExpressLRS, only with content decoding on): park on, or hop
 //!   with, one link for `ctrl::FOLLOW_US`, decoding its packets.
 //!
+//! - **Contested links**: every recognised packet also goes to
+//!   `ctrlwatch::contested::Watch`, which looks for a link heard from more
+//!   transmitters than it can have (docs/DRONE-ATTACKS.md); its findings go
+//!   to the hub as `Frame::Threat` of kind `ControlContested`
+//!   (`ctrl::contested_threat`), the link's identifier only with `read_ids`.
+//!
 //! The opt-ins come from the plan (`AeroMode::ControlFlags`, both off by
 //! default) and go to `recognise` and `Follow` unchanged. Receive only:
 //! every command comes from `lr2021cfg`, which has no transmit command.
@@ -27,7 +33,7 @@ use lr2021cfg::cmd;
 use lr2021cfg::config::{self, Modem, RxConfig as LrConfig};
 use lr2021cfg::ctrl::{
     self, BURST_DWELL_MS, CONTROL_PER_S, ContentGate, EnergyGate, EnergyMaps, Follow, Job,
-    MAX_GROUP, MAX_SIGHTINGS, SIGHTING_MAX_AGE_US, SUMMARY_GAP_US, SWEEP_DWELL_US,
+    MAX_CONTESTED, MAX_GROUP, MAX_SIGHTINGS, SIGHTING_MAX_AGE_US, SUMMARY_GAP_US, SWEEP_DWELL_US,
 };
 use lr2021cfg::node::RateLimit;
 use portable_atomic::Ordering::Relaxed;
@@ -56,6 +62,10 @@ pub struct Control {
     content_gate: ContentGate,
     limit: RateLimit,
     follow: Option<(Follow, Option<ctrlwatch::LinkId>)>,
+    contested: ctrlwatch::contested::Watch<MAX_CONTESTED>,
+    /// The opt-ins of the current plan entry (for reports made in
+    /// housekeeping).
+    cfg: Config,
     applied: Option<LrConfig>,
     last_housekeeping_us: u64,
     fifo: [u8; 256],
@@ -71,6 +81,11 @@ impl Control {
             content_gate: ContentGate::new(),
             limit: RateLimit::new(CONTROL_PER_S, 0),
             follow: None,
+            contested: ctrlwatch::contested::Watch::new(),
+            cfg: Config {
+                read_ids: false,
+                decode_content: false,
+            },
             applied: None,
             last_housekeeping_us: 0,
             fifo: [0; 256],
@@ -94,6 +109,7 @@ impl Control {
         until_us: u64,
     ) -> Result<(), Error> {
         self.scanner.set_masks(regions, energy);
+        self.cfg = cfg;
         if !cfg.decode_content {
             // Content was turned off: stop following now.
             self.follow = None;
@@ -174,6 +190,21 @@ impl Control {
             out::hub_frame(&Frame::Control(ctrl::summary(s)));
         });
         self.table.expire(now, SIGHTING_MAX_AGE_US);
+        self.contested.take_due(now, &self.cfg, |r| {
+            bump(&COUNTERS.ctrl_reports);
+            out::line(format_args!(
+                r#"{{"t":"contested","sys":"{:?}","region":"{:?}","f":{},"tx":{},"rule":"{}","events":{},"id":{}}}"#,
+                r.system,
+                r.region,
+                r.freq_hz / 1000,
+                r.transmitters,
+                ctrlwatch::contested::rule_name(r.rules),
+                r.events,
+                r.id.is_some()
+            ));
+            out::hub_frame(&Frame::Threat(ctrl::contested_threat(r, now)));
+        });
+        self.contested.expire(now);
     }
 
     /// One packet's content (and raw bytes) to the hub, within the gates.
@@ -282,6 +313,7 @@ impl Control {
             };
             bump(&COUNTERS.ctrl_recognised);
             self.table.record(&r.sighting);
+            self.contested.observe(bytes, &step.config, meta, &cfg);
             if !extended {
                 extended = true;
                 end = start + u64::from(job.extend_ms()) * 1000;
@@ -351,6 +383,9 @@ impl Control {
             let Some(got) = f.process(&self.fifo[..n], meta, t.channel) else {
                 continue;
             };
+            if got.is_sync {
+                self.contested.observe(&self.fifo[..n], &t.config, meta, &cfg);
+            }
             bump(&COUNTERS.ctrl_recognised);
             let s = ControlSighting {
                 system: ctrlwatch::System::ExpressLrs,

@@ -35,7 +35,10 @@ use ctrlwatch::{
     System,
 };
 use heapless::Vec;
-use link::{ControlEnergy, ControlReport, EnergyActivity, HopperReport, MAX_CONTROL_CONTENT};
+use link::{
+    ControlEnergy, ControlReport, EnergyActivity, HopperReport, MAX_CONTROL_CONTENT, ThreatKind,
+    ThreatSighting,
+};
 
 use crate::cmd::{bw, lora_bw, lora_cr, shaping};
 use crate::config::{Modem, RxConfig as LrConfig};
@@ -66,6 +69,8 @@ pub const SYSTEMS: [System; 4] = [
 ];
 /// Links the node keeps counts for.
 pub const MAX_SIGHTINGS: usize = 16;
+/// Links the contested-link check (`ctrlwatch::contested`) keeps.
+pub const MAX_CONTESTED: usize = 8;
 /// A link's summary report at most this often.
 pub const SUMMARY_GAP_US: u64 = 2_000_000;
 /// Forget a link not heard for this long.
@@ -639,6 +644,52 @@ impl ContentGate {
     }
 }
 
+/// A contested control link (`ctrlwatch::contested`) as a protocol 13
+/// [`ThreatKind::ControlContested`] threat:
+///
+/// - `detail`: [`ctrlwatch::contested::Report::detail`] (system code,
+///   transmitters, rule bits, region);
+/// - `freq`: where the node heard it, 100 kHz units; `width_khz` 0;
+/// - `level`: strongest packet on the link, dBm; `count`: pieces of
+///   evidence so far; `window_ms`: first to latest evidence;
+/// - `source`: the node's own handle for the link in the last byte (1-255,
+///   tells two contested links apart; not an identifier of anything);
+/// - `target`: the link's identifier, right-aligned (SiK NET ID, mLRS sync
+///   word: last two bytes; ExpressLRS: UID byte 3 or 0, 4, 5 as sent, 5 as
+///   checked, in the last four), **all zero unless `read_ids`** (the
+///   report's `id` is only set then);
+/// - `ssid`: empty.
+pub fn contested_threat(r: &ctrlwatch::contested::Report, now_us: u64) -> ThreatSighting {
+    let mut target = [0u8; 6];
+    match r.id {
+        Some(ctrlwatch::LinkId::SikNetId(v) | ctrlwatch::LinkId::MlrsSyncWord(v)) => {
+            target[4..].copy_from_slice(&v.to_be_bytes());
+        }
+        Some(ctrlwatch::LinkId::ElrsUid {
+            uid3,
+            uid4,
+            uid5,
+            uid5_real,
+        }) => target[2..].copy_from_slice(&[uid3.unwrap_or(0), uid4, uid5, uid5_real]),
+        Some(ctrlwatch::LinkId::OpenLrsMagic(m)) => target[2..].copy_from_slice(&m.to_be_bytes()),
+        None => {}
+    }
+    ThreatSighting {
+        kind: ThreatKind::ControlContested,
+        channel: 0,
+        freq: r.freq_hz / 100_000,
+        width_khz: 0,
+        level: dbm8(r.peak_rssi_dbm),
+        count: r.events,
+        window_ms: (r.last_us.saturating_sub(r.first_us) / 1000).min(u64::from(u32::MAX)) as u32,
+        source: [0, 0, 0, 0, 0, r.handle],
+        target,
+        detail: r.detail(),
+        ssid: heapless::String::new(),
+        uptime_us: now_us,
+    }
+}
+
 // --------------------------------------------------------------- follow --
 
 /// Where [`Follow`] wants the radio.
@@ -797,6 +848,34 @@ impl Follow {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn contested_threat_carries_ids_only_when_reported() {
+        use ctrlwatch::contested::{RULE_CLOCKS, Report, decode_detail};
+        let mut r = Report {
+            system: System::Sik,
+            region: Region::Fcc915,
+            freq_hz: 915_125_000,
+            transmitters: 3,
+            rules: RULE_CLOCKS,
+            events: 4,
+            first_us: 1_000_000,
+            last_us: 31_000_000,
+            peak_rssi_dbm: -300,
+            handle: 7,
+            id: None,
+        };
+        let t = contested_threat(&r, 99);
+        assert_eq!(t.kind, link::ThreatKind::ControlContested);
+        assert_eq!((t.freq, t.level, t.count, t.window_ms), (9151, -128, 4, 30_000));
+        assert_eq!((t.source, t.target), ([0, 0, 0, 0, 0, 7], [0; 6]));
+        let d = decode_detail(t.detail);
+        assert_eq!((d.system, d.transmitters, d.rules), (Some(System::Sik), 3, RULE_CLOCKS));
+        r.id = Some(ctrlwatch::LinkId::SikNetId(0x0119));
+        assert_eq!(contested_threat(&r, 99).target, [0, 0, 0, 0, 0x01, 0x19]);
+        r.id = Some(ctrlwatch::LinkId::ElrsUid { uid3: None, uid4: 0xAB, uid5: 0xC1, uid5_real: 0xC0 });
+        assert_eq!(contested_threat(&r, 99).target, [0, 0, 0, 0xAB, 0xC1, 0xC0]);
+    }
+
     use super::*;
     use crate::config;
     use ctrlwatch::scan;

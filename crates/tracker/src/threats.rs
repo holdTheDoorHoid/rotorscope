@@ -128,8 +128,21 @@ impl Threat {
             ThreatKind::EvilTwin | ThreatKind::DroneNetClone => self.ssid == s.ssid && self.source == s.source,
             ThreatKind::Karma => self.source == s.source,
             ThreatKind::ForgedLink => self.source == s.source,
+            // One per link: the node's handle for it (`source`), its
+            // identifier when sent (`target`), and the system (low byte of
+            // `detail`). Without identifiers, two contested links on one
+            // node still stay apart by handle.
+            ThreatKind::ControlContested => {
+                self.source == s.source && self.target == s.target && self.detail & 0xFF == s.detail & 0xFF
+            }
             _ => self.target == s.target,
         }
+    }
+
+    /// For [`ThreatKind::ControlContested`]: the system, transmitters and
+    /// rules its `detail` encodes (`ctrlwatch::contested::Report::detail`).
+    pub fn contested(&self) -> Option<ctrlwatch::contested::Detail> {
+        (self.kind == ThreatKind::ControlContested).then(|| ctrlwatch::contested::decode_detail(self.detail))
     }
 }
 
@@ -176,6 +189,13 @@ impl Mute {
                 m.source = t.source;
             }
             ThreatKind::ForgedLink => m.source = t.source,
+            // A control link: its identifier when known (all zero without
+            // `control ids`, so then every contested link) in that band
+            // (900 MHz or 2.4 GHz). Not the node's handle: it changes.
+            ThreatKind::ControlContested => {
+                m.target = t.target;
+                m.freq = t.freq;
+            }
             // Floods: the victim (random sources change all the time).
             _ => m.target = t.target,
         }
@@ -519,6 +539,14 @@ struct ThreatLine<'a> {
     target: Option<Mac<'a>>,
     #[serde(skip_serializing_if = "str::is_empty")]
     ssid: &'a str,
+    /// Contested control link: the system ("ExpressLRS"), how many
+    /// transmitters the evidence needs, and the rule that fired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ctrl_system: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transmitters: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<&'static str>,
     n: u32,
     first_ms: u64,
     last_ms: u64,
@@ -554,6 +582,9 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         src: (show && known(&t.source)).then_some(Mac(&t.source)),
         target: (show && known(&t.target)).then_some(Mac(&t.target)),
         ssid: t.ssid.as_str(),
+        ctrl_system: t.contested().and_then(|d| d.system).map(|s| s.label()),
+        transmitters: t.contested().map(|d| d.transmitters),
+        rule: t.contested().map(|d| ctrlwatch::contested::rule_name(d.rules)),
         n: t.reports,
         first_ms: t.first_seen_ms,
         last_ms: t.last_seen_ms,
@@ -730,6 +761,50 @@ mod tests {
         tr.unmute_all();
         assert_eq!(tr.active_threats(2_000).count(), 5, "the twin heard by node 3 too");
         assert!(tr.mutes().is_empty());
+    }
+
+    #[test]
+    fn contested_links_stay_apart_and_mute_by_band() {
+        use ctrlwatch::contested::{RULE_PHASE, encode_detail};
+        use ctrlwatch::{Region, System};
+        let mut tr: Tracker = Tracker::default();
+        let mut s = sighting(ThreatKind::ControlContested, 0, 9_155);
+        s.target = [0; 6];
+        s.source = [0, 0, 0, 0, 0, 1];
+        s.detail = encode_detail(System::ExpressLrs, 2, RULE_PHASE, Region::Fcc915);
+        tr.ingest_threat(4, &s, 1_000);
+        tr.ingest_threat(4, &s, 2_000);
+        // Another link on the same node: another handle.
+        let mut s2 = s.clone();
+        s2.source[5] = 2;
+        tr.ingest_threat(4, &s2, 2_000);
+        // Same handle, other system (the handle was reused): apart too.
+        let mut s3 = s.clone();
+        s3.detail = encode_detail(System::Sik, 3, RULE_PHASE, Region::Fcc915);
+        tr.ingest_threat(4, &s3, 2_000);
+        assert_eq!(tr.threats().len(), 3);
+        let t = &tr.threats()[0];
+        let d = t.contested().unwrap();
+        assert_eq!((d.system, d.transmitters), (Some(System::ExpressLrs), 2));
+        let ctx = Context { now_ms: 2_000, utc_ms: None, own: None, config: Config::default() };
+        let mut buf = [0u8; MAX_THREAT_LINE];
+        let n = threat_line(t, &ctx, &mut buf).unwrap();
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(text.contains("\"ctrl_system\":\"ExpressLRS\",\"transmitters\":2,\"rule\":\"interleaved timing\""), "{text}");
+        // Mute: the band (and the identifier, all zero here); a 2.4 GHz
+        // contested link is not muted by it.
+        let m = Mute::for_threat(t);
+        assert_eq!((m.freq, m.source, m.target), (9_155, [0; 6], [0; 6]));
+        let mut far = t.clone();
+        far.freq = 24_404;
+        assert!(m.matches(&tr.threats()[1]) && !m.matches(&far));
+        // Other kinds carry no contested fields.
+        let n = threat_line(&{
+            let mut x = t.clone();
+            x.kind = ThreatKind::Deauth;
+            x
+        }, &ctx, &mut buf).unwrap();
+        assert!(!core::str::from_utf8(&buf[..n]).unwrap().contains("transmitters"));
     }
 
     #[test]

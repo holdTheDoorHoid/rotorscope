@@ -34,6 +34,8 @@ fn known(id: u32) -> Option<(u8, usize)> {
 /// One frame found in a buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame<'a> {
+    /// Packet sequence number (per sending component, +1 per frame).
+    pub seq: u8,
     pub sysid: u8,
     pub compid: u8,
     pub msgid: u32,
@@ -80,6 +82,7 @@ fn frame_at(b: &[u8]) -> Option<Frame<'_>> {
             }
             let sig = if incompat & 1 != 0 { 13 } else { 0 };
             Some(Frame {
+                seq: b[4],
                 sysid: b[5],
                 compid: b[6],
                 msgid,
@@ -101,6 +104,7 @@ fn frame_at(b: &[u8]) -> Option<Frame<'_>> {
                 return None;
             }
             Some(Frame {
+                seq: b[2],
                 sysid: b[3],
                 compid: b[4],
                 msgid,

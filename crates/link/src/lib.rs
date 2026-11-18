@@ -507,6 +507,15 @@ pub enum ThreatKind {
     /// Protocol 13. A drone control or telemetry link heard from more
     /// transmitters than it can have (a third SiK radio on one NET ID, two
     /// ExpressLRS transmitters on one UID): injection or a takeover.
+    /// Sent by LR2021 nodes (`ctrlwatch::contested`,
+    /// `lr2021cfg::ctrl::contested_threat`, docs/DRONE-ATTACKS.md).
+    /// `detail`: bits 0-7 the `ctrlwatch::System` code, 8-11 transmitters
+    /// (at least), 12-15 rule bits (1 interleaved timing, 2 two clocks in
+    /// one window, 4 two sequence counts, 8 new transmitter after silence),
+    /// 16-23 the `ctrlwatch::Region` code. `source` = the node's handle for
+    /// the link in the last byte (not an identifier), `target` = the link's
+    /// identifier, right-aligned, all zero unless the `control ids` opt-in
+    /// is on. `level` = strongest packet, `count` = pieces of evidence.
     ControlContested,
     /// Protocol 13. Hostile content on a drone's MAVLink telemetry
     /// (`crates/mavwatch`): ground-station exploit payloads, shell access

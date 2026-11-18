@@ -94,6 +94,7 @@ heapless = "0.8"
 critical-section = "1.2"
 screen = { path = "../../crates/screen", features = ["tracker"] }
 tracker = { path = "../../crates/tracker" }
+ctrlwatch = { path = "../../crates/ctrlwatch" }
 # Phase 12: airspace pack lookups and the possible-violation rule engine.
 airspace = { path = "../../crates/airspace" }
 faarules = { path = "../../crates/faarules" }

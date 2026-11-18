@@ -83,6 +83,14 @@ the two opt-ins on: "The two settings" below):
 - **No encryption is broken.** Encrypted payloads are reported as such.
 - **Receive-only.** There is no transmit code of any kind.
 
+**Second transmitter on a link.** The node also checks whether a link is
+heard from more radios than it can have (a second ExpressLRS transmitter on
+one UID, a third SiK radio on one NET ID: what SiKW00F-style injection and
+ExpressLRS hijacking look like) and reports it as a `ControlContested`
+threat. How, its thresholds and its limits: docs/DRONE-ATTACKS.md, "Second
+transmitter on a control link". It uses identifiers inside the node only, and
+its MAVLink check only runs with content decoding on.
+
 ## On the node and the hub (2026-11-17, branch `ctrl-node`)
 
 **Status: written, host-tested and built for both boards; never run with an LR2021.** No LR2021

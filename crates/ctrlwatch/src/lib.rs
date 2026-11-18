@@ -63,6 +63,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod content;
+pub mod contested;
 pub mod crc;
 pub mod crsf;
 pub mod elrs;
