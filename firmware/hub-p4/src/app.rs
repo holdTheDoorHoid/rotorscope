@@ -597,8 +597,10 @@ impl App {
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
-            // WP-09: a flood of forged drone IDs, shown as FLOOD in the bar.
-            flood_per_s: self.tracker.flood_status(now).map_or(0, |f| f.new_per_s.min(u32::from(u16::MAX)) as u16),
+            // WP-09: a flood of forged drone IDs, shown as FLOOD in the bar
+            // (at least 1 while raised: the slow rules can hold under one
+            // new ID a second).
+            flood_per_s: self.tracker.flood_status(now).map_or(0, |f| f.new_per_s.clamp(1, u32::from(u16::MAX)) as u16),
             muted: self.tracker.threats().iter().filter(|t| t.muted && t.active(now)).count().min(255) as u8,
             mutable,
             snoozable,

@@ -80,7 +80,10 @@ being heard. Until then it is only remembered (`Ingested::Ignored`).
 within 2 s of its first frame for a drone sending at least once a second. A
 MAC-only track also waits 1 s (`announce_grace_ms`), so that BLE adverts about
 to merge into a known drone do not beep twice. Far more new identities than a
-real sky makes (20 a second over 5 s) raise a hub threat `id_flood`; so does
+real sky makes (20 a second over 5 s) raise a hub threat `id_flood`, and so
+do the slow rules: 60 new in the last minute, or 32 drone identities heard
+within 10 s at once (`probation::SlowWatch`; the threat line's `flood_rule`
+says which, `ids` its count and `says` the words); so does
 one node that discards frames (its `Stats.dropped`, 8 a second) while the new
 IDs it delivers do not confirm (4 a second): `id_flood` table `node`, naming
 the node (`probation::ShedWatch`, docs/SPOOFING.md "One node shedding a
@@ -451,7 +454,7 @@ Keep the manual position across reboots if you can; the page shows it as
 | `rec` | bool | The SD-card log is being written |
 | `nodes` | array | One per radio node: `role` (`"Wifi24"` \| `"Wifi5"` \| `"Ble"` \| `"Fpv"` \| `"DroneId"` \| `"Gateway"`), `can` (mask of `NodeRole::bit` from its Status frame, null before one; added 2026-11-14), `plan` (the hub plan it applied, 0 = built-in, null before a Status; added 2026-11-14), `alive` (heard recently), `age_ms` (since its last frame; null if never), `seen_per_s` (all frames it saw per second; null before its first Stats), `rid_per_s` (Remote ID detections the hub got per second), `drops` (total frames it dropped; null before its first Stats) |
 | `adsb` | object \| null | The ADS-B receiver (`json::AdsbStatus`): `alive`, `age_ms`, `frames_per_s`, `aircraft` (in the ADSBee's own table), `errors` (lines refused). `null` when the hub has none built in. Added 2026-11-09 |
-| `flood` | object, optional | Only while the drone flood alarm is raised (`probation`): `new_per_s` (new drone identities a second over 5 s), `refused` (new identities refused a track since boot), `since_ms`. Missing otherwise. Added with WP-09; `"v"` stays 1 |
+| `flood` | object, optional | Only while the drone flood alarm is raised (`probation`): `new_per_s` (new drone identities a second over 5 s), `refused` (new identities refused a track since boot), `since_ms`, `rule` (`"rate"`, `"minute"` or `"active"`: which rule raised it last), `minute` (new drone identities in the last 60 s), `active` (drone identities heard within 10 s). Missing otherwise. Added with WP-09 (`rule`, `minute`, `active` 2026-11-18); `"v"` stays 1 |
 | `open_links` | array | Every open FPV link, each exactly the `json::link_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 (a new field) |
 | `tracks` | array | Every track, each exactly the `json::track_line` object above (in table order; the page sorts) |
 | `aircraft` | array | Every ADS-B aircraft, each exactly the `json::aircraft_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 |

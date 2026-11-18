@@ -964,7 +964,8 @@ struct StateHead<'a> {
     nodes: &'a [NodeStatus],
     adsb: Option<AdsbStatus>,
     /// A flood of forged drone identities while its alarm is raised
-    /// (`crate::probation`): `{new_per_s, refused, since_ms}`, else null.
+    /// (`crate::probation`): `{new_per_s, refused, since_ms, rule, minute,
+    /// active}`, else null.
     /// Added with WP-09; `"v"` stays 1 (a new field, left out when null).
     #[serde(skip_serializing_if = "Option::is_none")]
     flood: Option<crate::probation::FloodStatus>,
