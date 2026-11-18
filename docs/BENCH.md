@@ -609,6 +609,7 @@ Type a whole line and Enter (`tools/dev-board.sh --log 20 c5a --send $'flood rid
 | `flood dji <n>` | beacons with a DJI DroneID element (serial `FLOODDJI00000001`), random addresses |
 | `flood wfb <n>` | wfb-ng data frames, link ids `0x7E57C0`.. (64 in turn) |
 | `flood spoof <n>` | DJI DroneID elements from the real drone's address, one fixed false position |
+| `flood crowd <n>` | `n` fake drones kept alive: each one Remote ID beacon a second from its own fixed address (`02:c2:0d:00:..`) with its own id (`FLOODFAKE9` + nine digits). Tests the hub's population rule (32 drone IDs active at once, docs/SPOOFING.md "The slow rules"); not in the `flood` status line |
 | `flood real on` / `off` | the "real" drone at `02:52:45:41:4c:01`: one Remote ID beacon a second (id `FLOODREAL0000000001`) and one DJI DroneID element a second (serial `FLOODREAL0000001`, sequence moving on) |
 | `flood off` / `flood` | everything off / print the state |
 
@@ -1067,3 +1068,26 @@ node-wifi, node-ble and node-sdr normal images, link key 42eeb2c6, `"bench":[]`,
 `"faulttest":false`. `c5c`: gateway as before, link key 42eeb2c6, `"bench":[]`. A 200 s run
 together (`a-p4-final.log`): no restart, `refused` and `corrupt` 0, the deaf check holding node 1
 (`c5a`) at about 82/s now and 91/s normal.
+
+### Slow fake-drone floods (hub-wide drone alarm, slow rules)
+
+Branch `sec/wp07-audio`, P4 at `7b4d279` (normal build, `bench: []`), `c5a` a `floodtest` node-wifi
+built with `ROTORSCOPE_BENCH_CAN=wifi24` (so the hub gives it Wi-Fi 2.4; without it the hub gave
+`c5a` BLE and the injector never ran), `c5c` gateway. Logs `c-*.log` in the session scratchpad
+(`p2fix/`). Times are from the command.
+
+* Quiet 3 minutes, `flood real on`: no threat at all.
+* `flood rid 3` for 60 s: `id_flood` (`drones`) at 12 s, first said as "32 drone IDs active at once
+  (limit 32)" (30 one-frame fakes in 10 s plus the test drone's Remote ID and DroneID tracks), then
+  "124 new drone IDs in the last minute"; ended 50 s after the flood stopped. The test drone's two
+  tracks stayed confirmed under their own ids for the whole run.
+* `flood crowd 40` for 120 s: no drone flood alarm. The node let about 28 of the 40 through (21
+  known sources in its 32-slot table, the rest over the 8 a second new-source budget), so the hub
+  held 30 tracks, under 32. A `Fake network flood` (node 1, the `FLOOD` beacons) was raised.
+* `flood rid 200` for 60 s: the drone alarm 2 s after the start and the node-shed alarm 5 s after
+  ("166 frames a second discarded, 4 new drone IDs a second never confirmed"); the node-shed alarm
+  ended 15 s after the flood stopped, the drone alarm (minute rule, 419 then falling) 61 s after.
+* The console printed one `THREAT Flood of new drone IDs` line for the whole run: an entry that
+  ends and is raised again before it is removed (10 min) is not announced again. Not changed here.
+* The GPS hold note could not be seen: no GPS module was attached.
+
