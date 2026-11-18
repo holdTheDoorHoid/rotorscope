@@ -16,7 +16,11 @@
 //!   UBX NAV-PVT, so the hub's baud hunt is exercised too.
 //! - **PPS.** The PPS pad (GPIO29) is driven from inside the chip: high at
 //!   the top of each emulated second (once the emulated module has a fix and,
-//!   LC29H, PPS was configured), low 100 ms later.
+//!   LC29H, PPS was configured), low 100 ms later. The main loop that drives
+//!   it can be late (an SD flush, an airspace read: up to ~130 ms), more than
+//!   the 5 ms PPS tolerance, so the edge interrupt is handed the instant the
+//!   edge was scheduled for (`gps::pps_drive_at`) and timestamps the edge
+//!   with that, as a real receiver's on-time edge would be.
 //! - **ADS-B.** UART4's TX drives its own RX pad (GPIO30) with a CSBee
 //!   aircraft line and a statistics line once a second.
 //!
@@ -166,6 +170,9 @@ impl Loop {
         if Instant::now() < self.next_epoch {
             return;
         }
+        // When this epoch was due: its PPS edge carries this instant, not
+        // the (possibly late) moment the main loop got here.
+        let due = self.next_epoch;
         self.next_epoch += esp_hal::time::Duration::from_millis(1000);
         self.second += 1;
         if self.second == SCRIPT_AT && matches!(SCENARIO, "step1s" | "step500" | "drift") {
@@ -184,8 +191,8 @@ impl Loop {
         }
         let fixed = self.second > FIX_AFTER;
         if fixed && self.pps_configured {
-            gps::pps_drive(true);
-            self.pps_off = Some(Instant::now() + esp_hal::time::Duration::from_millis(100));
+            gps::pps_drive_at(due);
+            self.pps_off = Some(due + esp_hal::time::Duration::from_millis(100));
         }
         if M10 {
             if self.nmea_on {
