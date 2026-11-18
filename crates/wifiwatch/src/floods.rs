@@ -11,18 +11,23 @@
 //!
 //! # Thresholds (per BSSID, per one-second window)
 //!
-//! Only frames without the retry bit count towards the thresholds: a real
-//! access point that kicks a station which has already left sends one
-//! deauth and then up to ~7 retries, which would otherwise look like a
-//! burst. Injected floods are sent fresh (broadcast frames are never
-//! retried at all).
+//! Retransmissions count once: a real access point that kicks a station
+//! which has already left sends one deauth and then up to ~7 retries (Retry
+//! bit set, **same sequence number**), which would otherwise look like a
+//! burst. A frame is skipped as a retransmission only when it really is one:
+//! Retry bit set *and* the same (transmitter, sequence number) as the last
+//! frame heard from that transmitter at that BSSID ([`Dups`], the
+//! receiver's own duplicate rule). A victim discards exactly those and acts
+//! on every other frame, so an injector that sets the Retry bit on frames
+//! with advancing numbers is counted in full. (Until WP-11a any Retry-bit
+//! frame was skipped, which hid such a flood completely.)
 //!
 //! A hopping node hears a channel only part of the time (75% on its home
 //! channel, ~12% on a 50 ms visit), so these are rates *as heard*: a flood
 //! at 100 frames/s on a visited channel still reads well above them.
 
 use crate::mac::{self, ASSOC_REQ, AUTH, DEAUTH, DISASSOC, PROBE_REQ, REASSOC_REQ};
-use crate::util::{BROADCAST, Bits, Ms, NONE, elapsed, hash, ms};
+use crate::util::{BROADCAST, Bits, Dups, Ms, NONE, elapsed, hash, ms};
 use crate::{ThreatKind, ThreatSighting, sighting};
 
 /// Length of one counting window.
@@ -78,9 +83,9 @@ enum Class {
 
 #[derive(Clone, Copy, Debug)]
 struct Counts {
-    /// Every frame, retries included.
+    /// Every frame, retransmissions included.
     frames: u16,
-    /// Without the retry bit.
+    /// Not a retransmission ([`Dups`]).
     fresh: u16,
     bcast: u16,
     protected: u16,
@@ -111,12 +116,14 @@ impl Counts {
         channel: 0,
     };
 
-    fn add(&mut self, h: &mac::Header, rssi: i8, channel: u8) {
+    /// Count one frame; `dup`: a retransmission of the last frame from
+    /// its transmitter.
+    fn add(&mut self, h: &mac::Header, dup: bool, rssi: i8, channel: u8) {
         if self.frames > 0 && self.dst != h.addr1 {
             self.many_dst = true;
         }
         self.frames = self.frames.saturating_add(1);
-        if !h.retry {
+        if !dup {
             self.fresh = self.fresh.saturating_add(1);
         }
         if h.addr1 == BROADCAST {
@@ -154,6 +161,9 @@ struct Entry {
     alarmed: bool,
     /// Windows in a row with nothing.
     idle: u8,
+    /// Last sequence number per transmitter (two: the access point and the
+    /// station of a kick), across windows.
+    dups: Dups<2>,
 }
 
 /// Running totals since boot, for a node's stats line.
@@ -171,6 +181,7 @@ pub struct Totals {
 pub struct Floods {
     entries: heapless::Vec<Entry, TABLE>,
     probe: Counts,
+    probe_dups: Dups<2>,
     /// Distinct probe sources: a bigger map than per-BSSID entries get.
     probe_sources: Bits<8>,
     probe_hot: bool,
@@ -190,6 +201,7 @@ impl Floods {
         Self {
             entries: heapless::Vec::new(),
             probe: Counts::EMPTY,
+            probe_dups: Dups::new(),
             probe_sources: Bits::new(),
             probe_hot: false,
             start: 0,
@@ -215,7 +227,8 @@ impl Floods {
         match h.subtype {
             PROBE_REQ => {
                 self.totals.probe = self.totals.probe.wrapping_add(1);
-                self.probe.add(&h, rssi, channel);
+                let dup = self.probe_dups.duplicate(&h.addr2, h.seq, h.retry);
+                self.probe.add(&h, dup, rssi, channel);
                 self.probe_sources.insert(hash(&h.addr2));
             }
             DEAUTH | DISASSOC => {
@@ -231,7 +244,8 @@ impl Floods {
                     _ => 0,
                 };
                 let e = self.entry(class, h.addr3);
-                e.c.add(&h, rssi, channel);
+                let dup = e.dups.duplicate(&h.addr2, h.seq, h.retry);
+                e.c.add(&h, dup, rssi, channel);
                 e.c.vote(reason);
             }
             AUTH => {
@@ -239,12 +253,16 @@ impl Floods {
                 // (receiver = BSSID, transmitter = the station).
                 if h.addr1 == h.addr3 && h.addr2 != h.addr3 {
                     self.totals.auth = self.totals.auth.wrapping_add(1);
-                    self.entry(Class::Auth, h.addr3).c.add(&h, rssi, channel);
+                    let e = self.entry(Class::Auth, h.addr3);
+                    let dup = e.dups.duplicate(&h.addr2, h.seq, h.retry);
+                    e.c.add(&h, dup, rssi, channel);
                 }
             }
             ASSOC_REQ | REASSOC_REQ => {
                 self.totals.auth = self.totals.auth.wrapping_add(1);
-                self.entry(Class::Auth, h.addr1).c.add(&h, rssi, channel);
+                let e = self.entry(Class::Auth, h.addr1);
+                let dup = e.dups.duplicate(&h.addr2, h.seq, h.retry);
+                e.c.add(&h, dup, rssi, channel);
             }
             _ => {}
         }
@@ -262,7 +280,7 @@ impl Floods {
                         .unwrap_or(0);
                     self.entries.swap_remove(victim);
                 }
-                let e = Entry { class, bssid, c: Counts::EMPTY, hot: 0, alarmed: false, idle: 0 };
+                let e = Entry { class, bssid, c: Counts::EMPTY, hot: 0, alarmed: false, idle: 0, dups: Dups::new() };
                 // Cannot fail: room was made above.
                 let _ = self.entries.push(e);
                 self.entries.len() - 1
@@ -456,6 +474,44 @@ mod tests {
             f
         });
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn retry_bit_with_advancing_numbers_is_counted() {
+        // An injector setting the Retry bit on every frame, numbering them
+        // as it goes: each one is a new frame to the victim, which acts on
+        // it. Old rule: "retries never count", so this flood was invisible.
+        let mut fl = started();
+        let out = second(&mut fl, 0, 60, |i| with_seq(kill(DEAUTH, STA, AP, AP, 7), i as u16, true));
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].kind, ThreatKind::Deauth);
+        // Paced under the burst level, it is still a sustained flood.
+        let mut fl = started();
+        let f = |i: usize| with_seq(kill(DISASSOC, STA, AP, AP, 1), 100 + i as u16, true);
+        assert!(second(&mut fl, 0, 12, f).is_empty());
+        assert_eq!(second(&mut fl, 1000, 12, |i| f(i + 12)).len(), 1);
+    }
+
+    #[test]
+    fn genuine_retransmissions_count_once() {
+        // Nine stations kicked in one second, each deauth sent once and
+        // retried five times (same number, Retry bit): nine frames, not 54.
+        let mut fl = started();
+        for s in 0..3u64 {
+            let out = second(&mut fl, s * 1000, 54, |i| {
+                let k = i / 6;
+                with_seq(kill(DEAUTH, sta(k), AP, AP, 8), 40 + k as u16, i % 6 != 0)
+            });
+            assert!(out.is_empty(), "second {s}: {out:?}");
+        }
+        // Both directions of a kick retried (AP -> station, station -> AP):
+        // two transmitters, each its own last number.
+        let mut fl = started();
+        let out = second(&mut fl, 0, 40, |i| {
+            let (src, dst) = if i % 2 == 0 { (AP, STA) } else { (STA, AP) };
+            with_seq(kill(DEAUTH, dst, src, AP, 3), 9, i >= 2)
+        });
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]

@@ -1037,3 +1037,13 @@ fn random_bytes_find_nothing() {
     }
     assert_eq!(n, 0);
 }
+
+#[test]
+fn state_size() {
+    std::println!(
+        "SIZE mavwatch Watch {} B, Analyser {} B, Stream {} B",
+        core::mem::size_of::<Watch>(),
+        core::mem::size_of::<Analyser>(),
+        core::mem::size_of::<Stream>()
+    );
+}

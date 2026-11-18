@@ -551,3 +551,8 @@ fn table_is_bounded() {
     assert_eq!(w.len(), 2);
     assert_eq!(w.evicted, 3);
 }
+
+#[test]
+fn state_size() {
+    std::println!("SIZE contested Watch<8> {} B, Link {} B", core::mem::size_of::<W>(), core::mem::size_of::<Link>());
+}

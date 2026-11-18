@@ -172,9 +172,9 @@ mod size {
         let f = core::mem::size_of::<super::floods::Floods>();
         let b = core::mem::size_of::<super::ble::BleWatch>();
         let d = core::mem::size_of::<super::drones::DroneLinks>();
-        std::println!("Watch {w} B (Floods {f} B, DroneLinks {d} B), BleWatch {b} B");
+        std::println!("SIZE Watch {w} B (Floods {f} B, DroneLinks {d} B), BleWatch {b} B");
         assert!(d <= 512, "DroneLinks is {d} bytes");
-        assert!(w <= 6 * 1024, "Watch is {w} bytes");
+        assert!(w <= 6 * 1024 + 512, "Watch is {w} bytes");
         assert!(f <= 1536, "Floods is {f} bytes");
         assert!(b <= 512, "BleWatch is {b} bytes");
     }

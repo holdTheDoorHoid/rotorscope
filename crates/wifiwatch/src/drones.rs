@@ -59,18 +59,21 @@
 //!   heard it), `count` = frames from the copy.
 
 use crate::mac::{self, ASSOC_REQ, ASSOC_RESP, AUTH, BssInfo, DEAUTH, DISASSOC, REASSOC_REQ, REASSOC_RESP, Security};
-use crate::util::{BROADCAST, Ms, NONE, RateLimit, elapsed, hash, ms};
+use crate::util::{BROADCAST, Dups, Ms, NONE, RateLimit, elapsed, hash, ms};
 use crate::{ThreatKind, ThreatSighting, floods, sighting};
 
 /// Drone networks followed at once. A node rarely has more than one or two
 /// Wi-Fi drones in range; the stalest one not being reported makes room.
 pub const NETS: usize = 3;
 
-/// Fresh (non-retry) deauth / disassoc frames aimed at one drone network
-/// within [`KILL_WINDOW_MS`] that make a [`ThreatKind::DroneDeauth`]. A toy
-/// drone has one controller: a phone leaving sends one deauth or disassoc
-/// (two at most, one of each), the drone kicking an idle phone one (its
-/// retries are not counted). aireplay-ng `-0 1` alone sends 128.
+/// Deauth / disassoc frames aimed at one drone network within
+/// [`KILL_WINDOW_MS`] that make a [`ThreatKind::DroneDeauth`], counting a
+/// retransmission (Retry bit and the transmitter's last sequence number,
+/// [`Dups`]) once. A toy drone has one controller: a phone leaving sends one
+/// deauth or disassoc (two at most, one of each), the drone kicking an idle
+/// phone one (its retransmissions are not counted). aireplay-ng `-0 1`
+/// alone sends 128. A Retry-bit frame with a new sequence number is a new
+/// frame to the phone, and counts.
 pub const KILL_FRAMES: usize = 3;
 pub const KILL_WINDOW_MS: Ms = 5000;
 /// The attack is over when no counted frame came for this long.
@@ -218,6 +221,8 @@ struct Net {
     k_src: [u8; 6],
     k_rssi: i8,
     k_ch: u8,
+    /// Last sequence number of the drone and of one station.
+    dups: Dups<2>,
 
     /// The newcomer.
     cand: [u8; 6],
@@ -273,6 +278,7 @@ impl Net {
             k_src: NONE,
             k_rssi: i8::MIN,
             k_ch: 0,
+            dups: Dups::new(),
             cand: NONE,
             cand_n: 0,
             cand_reported_n: 0,
@@ -342,7 +348,9 @@ impl Net {
             self.set(F_LEFT, true);
             self.left_at = now;
         }
-        if h.retry {
+        // A retransmission is discarded by the receiver; a Retry-bit frame
+        // with a new number is not, and counts.
+        if self.dups.duplicate(&h.addr2, h.seq, h.retry) {
             return;
         }
         // A drone that just restarted tells the phone it does not know it.

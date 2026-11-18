@@ -20,7 +20,7 @@ channel reads as ~12/s; the thresholds leave room for that.
 
 | Kind | Looks for | Threshold | `detail` |
 |---|---|---|---|
-| `Deauth`, `Disassoc` | Subtype 12 / 10 frames per BSSID, retries (retry bit) not counted | 30 in 1 s, or 10/s for 2 s in a row, or 10 to broadcast in 1 s | `& 0xFFFF` most common reason code; bit 16 some went to broadcast; bit 17 all were protected (802.11w, reason unreadable) |
+| `Deauth`, `Disassoc` | Subtype 12 / 10 frames per BSSID; a retransmission (Retry bit **and** the transmitter's previous sequence number) counts once, see below | 30 in 1 s, or 10/s for 2 s in a row, or 10 to broadcast in 1 s | `& 0xFFFF` most common reason code; bit 16 some went to broadcast; bit 17 all were protected (802.11w, reason unreadable) |
 | `AuthFlood` | Authentication / (re)association **requests** to one AP | 30/s from 8+ addresses for 2 s in a row, or 100 in 1 s | distinct sources (lower bound) |
 | `ProbeFlood` | Probe requests on the channel | 100 in 1 s from 36+ addresses, or 300 in 1 s from anyone | distinct sources (lower bound) |
 | `BeaconFlood` | Transmitters not heard in the last 10-20 s, on a channel heard continuously for 4 s | 20 new in 1 s (keeps reporting down to 10) | distinct names among them |
@@ -28,10 +28,21 @@ channel reads as ~12/s; the thresholds leave room for that.
 | `EvilTwin` | An **open** network using the name of a protected network heard recently | protected seen 5+ times in the last 60 s, open copy 2+ times | `(original security << 8) \| 0` (`wifiwatch::mac::Security`) |
 | `ChannelSwitch` | CSA (element 37) / extended CSA (60) in beacons, probe responses or action frames | contradicts the same BSSID's plain beacons on that channel (2 + 2 within 3 s); names no valid channel; still going after 10 s and 20 frames; switch count not falling 10 times; or 10 CSA action frames in 1 s | announced channel |
 | `AttackTool` | A tool's own signature (table below) | one frame | index into `wifiwatch::TOOLS` |
-| `DroneDeauth` | Deauth / disassoc at a drone's own network (`crates/wifidrone`), retries not counted | 3 in 5 s | reason code + flags + maker; see docs/DRONE-ATTACKS.md |
+| `DroneDeauth` | Deauth / disassoc at a drone's own network (`crates/wifidrone`), retransmissions counted once | 3 in 5 s | reason code + flags + maker; see docs/DRONE-ATTACKS.md |
 | `DroneTakeover` | A new station joining a drone's network just after its pilot was kicked off, or while the pilot still flies it | 2 frames from the newcomer | what was seen + why + maker; see docs/DRONE-ATTACKS.md |
 | `DroneNetClone` | A drone's network name from a second address (or its own address on a second channel), or a drone name from an address the maker does not own | 2 frames (3 without an original) | flags + maker; see docs/DRONE-ATTACKS.md |
 | `BleSpam` | Pairing pop-up adverts (Apple Continuity 0x07/0x0F, Samsung 0x0075, Microsoft Swift Pair, Google Fast Pair 0xFE2C) from addresses not heard in the last 5-10 s | 20 new addresses of one family in 5 s (keeps reporting down to 10) | new addresses in the window; `ssid` = family (`apple`, `samsung`, `microsoft`, `google`) |
+
+**Retransmissions.** A real access point kicking a station that has
+already gone sends one deauth and then several retries: the Retry bit set,
+the *same* sequence number. Those count once. Until WP-11a every frame with
+the Retry bit was skipped, which an injector could exploit: a receiver
+discards a retry only when its (transmitter, sequence number) equals the last
+frame it took from that transmitter (IEEE 802.11 duplicate detection), so a
+deauth stream with the Retry bit set and advancing numbers still disconnects
+the victim. The detectors now apply the receiver's own rule (a 4-byte entry
+per transmitter, two per BSSID: `wifiwatch::util::Dups`), so such a stream
+counts in full. Probe requests use the same rule.
 
 Other fields: `source` is the claimed transmitter (all zero when many),
 `target` the network or station hit (all 0xFF for broadcast), `level` the

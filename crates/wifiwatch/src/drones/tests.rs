@@ -193,6 +193,36 @@ fn a_handful_of_deauths_is_enough() {
 }
 
 #[test]
+fn retry_bit_deauths_with_new_numbers_count() {
+    // An injector sets the Retry bit and advances the sequence number: the
+    // phone acts on every one. Old rule: any retry was skipped.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    for i in 0..4u16 {
+        s.mgmt(&with_seq(kill(DEAUTH, PILOT, TELLO, TELLO, 7), 200 + i, true));
+        s.tick(100);
+    }
+    s.tick(300);
+    let d = s.of(ThreatKind::DroneDeauth);
+    assert!(!d.is_empty(), "{:?}", s.out);
+    assert_eq!(d[0].count, 3, "reported at the third");
+}
+
+#[test]
+fn drone_retransmissions_count_once() {
+    // The drone kicking an idle phone: one deauth, retried six times (same
+    // number) because the phone is gone and never acknowledges.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    s.mgmt(&with_seq(kill(DEAUTH, PILOT, TELLO, TELLO, 4), 77, false));
+    for _ in 0..6 {
+        s.mgmt(&with_seq(kill(DEAUTH, PILOT, TELLO, TELLO, 4), 77, true));
+    }
+    s.fly(6000, &[TELLO_NET], &[]);
+    assert!(s.of(ThreatKind::DroneDeauth).is_empty(), "{:?}", s.out);
+}
+
+#[test]
 fn deauth_to_broadcast_and_disassoc_count() {
     let mut s = Sim::new();
     s.fly(2000, &[TELLO_NET], &[(PILOT, TELLO)]);

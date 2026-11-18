@@ -68,6 +68,10 @@ pub struct Header {
     pub addr1: [u8; 6],
     pub addr2: [u8; 6],
     pub addr3: [u8; 6],
+    /// Sequence number (12 bits of the Sequence Control field; the
+    /// fragment number dropped). A retransmission repeats it; a new frame
+    /// from the same transmitter advances it.
+    pub seq: u16,
     /// Offset of the frame body (24, or 28 with an HT Control field).
     pub body_at: usize,
 }
@@ -92,6 +96,7 @@ pub fn header(f: &[u8]) -> Option<Header> {
         addr1: f[4..10].try_into().ok()?,
         addr2: f[10..16].try_into().ok()?,
         addr3: f[16..22].try_into().ok()?,
+        seq: u16::from_le_bytes([f[22], f[23]]) >> 4,
         body_at,
     })
 }
@@ -372,6 +377,17 @@ pub(crate) mod build {
         f
     }
 
+    /// Set a frame's sequence number (and the retry bit).
+    pub fn with_seq(mut f: Vec<u8>, seq: u16, retry: bool) -> Vec<u8> {
+        f[22..24].copy_from_slice(&(seq << 4).to_le_bytes());
+        if retry {
+            f[1] |= 0x08;
+        } else {
+            f[1] &= !0x08;
+        }
+        f
+    }
+
     /// Deauth / disassoc with a reason code.
     pub fn kill(subtype: u8, dst: [u8; 6], src: [u8; 6], bssid: [u8; 6], reason: u16) -> Vec<u8> {
         mgmt(subtype, dst, src, bssid, &reason.to_le_bytes())
@@ -391,6 +407,9 @@ mod tests {
         let h = header(&f).unwrap();
         assert_eq!((h.subtype, h.retry, h.protected, h.body_at), (DEAUTH, false, false, 24));
         assert_eq!((h.addr1, h.addr2, h.addr3), ([0xFF; 6], AP, AP));
+        assert_eq!(h.seq, 1, "the builders' Sequence Control is 0x0010");
+        f[22..24].copy_from_slice(&0xABC5u16.to_le_bytes());
+        assert_eq!(header(&f).unwrap().seq, 0xABC);
         f[1] = 0x08 | 0x40 | 0x80;
         f.extend_from_slice(&[0; 4]);
         let h = header(&f).unwrap();
