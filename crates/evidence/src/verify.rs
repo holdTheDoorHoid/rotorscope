@@ -292,10 +292,12 @@ struct ChainState {
 
 /// The bench features a boot event's text names (`...; bench: a,b`, as
 /// the P4 hub writes it), or `None` for a normal build (`bench: none`) or a
-/// text that names none.
+/// text that names none. The list ends at the next `;` (the hub writes
+/// `...; bench: none; audio clips off at boot`).
 pub fn boot_bench_list(text: &[u8]) -> Option<&str> {
     let text = core::str::from_utf8(text).ok()?;
-    let list = text.rsplit_once("bench: ")?.1.trim();
+    let rest = text.rsplit_once("bench: ")?.1;
+    let list = rest.split(';').next().unwrap_or("").trim();
     (!list.is_empty() && list != "none").then_some(list)
 }
 
