@@ -155,6 +155,11 @@ content on`) and logged in the evidence log as a Setting event. Rebuilding an Ex
 missing ID bytes from what the node hears (needed to hop along with a link) needs **both**.
 Encrypted links stay encrypted: nothing tries to break them.
 
+**`control content on` also turns on the hostile-MAVLink scan** (docs/DRONE-ATTACKS.md,
+"Hostile MAVLink telemetry"): the node reads the MAVLink on SiK and mLRS links for
+ground-station exploit payloads and shell access, and raises a "Hostile drone telemetry" alarm.
+Its link-integrity checks (injected, replayed or unsigned frames) also need `control ids on`.
+
 ### Protocol (link protocol 12)
 
 - `Frame::Control(ControlReport)`: one sighting (`part` 0: the 2-second summary, counts only) or

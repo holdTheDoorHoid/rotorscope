@@ -109,6 +109,10 @@ pub fn info(f: &Frame) -> Option<FrameInfo> {
             let f = link::ctrlwatch::scan::band(e.region).0 / 100_000;
             FrameInfo { frame_kind: frame_kind::CONTROL_ENERGY, band: rf_band(f), channel: 0, freq_100khz: f, rssi: None }
         }
+        // Protocol 13: the MAVLink frame behind a MavlinkAttack threat.
+        Frame::MavlinkEvidence(_) => {
+            FrameInfo { frame_kind: frame_kind::MAVLINK, band: band::RF, channel: 0, freq_100khz: 0, rssi: None }
+        }
         _ => return None,
     })
 }
@@ -323,6 +327,16 @@ pub fn write_summary(f: &Frame, w: &mut impl Write) -> core::fmt::Result {
                 }
             }
         }
+        Frame::MavlinkEvidence(m) => write!(
+            w,
+            "mavlink_attack detail={} sys={}/{} msg={} frame={}B{}",
+            m.detail,
+            m.sysid,
+            m.compid,
+            m.msgid,
+            m.frame.len(),
+            if m.truncated { " truncated" } else { "" }
+        ),
         _ => write!(w, "not a data frame"),
     }
 }

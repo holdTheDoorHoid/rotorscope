@@ -335,6 +335,11 @@ pub mod frame_kind {
     /// Link protocol 12: one energy window of a control band
     /// (`link::Frame::ControlEnergy`: hoppers, steady carriers), band `RF`.
     pub const CONTROL_ENERGY: u8 = 9;
+    /// Link protocol 13: the MAVLink frame behind a hostile-telemetry
+    /// threat (`link::Frame::MavlinkEvidence`, `crates/mavwatch`), band
+    /// `RF` (it came over a drone telemetry radio). Logged only with control
+    /// content decoding on.
+    pub const MAVLINK: u8 = 10;
 }
 
 /// Detection body: band.

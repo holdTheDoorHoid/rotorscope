@@ -445,6 +445,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             // to a `ctrllinks::ControlTable`, which the caller owns (the P4
             // hub keeps it in PSRAM) and feeds itself.
             Frame::Control(_) | Frame::ControlEnergy(_) => {}
+            // Protocol 13: the bytes behind a MavlinkAttack threat, for the
+            // evidence log only (the threat itself is `Frame::Threat`).
+            Frame::MavlinkEvidence(_) => {}
             Frame::Status { role, can, plan } => {
                 self.ingest_status(node, *role, *can, *plan, now_ms)
             }

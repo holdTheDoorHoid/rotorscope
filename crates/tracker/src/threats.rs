@@ -128,6 +128,9 @@ impl Threat {
             ThreatKind::EvilTwin | ThreatKind::DroneNetClone => self.ssid == s.ssid && self.source == s.source,
             ThreatKind::Karma => self.source == s.source,
             ThreatKind::ForgedLink => self.source == s.source,
+            // One per claimed MAVLink sender and finding (`detail` is the
+            // `mavwatch::Kind`; `source` the sender's system/component).
+            ThreatKind::MavlinkAttack => self.source == s.source && self.detail == s.detail,
             _ => self.target == s.target,
         }
     }
@@ -176,6 +179,10 @@ impl Mute {
                 m.source = t.source;
             }
             ThreatKind::ForgedLink => m.source = t.source,
+            // Hostile MAVLink: the sender (its system/component ID). The
+            // rule has no `detail`, so it silences every finding from that
+            // sender (the owner's own ground station using its console).
+            ThreatKind::MavlinkAttack => m.source = t.source,
             // Floods: the victim (random sources change all the time).
             _ => m.target = t.target,
         }
@@ -700,6 +707,35 @@ mod tests {
             assert!(tr.ingest_node_stats(3, (i + 1) * 1_000_000, 0, t).is_none());
         }
         assert!(tr.threats().is_empty());
+    }
+
+    /// Hostile MAVLink (protocol 13, `crates/mavwatch`): one threat per
+    /// claimed sender and finding kind; a mute silences that sender.
+    #[test]
+    fn mavlink_attack_per_sender_and_finding() {
+        let mut tr: Tracker = Tracker::default();
+        let mav = |sys: u8, comp: u8, detail: u32| {
+            let mut s = sighting(ThreatKind::MavlinkAttack, 0, 9_150);
+            s.source = [0, 0, 0, 0, sys, comp];
+            s.target = [0, 0, 0, 0, 1, 1];
+            s.detail = detail;
+            s.ssid = heapless::String::try_from("dev 10 n 7: reboot?").unwrap();
+            s
+        };
+        let a = tr.ingest_threat(4, &mav(255, 190, 13), 1_000);
+        assert_eq!(tr.ingest_threat(4, &mav(255, 190, 13), 3_000), a);
+        let b = tr.ingest_threat(4, &mav(255, 190, 16), 3_000);
+        let c = tr.ingest_threat(4, &mav(1, 100, 1), 3_000);
+        assert!(a != b && b != c && a != c);
+        assert_eq!(tr.get_threat(a).unwrap().label(), "Hostile drone telemetry");
+        let ctx = Context { now_ms: 3_000, utc_ms: None, own: None, config: Config::default() };
+        let mut buf = [0u8; MAX_THREAT_LINE];
+        let n = threat_line(tr.get_threat(a).unwrap(), &ctx, &mut buf).unwrap();
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(text.contains("\"kind\":\"mavlink_attack\"") && text.contains("\"detail\":13"), "{text}");
+        // Muting the owner's own console silences that sender only.
+        assert!(tr.mute(Mute::for_threat(tr.get_threat(a).unwrap())));
+        assert_eq!(tr.active_threats(3_000).count(), 1);
     }
 
     #[test]

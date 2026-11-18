@@ -36,6 +36,8 @@ pub struct Counters {
     pub ctrl_recognised: AtomicU32,
     pub ctrl_reports: AtomicU32,
     pub ctrl_dropped: AtomicU32,
+    /// Hostile-MAVLink findings sent (`mavwatch`).
+    pub mav_findings: AtomicU32,
     pub sweeps: AtomicU32,
     pub follows: AtomicU32,
 }
@@ -55,6 +57,7 @@ pub static COUNTERS: Counters = Counters {
     ctrl_recognised: AtomicU32::new(0),
     ctrl_reports: AtomicU32::new(0),
     ctrl_dropped: AtomicU32::new(0),
+    mav_findings: AtomicU32::new(0),
     sweeps: AtomicU32::new(0),
     follows: AtomicU32::new(0),
 };
