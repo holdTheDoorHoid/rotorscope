@@ -207,7 +207,10 @@ RAM (and the M10's battery-backed RAM) only:
   `$PAIRSPF` (not yet seen on real hardware) and C/N0; spoofing on C/N0,
   position and time.
 - **Single-antenna, single-receiver.** No angle-of-arrival, no second
-  receiver to compare with.
+  receiver of its own to compare with. Other receivers nearby (aircraft
+  ADS-B integrity, drones' positions) are used as a separate check, which
+  takes this verdict as corroboration: docs/DRONE-ATTACKS.md "GPS
+  interference in the area".
 
 ## What needs hardware
 

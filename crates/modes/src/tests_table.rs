@@ -268,3 +268,39 @@ fn init_in_place_builds_an_empty_table() {
     assert!(distance_m(t.get(ICAO).unwrap().position().unwrap(), (lat, lon)) < 10.0);
     assert_eq!(report(t, 2000).len(), 1);
 }
+
+/// An operational status (TC 31 airborne): version 2, NIC_A, NACp, SIL 3.
+fn op_status(icao: u32, nic_a: bool, nacp: u8) -> Frame {
+    let mut m = [0u8; 7];
+    put(&mut m, 1, 5, 31);
+    put(&mut m, 41, 3, 2);
+    put(&mut m, 44, 1, u32::from(nic_a));
+    put(&mut m, 45, 4, u32::from(nacp));
+    put(&mut m, 51, 2, 3);
+    es_frame(17, 5, icao, m)
+}
+
+#[test]
+fn nicnac_from_position_type_code_and_operational_status() {
+    let mut t: Table<8> = Table::default();
+    let (lat, lon) = (40.05, -75.01);
+    // Nothing yet: 0, as the ADSBee prints before it has heard anything.
+    t.ingest(&rx(ident(ICAO, "N1")), 900).unwrap();
+    assert_eq!(report(&mut t, 950)[0].nicnac, 0);
+    t.ingest(&rx(op_status(ICAO, false, 10)), 1000).unwrap();
+    // TC 11 with NIC_A = NIC_B = 0: NIC 8 (< 0.1 NM).
+    t.ingest(&rx(pos(ICAO, lat, lon, 2500, false)), 1200).unwrap();
+    let a = report(&mut t, 1500)[0];
+    assert_eq!((a.nic(), a.nacp(), adsb::nicnac::sil(a.nicnac)), (8, 10, 3));
+    // A jammed receiver: TC 18 (NIC 0) and NACp 0 from then on.
+    t.ingest(&rx(es_frame(17, 5, ICAO, airborne_me(18, 2500, lat, lon, true))), 2000).unwrap();
+    t.ingest(&rx(op_status(ICAO, false, 0)), 2100).unwrap();
+    let a = report(&mut t, 2500)[0];
+    assert_eq!((a.nic(), a.nacp()), (0, 0));
+    // TC 9: NIC 11.
+    t.ingest(&rx(es_frame(17, 5, ICAO, airborne_me(9, 2500, lat, lon, false))), 3000).unwrap();
+    assert_eq!(report(&mut t, 3500)[0].nic(), 11);
+    // Old values lapse: 0 again after VALID_MS.
+    t.ingest(&rx(ident(ICAO, "N1")), 3000 + crate::table::VALID_MS + 1).unwrap();
+    assert_eq!(report(&mut t, 3000 + crate::table::VALID_MS + 2)[0].nicnac, 0);
+}

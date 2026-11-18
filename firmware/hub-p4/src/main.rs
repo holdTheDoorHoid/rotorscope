@@ -256,7 +256,7 @@ fn main() -> ! {
     let mut down = downlink::Downlink::new();
     // Aero (LR2021) nodes: their frame queue and the 1090 table (the
     // ADSBee's too with `modes`) in PSRAM (aero.rs).
-    let (air_q, mut aero_es, control_table) = aero::split(aero::store(psram));
+    let (air_q, mut aero_es, control_table, area_watch) = aero::split(aero::store(psram));
     println!(
         "hub-p4: aero frames queued in {}; 1090 table {}",
         if air_q.is_some() { "PSRAM" } else { "the link queue (no PSRAM)" },
@@ -365,6 +365,12 @@ fn main() -> ! {
         println!("hub-p4: no PSRAM: control-link frames are logged but not tabled");
     }
     app.control = control_table;
+    // GPS interference in the area (aircraft integrity, drones jumping
+    // together), also in PSRAM.
+    if area_watch.is_none() {
+        println!("hub-p4: no PSRAM: no area GPS check");
+    }
+    app.area = area_watch;
 
     #[cfg(feature = "fakenode")]
     let mut last_fake = Instant::now();

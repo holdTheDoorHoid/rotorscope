@@ -221,6 +221,16 @@ impl Decoded {
             }
         }
         put_alt(&mut a, p.aux_altitude, &mut set);
+        // NICNAC as the ADSBee packs it (`adsb::nicnac`): NIC from the state
+        // vector, the rest from the mode status. A field this frame did not
+        // carry is 0, as the ADSBee prints values it has not received; a
+        // basic frame (no mode status) therefore says NACp 0, which a
+        // reader must treat as "not in this record".
+        let nic = p.sv.map_or(0, |sv| sv.nic);
+        a.nicnac = match &p.ms {
+            Some(ms) => adsb::nicnac::pack(ms.sil, 0, ms.nac_p, ms.nac_v, ms.nic_baro != 0, nic),
+            None => adsb::nicnac::pack(0, 0, 0, 0, false, nic),
+        };
         if let Some(ms) = &p.ms {
             a.callsign = ms.callsign;
             a.squawk = ms.squawk;

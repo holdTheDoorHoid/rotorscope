@@ -467,6 +467,14 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         Some(self.threats.ingest(node, true, &s, now_ms))
     }
 
+    /// Raise (or refresh) a threat the hub found itself from what it holds,
+    /// rather than one a node reported: `by_hub`, node 0. Used by checks
+    /// that live outside the tracker (`area_gnss::AreaWatch`).
+    pub fn ingest_hub_threat(&mut self, s: &ThreatSighting, now_ms: u64) -> ThreatId {
+        self.expire(now_ms);
+        self.threats.ingest(0, true, s, now_ms)
+    }
+
     /// Threats, in table order.
     pub fn threats(&self) -> &[Threat] {
         self.threats.all()
@@ -929,8 +937,7 @@ mod tests {
         s.count = u32::MAX;
         s.level = i8::MIN;
         tr.ingest_threat(u8::MAX, &s, u64::MAX / 4);
-        let mut config = Config::default();
-        config.show_link_ids = true;
+        let config = Config { show_link_ids: true, ..Default::default() };
         let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config };
         let mut buf = [0u8; MAX_THREAT_LINE];
         let n = threat_line(&tr.threats()[0], &ctx, &mut buf).unwrap();

@@ -576,6 +576,25 @@ pub struct UiState {
     pub threats: Threats,
     /// The most serious drone / crewed-aircraft pair (tracker `conflict`).
     pub conflict: Option<ConflictView>,
+    /// GPS jamming or spoofing in the area, seen through aircraft and
+    /// drones (tracker `area_gnss`); `None` when neither is raised.
+    pub area_gnss: Option<AreaGnssView>,
+}
+
+/// GPS interference in the area (tracker `area_gnss`), for the status bar
+/// and health page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AreaGnssView {
+    pub jamming: bool,
+    pub spoofing: bool,
+    /// Jamming: aircraft reporting degraded GPS, and how many are counted.
+    pub degraded: u8,
+    pub counted: u8,
+    /// Spoofing: drones and aircraft whose positions jumped together.
+    pub drones_moved: u8,
+    pub aircraft_moved: u8,
+    /// The hub's own GPS check agrees.
+    pub own_agrees: bool,
 }
 
 /// A drone close to a crewed aircraft, for the status bar and health page.

@@ -89,6 +89,9 @@ pub struct App {
     /// Drone control links and control-band energy from LR2021 nodes
     /// (protocol 12), in PSRAM (`aero::Store`); `None` without PSRAM.
     pub control: Option<&'static mut tracker::ctrllinks::ControlTable>,
+    /// GPS jamming / spoofing in the area seen through aircraft and drones
+    /// (`tracker::area_gnss`), in PSRAM (`aero::Store`); `None` without.
+    pub area: Option<&'static mut tracker::area_gnss::AreaWatch>,
 }
 
 impl App {
@@ -111,6 +114,7 @@ impl App {
             aero: crate::aero::Aero::default(),
             control_flags: (false, false),
             control: None,
+            area: None,
         }
     }
 
@@ -201,6 +205,15 @@ impl App {
         while let Some(id) = self.tracker.take_new_threat(now) {
             let Some(t) = self.tracker.get_threat(id) else { continue };
             let mac = t.node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
+            if t.kind == link::ThreatKind::AreaGnss {
+                // Raised by the hub from aircraft and drones: its own text.
+                let text = tracker::area_gnss::describe(t);
+                let mut data = [0u8; 7];
+                data[0] = t.kind as u8;
+                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+                crate::println!("hub-p4: THREAT {}", text);
+                continue;
+            }
             let mut text: heapless::String<192> = heapless::String::new();
             let _ = write!(text, "{} (node {}", t.label(), t.node);
             if t.channel != 0 {
@@ -333,6 +346,24 @@ impl App {
         self.tracker.expire(now);
         if let Some(ct) = self.control.as_deref_mut() {
             ct.expire(now, self.tracker.config());
+        }
+        // GPS interference in the area: the hub's own GPS verdict as
+        // corroboration (only while a receiver is there), then the check;
+        // a raised threat is announced and logged with the others.
+        if let Some(area) = self.area.as_deref_mut() {
+            use gnss::IntegrityState as I;
+            use tracker::area_gnss::OwnGnss as O;
+            if gps.status.state != tracker::json::GpsState::Absent {
+                let own = match gps.integrity().state {
+                    I::Ok => O::Ok,
+                    I::SuspectJamming => O::SuspectJamming,
+                    I::Jamming => O::Jamming,
+                    I::SuspectSpoofing => O::SuspectSpoofing,
+                    I::Spoofing => O::Spoofing,
+                };
+                area.set_own_gnss(own, now);
+            }
+            area.tick(self.tracker, now);
         }
         self.announce_new(now);
     }
@@ -494,6 +525,7 @@ impl App {
             self.state.aircraft = None;
             self.state.conflict = None;
         }
+        self.state.area_gnss = self.area.as_deref().and_then(|a| screen::from_tracker::area_gnss_view(a.status()));
         let _ = (links::BAUD, Rgb565::BLACK);
     }
 }
