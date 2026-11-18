@@ -340,7 +340,8 @@ fn main() -> ! {
     // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
     let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
     // Phase 12: the airspace pack goes to PSRAM above the framebuffer.
-    // SAFETY: taken exactly once, here (a static: the engine is ~27 KB).
+    // SAFETY: taken exactly once, here (a static; the rule engine itself,
+    // ~84 KB, is placed in PSRAM by Faa::new at faa::ENGINE_OFFSET).
     let faa = unsafe {
         (&raw mut FAA).write(core::mem::MaybeUninit::new(faa::Faa::new(psram)));
         (*(&raw mut FAA)).assume_init_mut()

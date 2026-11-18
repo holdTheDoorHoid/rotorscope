@@ -137,7 +137,8 @@ pub struct AircraftTrack {
     /// nibble NACp, 0 = none. Read with [`Self::nic`] and [`Self::nacp`].
     integrity: u8,
     /// Plausible position updates in a row (saturating), for
-    /// [`Self::established`]. Also fits in the padding.
+    /// [`Self::established`] (WP-09; with padding the track grew from 120
+    /// to 128 bytes).
     positions: u8,
 }
 

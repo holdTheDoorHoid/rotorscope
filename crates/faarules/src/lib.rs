@@ -176,6 +176,9 @@ pub enum Key {
 
 const MAX_FLAGS: usize = 8;
 const MAX_RUNNING: usize = 12;
+/// A full engine may drop an entry of equal standing only once it has had
+/// no fresh data for this long (a gap that also restarts a condition).
+pub const IDLE_EVICT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Running {
@@ -200,6 +203,11 @@ pub struct Entry {
     serial_changes: u8,
     serial_changed_ms: u64,
     pub(crate) seen_ms: u64,
+    /// Last update that had fresh data for it.
+    fresh_ms: u64,
+    /// 1 for a confirmed drone or an established aircraft, 0 otherwise
+    /// (`tracker::probation`): who may replace whom when the engine is full.
+    standing: u8,
 }
 
 impl Entry {
@@ -215,6 +223,8 @@ impl Entry {
             serial_changes: 0,
             serial_changed_ms: 0,
             seen_ms: now,
+            fresh_ms: now,
+            standing: 0,
         }
     }
 
@@ -403,6 +413,9 @@ pub struct Engine<const N: usize> {
     /// at least one flag, for [`Engine::take_finished`]. The oldest goes
     /// when full.
     finished: heapless::Deque<(Key, Summary), 4>,
+    /// Tracks that found the engine full and could not be evaluated
+    /// (counted per evaluation). Zero when `N` covers every track.
+    pub refused: u32,
 }
 
 impl<const N: usize> Default for Engine<N> {
@@ -418,6 +431,7 @@ impl<const N: usize> Engine<N> {
             entries: Vec::new(),
             finished: heapless::Deque::new(),
             evals: 0,
+            refused: 0,
         }
     }
 
@@ -437,27 +451,49 @@ impl<const N: usize> Engine<N> {
         self.get(Key::Aircraft(icao))
     }
 
-    fn entry(&mut self, key: Key, now: u64) -> Option<&mut Entry> {
+    /// The entry for `key`, made if new and there is room for it. A full
+    /// engine makes room only by dropping an entry of lower standing (an
+    /// unconfirmed drone or unproven aircraft for a confirmed or
+    /// established one), or one of equal standing that has had no fresh
+    /// data for [`IDLE_EVICT_MS`]; never a track still being evaluated at
+    /// its own standing. So churn of new (forged) tracks never restarts a
+    /// real drone's timers (WP-09).
+    fn entry(&mut self, key: Key, standing: u8, now: u64) -> Option<&mut Entry> {
         if let Some(i) = self.entries.iter().position(|e| e.key == key) {
-            return Some(&mut self.entries[i]);
+            let e = &mut self.entries[i];
+            e.standing = standing;
+            return Some(e);
         }
         if self.entries.is_full() {
-            // Drop the entry not touched for longest.
+            let idle = |e: &Entry| now.saturating_sub(e.fresh_ms) >= IDLE_EVICT_MS;
             let i = self
                 .entries
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, e)| e.seen_ms)
-                .map(|(i, _)| i)?;
+                .filter(|(_, e)| e.standing < standing || (e.standing == standing && idle(e)))
+                .min_by_key(|(_, e)| (e.standing, e.fresh_ms))
+                .map(|(i, _)| i);
+            let Some(i) = i else {
+                self.refused = self.refused.saturating_add(1);
+                return None;
+            };
             self.entries.swap_remove(i);
         }
-        self.entries.push(Entry::new(key, now)).ok()?;
+        let mut e = Entry::new(key, now);
+        e.standing = standing;
+        self.entries.push(e).ok()?;
         self.entries.last_mut()
     }
 
     /// Evaluate every drone with a fresh position (or a DroneID-only
     /// presence) and every airborne aircraft. Call about once a second.
-    /// Entries for tracks the tracker no longer holds are dropped.
+    /// Entries for tracks the tracker no longer holds are dropped first.
+    ///
+    /// Entries are made only for tracks with fresh data, confirmed drones
+    /// and established aircraft before the rest, and a full engine never
+    /// drops an entry still in use at its own standing (see `entry`): size
+    /// `N` for every drone and aircraft the tracker holds (the P4 uses its
+    /// drone plus aircraft capacity) and nothing is ever dropped at all.
     pub fn update<const T: usize, const A: usize>(
         &mut self,
         tracker: &Tracker<T, A>,
@@ -465,96 +501,6 @@ impl<const N: usize> Engine<N> {
         now: u64,
         utc_ms: Option<u64>,
     ) {
-        let s = self.settings;
-        for t in tracker.tracks() {
-            let inputs = Inputs {
-                pack,
-                settings: &s,
-                now_ms: now,
-                utc_ms,
-            };
-            let Some(e) = self.entry(Key::Drone(t.id), now) else {
-                continue;
-            };
-            e.seen_ms = now;
-            // Serial-number continuity (89.305(a)).
-            let serial = t
-                .uas_ids
-                .iter()
-                .find(|u| u.id_type == rid::message::IdType::SerialNumber)
-                .map(|u| u.id);
-            if let Some(sn) = serial {
-                // A new serial on the same transmitter makes a new track in
-                // the tracker (IDs disagree), so compare with the track that
-                // last used this transmitter address.
-                if e.serial.is_none() {
-                    let mac = t.latest_slot().map(|(_, l)| l.mac);
-                    let prev = tracker
-                        .tracks()
-                        .iter()
-                        .filter(|u| u.id != t.id && u.first_seen_ms <= t.first_seen_ms)
-                        .find(|u| {
-                            mac.is_some_and(|m| u.slots().any(|(_, l)| l.mac == m))
-                                && t.first_seen_ms.saturating_sub(u.last_seen_ms) < 30_000
-                                && u.uas_ids.iter().any(|x| {
-                                    x.id_type == rid::message::IdType::SerialNumber && x.id != sn
-                                })
-                        });
-                    if prev.is_some() {
-                        e.serial_changes = 1;
-                        e.serial_changed_ms = now;
-                    }
-                }
-                if e.serial.is_some_and(|old| old != sn) {
-                    e.serial_changes = e.serial_changes.saturating_add(1);
-                    e.serial_changed_ms = now;
-                }
-                e.serial = Some(sn);
-            }
-            let loc_ms = t.location.as_ref().map_or(0, |l| l.rx_ms);
-            let fresh_loc = loc_ms + s.fresh_ms as u64 >= now && loc_ms > 0;
-            let dji_recent = [t.dji.ocusync, t.dji.wifi]
-                .iter()
-                .any(|l| l.heard() && l.last_seen_ms + s.fresh_ms as u64 >= now);
-            if !fresh_loc && !dji_recent {
-                // Nothing new: keep the last flags until the track goes stale.
-                if now.saturating_sub(t.last_seen_ms) > tracker.config().stale_after_ms {
-                    e.flags.clear();
-                }
-                continue;
-            }
-            if fresh_loc && loc_ms == e.last_loc_ms && !dji_recent {
-                continue;
-            }
-            e.last_loc_ms = loc_ms;
-            let changed = (e.serial_changes > 0
-                && now.saturating_sub(e.serial_changed_ms) < (s.id_change_hold_s * 1000.0) as u64)
-                .then_some(e.serial_changes);
-            let (conds, confirmed) = check::drone_conditions(t, &inputs, changed);
-            e.apply(&conds, &s, now, confirmed);
-            self.evals += 1;
-        }
-        for a in tracker.aircraft() {
-            if now.saturating_sub(a.last_seen_ms) > tracker::aircraft::AIRCRAFT_STALE_MS {
-                continue;
-            }
-            let inputs = Inputs {
-                pack,
-                settings: &s,
-                now_ms: now,
-                utc_ms,
-            };
-            let conds = check::aircraft_conditions(a, &inputs);
-            if conds.is_empty() && self.get(Key::Aircraft(a.key.icao)).is_none() {
-                continue;
-            }
-            let Some(e) = self.entry(Key::Aircraft(a.key.icao), now) else {
-                continue;
-            };
-            e.seen_ms = now;
-            e.apply(&conds, &s, now, false);
-            self.evals += 1;
-        }
         // Forget tracks the tracker dropped, keeping a flagged flight's summary.
         let finished = &mut self.finished;
         self.entries.retain(|e| {
@@ -570,6 +516,120 @@ impl<const N: usize> Engine<N> {
             }
             keep
         });
+        let s = self.settings;
+        // Confirmed drones first, then unconfirmed ones.
+        for pass in [true, false] {
+            for t in tracker.tracks().iter().filter(|t| t.confirmed() == pass) {
+                self.eval_drone(tracker, t, pack, &s, now, utc_ms);
+            }
+        }
+        for pass in [true, false] {
+            for a in tracker.aircraft().iter().filter(|a| a.established() == pass) {
+                if now.saturating_sub(a.last_seen_ms) > tracker::aircraft::AIRCRAFT_STALE_MS {
+                    continue;
+                }
+                let inputs = Inputs {
+                    pack,
+                    settings: &s,
+                    now_ms: now,
+                    utc_ms,
+                };
+                let conds = check::aircraft_conditions(a, &inputs);
+                if conds.is_empty() && self.get(Key::Aircraft(a.key.icao)).is_none() {
+                    continue;
+                }
+                let Some(e) = self.entry(Key::Aircraft(a.key.icao), u8::from(pass), now) else {
+                    continue;
+                };
+                e.seen_ms = now;
+                e.fresh_ms = now;
+                e.apply(&conds, &s, now, false);
+                self.evals += 1;
+            }
+        }
+    }
+
+    /// One drone's evaluation (see [`Engine::update`]).
+    fn eval_drone<const T: usize, const A: usize>(
+        &mut self,
+        tracker: &Tracker<T, A>,
+        t: &tracker::Track,
+        pack: Option<&Pack<'_>>,
+        s: &Settings,
+        now: u64,
+        utc_ms: Option<u64>,
+    ) {
+        let inputs = Inputs {
+            pack,
+            settings: s,
+            now_ms: now,
+            utc_ms,
+        };
+        let loc_ms = t.location.as_ref().map_or(0, |l| l.rx_ms);
+        let fresh_loc = loc_ms + s.fresh_ms as u64 >= now && loc_ms > 0;
+        let dji_recent = [t.dji.ocusync, t.dji.wifi]
+            .iter()
+            .any(|l| l.heard() && l.last_seen_ms + s.fresh_ms as u64 >= now);
+        if !fresh_loc && !dji_recent {
+            // Nothing new: no entry is made for it; an existing one keeps
+            // its last flags until the track goes stale.
+            if let Some(e) = self.entries.iter_mut().find(|e| e.key == Key::Drone(t.id)) {
+                e.seen_ms = now;
+                if now.saturating_sub(t.last_seen_ms) > tracker.config().stale_after_ms {
+                    e.flags.clear();
+                }
+            }
+            return;
+        }
+        let Some(e) = self.entry(Key::Drone(t.id), u8::from(t.confirmed()), now) else {
+            return;
+        };
+        e.seen_ms = now;
+        e.fresh_ms = now;
+        // Serial-number continuity (89.305(a)).
+        let serial = t
+            .uas_ids
+            .iter()
+            .find(|u| u.id_type == rid::message::IdType::SerialNumber)
+            .map(|u| u.id);
+        if let Some(sn) = serial {
+            // A new serial on the same transmitter makes a new track in
+            // the tracker (IDs disagree), so compare with the track that
+            // last used this transmitter address.
+            if e.serial.is_none() {
+                let mac = t.latest_slot().map(|(_, l)| l.mac);
+                let prev = tracker
+                    .tracks()
+                    .iter()
+                    .filter(|u| u.id != t.id && u.first_seen_ms <= t.first_seen_ms)
+                    .find(|u| {
+                        mac.is_some_and(|m| u.slots().any(|(_, l)| l.mac == m))
+                            && t.first_seen_ms.saturating_sub(u.last_seen_ms) < 30_000
+                            && u.uas_ids.iter().any(|x| {
+                                x.id_type == rid::message::IdType::SerialNumber && x.id != sn
+                            })
+                    });
+                if prev.is_some() {
+                    e.serial_changes = 1;
+                    e.serial_changed_ms = now;
+                }
+            }
+            if e.serial.is_some_and(|old| old != sn) {
+                e.serial_changes = e.serial_changes.saturating_add(1);
+                e.serial_changed_ms = now;
+            }
+            e.serial = Some(sn);
+        }
+        if fresh_loc && loc_ms == e.last_loc_ms && !dji_recent {
+            return;
+        }
+        e.last_loc_ms = loc_ms;
+        let changed = (e.serial_changes > 0
+            && now.saturating_sub(e.serial_changed_ms) < (s.id_change_hold_s * 1000.0) as u64)
+            .then_some(e.serial_changes);
+        let (conds, confirmed) = check::drone_conditions(t, &inputs, changed);
+        e.apply(&conds, s, now, confirmed);
+        self.evals += 1;
     }
 
     /// The next finished flight's summary (worst flag, highest height above
