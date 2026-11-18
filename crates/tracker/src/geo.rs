@@ -7,6 +7,14 @@
 //! and makes the number match what a phone map or ATAK reports. Vincenty can
 //! fail to converge for nearly antipodal points; those fall back to the
 //! sphere, which is irrelevant at Remote ID ranges but keeps the function total.
+//!
+//! **Bounded cost** (WP-09). Positions come from the air: a forged drone and
+//! operator on opposite sides of the Earth used to cost 200 iterations of
+//! soft-float f64 every time the screen asked (four times a second, for every
+//! shown drone). Now points more than [`FAR_DEG`] apart in latitude plus
+//! longitude (over 1 000 km) go straight to the sphere, where 0.5 % does not
+//! matter, and Vincenty stops after [`MAX_VINCENTY_ITERATIONS`]: inside 1 000
+//! km it converges in under ten. Every call costs at most that.
 
 use libm::{atan, atan2, cos, fabs, sin, sqrt, tan};
 
@@ -57,9 +65,29 @@ pub fn haversine(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> RangeBearing {
     }
 }
 
+/// Points this far apart (degrees of latitude difference plus degrees of
+/// longitude difference, wrapped) use the sphere: over 1 000 km.
+pub const FAR_DEG: f64 = 10.0;
+/// Vincenty iterations at most (inside [`FAR_DEG`] it needs fewer than 10).
+pub const MAX_VINCENTY_ITERATIONS: u32 = 20;
+
 /// Geodesic distance and initial bearing on WGS-84 (Vincenty inverse). Same
-/// point gives 0 m, bearing 0.
+/// point gives 0 m, bearing 0. Far-apart points (over [`FAR_DEG`]) use the
+/// sphere; the cost is bounded either way (see the module notes).
 pub fn range_bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> RangeBearing {
+    range_bearing_counted(lat1, lon1, lat2, lon2).0
+}
+
+/// As [`range_bearing`], also returning the Vincenty iterations it took (0
+/// when it used the sphere), for tests of the bound.
+pub fn range_bearing_counted(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> (RangeBearing, u32) {
+    let dlon = fabs(lon2 - lon1) % 360.0;
+    let dlon = if dlon > 180.0 { 360.0 - dlon } else { dlon };
+    // Also catches NaN (every comparison false): the sphere stays finite
+    // or NaN without looping.
+    if !(fabs(lat2 - lat1) + dlon <= FAR_DEG) {
+        return (haversine(lat1, lon1, lat2, lon2), 0);
+    }
     let (a, f) = (WGS84_A, WGS84_F);
     let b = a * (1.0 - f);
     let l = to_rad(lon2 - lon1);
@@ -70,16 +98,19 @@ pub fn range_bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> RangeBearing
     let (sin_u2, cos_u2) = (sin(u2), cos(u2));
 
     let mut lambda = l;
-    for _ in 0..200 {
+    for n in 1..=MAX_VINCENTY_ITERATIONS {
         let (sin_l, cos_l) = (sin(lambda), cos(lambda));
         let t = cos_u2 * sin_l;
         let s = cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_l;
         let sin_sigma = sqrt(t * t + s * s);
         if sin_sigma == 0.0 {
-            return RangeBearing {
-                distance_m: 0.0,
-                bearing_deg: 0.0,
-            };
+            return (
+                RangeBearing {
+                    distance_m: 0.0,
+                    bearing_deg: 0.0,
+                },
+                n,
+            );
         }
         let cos_sigma = sin_u1 * sin_u2 + cos_u1 * cos_u2 * cos_l;
         let sigma = atan2(sin_sigma, cos_sigma);
@@ -115,14 +146,17 @@ pub fn range_bearing(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> RangeBearing
                                 * (-3.0 + 4.0 * cos_2sm * cos_2sm)));
             let (sin_l, cos_l) = (sin(lambda), cos(lambda));
             let alpha1 = atan2(cos_u2 * sin_l, cos_u1 * sin_u2 - sin_u1 * cos_u2 * cos_l);
-            return RangeBearing {
-                distance_m: b * big_a * (sigma - delta_sigma),
-                bearing_deg: normalize_deg(to_deg(alpha1)),
-            };
+            return (
+                RangeBearing {
+                    distance_m: b * big_a * (sigma - delta_sigma),
+                    bearing_deg: normalize_deg(to_deg(alpha1)),
+                },
+                n,
+            );
         }
     }
-    // Nearly antipodal: Vincenty does not converge. Never happens at radio range.
-    haversine(lat1, lon1, lat2, lon2)
+    // Did not converge (cannot happen inside FAR_DEG): the sphere.
+    (haversine(lat1, lon1, lat2, lon2), MAX_VINCENTY_ITERATIONS)
 }
 
 #[cfg(test)]
