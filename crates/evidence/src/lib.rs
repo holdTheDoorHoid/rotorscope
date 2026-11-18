@@ -48,6 +48,27 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(data).into()
 }
 
+/// SHA-256 over data fed in pieces (a file read a block at a time, such
+/// as the hub's site file).
+#[derive(Clone, Default)]
+pub struct Sha256Stream(sha2::Sha256);
+
+impl Sha256Stream {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        use sha2::Digest;
+        self.0.update(data);
+    }
+
+    pub fn finish(self) -> [u8; 32] {
+        use sha2::Digest;
+        self.0.finalize().into()
+    }
+}
+
 /// Short key fingerprint: the first 8 bytes of SHA-256 of the 65-byte
 /// uncompressed public key, as 16 hex digits in four groups
 /// (`a1b2-c3d4-e5f6-0718`). Printed at setup and on the server.
@@ -65,4 +86,19 @@ pub fn fingerprint(pubkey: &[u8; 65]) -> [u8; 19] {
         o += 2;
     }
     out
+}
+
+#[cfg(test)]
+mod stream_tests {
+    #[test]
+    fn sha256_in_pieces_is_sha256_of_the_whole() {
+        let data: [u8; 1000] = core::array::from_fn(|i| (i * 7) as u8);
+        for piece in [1usize, 63, 64, 256, 1000] {
+            let mut h = super::Sha256Stream::new();
+            for c in data.chunks(piece) {
+                h.update(c);
+            }
+            assert_eq!(h.finish(), super::sha256(&data));
+        }
+    }
 }
