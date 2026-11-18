@@ -146,7 +146,7 @@ fn parse_head(head: &str) -> (Request, usize) {
             continue;
         };
         let v = v.trim();
-        let mut set = |name: &str, slot: &mut Option<String>| {
+        let set = |name: &str, slot: &mut Option<String>| {
             if k.eq_ignore_ascii_case(name) {
                 *slot = Some(v.to_string());
             }
