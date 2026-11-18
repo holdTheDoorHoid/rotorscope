@@ -61,6 +61,11 @@ wirebus = ["node-common/wirebus"]
 # on USB to prove the reboot after a panic and the hang watchdog. Never in a
 # normal build.
 faulttest = ["node-common/faulttest"]
+# Bench only (docs/BENCH.md "Origin checks"): type `forge hubfix` (or csbee,
+# flags, via, hello, threat, join) on USB to send a frame a node must never
+# originate, and see the gateway and the hub refuse it. Not with faulttest
+# (both read the USB console). Never in a normal build.
+forgetest = []
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }

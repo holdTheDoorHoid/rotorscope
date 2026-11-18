@@ -40,9 +40,13 @@
 compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one");
 #[cfg(all(feature = "wirebus", not(feature = "esp32c5")))]
 compile_error!("`wirebus` pins are set for the XIAO ESP32-C5 only");
+#[cfg(all(feature = "forgetest", feature = "faulttest"))]
+compile_error!("`forgetest` and `faulttest` both read the USB console; build one");
 
 mod chip;
 mod detect;
+#[cfg(feature = "forgetest")]
+mod forge;
 mod report;
 mod role;
 mod rx;
@@ -180,6 +184,12 @@ async fn main(spawner: Spawner) -> ! {
         spawner.spawn(faulttest(rx, tx).expect("spawn faulttest"));
     }
 
+    #[cfg(feature = "forgetest")]
+    {
+        let (rx, _tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+        spawner.spawn(forgetest(rx).expect("spawn forgetest"));
+    }
+
     node_common::fault::arm(WATCHDOG);
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
     hop_forever(&mut wifi).await
@@ -193,6 +203,14 @@ async fn faulttest(
     _tx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Blocking>,
 ) {
     node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| esp_println::println!("{l}")).await
+}
+
+/// Bench only: `forge <what>` typed on USB sends a frame this node may not
+/// originate (docs/BENCH.md "Origin checks").
+#[cfg(feature = "forgetest")]
+#[embassy_executor::task]
+async fn forgetest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>) {
+    forge::console(|b| rx.drain_rx_fifo(b)).await
 }
 
 /// The wired-bus node: hub frames from `report::HUB_QUEUE`, `Assign`s to

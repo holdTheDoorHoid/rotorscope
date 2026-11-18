@@ -490,7 +490,7 @@ pub fn mavlink_evidence(e: &link::MavlinkEvidence) {
     to_hub(&link::Frame::MavlinkEvidence(e.clone()));
 }
 
-fn to_hub(frame: &link::Frame) {
+pub(crate) fn to_hub(frame: &link::Frame) {
     let mut buf = [0u8; link::MAX_FRAME];
     let queued = link::encode(frame, &mut buf)
         .ok()

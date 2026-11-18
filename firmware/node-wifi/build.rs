@@ -9,7 +9,7 @@ mod benchfence;
 
 fn main() {
     println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
-    benchfence::run("node-wifi", &["faulttest"], &["ROTORSCOPE_BENCH_CAN", "ROTORSCOPE_BENCH_FLIP"]);
+    benchfence::run("node-wifi", &["faulttest", "forgetest"], &["ROTORSCOPE_BENCH_CAN", "ROTORSCOPE_BENCH_FLIP"]);
     let target = std::env::var("TARGET").unwrap_or_default();
     let s3 = std::env::var_os("CARGO_FEATURE_ESP32S3").is_some();
     let c5 = std::env::var_os("CARGO_FEATURE_ESP32C5").is_some();
