@@ -758,6 +758,11 @@ impl Radio {
     // ---------------------------------------------------------- commands --
 
     pub fn command(&mut self, c: Command) {
+        // The console parser already refuses these outside a `bringup`
+        // build; this keeps the code for them out of a normal image too.
+        if !cfg!(feature = "bringup") && c.bringup_only() {
+            return err("bringup");
+        }
         match c {
             Command::Help => help(),
             Command::Stats => self.stats(),
