@@ -111,6 +111,7 @@ impl Turbo {
     /// `d[2]` parity, each with its four tail positions) into `out` (176
     /// bytes, MSB first, CRC-24A included), running at most `max_iter` full
     /// iterations.
+    #[inline(always)]
     pub fn decode(&mut self, d: &[[i16; D]; 3], max_iter: u8, out: &mut [u8; K / 8]) -> TurboResult {
         let sys = &d[0];
         let p1 = &d[1];
