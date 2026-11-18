@@ -570,8 +570,13 @@ not its own:
 - **Drones.** When a spoofer is on, every drone in range is pulled the same
   way at the same moment, so their reported positions all jump together.
   One drone jumping on its own is a broken or lying drone (the spoofing
-  checks in docs/SPOOFING.md already flag it); two jumping together is the
-  area.
+  checks in docs/SPOOFING.md already flag it); several jumping together is
+  the area. But a drone's position is only what its broadcast claims, and
+  anyone can broadcast (WP-11b): only drones the hub has confirmed, whose
+  own transmitter moved and stayed moved, count; and they must be
+  separate transmitters, heard differently. On their own it takes three
+  of them; two are enough when aircraft jump too; one when the hub's own
+  GPS agrees.
 - **The hub's own GPS.** It has its own jamming and spoofing checks
   (docs/GNSS-INTEGRITY.md). When it agrees with the aircraft or the drones,
   the alarm is more certain. It is never needed: the other receivers are
@@ -635,15 +640,37 @@ counted (they show in the JSON) but never raise the alarm on their own.
 
 **Spoofing** is raised when, within **10 s**:
 
-1. **2 or more drones** jumped "alike"; or
-2. **3 or more aircraft** jumped alike; or
-3. **1 drone** jumped while the hub's own GPS says spoofing (two
-   independent receivers moved at once).
+1. **3 or more independent drones** made path jumps "alike"
+   (`DRONE_MIN_JUMPERS_ALONE`); or
+2. **2 or more independent drones** did, and at least one aircraft jumped
+   in the same window (`DRONE_MIN_JUMPERS`); or
+3. **3 or more aircraft** jumped alike; or
+4. **1 drone** made a path jump while the hub's own GPS says spoofing (two
+   receivers moved at once, and the attacker cannot reach the hub's own
+   receiver with forged Remote ID frames).
 
-A **drone jump** is the drone spoofing check's own position-jump test
-(`spoof.rs`, `Check::PositionJump`: further than any drone flies between
-two reports) firing on that track, with the position at least 60 m from
-where it was a second earlier. An **aircraft jump** is a position more than
+A **drone path jump** (WP-11b, `claims.rs` `Claims::path_jumps`) is a
+jump by *one consistent transmitter*: on a **confirmed** track (heard again
+a second after it was first heard, docs/SPOOFING.md "Floods"), a report
+further off the track's path than any drone flies is held as a rival claim
+(docs/SPOOFING.md "Impersonation and disputes"); it becomes a path jump
+when the moved claim comes from the track's own transmitter address, forms
+its own path (3 reports over 2 s), the old path has not reported since,
+and nothing about the track is disputed (or, for a DJI record with no
+address, when the track follows the moved claim after 10 s). The position
+must be at least 60 m from where the track was shown. Not counted, ever:
+jumps of **unconfirmed** tracks (one cheap transmitter can make those by
+the hundred), **rival claims** while the old path is still reported (an
+impersonator), and **disputed** tracks.
+
+Two drone jumpers are **independent** when they have different
+transmitter addresses, were heard differently (different sets of
+receiving nodes, or latest signal strengths at least **6 dB** apart), and
+were first heard at least **2 s** apart. One radio sending several
+identities fails at least one of these unless its operator varies the
+power per identity and staggers their start, and then still needs three
+identities, all confirmed and kept alive, to raise the alarm with nothing
+to back it. An **aircraft jump** is a position more than
 **2 km** off where the aircraft's previous position, speed and track put it
 (positions at most 30 s apart). Two jumps are **alike** when their
 displacements differ by at most 25 % of the larger one or a floor (75 m
@@ -654,9 +681,10 @@ puts them all on the same spot.
 
 **Confidence** (the alarm's `level`, 0-100): jamming from aircraft 50,
 +10 per dropped aircraft beyond 2 (to 80); from one aircraft plus the hub
-45; +20 when the hub's own GPS agrees. Spoofing from 2 drones 60 (+10 each
-beyond, to 90), 3 aircraft 60, one drone plus the hub 50; +15 when drones
-and aircraft both moved; +20 when the hub agrees. Capped at 95.
+45; +20 when the hub's own GPS agrees. Spoofing from 3 independent drones
+(or 2 with aircraft) 60 (+10 each beyond, to 90), 3 aircraft 60, one drone
+plus the hub 50; +15 when drones and aircraft both moved; +20 when the hub
+agrees. Capped at 95.
 
 **How long.** An alarm stays raised for **60 s** after its evidence was
 last seen, so a short episode stays on the screen and in the log.
@@ -720,9 +748,21 @@ through its NIC or its lost position).
 - **Busy airport, few drops**: with many aircraft, two drops may stay under
   the 10 % share; real jamming hits every aircraft in range, so this
   mostly costs sensitivity for a very small, low-power jammer.
-- **Drone track merges** can raise a drone's jump counter without a real
-  jump; the 60 m minimum and the need for a second drone keep that from
-  becoming an alarm.
+- **Drone track merges** add up the path-jump counts; the 60 m minimum and
+  the need for independent drones keep that from becoming an alarm.
+- **A hub that just booted** first hears every drone already flying within
+  the same second or two, so they are not "first heard apart" and a real
+  spoof in the first minutes after boot needs the hub's own GPS or aircraft
+  to agree.
+- **Fewer than three drones and no aircraft**: a real spoofer moving one
+  or two drones is not raised as area spoofing unless the hub's own GPS
+  sees it too (each drone still gets its own position-jump flag).
+- **What an attacker can still do** (WP-11b): with three radios (or one
+  radio, per-identity power control and patience: three identities first
+  heard seconds apart, each confirmed, each heard 6 dB apart, then moved
+  together and kept moving), raise AREA FAKE at confidence 60. The alarm
+  says drones *claim* to have jumped together; nothing in Remote ID can
+  prove it.
 - **A single aircraft whose ADS-B position is wrong** (spoofed alone, or
   broadcasting a false position) cannot be seen: that needs
   multilateration (timing one message at several receivers), which one

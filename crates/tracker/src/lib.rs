@@ -733,6 +733,10 @@ impl Track {
     ) -> claims::Outcome {
         let orig = self.location.as_ref().map(|l| (l.rx_ms, l.value.position));
         let (out, jumped) = self.claims.rival_report(p, hacc, src, mac, orig.map_or(0, |o| o.0), now);
+        // From the address this track's own frames come from (held rival
+        // frames never update it): possibly this transmitter's path moving.
+        let own_addr = mac != [0; 6] && self.slots().any(|(_, l)| l.mac == mac);
+        self.claims.path_jump(own_addr, now);
         if jumped {
             self.spoof.note_jump();
             if let Some((ms, Some(q))) = orig

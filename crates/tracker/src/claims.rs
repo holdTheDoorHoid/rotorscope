@@ -60,7 +60,8 @@
 //!
 //! # Cost
 //!
-//! [`Claims`] is 48 bytes per track (3 KB for 64 tracks). Per frame: one distance against the
+//! [`Claims`] is 48 bytes per track (3 KB for 64 tracks; the path-jump
+//! count of WP-11b took its last spare byte). Per frame: one distance against the
 //! established fix (two when a rival is alive), per matched track; the
 //! merge table is four entries. Nothing grows with history.
 
@@ -169,6 +170,9 @@ const B_FOLLOWED: u8 = 0x10;
 const B_EVER: u8 = 0x20;
 /// The latest position report was the rival's.
 const B_LAST_RIVAL: u8 = 0x40;
+/// The current rival can no longer be a path jump: it was counted as one
+/// already, or the original reported after it started.
+const B_SETTLED: u8 = 0x80;
 
 /// Pending change of one text field or ID: 16 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -215,6 +219,9 @@ pub struct Claims {
     rejected: u8,
     /// Frames naming this track's ID beside another ID of the same type.
     contradictory: u8,
+    /// Path jumps: a single consistent transmitter whose reports moved off
+    /// the path and stayed there ([`Claims::path_jumps`]).
+    path_jumps: u8,
     /// Hub ms (low 32 bits) the dispute was last fed, and how many whole
     /// seconds it had been open then.
     last: u32,
@@ -351,6 +358,9 @@ impl Claims {
             self.bits &= !B_LAST_RIVAL;
             if self.rival_alive(now) {
                 self.switches = self.switches.saturating_add(1);
+                // The old path is still being reported: whatever the rival
+                // is, it is not this transmitter's path moving.
+                self.bits |= B_SETTLED;
             }
         }
     }
@@ -379,6 +389,7 @@ impl Claims {
             self.rival_frames = 1;
             self.rival_first = now32;
             self.marks &= 0x0f;
+            self.bits &= !B_SETTLED;
         }
         self.rival_pos = e7(p);
         self.rival_last = now32;
@@ -406,11 +417,41 @@ impl Claims {
         let disputed = self.active(now) & what::POSITION != 0;
         if disputed {
             self.bits |= B_FOLLOWED;
+        } else if self.bits & B_SETTLED == 0 && self.active(now) == 0 {
+            // The original went quiet and only the moved claim continued,
+            // never switching back: a path jump (unless counted already).
+            self.path_jumps = self.path_jumps.saturating_add(1);
         }
         self.rival_frames = 0;
         self.switches = 0;
-        self.bits &= !B_LAST_RIVAL;
+        self.bits &= !(B_LAST_RIVAL | B_SETTLED);
         !disputed
+    }
+
+    /// After a rival report: whether the rival is now a **path jump**, a
+    /// single consistent transmitter that moved (the area GPS check counts
+    /// only these, `crate::area_gnss`). It is when the rival came from the
+    /// track's own transmitter address (`own_addr`), has formed its own path
+    /// ([`RIVAL_MIN_FRAMES`] over [`RIVAL_MIN_SPAN_MS`]), the old path has
+    /// not reported since the rival started, and nothing about the track is
+    /// disputed. Counted once per rival. (Without an address, a DJI record,
+    /// it counts only when the track follows it, [`Claims::followed`].)
+    pub(crate) fn path_jump(&mut self, own_addr: bool, now: u64) -> bool {
+        let path = self.rival_frames >= RIVAL_MIN_FRAMES
+            && Self::now32(now).wrapping_sub(self.rival_first) >= RIVAL_MIN_SPAN_MS;
+        if !own_addr || !path || self.bits & B_SETTLED != 0 || self.active(now) != 0 {
+            return false;
+        }
+        self.bits |= B_SETTLED;
+        self.path_jumps = self.path_jumps.saturating_add(1);
+        true
+    }
+
+    /// Path jumps counted on this track (saturating): see
+    /// [`Claims::path_jump`]. Rival claims, disputes and impersonation
+    /// never count.
+    pub fn path_jumps(&self) -> u8 {
+        self.path_jumps
     }
 
     /// A frame with no position from the rival's own address while the
@@ -485,6 +526,7 @@ impl Claims {
         self.bits |= o.bits & B_EVER;
         self.rejected = self.rejected.saturating_add(o.rejected);
         self.contradictory = self.contradictory.saturating_add(o.contradictory);
+        self.path_jumps = self.path_jumps.saturating_add(o.path_jumps);
     }
 
     /// The rival claim, while it is being heard.
@@ -551,6 +593,7 @@ impl Claims {
             marks: 0,
             rejected: 255,
             contradictory: 255,
+            path_jumps: 255,
             last: now32.wrapping_sub(14_999),
             open_s: u16::MAX,
             guard: Guard::default(),
