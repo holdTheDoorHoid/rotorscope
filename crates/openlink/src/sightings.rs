@@ -123,18 +123,38 @@ impl<const N: usize> Sightings<N> {
     /// Due means: frames arrived since its last report, and the last report
     /// was at least `min_gap_us` ago (a new link is due at once, so the first
     /// sighting is not delayed).
-    pub fn take_due(&mut self, now_us: u64, min_gap_us: u64, mut out: impl FnMut(&Sighting)) {
-        for s in self.slots.iter_mut().flatten() {
-            let fresh = s.packets != s.reported_packets;
-            let gap_ok = s
-                .reported_us
-                .is_none_or(|r| now_us.saturating_sub(r) >= min_gap_us);
-            if fresh && gap_ok {
-                out(s);
-                s.reported_us = Some(now_us);
-                s.reported_packets = s.packets;
+    pub fn take_due(&mut self, now_us: u64, min_gap_us: u64, out: impl FnMut(&Sighting)) {
+        self.take_due_max(now_us, min_gap_us, N, out);
+    }
+
+    /// [`take_due`](Self::take_due), but hand over at most `max` links (the
+    /// room the caller has to send them). The rest stay due and are taken
+    /// first next time, so a full table is reported in turns rather than in
+    /// one burst the caller would have to drop. Returns how many were taken.
+    pub fn take_due_max(&mut self, now_us: u64, min_gap_us: u64, max: usize, mut out: impl FnMut(&Sighting)) -> usize {
+        let mut taken = 0;
+        while taken < max {
+            // The due link waiting longest: oldest report, never-reported first.
+            let mut best: Option<(usize, u64)> = None;
+            for (i, s) in self.slots.iter().enumerate() {
+                let Some(s) = s else { continue };
+                let fresh = s.packets != s.reported_packets;
+                let gap_ok = s
+                    .reported_us
+                    .is_none_or(|r| now_us.saturating_sub(r) >= min_gap_us);
+                let since = s.reported_us.unwrap_or(0);
+                if fresh && gap_ok && best.is_none_or(|(_, b)| since < b) {
+                    best = Some((i, since));
+                }
             }
+            let Some((i, _)) = best else { break };
+            let Some(s) = self.slots[i].as_mut() else { break };
+            out(s);
+            s.reported_us = Some(now_us);
+            s.reported_packets = s.packets;
+            taken += 1;
         }
+        taken
     }
 
     /// Links currently in the table.

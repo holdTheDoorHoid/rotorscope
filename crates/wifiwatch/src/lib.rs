@@ -72,6 +72,7 @@ pub mod drones;
 pub mod floods;
 pub mod mac;
 pub mod mavwifi;
+pub mod shed;
 pub mod tools;
 pub mod util;
 
