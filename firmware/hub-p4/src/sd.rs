@@ -30,8 +30,9 @@
 //! recording drops back to probing; a card put back gets a new file.
 //!
 //! **Evidence log.** `ROTORSCP/EVIDENCE/EVnnnnnn.EVL`, one new file per
-//! mount, numbered one past the highest there (never reused, never
-//! rewritten). The queue lives in `evlog.rs`; here it is appended in
+//! mount, numbered one past the highest there (never rewritten: a new file
+//! never takes a name that exists; the number of a deleted file, the newest
+//! one's included, can come back, docs/EVIDENCE.md). The queue lives in `evlog.rs`; here it is appended in
 //! block-aligned chunks ahead of the CSV, and flushed only at a record
 //! boundary, after which the flushed records leave the queue. At mount the
 //! previous evidence file's last record is read and named in the new file's

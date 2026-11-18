@@ -1,6 +1,7 @@
 //! Evidence file names on the SD card: `EVnnnnnn.EVL`, one new file per
-//! mount, numbered one past the highest already there, never reused and
-//! never rewritten. Pure logic (no card access), so it is tested here; the
+//! mount, numbered one past the highest already there, never rewritten
+//! (a name that exists is never taken; the number of a deleted file can
+//! come back). Pure logic (no card access), so it is tested here; the
 //! hub's `sd.rs` feeds it the directory listing.
 //!
 //! The card is not trusted: someone may have put anything in the folder.
