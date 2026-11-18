@@ -23,6 +23,18 @@
 //! The opt-ins come from the plan (`AeroMode::ControlFlags`, both off by
 //! default) and go to `recognise` and `Follow` unchanged. Receive only:
 //! every command comes from `lr2021cfg`, which has no transmit command.
+//!
+//! **Hostile MAVLink** (`mavwatch`, docs/DRONE-ATTACKS.md): with content
+//! decoding on, the MAVLink bytes of every SiK and mLRS packet go through
+//! `mavwatch::Watch`, which reassembles frames that span packets. A finding
+//! goes to the hub as a `Threat` (`MavlinkAttack`) followed by a
+//! `MavlinkEvidence` frame with the MAVLink frame that caused it. This runs
+//! here rather than on the hub because the hub only gets a packet's first
+//! `ctrlwatch::MAX_RAW` (96) bytes, at most `CONTROL_PER_S` packets a
+//! second: most of the frames the scan needs (camera and video URIs, FTP,
+//! anything split across two SiK packets) never reach it whole. With
+//! `control ids` off every SiK (and every mLRS) link shares one stream and
+//! the link-integrity checks are off (`mavwatch::Link::distinct`).
 
 use ctrlwatch::energy::{Activity, BurstTimer};
 use ctrlwatch::{Config, ControlContent, ControlSighting, Modulation, Region, RxMeta, Sightings};
@@ -69,6 +81,9 @@ pub struct Control {
     applied: Option<LrConfig>,
     last_housekeeping_us: u64,
     fifo: [u8; 256],
+    /// Hostile-MAVLink scan (~8 KB), content decoding only.
+    mav: mavwatch::Watch,
+    mav_buf: [u8; 258],
 }
 
 impl Control {
@@ -89,6 +104,8 @@ impl Control {
             applied: None,
             last_housekeeping_us: 0,
             fifo: [0; 256],
+            mav: mavwatch::Watch::new(),
+            mav_buf: [0; 258],
         }
     }
 
@@ -325,6 +342,7 @@ impl Control {
             .then(|| Follow::start(&cfg, bytes, &step.config, meta.t_us))
             .flatten();
             if cfg.decode_content {
+                scan_mavlink(&mut self.mav, &mut self.mav_buf, bytes, &step.config, &r.sighting);
                 let raw: Vec<u8, { ctrlwatch::MAX_RAW }> = r.raw.clone().unwrap_or_default();
                 self.send_content(
                     &r.sighting,
@@ -532,4 +550,75 @@ pub fn stats() -> (u32, u32, u32, u32, u32, u32) {
         c.sweeps.load(Relaxed),
         c.follows.load(Relaxed),
     )
+}
+
+/// Feed one SiK / mLRS packet's MAVLink bytes to `mavwatch` and send what
+/// it finds: a `Threat` the hub's threat table takes as any other, then the
+/// offending frame for the evidence log. Only called with content decoding
+/// on.
+fn scan_mavlink(
+    mav: &mut mavwatch::Watch,
+    buf: &mut [u8; 258],
+    packet: &[u8],
+    rx: &ctrlwatch::RxConfig,
+    s: &ControlSighting,
+) {
+    let Some((data, dir)) = ctrlwatch::serial_bytes(packet, rx, buf) else {
+        return;
+    };
+    // The link's own ID, only when the hub turned ID reading on (it is in
+    // the sighting only then); it stays in this node's memory as a stream
+    // key and is never sent.
+    let id = match s.id {
+        Some(ctrlwatch::LinkId::SikNetId(n)) => Some(u32::from(n)),
+        Some(ctrlwatch::LinkId::MlrsSyncWord(w)) => Some(u32::from(w)),
+        _ => None,
+    };
+    let key = mavwatch::StreamKey {
+        system: s.system as u8,
+        id,
+        dir: match dir {
+            ctrlwatch::Direction::Uplink => 1,
+            ctrlwatch::Direction::Downlink => 2,
+            ctrlwatch::Direction::Unknown => 0,
+        },
+    };
+    let now_ms = s.t_us / 1000;
+    mav.feed(key, data, now_ms, &mut |f, fr| {
+        bump(&COUNTERS.mav_findings);
+        let addr = |(sys, comp): (u8, u8)| [0, 0, 0, 0, sys, comp];
+        let threat = link::ThreatSighting {
+            kind: link::ThreatKind::MavlinkAttack,
+            channel: 0,
+            freq: s.freq_hz / 100_000,
+            width_khz: 0,
+            level: s.rssi_dbm.clamp(-128, 127) as i8,
+            count: f.hits,
+            window_ms: now_ms.saturating_sub(f.first_ms).min(u64::from(u32::MAX)) as u32,
+            source: addr((f.sysid, f.compid)),
+            target: f.target.map_or([0; 6], addr),
+            detail: f.kind.code(),
+            ssid: f.excerpt.clone(),
+            uptime_us: s.t_us,
+        };
+        out::hub_frame(&Frame::Threat(threat));
+        let n = fr.bytes.len().min(link::MAX_MAVLINK_EVIDENCE);
+        out::hub_frame(&Frame::MavlinkEvidence(link::MavlinkEvidence {
+            detail: f.kind.code(),
+            sysid: f.sysid,
+            compid: f.compid,
+            msgid: f.msgid,
+            truncated: fr.bytes.len() > n,
+            uptime_us: s.t_us,
+            frame: Vec::from_slice(&fr.bytes[..n]).unwrap_or_default(),
+        }));
+        out::line(format_args!(
+            r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"hits":{}}}"#,
+            f.kind.code(),
+            f.sysid,
+            f.compid,
+            f.msgid,
+            f.hits
+        ));
+    });
 }

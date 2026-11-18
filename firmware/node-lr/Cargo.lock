@@ -183,6 +183,7 @@ name = "ctrlwatch"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "mavwatch",
  "serde",
 ]
 
@@ -1365,6 +1366,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mavwatch"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1431,6 +1439,7 @@ dependencies = [
  "heapless 0.8.0",
  "link",
  "lr2021cfg",
+ "mavwatch",
  "node-common",
  "portable-atomic",
  "postcard",

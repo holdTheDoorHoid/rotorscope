@@ -376,5 +376,8 @@ fn is_data(f: &Frame) -> bool {
             // same nodes (tracker `ctrllinks`, logged as evidence).
             | Frame::Control(_)
             | Frame::ControlEnergy(_)
+            // Protocol 13: the MAVLink frame behind a MavlinkAttack threat
+            // (logged as evidence; the threat is a `Frame::Threat`).
+            | Frame::MavlinkEvidence(_)
     )
 }

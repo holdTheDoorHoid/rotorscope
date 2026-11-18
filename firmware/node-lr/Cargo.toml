@@ -37,6 +37,7 @@ link      = { path = "../../crates/link" }
 lr2021cfg = { path = "../../crates/lr2021cfg" }
 aerohop   = { path = "../../crates/aerohop" }
 ctrlwatch = { path = "../../crates/ctrlwatch" }
+mavwatch  = { path = "../../crates/mavwatch" }
 airlink   = { path = "../../crates/airlink", optional = true }
 node-common = { path = "../node-common", optional = true, features = ["esp32c3"] }
 heapless  = { version = "0.8", features = ["serde"] }

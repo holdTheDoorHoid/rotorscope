@@ -559,3 +559,30 @@ fn control_frames_are_logged_raw() {
     let bytes = evidence::summary::raw_bytes(&e, &mut buf).unwrap().to_vec();
     assert!(evidence::summary::decode_raw(evidence::format::RAW_LINK_FRAME_V6, &bytes).is_ok());
 }
+
+/// Protocol 13: the MAVLink frame behind a hostile-telemetry threat is a
+/// data frame (kind MAVLINK), and its bytes come back exactly.
+#[test]
+fn mavlink_evidence_is_logged_raw() {
+    let frame: heapless::Vec<u8, { link::MAX_MAVLINK_EVIDENCE }> = (0..200u8).collect();
+    let f = link::Frame::MavlinkEvidence(link::MavlinkEvidence {
+        detail: 2,
+        sysid: 1,
+        compid: 100,
+        msgid: 259,
+        truncated: false,
+        uptime_us: 5,
+        frame: frame.clone(),
+    });
+    let info = evidence::summary::info(&f).unwrap();
+    assert_eq!((info.frame_kind, info.band), (evidence::format::frame_kind::MAVLINK, evidence::format::band::RF));
+    let mut s = evidence::summary::Summary::new();
+    evidence::summary::write_summary(&f, &mut s).unwrap();
+    assert_eq!(core::str::from_utf8(s.as_bytes()).unwrap(), "mavlink_attack detail=2 sys=1/100 msg=259 frame=200B");
+    let mut buf = [0u8; link::MAX_FRAME];
+    let bytes = evidence::summary::raw_bytes(&f, &mut buf).unwrap().to_vec();
+    let (i2, s2, f2) = evidence::summary::decode_raw(evidence::format::RAW_LINK_FRAME_V6, &bytes).unwrap();
+    assert_eq!((i2, s2.as_bytes(), &f2), (info, s.as_bytes(), &f));
+    let link::Frame::MavlinkEvidence(m) = f2 else { panic!() };
+    assert_eq!(m.frame, frame);
+}

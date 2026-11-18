@@ -74,7 +74,8 @@ use serde::{Deserialize, Serialize};
 ///   [`ThreatKind`]s appended (`DroneDeauth`, `DroneTakeover`,
 ///   `DroneNetClone`, `ControlContested`, `MavlinkAttack`, `AreaGnss`), so
 ///   every v12 frame encodes exactly as before; a v12 hub counts a threat
-///   of a new kind as corrupt.
+///   of a new kind as corrupt. [`Frame::MavlinkEvidence`] appended: the
+///   MAVLink frame behind a `MavlinkAttack` threat, for the evidence log.
 pub const PROTOCOL_VERSION: u8 = 13;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
@@ -955,6 +956,34 @@ pub enum Frame {
     Control(ControlReport),
     /// Protocol 12: an LR2021 node's energy map of one band.
     ControlEnergy(ControlEnergy),
+    /// Protocol 13: the MAVLink frame that raised a
+    /// [`ThreatKind::MavlinkAttack`] threat, sent right after its
+    /// [`Frame::Threat`] so the evidence log keeps the bytes. Only sent
+    /// with control content decoding on (the frame is content).
+    MavlinkEvidence(MavlinkEvidence),
+}
+
+/// Longest MAVLink frame a [`MavlinkEvidence`] carries. A full MAVLink 2
+/// frame is up to 280 bytes; MAVLink 2 trims trailing zero bytes, so the
+/// messages `mavwatch` reports on (CAMERA_INFORMATION is the longest at
+/// 237 payload bytes) fit whole unless signed and full. Longer frames are
+/// cut here (`truncated`).
+pub const MAX_MAVLINK_EVIDENCE: usize = 255;
+
+/// Protocol 13. See [`Frame::MavlinkEvidence`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MavlinkEvidence {
+    /// The threat's `detail` (`mavwatch::Kind` number).
+    pub detail: u32,
+    /// Sender as claimed in the frame.
+    pub sysid: u8,
+    pub compid: u8,
+    pub msgid: u32,
+    /// The frame was longer than [`MAX_MAVLINK_EVIDENCE`] and was cut.
+    pub truncated: bool,
+    pub uptime_us: u64,
+    /// The frame as received: header, payload, CRC, signature.
+    pub frame: Vec<u8, MAX_MAVLINK_EVIDENCE>,
 }
 
 /// Serialize `frame` with postcard and COBS-encode it into `buf`, including
@@ -1767,6 +1796,15 @@ mod tests {
         let worst = [
             Frame::Control(control_report(true, 1)),
             Frame::ControlEnergy(control_energy(true)),
+            Frame::MavlinkEvidence(MavlinkEvidence {
+                detail: u32::MAX,
+                sysid: 255,
+                compid: 255,
+                msgid: 0xFF_FFFF,
+                truncated: true,
+                uptime_us: u64::MAX,
+                frame: Vec::from_slice(&[0xFF; MAX_MAVLINK_EVIDENCE]).unwrap(),
+            }),
         ]
         .iter()
         .map(|f| encode(f, &mut buf).unwrap().len())

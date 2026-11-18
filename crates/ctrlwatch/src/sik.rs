@@ -169,6 +169,28 @@ pub fn recognise(raw: &[u8], rx: &RxConfig, meta: RxMeta, cfg: &Config) -> Optio
     None
 }
 
+/// The serial bytes (normally MAVLink) one SiK packet carries: de-whitened,
+/// CRC-checked, TDM trailer and command packets left out. Copied into
+/// `out`; `None` if the packet does not check. For `mavwatch`, which
+/// reassembles frames that span packets; only called with content decoding
+/// on.
+pub fn serial_bytes<'a>(raw: &[u8], out: &'a mut [u8; 258]) -> Option<&'a [u8]> {
+    let n = raw.len().min(out.len());
+    out[..n].copy_from_slice(&raw[..n]);
+    pn9_xor(&mut out[..n]);
+    let (_, data) = si443x_parse(&out[..n], 2, 0x8005)?;
+    if data.len() < 2 {
+        return None;
+    }
+    let trailer = u16::from_le_bytes([data[data.len() - 2], data[data.len() - 1]]);
+    if trailer & (1 << 13) != 0 {
+        return None;
+    }
+    let len = data.len() - 2;
+    // data starts after the 2 header bytes and the length byte.
+    Some(&out[3..3 + len])
+}
+
 /// Test-only encoder: a whitened SiK frame as the radio would send it
 /// (after the sync word), padded to `READ_LEN` with noise.
 #[cfg(test)]
@@ -211,6 +233,18 @@ mod tests {
         assert_eq!((spacing, n), (250_000, 50));
         assert!((915_125_000..915_375_000).contains(&start));
         assert!(start + 49 * spacing < 928_000_000);
+    }
+
+    #[test]
+    fn serial_bytes_strip_header_and_trailer() {
+        let hb = crate::mavlink::encode_v2(4, 1, 1, crate::mavlink::MSG_HEARTBEAT, &crate::mavlink::heartbeat_payload());
+        let mut out = [0u8; 258];
+        let f = encode(DEFAULT_NETID, &hb, 0x0123);
+        let (b, d) = crate::serial_bytes(&f, &rx(), &mut out).unwrap();
+        assert_eq!((b, d), (&hb[..], Direction::Unknown));
+        // A TDM command packet carries no serial data.
+        let f = encode(DEFAULT_NETID, &hb, 1 << 13);
+        assert!(crate::serial_bytes(&f, &rx(), &mut out).is_none());
     }
 
     #[test]
