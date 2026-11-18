@@ -112,9 +112,12 @@ same fields) sets role and plan. Idempotent: the same role and plan id change no
 `(centre in 100 kHz units, dwell ms)`. Empty plan = built-in: DroneID 5756.5 / 5776.5 / 5796.5 /
 5816.5 / 2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 700 ms each (the LO sits on the whole MHz
 below, +0.5 MHz off the DC spike; 5816.5 is above the measured 5800 MHz reach, unverified). On top
-of the plan the DroneID job follows O4 drones: after a valid O4 packet it retunes, 30 ms early, to
-each channel the published schedule predicts (`droneid::follow`, docs/DRONEID-O4.md) and scans the
-plan in between; the stats line's `"follow":[sessions,visits,hits,misses]` counts it; FPV every reachable channel of both bands (15 at 2.4 GHz, then 31 at
+of the plan the DroneID job follows O4 drones: once three valid O4 packets of a session agree it
+retunes, 30 ms early, to each channel the published schedule predicts (`droneid::follow`,
+docs/DRONEID-O4.md, at most about half the time) and scans the plan in between; the stats line's
+`"follow":[followed,visits,hits,misses,tentative,contradictions,refused,declined]` counts it, and
+`"dec":[decodes,full,skipped,busy_ms]` the decode budget (docs/BENCH.md "node-sdr under hostile
+signals"); FPV every reachable channel of both bands (15 at 2.4 GHz, then 31 at
 5.8 GHz), 60 ms each. Entries outside the C5's reach
 are dropped. Roles this image cannot do (Wi-Fi, BLE) are refused and the node keeps its job;
 switching images is the multi-image layout's business. Console: `role droneid|fpv` (holds that job
@@ -214,6 +217,10 @@ and `hil run <len> <crc32>` checks it and runs it through the live path (`Radio:
 into the stopped ring, a fresh trigger, `window`: length gate, half-band, DC removal, decoder,
 redacted `burst` line, hub sighting). HIL sightings are encoded and round-tripped but **never
 queued for the hub**: a recording must not appear on the hub as a live drone.
+
+`hil train` and `hil forge` (`radio/hilsim.rs`) run the decode budget against a pulse train and
+the follower against forged sessions, still without transmitting: docs/BENCH.md "node-sdr under
+hostile signals".
 
 It needs a `bringup` build (`@F` and `hil run` are refused otherwise):
 
