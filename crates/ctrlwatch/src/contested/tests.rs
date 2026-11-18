@@ -618,6 +618,48 @@ fn new_contested_links_are_rate_limited() {
     assert_eq!(handles(&later), 8);
 }
 
+#[test]
+fn a_spray_of_new_uids_keeps_a_link_holding_evidence() {
+    // Between every packet of the victim link, ten syncs that check, each
+    // on a new made-up UID. Until WP-11a the least recently heard link
+    // without a finding made room, which was the victim: its phase ring
+    // emptied before the alternation could add up.
+    let cfg = Config::default();
+    let mut w = W::new();
+    let a = Elrs::new(tx("victim", None), 0);
+    let b = Elrs::new(tx("victim", None), 777_777);
+    let mut k = 0u32;
+    let mut spray = |w: &mut W, t: u64| {
+        for j in 0..10u64 {
+            k += 1;
+            let e = Elrs::new(tx(&std::format!("spray {k}"), None), 3_000 * u64::from(k));
+            feed_elrs(w, &e, t + 10_000 + j * 20_000, 0, -50, &cfg);
+        }
+    };
+    let mut out = std::vec::Vec::new();
+    for i in 0..4u64 {
+        let t = 1_000_000 + i * 2_000_000;
+        feed_elrs(&mut w, &a, t, 0, -60, &cfg);
+        // (A link's very first packet is on probation: a spray of L-1 new
+        // IDs before its second can still push it out. From its second on,
+        // it holds evidence.)
+        if i >= 1 {
+            spray(&mut w, t);
+        }
+    }
+    for i in 4..12u64 {
+        let t = 1_000_000 + i * 2_000_000;
+        feed_elrs(&mut w, &a, t, 0, -60, &cfg);
+        spray(&mut w, t);
+        feed_elrs(&mut w, &b, t + 1_000_000, 0, -75, &cfg);
+        spray(&mut w, t + 1_000_000);
+        out.extend(reports(&mut w, t + 1_500_000, &cfg));
+    }
+    assert!(!out.is_empty(), "the contest still fires");
+    assert!(w.evicted > 100, "the spray came and went: {}", w.evicted);
+    assert_eq!(w.pressure_evicted, 0, "nothing holding evidence was dropped");
+}
+
 // ---------------------------------------------------------------- misc --
 
 #[test]

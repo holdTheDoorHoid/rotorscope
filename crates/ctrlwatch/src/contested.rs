@@ -146,6 +146,16 @@ pub const HANDOVER_RSSI_DB: i16 = 15;
 pub const OBS_MAX_AGE_US: u64 = 600_000_000;
 /// A link not heard for this long is forgotten.
 pub const LINK_MAX_AGE_US: u64 = 600_000_000;
+/// A link holding evidence (two or more observations, SiK trailer counts,
+/// a finding) is not given up for a newcomer until it has been quiet this
+/// long. Until WP-11a the least recently heard link without a finding made
+/// room, so a spray of syncs on made-up UIDs between the victim's packets
+/// emptied the victim's phase ring before the alternation added up. A new
+/// link is on probation (one observation) and goes first; a newcomer that
+/// finds every link holding evidence is turned away
+/// ([`Watch::refused`]); dropping a quiet link holding evidence is counted
+/// in [`Watch::pressure_evicted`].
+pub const QUIET_EVICT_US: u64 = 120_000_000;
 /// SiK: 16 µs TDM ticks.
 pub const SIK_TICK_US: u64 = 16;
 /// SiK: two packets in one window may claim ends this far apart and still
@@ -368,6 +378,16 @@ struct Link {
 }
 
 impl Link {
+    /// Holds something a newcomer must not wipe.
+    fn holds_evidence(&self) -> bool {
+        self.ring.len() >= 2
+            || self.finding.is_some()
+            || self.seasoned
+            || self.sik.agree != [0; 2]
+            || self.sik.contra != [0; 2]
+            || self.sik.mav.iter().any(Option::is_some)
+    }
+
     fn evidence(&mut self, rule: u8, transmitters: u8, t_us: u64) {
         if !self.seasoned {
             self.unseasoned = self.unseasoned.saturating_add(1);
@@ -398,6 +418,10 @@ pub struct Watch<const L: usize> {
     next_handle: u8,
     /// Links dropped to make room.
     pub evicted: u32,
+    /// ...of which held evidence (quiet for [`QUIET_EVICT_US`]).
+    pub pressure_evicted: u32,
+    /// New links turned away: every link held evidence.
+    pub refused: u32,
     /// Contradictions on links without history (not reported).
     pub unseasoned: u32,
     /// New findings that had to wait for a token.
@@ -427,6 +451,8 @@ impl<const L: usize> Watch<L> {
             links: heapless::Vec::new(),
             next_handle: 1,
             evicted: 0,
+            pressure_evicted: 0,
+            refused: 0,
             unseasoned: 0,
             throttled: 0,
             tokens: NEW_FINDING_BURST,
@@ -467,15 +493,23 @@ impl<const L: usize> Watch<L> {
             Some(i) => i,
             None => {
                 if self.links.is_full() {
-                    // Drop the least recently heard link without a finding,
-                    // else the least recently heard.
+                    // A link on probation first (least recently heard),
+                    // else one holding evidence but quiet, else none.
+                    let held = |k: usize| self.links[k].holds_evidence();
+                    let quiet = |k: usize| t.saturating_sub(self.links[k].last_us) >= QUIET_EVICT_US;
                     let victim = (0..self.links.len())
-                        .filter(|&k| self.links[k].finding.is_none())
+                        .filter(|&k| !held(k))
                         .min_by_key(|&k| self.links[k].last_us)
-                        .or_else(|| (0..self.links.len()).min_by_key(|&k| self.links[k].last_us));
-                    if let Some(k) = victim {
-                        self.links.swap_remove(k);
-                        self.evicted = self.evicted.saturating_add(1);
+                        .map(|k| (k, false))
+                        .or_else(|| (0..self.links.len()).filter(|&k| quiet(k)).min_by_key(|&k| self.links[k].last_us).map(|k| (k, true)));
+                    let Some((k, was_held)) = victim else {
+                        self.refused = self.refused.saturating_add(1);
+                        return;
+                    };
+                    self.links.swap_remove(k);
+                    self.evicted = self.evicted.saturating_add(1);
+                    if was_held {
+                        self.pressure_evicted = self.pressure_evicted.saturating_add(1);
                     }
                 }
                 let handle = self.next_handle;

@@ -66,7 +66,7 @@
 //! - Files fetched over IP (a `https://` camera definition's content, a
 //!   decompression bomb behind a normal-looking `.xz` URI, MAVSDK-03).
 //!
-//! `no_std`, no allocation, fixed memory ([`Watch`] is about 8 KB).
+//! `no_std`, no allocation, fixed memory ([`Watch`] is about 8.6 KB).
 #![cfg_attr(not(test), no_std)]
 
 pub mod analyse;

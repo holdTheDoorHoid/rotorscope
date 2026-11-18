@@ -11,8 +11,16 @@ use crate::frame::{Frame, MAX_FRAME_LEN, Parse, parse_at};
 
 /// Bytes a stream holds: one frame waiting to complete plus a full packet.
 pub const STREAM_BUF: usize = MAX_FRAME_LEN + 256;
-/// Streams followed at once.
+/// Streams followed at once. A stream holding the unfinished start of a
+/// frame is not given up for a newcomer until it has been quiet for
+/// [`STREAM_QUIET_MS`] (WP-11a: a spray of packets on made-up streams used
+/// to push out the victim's half frame, so a frame split across two packets
+/// with the spray in between was never seen whole). A newcomer that finds
+/// every stream holding half a frame has its packet analysed on its own
+/// (whole frames only) and is counted ([`Pressure::streams_refused`]).
 pub const MAX_STREAMS: usize = 4;
+/// See [`MAX_STREAMS`].
+pub const STREAM_QUIET_MS: u64 = 5_000;
 
 /// Which byte stream a packet belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,6 +113,8 @@ impl Stream {
 pub struct Watch {
     streams: heapless::Vec<Stream, MAX_STREAMS>,
     analyser: Analyser,
+    streams_refused: u32,
+    streams_evicted: u32,
 }
 
 impl Default for Watch {
@@ -118,6 +128,8 @@ impl Watch {
         Self {
             streams: heapless::Vec::new(),
             analyser: Analyser::new(),
+            streams_refused: 0,
+            streams_evicted: 0,
         }
     }
 
@@ -156,9 +168,18 @@ impl Watch {
                 self.streams.len() - 1
             }
             None => {
-                let i = (0..self.streams.len())
-                    .min_by_key(|&i| self.streams[i].last_ms)
-                    .unwrap_or(0);
+                let Some((i, _)) = crate::analyse::victim(
+                    &self.streams,
+                    now_ms,
+                    STREAM_QUIET_MS,
+                    |s| s.len > 0,
+                    |s| s.last_ms,
+                ) else {
+                    self.streams_refused = self.streams_refused.saturating_add(1);
+                    self.feed_frames(link, bytes, now_ms, out);
+                    return;
+                };
+                self.streams_evicted = self.streams_evicted.saturating_add(1);
                 self.streams[i] = Stream::new(key);
                 i
             }
@@ -171,7 +192,11 @@ impl Watch {
 
     /// Counters for a node's stats line (see [`Pressure`]).
     pub fn pressure(&self) -> Pressure {
-        self.analyser.pressure()
+        Pressure {
+            streams_refused: self.streams_refused,
+            streams_evicted: self.streams_evicted,
+            ..self.analyser.pressure()
+        }
     }
 
     /// Analyse frames that need no reassembly (each `bytes` holds whole

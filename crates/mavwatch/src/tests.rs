@@ -1126,6 +1126,79 @@ fn replayed_signed_frames() {
     assert_eq!(kinds(&got), [Kind::SignedReplay]);
 }
 
+// ------------------------------------------- tables under a spray --
+
+#[test]
+fn a_spray_of_system_ids_keeps_partial_evidence() {
+    // An injector interleaving its own count for system 1 / component 1
+    // with the vehicle's, and between every pair of frames a heartbeat from
+    // each of 20 made-up systems. Until WP-11a the least recently heard
+    // source made room (12 kept), which was system 1 every time.
+    let mut an = Analyser::new();
+    let mut frames = Vec::new();
+    let mut fake = 2u8;
+    for i in 0..40u64 {
+        let t = i * 200;
+        frames.push((enc(i as u8, 1, 1, msg::HEARTBEAT, &heartbeat(), None), t));
+        frames.push((enc(100 + i as u8, 1, 1, msg::HEARTBEAT, &heartbeat(), None), t + 50));
+        for j in 0..20u64 {
+            fake = if fake >= 250 { 2 } else { fake + 1 };
+            frames.push((enc(j as u8, fake, 1, msg::HEARTBEAT, &heartbeat(), None), t + 60 + j));
+        }
+    }
+    let got = run(&mut an, LINK, &frames);
+    assert_eq!(kinds(&got), [Kind::SeqInterleave]);
+    assert!(an.pressure().evicted > 100);
+    assert_eq!(an.pressure().evicted_evidence, 0);
+}
+
+#[test]
+fn a_spray_of_systems_keeps_a_parameter_name_count() {
+    // A parameter-name flood from system 7, with a PARAM_VALUE from each
+    // of two new made-up systems after every one of its frames (two name
+    // sets are kept).
+    let mut an = Analyser::new();
+    let mut got = Vec::new();
+    for i in 0..4_000u32 {
+        let id = std::format!("P{i:05}");
+        let t = 10 * u64::from(i);
+        let f = enc(i as u8, 7, 1, msg::PARAM_VALUE, &param_value(id.as_bytes(), 1.0, 9, 4_000, i as u16), None);
+        got.extend(run(&mut an, LINK, &[(f, t)]));
+        // The spray starts once the flood is under way (a set that is
+        // still on probation, under eight names, can be pushed out).
+        for k in 0..2u32 * u32::from(i >= 20) {
+            let sys = 20 + ((2 * i + k) % 200) as u8;
+            let g = enc(0, sys, 1, msg::PARAM_VALUE, &param_value(b"SYSID_THISMAV", 1.0, 9, 1, i as u16), None);
+            got.extend(run(&mut an, LINK, &[(g, t + 1 + u64::from(k))]));
+        }
+    }
+    assert!(got.iter().any(|f| f.kind == Kind::ParamFlood && f.sysid == 7), "{:?}", kinds(&got));
+}
+
+#[test]
+fn a_spray_of_streams_keeps_a_half_frame() {
+    // The first half of a hostile CAMERA_INFORMATION, then one packet on
+    // each of 30 other streams, then the second half.
+    let cam = enc(2, 1, 100, msg::CAMERA_INFORMATION, &camera_info(b"v", b"m", b"file:///etc/passwd"), None);
+    let (a, b) = cam.split_at(120);
+    let mut w = Watch::new();
+    let key = |id: u32| StreamKey {
+        system: 2,
+        id: Some(id),
+        dir: 0,
+    };
+    let mut got = Vec::new();
+    let mut on = |f: &Finding, _: &Frame<'_>| got.push(f.kind);
+    w.feed(key(25), &enc(0, 1, 1, msg::HEARTBEAT, &heartbeat(), None), 0, &mut on);
+    w.feed(key(25), a, 10, &mut on);
+    for k in 0..30u32 {
+        w.feed(key(1000 + k), &[0xFD, 0x40, 0, 0, 0, 1, 1, 0, 0, 0, 1, 2, 3], 20 + u64::from(k), &mut on);
+    }
+    w.feed(key(25), b, 60, &mut on);
+    assert_eq!(got, [Kind::UriScheme]);
+    assert!(w.pressure().streams_refused > 0);
+}
+
 // ----------------------------------------------------- reassembly --
 
 #[test]

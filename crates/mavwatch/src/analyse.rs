@@ -276,7 +276,31 @@ pub const NEW_ALARM_REFILL_ALL_MS: u64 = 5_000;
 pub const MAX_BUDGETS: usize = 4;
 
 /// Systems / components followed at once.
+///
+/// The tables below are small, and a forger can send checksum-valid frames
+/// with any system ID. Until WP-11a each table made room for a newcomer by
+/// dropping its least recently heard entry, so spraying made-up IDs between
+/// the victim's frames reset the victim's partial evidence (sequence
+/// tracks, parameter-name set) before any threshold was reached. Now a new
+/// entry is on **probation** until it holds evidence: a source heard
+/// [`SOURCE_PROBATION_FRAMES`] times, a parameter set with
+/// [`PARAM_PROBATION_NAMES`] names. A newcomer takes the slot of the least
+/// recently heard entry on probation; failing that, of an entry quiet for
+/// [`SOURCE_QUIET_MS`] / [`PARAM_QUIET_MS`]; failing that, it gets none
+/// (counted in [`Pressure::refused`]; the frame is still analysed, without
+/// that table's state). Report entries are only made for an alarm that got
+/// a token from the new-alarm budget, which bounds how fast a spray can
+/// cycle them.
 pub const MAX_SOURCES: usize = 12;
+/// Frames before a source holds evidence (leaves probation).
+pub const SOURCE_PROBATION_FRAMES: u32 = 2;
+/// A source holding evidence but not heard for this long may make room.
+pub const SOURCE_QUIET_MS: u64 = 30_000;
+/// Names before a parameter set holds evidence.
+pub const PARAM_PROBATION_NAMES: u32 = 8;
+/// A parameter set holding evidence but not heard for this long may make
+/// room.
+pub const PARAM_QUIET_MS: u64 = 60_000;
 /// Parameter-name sets held at once (one per system sending PARAM_VALUE).
 pub const MAX_PARAM_SETS: usize = 2;
 /// Findings followed for the report rate limit.
@@ -339,6 +363,37 @@ impl Finding {
 pub struct Pressure {
     /// New alarms held back by the new-alarm budget.
     pub throttled: u32,
+    /// Table entries (sources, parameter sets) given up for a newcomer.
+    pub evicted: u32,
+    /// ...of which held evidence (quiet for long enough to go).
+    pub evicted_evidence: u32,
+    /// Newcomers that found a table full of entries holding evidence.
+    pub refused: u32,
+    /// Reassembly streams ([`crate::Watch`]): a newcomer found every
+    /// stream holding half a frame; its packet was analysed on its own.
+    pub streams_refused: u32,
+    /// Reassembly streams given up for a newcomer.
+    pub streams_evicted: u32,
+}
+
+/// The entry of a full table that makes room for a newcomer: the least
+/// recently heard one on probation (`held` false), else the least recently
+/// heard one holding evidence that has been quiet for `quiet_ms`, else
+/// none. `(index, it held evidence)`.
+pub(crate) fn victim<T>(
+    v: &[T],
+    now_ms: u64,
+    quiet_ms: u64,
+    held: impl Fn(&T) -> bool,
+    last_ms: impl Fn(&T) -> u64,
+) -> Option<(usize, bool)> {
+    let pick = |want: bool| {
+        (0..v.len())
+            .filter(|&i| held(&v[i]) == want)
+            .filter(|&i| !want || now_ms.saturating_sub(last_ms(&v[i])) >= quiet_ms)
+            .min_by_key(|&i| last_ms(&v[i]))
+    };
+    pick(false).map(|i| (i, false)).or_else(|| pick(true).map(|i| (i, true)))
 }
 
 /// A token bucket.
@@ -467,7 +522,7 @@ struct Report {
     frame_h: u32,
 }
 
-/// The analyser. Fixed memory (about 4 KB); no allocation.
+/// The analyser. Fixed memory (about 6.5 KB); no allocation.
 #[derive(Debug, Clone)]
 pub struct Analyser {
     sources: Vec<Source, MAX_SOURCES>,
@@ -518,7 +573,14 @@ impl Analyser {
                 tokens: NEW_ALARM_BURST_ALL,
                 at_ms: 0,
             },
-            pressure: Pressure { throttled: 0 },
+            pressure: Pressure {
+                throttled: 0,
+                evicted: 0,
+                evicted_evidence: 0,
+                refused: 0,
+                streams_refused: 0,
+                streams_evicted: 0,
+            },
         }
     }
 
@@ -596,14 +658,18 @@ impl Analyser {
                 && s.frames >= HISTORY_FRAMES
                 && now_ms.saturating_sub(s.first_ms) >= HISTORY_MS
         });
-        let s = &mut self.sources[si];
-        s.frames = s.frames.saturating_add(1);
+        if let Some(si) = si {
+            let s = &mut self.sources[si];
+            s.frames = s.frames.saturating_add(1);
+        }
         let mut hits: Vec<Hit, 4> = Vec::new();
         let mut hit = |k: Kind, t: Option<(u8, u8)>, e: heapless::String<32>| {
             let _ = hits.push((k, t, e));
         };
 
-        if link.distinct {
+        if link.distinct
+            && let Some(si) = si
+        {
             self.integrity(si, link, f, now_ms, &mut hit);
         }
         if let Some((sent, want)) = f.odd_length() {
@@ -621,27 +687,42 @@ impl Analyser {
         }
     }
 
-    /// Index of the source for (link, sysid, compid), created if new (the
-    /// least recently heard one makes room).
-    fn source(&mut self, link: u32, sysid: u8, compid: u8, now_ms: u64) -> usize {
+    /// Index of the source for (link, sysid, compid), created if new (see
+    /// [`MAX_SOURCES`] for who makes room); `None` when the table is full
+    /// of sources holding evidence.
+    fn source(&mut self, link: u32, sysid: u8, compid: u8, now_ms: u64) -> Option<usize> {
         if let Some(i) = self
             .sources
             .iter()
             .position(|s| s.link == link && s.sysid == sysid && s.compid == compid)
         {
             self.sources[i].last_ms = now_ms;
-            return i;
+            return Some(i);
         }
         let s = Source::new(link, sysid, compid, now_ms);
-        if self.sources.is_full() {
-            let i = (0..self.sources.len())
-                .min_by_key(|&i| self.sources[i].last_ms)
-                .unwrap_or(0);
-            self.sources[i] = s;
-            i
-        } else {
+        if !self.sources.is_full() {
             let _ = self.sources.push(s);
-            self.sources.len() - 1
+            return Some(self.sources.len() - 1);
+        }
+        let Some((i, held)) = victim(
+            &self.sources,
+            now_ms,
+            SOURCE_QUIET_MS,
+            |s| s.frames >= SOURCE_PROBATION_FRAMES,
+            |s| s.last_ms,
+        ) else {
+            self.pressure.refused = self.pressure.refused.saturating_add(1);
+            return None;
+        };
+        self.count_eviction(held);
+        self.sources[i] = s;
+        Some(i)
+    }
+
+    fn count_eviction(&mut self, held: bool) {
+        self.pressure.evicted = self.pressure.evicted.saturating_add(1);
+        if held {
+            self.pressure.evicted_evidence = self.pressure.evicted_evidence.saturating_add(1);
         }
     }
 
@@ -772,7 +853,7 @@ impl Analyser {
 
     fn payload(
         &mut self,
-        si: usize,
+        si: Option<usize>,
         link: Link,
         f: &Frame<'_>,
         now_ms: u64,
@@ -825,6 +906,13 @@ impl Analyser {
             msg::STATUSTEXT => {
                 use msg::statustext as st;
                 let t = f.text(st::TEXT, st::TEXT_LEN);
+                let Some(si) = si else {
+                    // No source state (a full table): this message alone.
+                    if text::link_markup(t) {
+                        hit(Kind::StatusLink, None, excerpt(t));
+                    }
+                    return;
+                };
                 let s = &mut self.sources[si];
                 let mut joined: Vec<u8, 55> = Vec::new();
                 let _ = joined.extend_from_slice(&s.status_tail);
@@ -929,9 +1017,17 @@ impl Analyser {
                     bits: [0; PARAM_BITS / 8],
                 };
                 if self.params.is_full() {
-                    let k = (0..self.params.len())
-                        .min_by_key(|&k| self.params[k].last_ms)
-                        .unwrap_or(0);
+                    let Some((k, held)) = victim(
+                        &self.params,
+                        now_ms,
+                        PARAM_QUIET_MS,
+                        |p| p.set >= PARAM_PROBATION_NAMES,
+                        |p| p.last_ms,
+                    ) else {
+                        self.pressure.refused = self.pressure.refused.saturating_add(1);
+                        return;
+                    };
+                    self.count_eviction(held);
                     self.params[k] = fresh;
                     k
                 } else {
@@ -979,6 +1075,12 @@ impl Analyser {
         }) {
             Some(i) => i,
             None => {
+                // A new alarm: no entry (and no slot taken) without a
+                // token from the budget.
+                if !self.new_alarm(link.key, now_ms) {
+                    self.pressure.throttled = self.pressure.throttled.saturating_add(1);
+                    return;
+                }
                 let r = Report {
                     kind,
                     link: link.key,
@@ -1028,10 +1130,6 @@ impl Analyser {
             && r.last_report_ms
                 .is_some_and(|t| now_ms.saturating_sub(t) < REPORT_GAP_MS)
         {
-            return;
-        }
-        if r.last_report_ms.is_none() && !self.new_alarm(link.key, now_ms) {
-            self.pressure.throttled = self.pressure.throttled.saturating_add(1);
             return;
         }
         let r = &mut self.reports[i];
