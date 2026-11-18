@@ -154,6 +154,91 @@ pub mod flag {
     pub const UPDATED_GNSS_VRATE: u32 = 29;
 }
 
+/// The `NICNAC` field: six integrity and accuracy values in 16 bits, as the
+/// ADSBee packs them (`firmware/common/comms/csbee/csbee_utils.hh`, the
+/// "Build up NICNAC bitfield" block, same for `#A:` and `#U:`):
+///
+/// | bits  | value | meaning |
+/// |-------|-------|---------|
+/// | 15-14 | SIL   | source integrity level, 0-3 |
+/// | 13-12 | GVA   | geometric vertical accuracy, 0-3 |
+/// | 11-8  | NACp  | navigation accuracy, position, 0-11 (DO-260B 2.2.3.2.7.2.7) |
+/// | 7-5   | NACv  | navigation accuracy, velocity, 0-4 |
+/// | 4     | NICbaro | barometric altitude cross-checked |
+/// | 3-0   | NIC   | navigation integrity category, 0-11 |
+///
+/// NIC is the containment radius the position is guaranteed within (11:
+/// under 7.5 m, 8: under 0.1 NM, 7: under 0.2 NM, 6: under 0.6 NM, 0:
+/// unknown). On 1090 MHz it is not sent as a number: the ADSBee works it
+/// out from the airborne position type code and the NIC supplements A/B/C
+/// (DO-260B Table 2-14), as `modes` does ([`nicnac::nic_of_type_code`]).
+/// On UAT the state vector carries it directly. NACp is the 95 % position
+/// error bound (11: under 3 m, 9: under 30 m, 8: under 0.05 NM = 93 m, 7:
+/// under 0.1 NM, 0: 10 NM or more, or unknown), from operational status /
+/// target state messages (1090) or the mode status element (UAT).
+pub mod nicnac {
+    pub const fn sil(v: u16) -> u8 {
+        (v >> 14) as u8 & 0b11
+    }
+    pub const fn gva(v: u16) -> u8 {
+        (v >> 12) as u8 & 0b11
+    }
+    pub const fn nacp(v: u16) -> u8 {
+        (v >> 8) as u8 & 0b1111
+    }
+    pub const fn nacv(v: u16) -> u8 {
+        (v >> 5) as u8 & 0b111
+    }
+    pub const fn nic_baro(v: u16) -> bool {
+        v & (1 << 4) != 0
+    }
+    pub const fn nic(v: u16) -> u8 {
+        v as u8 & 0b1111
+    }
+
+    /// Pack the six values the way the ADSBee prints them (each masked to
+    /// its width).
+    pub const fn pack(sil: u8, gva: u8, nacp: u8, nacv: u8, nic_baro: bool, nic: u8) -> u16 {
+        ((sil as u16 & 0b11) << 14)
+            | ((gva as u16 & 0b11) << 12)
+            | ((nacp as u16 & 0b1111) << 8)
+            | ((nacv as u16 & 0b111) << 5)
+            | ((nic_baro as u16) << 4)
+            | (nic as u16 & 0b1111)
+    }
+
+    /// NIC of a 1090 MHz airborne position message (DO-260B Table 2-14;
+    /// DO-260A for version 1, where NIC supplement A alone selects the
+    /// finer row): `tc` the type code (9-18, 20-22), `nic_a` from the
+    /// latest operational status (false if none heard), `nic_b` the
+    /// position message's own ME bit 8 (version 2; in versions 0-1 it is
+    /// the single-antenna flag and is ignored). `None` for a type code
+    /// that is not an airborne position.
+    pub const fn nic_of_type_code(tc: u8, version: u8, nic_a: bool, nic_b: bool) -> Option<u8> {
+        // Version 1 has only NIC_A; version 0 has neither (the coarser row).
+        let (a, b) = match version {
+            0 => (false, false),
+            1 => (nic_a, nic_a),
+            _ => (nic_a, nic_b),
+        };
+        Some(match tc {
+            9 | 20 => 11,
+            10 | 21 => 10,
+            11 if a && b => 9,
+            11 => 8,
+            12 => 7,
+            13 => 6,
+            14 => 5,
+            15 => 4,
+            16 if a && b => 3,
+            16 => 2,
+            17 => 1,
+            18 | 22 => 0,
+            _ => return None,
+        })
+    }
+}
+
 /// A callsign (flight ID), up to 8 characters. Empty when the aircraft has
 /// not sent one (the ADSBee prints `?`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -328,7 +413,9 @@ pub struct Aircraft {
     /// UAT emergency/priority status (0 = none). Always 0 for Mode S. For
     /// OGN, 1 when the packet's emergency bit is set.
     pub uat_emergency: u8,
-    /// Integrity and accuracy (SIL, GVA, NACp, NACv, NICbaro, NIC) packed.
+    /// Integrity and accuracy (SIL, GVA, NACp, NACv, NICbaro, NIC) packed;
+    /// see [`nicnac`] for the bit layout and [`Aircraft::nic`] /
+    /// [`Aircraft::nacp`] to read it.
     pub nicnac: u16,
     /// System design assurance, size and GNSS antenna offset packed.
     pub acdims: u32,
@@ -422,6 +509,21 @@ impl Aircraft {
 
     pub fn airborne(&self) -> bool {
         self.has(flag::AIRBORNE)
+    }
+
+    /// Navigation Integrity Category, 0-11 (the `NICNAC` field's low four
+    /// bits, [`nicnac`]). 0 means "containment radius unknown": what an
+    /// aircraft says when it cannot vouch for its position, and also what
+    /// is printed before any position message was heard.
+    pub fn nic(&self) -> u8 {
+        nicnac::nic(self.nicnac)
+    }
+
+    /// Navigation Accuracy Category for position, 0-11 ([`nicnac`]). 0
+    /// means "10 NM or worse, or unknown", and is also printed before any
+    /// message carrying it (operational status, target state) was heard.
+    pub fn nacp(&self) -> u8 {
+        nicnac::nacp(self.nicnac)
     }
 
     /// Mode S only: a military extended squitter was heard.

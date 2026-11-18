@@ -127,6 +127,16 @@ struct Half {
     ms: u64,
 }
 
+/// The integrity figures an operational status (TC 31) carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpBits {
+    nic_a: bool,
+    nacp: u8,
+    sil: u8,
+    gva: u8,
+    nic_baro: bool,
+}
+
 /// Everything known about one aircraft.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plane {
@@ -162,6 +172,14 @@ pub struct Plane {
     air_data: bool,
     vrate_baro: Option<At<i32>>,
     vrate_gnss: Option<At<i32>>,
+    /// Latest airborne position message's type code and NIC supplement B,
+    /// for the NIC.
+    pos_tc: Option<At<(u8, bool)>>,
+    /// Latest operational status: NIC supplement A, NACp, SIL, GVA,
+    /// NIC baro.
+    op: Option<At<OpBits>>,
+    /// NACv of the latest airborne velocity.
+    nacv: Option<At<u8>>,
     version: u8,
     signal_dbm: i16,
     /// Frames this reporting interval: 56-bit and 112-bit.
@@ -198,6 +216,9 @@ impl Plane {
             air_data: false,
             vrate_baro: None,
             vrate_gnss: None,
+            pos_tc: None,
+            op: None,
+            nacv: None,
             version: 0,
             signal_dbm: 0,
             short_n: 0,
@@ -235,6 +256,25 @@ impl Plane {
 
     pub fn ground_speed_kt(&self) -> Option<f32> {
         (!self.air_data).then_some(self.speed.map(|s| s.v)).flatten()
+    }
+
+    /// The `NICNAC` field the ADSBee would print (`adsb::nicnac`). NIC is
+    /// worked out from the latest airborne position's type code (0 when
+    /// none in [`VALID_MS`]); NACp and the rest come from the latest
+    /// operational status (0 when none in [`VALID_MS`]), as the ADSBee
+    /// prints 0 for values it has not received.
+    pub fn nicnac(&self, now: u64) -> u16 {
+        let op = fresh(self.op, now);
+        let nic = fresh(self.pos_tc, now)
+            .and_then(|(tc, nic_b)| {
+                adsb::nicnac::nic_of_type_code(tc, self.version, op.is_some_and(|o| o.nic_a), nic_b)
+            })
+            .unwrap_or(0);
+        let nacv = fresh(self.nacv, now).unwrap_or(0);
+        match op {
+            Some(o) => adsb::nicnac::pack(o.sil, o.gva, o.nacp, nacv, o.nic_baro, nic),
+            None => adsb::nicnac::pack(0, 0, 0, nacv, false, nic),
+        }
     }
 
     fn hint(&self) -> Hint {
@@ -288,7 +328,7 @@ impl Plane {
             baro_vrate_fpm: vb.unwrap_or(0),
             gnss_vrate_fpm: vg.unwrap_or(0),
             uat_emergency: 0,
-            nicnac: 0,
+            nicnac: self.nicnac(now),
             acdims: 0,
             version: self.version,
             signal_dbm: self.signal_dbm,
@@ -672,8 +712,9 @@ fn extended(p: &mut Plane, es: &Es, now: u64, reference: Option<(f64, f64)>, con
             set(&mut p.callsign, callsign, now);
             p.category = es::category_number(tc, category);
         }
-        Es::AirbornePosition { altitude, gnss, cpr, .. } => {
+        Es::AirbornePosition { tc, altitude, gnss, nic_b, cpr, .. } => {
             set(&mut p.airborne, true, now);
+            set(&mut p.pos_tc, (tc, nic_b), now);
             if let Some(f) = altitude.feet() {
                 if gnss {
                     set(&mut p.gnss_alt, f, now);
@@ -699,6 +740,7 @@ fn extended(p: &mut Plane, es: &Es, now: u64, reference: Option<(f64, f64)>, con
             position(p, cpr, CprKind::Surface, now, reference, config, st);
         }
         Es::Velocity(v) => {
+            set(&mut p.nacv, v.nacv, now);
             if let (Some(gs), Some(trk)) = (v.ground_speed_kt, v.track_deg) {
                 set(&mut p.speed, gs, now);
                 set(&mut p.track, trk, now);
@@ -742,6 +784,10 @@ fn extended(p: &mut Plane, es: &Es, now: u64, reference: Option<(f64, f64)>, con
         }
         Es::OperationalStatus(o) => {
             p.version = o.version;
+            // The surface format has no GVA; NIC_A, NACp and SIL are common.
+            let gva = if o.subtype == 0 { o.gva } else { fresh(p.op, now).map_or(0, |b| b.gva) };
+            let bits = OpBits { nic_a: o.nic_a, nacp: o.nacp, sil: o.sil, gva, nic_baro: o.subtype == 0 && o.nic_baro };
+            set(&mut p.op, bits, now);
         }
         Es::TcasRa | Es::TargetState | Es::Other { .. } => {}
     }

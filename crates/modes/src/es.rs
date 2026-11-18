@@ -63,6 +63,10 @@ pub enum Es {
         altitude: Altitude,
         /// True for TC 20-22: `altitude` is GNSS height (HAE), not pressure.
         gnss: bool,
+        /// ME bit 8: NIC supplement B in version 2 (the single-antenna
+        /// flag in versions 0-1). With `tc` it gives the NIC
+        /// (`adsb::nicnac::nic_of_type_code`).
+        nic_b: bool,
         cpr: Cpr,
     },
     /// TC 19.
@@ -169,7 +173,8 @@ pub fn decode(m: &[u8; 7]) -> Es {
             // TC 20-22 carry GNSS height in the same 12-bit, 25 ft layout
             // (as dump1090-fa / readsb read it; see docs in lib.rs).
             let altitude = alt::ac12(field);
-            Es::AirbornePosition { tc, ss, altitude, gnss, cpr: cpr_at(m) }
+            let nic_b = me(m, 8, 1) == 1;
+            Es::AirbornePosition { tc, ss, altitude, gnss, nic_b, cpr: cpr_at(m) }
         }
         19 => match velocity(m, st) {
             Some(v) => Es::Velocity(v),

@@ -462,3 +462,35 @@ fn ogn_and_flarm_lines_are_our_own_extension_with_the_uat_layout() {
     assert_eq!(Source::Ogn.label(), "OGN");
     assert_eq!(Source::Flarm.label(), "FLARM");
 }
+
+// ------------------------------------------------------------ NICNAC ----
+
+#[test]
+fn nicnac_layout_matches_the_adsbee_packing() {
+    // 0xBDBB from the ADSBee host test: SIL 2, GVA 3, NACp 13, NACv 5,
+    // NICbaro 1, NIC 11.
+    let v = 0xBDBB;
+    assert_eq!(
+        (nicnac::sil(v), nicnac::gva(v), nicnac::nacp(v), nicnac::nacv(v), nicnac::nic_baro(v), nicnac::nic(v)),
+        (2, 3, 13, 5, true, 11)
+    );
+    assert_eq!(nicnac::pack(2, 3, 13, 5, true, 11), v);
+    let a = aircraft(MODE_S);
+    assert_eq!((a.nic(), a.nacp()), (11, 13));
+}
+
+#[test]
+fn nic_from_type_code_and_supplements() {
+    use nicnac::nic_of_type_code as nic;
+    assert_eq!(nic(9, 2, false, false), Some(11));
+    assert_eq!(nic(11, 2, true, true), Some(9));
+    assert_eq!(nic(11, 2, true, false), Some(8));
+    assert_eq!(nic(11, 1, true, false), Some(9), "version 1: NIC_A alone");
+    assert_eq!(nic(11, 0, true, true), Some(8), "version 0: no supplements");
+    assert_eq!(nic(12, 2, false, false), Some(7));
+    assert_eq!(nic(16, 2, true, true), Some(3));
+    assert_eq!(nic(18, 2, false, false), Some(0));
+    assert_eq!(nic(22, 2, false, false), Some(0));
+    assert_eq!(nic(19, 2, false, false), None);
+    assert_eq!(nic(5, 2, false, false), None);
+}

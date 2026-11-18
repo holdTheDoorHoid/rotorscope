@@ -663,3 +663,24 @@ fn decoded_record_survives_csbee_round_trip() {
         r => panic!("{r:?}"),
     }
 }
+
+#[test]
+fn nicnac_packs_state_vector_nic_and_mode_status_nacp() {
+    // Long frame with mode status: NIC 8 from the state vector, NACp 9
+    // and NACv 2 from the mode status (byte 25).
+    let mut d = [0u8; 34];
+    put_sv(&mut d, 1, &philly());
+    put_ms(&mut d, 7, "N123AB", true, 0, 2);
+    put(&mut d, 200, 4, 9);
+    put(&mut d, 204, 3, 2);
+    let mut f = encode(rs::LONG, &d);
+    f.resize(LONG_BYTES, 0);
+    let a = decode(&mut f).unwrap().aircraft();
+    assert_eq!((a.nic(), a.nacp(), adsb::nicnac::nacv(a.nicnac)), (8, 9, 2));
+    // Basic frame: NIC only, NACp 0 ("not in this record").
+    let mut d = [0u8; 18];
+    put_sv(&mut d, 0, &philly());
+    let mut f = encode(rs::BASIC, &d);
+    let a = decode(&mut f).unwrap().aircraft();
+    assert_eq!((a.nic(), a.nacp()), (8, 0));
+}
