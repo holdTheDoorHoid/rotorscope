@@ -115,8 +115,9 @@ turbo decoder gets them.
 ## The channel follower
 
 A C5 has one tuner. Parked on one frequency it hears an O4 drone on about one publication in
-seven (one every 4-5 s). Scanning the nine-channel plan with 700 ms dwells is no better on
-average. The follower uses the schedule:
+seven (one every 4-5 s). Scanning the 13-hop DroneID plan with 700 ms dwells (seven of the hops
+are schedule channels) is worse: about one publication every 8.3 s (7.2 a minute, host model
+`crates/rawcap/tests/follow_forge.rs`). The follower uses the schedule:
 
 - The first valid O4 packet of a session starts 256 counter hypotheses and keeps the ~37 that
   put it on the channel it was heard on.
@@ -126,9 +127,23 @@ average. The follower uses the schedule:
   the counter wrap; a later packet, or a missed window the node sat through completely, settles
   it.
 - Before each predicted publication (window ±25 ms, growing with distance) the DroneID job
-  retunes there, 30 ms early to allow for the DC calibration; between windows it keeps scanning
-  its plan, so other drones and other frequencies (2459.5, 2399.5 MHz) are still covered.
-- Up to four sessions are followed at once; if two windows overlap the earlier one wins.
+  retunes there, 50 ms early to allow for the DC calibration (~23 ms on 5 GHz, ~5 ms on 2.4 GHz) and
+  the capture loop's own lateness (30 ms until 2026-11-18: on the bench most silent windows began
+  before the receiver had settled); between windows it keeps scanning
+  its plan, so other drones and other frequencies (2459.5, 2399.5 MHz) are still covered. A plan
+  dwell cut short for a window ends 50 ms before the window counted from *before* its own retune
+  (fixed 2026-11-18: counted from after it, the visit's retune ended ~8 ms inside the window, so
+  no visit was ever "settled", silent windows never counted as misses, and at the counter wrap,
+  where only a miss prunes the wrong hypotheses, the session was lost: one followed drone in ten
+  within three minutes in the host model; the 2026-11-18 bench run had 90 silent visits and 2
+  counted misses).
+- A visit that hears nothing counts as a miss only if the receiver was settled for the whole
+  window and no decode of something else held it (on a busy 2.4 GHz channel most visits have one).
+  A visit that proves nothing is not a miss, but where the hypotheses disagree (the counter wrap)
+  the next visit tries the second-best channel, so the wrap is still resolved by hearing the drone
+  (bench 2026-11-18 before that: 21 of 26 silent visits interrupted, the drone lost at its wrap).
+- Up to four sessions are followed at once; if two windows overlap the earlier one wins, except
+  that a session 2 s without a packet goes first (so the share cannot starve it out).
 - **Fallback:** four silent windows in a row, or 6 s without a packet, drop a followed session
   and the node is back to plain scanning. Plaintext (OcuSync 2) bursts never feed the follower,
   since those drones use a different hopping pattern.
@@ -136,33 +151,92 @@ average. The follower uses the schedule:
 ### The follower under forged packets (2026-11-18)
 
 The key ID is in clear and the CRCs are public, so anyone with a transmitter can send valid-looking
-O4 bursts with any key ID, on any channel, at any time. Before this change one such packet made the
-node visit the predicted channel from the next publication on, four forged key IDs kept it on
+O4 bursts with any key ID, on any channel, at any time. Before the first change one such packet made
+the node visit the predicted channel from the next publication on, four forged key IDs kept it on
 attacker-chosen channels, a fifth evicted the real drone's session, and one packet with the real
 drone's key ID on another channel restarted (wiped) its hypotheses. Now:
 
-- **Confirmation.** A new key ID starts a *tentative* session that is never visited. It is
-  followed once it holds three packets that agree in channel and in time (each inside the window
-  the earlier ones predict, ±25 ms growing to ±75 ms). Until then only the plan's scanning feeds
-  it, so a real drone is followed after roughly 15-30 s instead of after its first packet.
-  Tentative sessions have four slots of their own; a tentative session is restarted by a packet
-  that fits no hypothesis (the old fallback) and dropped after 30 s without one.
-- **No eviction, no restart.** A new key ID only replaces a tentative session holding a single
-  packet; otherwise it is refused (counted). A packet that contradicts a followed session (a
-  channel no hypothesis predicts, or outside the predicted window) is ignored and counted; the
-  session keeps its hypotheses and timing.
+- **Confirmation.** A key ID that is not followed is a *candidate*: a 16-byte entry (key ID, time
+  and channel of its last packet, channel and gap of the one before) in a table of 128. Its
+  hypotheses are rebuilt from those two packets when needed. It is never visited. It is followed
+  once it holds three packets that agree in channel and in time (each inside the window the earlier
+  ones predict, ±25 ms growing to ±75 ms) and a followed slot is free. Until then only the plan's
+  scanning feeds it: alone, a drone is followed within 60 s in 95 % of runs of the host model (90 %
+  by 53 s). A candidate is restarted by a packet that fits no hypothesis (the old fallback) and
+  dropped after 30 s without one.
+- **A flood of new key IDs displaces nothing that matters.** With the table full, a new key ID takes
+  the entry whose last packet is oldest. Every new key ID costs the node a full decode of a valid
+  burst, and the decode budget lets at most 87 of those through in 30 s (at the fastest decode
+  measured, 144 ms; 72 at 173 ms), fewer than the 128 entries: a flood can only push out
+  candidates that would have expired anyway, and has nothing to steer (rate, timing and key IDs all
+  make no difference). `crates/rawcap/tests/follow_forge.rs` checks the arithmetic against the real
+  budget. The first version (2026-11-18 morning) had four slots instead: a new forged key ID every
+  0.7 s replaced the drone's first packet within ~3 s, long before the plan heard it again, and on
+  the bench the drone was never followed. Static memory: 128 x 16 bytes of candidates plus four
+  ~70-byte sessions, about 2.3 KiB in all (inside node-sdr's boxed `Radio`, no heap of its own).
+- **No eviction, no restart.** A packet that contradicts a followed session (a channel no hypothesis
+  predicts, or outside the predicted window) is ignored and counted; the session keeps its
+  hypotheses and timing. A confirmed candidate never displaces a followed session.
 - **Time share.** Each visit is paid from a credit that earns half of the time spent on the plan
   and holds at most 1 s; a visit it cannot pay for is declined (the plan dwell is not cut short
   for it either). So the follower takes at most about half the receiver, however many sessions.
+  A followed session 2 s without a packet goes before the others, so a drone followed before
+  forged sessions arrive keeps its visits (host model: 99.5 % still followed after four forged
+  sessions, the flood and wrong-time packets arrive; 96.4 % without that rule).
 
-Still possible: a forger who follows the published schedule creates followed sessions and spends
-the follower's half on them (the share is first come, so a real session's visits are declined in
-proportion); one who sends packets with a real drone's key ID while that session is still
-tentative keeps restarting it, so it is never followed (it is still detected by the plan); and
-consistent packets with a real key ID can narrow a followed session's hypotheses to a wrong one
-near the counter wrap, after which its own misses drop it. Plan scanning, and so detection, is
-not affected by any of this. Host tests: `crates/droneid/src/follow.rs`; bench scenario: BENCH.md
-"node-sdr under hostile signals" step 4.
+**What the forger still gets.** Numbers from the host model (1000 runs of 3 minutes each, the bench
+scenario's streams, no decode cost unless stated):
+
+| Case | Drone followed within 60 s | Followed at the end |
+|---|---|---|
+| Drone alone | 95 % | 100 % |
+| New forged key ID every 0.7 s | 95 % | 100 % |
+| Forgers arrive once the drone is followed | (95 %) | 99.5 % |
+| Three forged sessions + the flood | 77 % | 84 % |
+| Four forged sessions + the flood from the start | 71 % | 76 % |
+| The same with the bench's phases (a forged session in step with the drone) | 45 % | 45 % |
+
+- **All four followed slots taken first.** Schedule-perfect forged sessions are followed like a
+  drone. If four of them are confirmed before the drone, the drone is not followed (in the bench's
+  fixed phases, 50 % of runs; with random phases 11 %): it stays a candidate and is followed as
+  soon as a slot frees up, which a forger who keeps transmitting never allows. Any rule that let a
+  confirmed candidate take a followed slot could be used by a forger to take the drone's, so there
+  is none. What the operator loses is the gain of following (a position every 0.64 s); the drone is
+  still heard by the plan, see the next point.
+- **The plan hears less, and not evenly.** Scanning is *not* untouched, as this page used to say.
+  The follower's visits take their share of the receiver from the plan, so the plan hears a drone
+  that is not followed in proportion: 7.2 a minute with the follower idle, 6.3 with one followed
+  drone, 4.1-4.2 with three or four forged sessions followed (the follower then holds 41-45 % of the
+  receiver). Worse, the visits come at the forged sessions' publication moments: a drone that
+  publishes at the same moments as a followed forged session is heard by the plan only 1.9-2.3
+  times a minute, under a third of the idle rate, because the receiver is away on the forged session's
+  channel each time the drone transmits. A forger who can hear the drone can choose that phase.
+  With the plan's rate down, three plan hits take longer, which is all that lowers the "within
+  60 s" figures above; nothing the forger sends displaces the drone's candidate.
+- **Decoding costs time too.** On the air every forged packet the node hears is a full decode
+  (144-173 ms) during which it hears nothing. With the decode cost modelled: a new forged key ID
+  every 0.7 s, drone followed within 60 s in 83 % of runs (90 % by 71 s); one every 360 ms (the
+  most the decode budget passes, steady), 78 % (90 % by 82 s); three forged sessions with the flood,
+  54-60 %. A forger who keeps the decode budget spent (a valid burst every few tens of ms) starves
+  the drone's own decodes: 0.7 % followed. And once the drone is followed, forged packets in its
+  windows and an exhausted budget can still make it miss its own packets: with all the forgers
+  arriving after it is followed and every packet decoded, it is still followed after 4 minutes in
+  55 % of runs. These are the decode budget's documented trade-off (first come), not the
+  follower's rules.
+- **Its key ID.** One who sends packets with a real drone's key ID while it is a candidate keeps
+  restarting it, so it is never followed (it is still detected by the plan); consistent packets
+  with a real key ID can narrow a followed session's hypotheses to a wrong one near the counter
+  wrap, after which its own misses drop it.
+- **What the hub sees.** Each forged key ID the node decodes is a DroneID sighting like any other:
+  forged sessions show as drones, new key IDs as new unconfirmed tracks. The hub's flood alarm
+  (`crates/tracker/src/probation.rs`, `IdFlood`) needs 20 new identities a second; one DroneID node
+  decodes at most ~2.8 valid bursts a second, so this flood does **not** raise it, and nothing else
+  flags it (valid bursts never count as jamming pressure).
+
+Host tests: `crates/droneid/src/follow.rs`; the node model and the table above:
+`crates/rawcap/tests/follow_forge.rs` (`cargo test --release -p rawcap --test follow_forge --
+--ignored --nocapture`); bench scenario: BENCH.md "node-sdr under hostile signals" step 4
+(`hil forge <secs> start|flood|late`).
 
 Gain, if the schedule holds: once a session is confirmed, nearly every publication instead of
 one in seven, i.e. a position update every 0.64 s instead of every ~4.5 s. The node's stats line
