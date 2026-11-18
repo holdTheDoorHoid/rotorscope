@@ -25,8 +25,8 @@
 //! control content on      # decode sticks, telemetry, positions; keep raw packets
 //! control content off
 //!
-//! # Sound clips while a drone is heard (on unless a line says off):
-//! audio clips off
+//! # Sound clips while a drone is heard (off unless a line says on):
+//! audio clips on
 //! ```
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
@@ -82,8 +82,9 @@ pub enum SiteLine {
     UnmuteAll,
     /// `control ids on|off`, `control content on|off` (protocol 12 opt-ins).
     Control { what: ControlSetting, on: bool },
-    /// `audio clips on|off`: whether the hub saves a sound clip while it
-    /// believes it hears a drone (PLAN.md Phase 15). On when never said.
+    /// `audio clips on|off`: whether the hub keeps a tape of raw sound and
+    /// saves a clip when a sound contact alerts (PLAN.md Phase 15). Off
+    /// when never said (owner decision 2026-11-18).
     AudioClips(bool),
 }
 
@@ -239,7 +240,7 @@ pub struct SiteState {
     pub control_ids: Option<bool>,
     pub control_content: Option<bool>,
     /// `audio clips on|off` as the file last set it (`None`: never
-    /// mentioned, which means on).
+    /// mentioned, which means off: [`SiteState::audio_clips_on`]).
     pub audio_clips: Option<bool>,
     pub used: u32,
     pub ignored: u32,
@@ -252,6 +253,14 @@ impl SiteState {
             self.nodes.remove(0);
         }
         let _ = self.nodes.push((mac, lat, lon));
+    }
+
+    /// Whether audio clips are on: only when a line said so. Off by
+    /// default (owner decision 2026-11-18: the owner turns them on per
+    /// site; recording a conversation needs everyone's consent in
+    /// Pennsylvania).
+    pub fn audio_clips_on(&self) -> bool {
+        self.audio_clips.unwrap_or(false)
     }
 
     /// Apply one line. `AllNodesHere` needs a live position and is ignored
@@ -405,10 +414,24 @@ mod tests {
         assert_eq!(j.freq, 24_370);
         assert_eq!(parse_line("control ids on"), Ok(SiteLine::Control { what: ControlSetting::Ids, on: true }));
         assert_eq!(parse_line("audio clips off"), Ok(SiteLine::AudioClips(false)));
-        assert_eq!(parse_line("Audio Clips ON # default"), Ok(SiteLine::AudioClips(true)));
+        assert_eq!(parse_line("Audio Clips ON # not the default"), Ok(SiteLine::AudioClips(true)));
         assert!(parse_line("audio on").is_err());
         assert!(parse_line("audio clips maybe").is_err());
         assert_eq!(parse_line("CONTROL Content OFF # not today"), Ok(SiteLine::Control { what: ControlSetting::Content, on: false }));
+    }
+
+    /// Audio clips are off unless a line turns them on; the last line wins.
+    #[test]
+    fn audio_clips_are_off_unless_a_line_says_on() {
+        let mut st = SiteState::default();
+        assert!(!st.audio_clips_on(), "no line: off");
+        let mut lines = Lines::default();
+        read_into(&mut st, &mut lines, b"node all here\ncontrol ids on\n", |_, e| panic!("{e}"));
+        assert!(!st.audio_clips_on(), "other lines leave it off");
+        st.apply(parse_line("audio clips on").unwrap());
+        assert!(st.audio_clips_on());
+        st.apply(parse_line("audio clips off").unwrap());
+        assert!(!st.audio_clips_on());
     }
 
     #[test]

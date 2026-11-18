@@ -32,6 +32,8 @@ use crate::signals::rf_alerts;
 use crate::text::FormatError;
 use crate::{Context, Tracker};
 
+pub mod clip;
+
 /// Contacts held.
 pub const MAX_CONTACTS: usize = 16;
 /// Silence this long ends a contact; hearing again starts a new one.
@@ -123,6 +125,15 @@ impl SoundContact {
 
     pub fn duration_ms(&self) -> u64 {
         self.last_seen_ms.saturating_sub(self.first_seen_ms)
+    }
+
+    /// Whether this contact is at the point that raises an alert: it alerts
+    /// as a drone-like sound (not explained by a tracked aircraft), has
+    /// lasted [`ANNOUNCE_AFTER_MS`] and is still being heard. The alert
+    /// ([`Tracker::take_new_sound`]) and the audio clip
+    /// ([`clip::may_start`]) both use exactly this.
+    pub fn alert_due(&self, now_ms: u64) -> bool {
+        self.kind.alerts() && self.active(now_ms) && self.duration_ms() >= ANNOUNCE_AFTER_MS
     }
 
     /// "Large propellers" or "Small propellers".
@@ -275,12 +286,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// lasted [`ANNOUNCE_AFTER_MS`], is still being heard, and is not
     /// explained by a tracked aircraft.
     pub fn take_new_sound(&mut self, now_ms: u64) -> Option<SoundId> {
-        let c = self.sounds.contacts.iter_mut().find(|c| {
-            !c.announced
-                && c.kind.alerts()
-                && c.active(now_ms)
-                && c.duration_ms() >= ANNOUNCE_AFTER_MS
-        })?;
+        let c = self.sounds.contacts.iter_mut().find(|c| !c.announced && c.alert_due(now_ms))?;
         c.announced = true;
         Some(c.id)
     }
