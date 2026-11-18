@@ -151,6 +151,9 @@ Every number is a constant in `crates/mavwatch/src/analyse.rs`, documented there
 - **Hub**: the threat table keeps one alarm per sender and kind (`crates/tracker/src/
   threats.rs`); a mute silences that sender. No new hub code runs per packet, so the P4 stack is
   unchanged.
+- **Builds (release, 2026-11-17)**: hub-p4 stack region 71,984 bytes before and after (.bss
+  unchanged). node-lr: RAM +8.5 KB (the `Watch` sits in the control scan's static state; stack
+  region 201,464 -> 192,960 bytes), code +17 KB.
 
 ### Sources
 
