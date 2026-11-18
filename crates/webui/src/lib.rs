@@ -258,4 +258,51 @@ mod tests {
         assert!(src.contains(".trk.unc{"));
         assert!(src.contains("${u ? ' unc' : ''}"));
     }
+
+    /// The `/api/state` reference for WP-10's per-track `claims` object
+    /// (crates/tracker/README.md): missing on older hubs, so only an
+    /// explicit `claims.disputed` counts; disputed rows are tagged (a
+    /// class, no style attribute); the list says once that nothing is
+    /// verified; and the claim section puts only esc()'d strings and
+    /// Number()s from the claim into the page (its source and what is
+    /// disputed are strings from the hub).
+    #[test]
+    fn page_follows_the_state_reference_for_claims() {
+        let src = page();
+        assert!(src.contains("const isDisp = t => !!(t.claims && t.claims.disputed);"));
+        assert!(src.contains("(isDisp(t) ? '<span class=\"tag disp\">DISPUTED</span>' : '')"));
+        assert!(src.contains(".tag.disp{"));
+        assert!(src.contains("IDs and positions are what drones broadcast; none is verified."));
+        assert!(src.contains("o.push(...claimSection(t));"));
+        assert!(src.contains("decrypted, not authenticated"));
+        assert!(src.contains("message present, not checked"));
+        let f = &src[src.find("function claimSection(t)").unwrap()..];
+        let f = &f[..f.find("\n}\n").unwrap()];
+        // Every interpolation: esc(), a Number(), a formatter of one, or
+        // the notes list (itself built from Number()s and fixed text).
+        let mut rest = f;
+        let mut n = 0;
+        while let Some(i) = rest.find("${") {
+            let e = &rest[i + 2..];
+            let end = e.find('}').unwrap();
+            let expr = &e[..end];
+            assert!(
+                expr.starts_with("esc(")
+                    || expr.starts_with("Number(")
+                    || expr.starts_with("copyBtn(coord(Number(")
+                    || expr == "notes.length ? '; ' + notes.join('; ') : ''",
+                "claim section interpolates {expr:?}: esc() or numbers only"
+            );
+            rest = &e[end..];
+            n += 1;
+        }
+        assert!(n >= 4, "{n}");
+        // The hub's strings appear only inside esc().
+        for (field, wrapped) in [("r.src", "esc(SRC[r.src] || r.src)"), ("c.what", "esc((c.what || [])")] {
+            assert_eq!(f.matches(field).count(), f.matches(wrapped).count() * if field == "r.src" { 2 } else { 1 }, "{field}");
+        }
+        // Coordinates and distances go through Number().
+        assert!(f.contains("coordHTML(Number(r.lat), Number(r.lon))"));
+        assert!(f.contains("fmtDist(Number(r.apart_m))"));
+    }
 }

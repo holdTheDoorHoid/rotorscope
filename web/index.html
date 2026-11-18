@@ -126,6 +126,8 @@ a.btn{color:var(--fg);display:inline-flex;align-items:center;text-decoration:non
 .trk .id{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
 .tag{flex:none;font-size:13px;font-weight:800;padding:1px 6px;border-radius:5px;border:2px solid currentColor}
 .tag.new{background:var(--hi-bg);color:var(--hi-fg);border-color:var(--hi-bg)}
+/* Two transmitters claim one ID (hub `claims`): marked, not alarmed. */
+.tag.disp{border-style:dashed}
 .num{flex:none;font-weight:800;color:var(--drone)}
 .trk .r2{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center;margin-top:4px}
 .big{font-size:26px;font-weight:800}
@@ -373,7 +375,8 @@ function radiosOf(t) {
   if (d && d.wifi) r.push('DJI Wi-Fi');
   return r;
 }
-const SRC = {RemoteId: 'Remote ID', DroneId: 'DJI DroneID', DjiWifi: 'DJI Wi-Fi'};
+const SRC = {RemoteId: 'Remote ID', DroneId: 'DJI DroneID', DjiWifi: 'DJI Wi-Fi', ControlLink: 'control link',
+  DroneIdO4: 'DJI O4, decrypted, not authenticated'};
 function rank(type) { const i = ID_RANK.indexOf(type); return i < 0 ? 9 : i; }
 
 const UA = {HelicopterOrMultirotor: 'Multirotor', Aeroplane: 'Fixed-wing', HybridLift: 'VTOL',
@@ -418,6 +421,9 @@ const isStale = t => t.state === 'stale';
 // alerted, listed after confirmed drones. Hubs older than the field send no
 // `confirmed`, and every track counts as confirmed.
 const isUnc = t => t.confirmed === false;
+// Two transmitters claim this ID (hub `claims`, WP-10). Older hubs send no
+// `claims`: never disputed.
+const isDisp = t => !!(t.claims && t.claims.disputed);
 const dist = t => t.own ? t.own.dist_m : null;
 
 // Active first; confirmed before unconfirmed (a forged drone can claim to be
@@ -733,6 +739,8 @@ function renderList() {
     (stales ? ` &middot; ${stales} not heard recently` : '') +
     (unc ? ` &middot; <span class="mut">${unc} unconfirmed</span>` : '') +
     (st && !st.own ? ` &middot; <span class="mut">sorted by last heard (no position)</span>` : '') + `</div>`];
+  // Once, not on every row: everything below is what transmitters claim.
+  if (all.length) o.push(`<div class="mut sm">IDs and positions are what drones broadcast; none is verified.</div>`);
   if (!all.length) {
     const ears = st ? (st.nodes || []).filter(n => n.alive).map(n => role(n.role)[1]).join(', ') : '';
     o.push(`<div class="empty mut">No drones heard yet.${ears ? '<br>Listening on: ' + esc(ears) + '.' : ''}</div>`);
@@ -742,7 +750,8 @@ function renderList() {
     const stale = isStale(t), u = isUnc(t);
     const fl = flagList.find(f => f.who === idOf(t) && f.level >= 1);
     const tags = (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') +
-      (fl ? `<span class="tag">${['', 'WATCH', 'WARNING', 'ALERT'][Math.min(fl.level, 3)]}</span>` : '');
+      (fl ? `<span class="tag">${['', 'WATCH', 'WARNING', 'ALERT'][Math.min(fl.level, 3)]}</span>` : '') +
+      (isDisp(t) ? '<span class="tag disp">DISPUTED</span>' : '');
     const where = !g ? '<span class="mut">distance unknown (no position for you)</span>'
       : g.dist_m == null ? '<span class="mut">drone not sending a position yet</span>'
       : `<span class="big">${fmtDist(g.dist_m)}</span><span class="big">${bearing(g.brg)}</span>`;
@@ -894,6 +903,37 @@ function mapsLink(lat, lon, label) {
 const copyBtn = (text, what) => `<button type="button" class="btn" data-copy="${esc(text)}">Copy ${what}</button>`;
 const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
 
+// What the shown data is: a claim. A dispute (two transmitters, one ID)
+// with the other claimed position; otherwise one quiet line. Strings from
+// the hub go through esc(); numbers through Number().
+const WHAT = {position: 'position', self_id: 'Self-ID text', op_id: 'operator ID', id: 'a second ID'};
+function claimSection(t) {
+  const c = t.claims, o = [];
+  const auth = t.spoof && t.spoof.auth > 0;
+  if (c && c.disputed) {
+    const r = c.rival;
+    o.push(`<h3><span class="tag disp">DISPUTED</span> Two transmitters claim this ID</h3>` +
+      `<p class="sm">The position shown is the one this ID had first; the other claim is below. ` +
+      `Either could be the real drone: nothing here is verified.</p><dl>` +
+      row('Disagree on', esc((c.what || []).map(w => WHAT[w] || w).join(', '))) +
+      (c.since_ms != null ? row('Since', fmtAge(st.now_ms - Number(c.since_ms))) : '') +
+      (r ? row('Other claim', coordHTML(Number(r.lat), Number(r.lon))) +
+        (r.apart_m != null ? row('Apart', fmtDist(Number(r.apart_m))) : '') +
+        row('From', esc(SRC[r.src] || r.src)) + row('Heard', ago(Number(r.age_ms))) : '') +
+      (c.followed ? row('Now showing', 'the claim that continued after the other went quiet') : '') +
+      (auth ? row('Authentication', 'message present, not checked') : '') + `</dl>`);
+    if (r) o.push(`<div class="row">${copyBtn(coord(Number(r.lat), Number(r.lon)), 'other claim')}</div>`);
+    return o;
+  }
+  const notes = [];
+  if (c && c.ever) notes.push('was disputed earlier');
+  if (c && c.rejected) notes.push(`${Number(c.rejected) | 0} position report(s) did not fit its path and were not shown`);
+  if (c && c.contradictory) notes.push(`${Number(c.contradictory) | 0} frame(s) named this ID beside another and were ignored`);
+  if (auth) notes.push('authentication message present, not checked');
+  o.push(`<p class="mut sm">Broadcast claim, not verified${notes.length ? '; ' + notes.join('; ') : ''}.</p>`);
+  return o;
+}
+
 function renderDetail() {
   const t = findTrack(sel);
   if (!t) {
@@ -906,6 +946,7 @@ function renderDetail() {
   const o = [];
   o.push(`<p><span class="tag">${isStale(t) ? 'STALE &middot; not heard for 60 s+' : 'ACTIVE'}</span> ` +
     `${esc(uaName(t.ua))} &middot; heard ${ago(t.age_ms)}</p>`);
+  o.push(...claimSection(t));
 
   o.push(`<h3>From you</h3>`);
   if (!g) o.push(`<p class="mut">Unknown: the hub has no position for you. <button type="button" class="btn" data-go="set">Set position</button></p>`);
@@ -955,6 +996,7 @@ function renderDetail() {
     o.push(`<h3>DJI DroneID</h3><dl>` +
       row('Model', dj.model ? esc(dj.model) : dj.product != null ? 'code ' + dj.product : 'not sent') +
       (dj.encrypted ? row('Kind', 'O4, encrypted: presence only, never decrypted') : '') +
+      (dj.decrypted ? row('Kind', 'O4, decrypted with your key: decrypted, not authenticated') : '') +
       (dj.undecoded ? row('Kind', 'bursts that did not decode (any DJI drone nearby)') : '') +
       (dj.key_id ? row('Session key ID', `<span class="mono">${esc(dj.key_id)}</span>`) : '') +
       (dj.ocusync ? row('Burst', `${dj.ocusync.mhz.toFixed(1)} MHz &middot; SNR ${dj.ocusync.snr} dB`) : '') +
