@@ -237,6 +237,8 @@ flush read-back OK, 0 errors, 0 dropped rows. Nothing deleted or formatted.
 Ten hub sessions, about 34 minutes logged, 11,228 frames from the gateway: **2 corrupt frames,
 8 UART errors** (5 in one Wi-Fi 2.4 session, 1, 2), **0 ring_full**, 0 lcd DMA errors. Loop
 max_gap 6.8-7.2 ms normally (the screen band); worst 17.0 ms, at SD flushes (BRINGUP: 18.3 ms).
+(Later finding, 2026-11-18: max_gap is not the loop's worst stall, because its clock restarts after the
+SD mount; the SD stats line's `max_tick` is the real worst figure. Measured: about 381 ms for identify + mount, 131 ms for a pack read.)
 Node uplinks: 0 failed sends.
 
 ### Bug found and fixed: Bluetooth node reset under Long Range traffic
@@ -273,7 +275,9 @@ beacons than the 0.4/s with the controller stop, but commands still arrive). Eac
 | China GB 46750 Remote ID | a test-beacon mode or a DJI on 2026 firmware |
 | wfb-ng's real LDPC/STBC video | OpenIPC hardware |
 
-## Crash recovery (2026-11-18, not yet run on hardware)
+## Crash recovery (2026-11-18, first hardware pass the same day)
+
+Run on 2026-11-18 for the P4, gateway, node-wifi C5 and node-sdr C5 (steps 1 to 4 and 6, 8; step 5 not checked): see "Bench results, 2026-11-18" at the end. Not run: node-ble, node-lr, S3 boards.
 
 Every board now reboots after a panic, and every board except `rid-beacon` has a hang watchdog
 (the chip's RTC watchdog) that resets it if its main work stops. After any restart the board's
@@ -316,17 +320,24 @@ starts the line (Esc cancels).
 |---|---|
 | gateway | `cargo build --release --features faulttest` |
 | node-wifi C5 | in `c5/`: `cargo build --release --features esp32c5,faulttest` (add `band24`, `espnow` as for `fw24` / `fw24-now`) |
+| node-wifi C5, ESP-NOW | in `c5/`: `cargo build --release --features esp32c5,band24,espnow,faulttest --target-dir ../target-espnow` |
 | node-wifi S3 | in `s3/`: `cargo build --release --features esp32s3,faulttest` |
 | node-sdr | in `c5/`: `cargo build --release --features faulttest` |
+| node-sdr, ESP-NOW node | in `c5/`: `cargo build --release --features espnow,faulttest --target-dir ../target-espnow` |
 | node-ble S3 / C5 | `cargo build --release --features faulttest` / `cargo +stable build --release --no-default-features --features esp32c5,faulttest --target riscv32imac-unknown-none-elf` |
 | node-lr | `cargo build --release --features faulttest` |
 | hub-p4 | `cargo build --release --features faulttest` (flash as in firmware/hub-p4/BRINGUP.md) |
+
+(`ROTORSCOPE_BENCH=1` exported for all of them; the ESP-NOW builds also need the link key or `ROTORSCOPE_LINK_KEY_FILE=none`, see "Bench builds".)
 
 ### The checklist (one board at a time)
 
 Flash the `faulttest` build with the board's usual tool (`tools/dev-board.sh <elf> 90 <board>` for
 the S3 and C5 boards; the P4 as in its BRINGUP.md). Note: opening the serial port resets the board,
-so the first `hello` after flashing says `"usb"` or `"power_on"`, not a fault.
+so the first `hello` after flashing says `"usb"` or `"power_on"`, not a fault. On the P4 this is true
+every time (ROM prints `POWERON`), even with DTR/RTS held low before the port is opened. Also on the
+P4: it booted by itself right after flashing, both times on 2026-11-18, so it may need no reset (it
+may still need one on some runs).
 
 1. **First boot.** The `hello` line has `"faulttest":true` and a `reset` field. P4: the boot log
    also has `hub-p4: watchdog on: resets the chip if the main loop stops for N s`, with N close
@@ -342,7 +353,11 @@ so the first `hello` after flashing says `"usb"` or `"power_on"`, not a fault.
    `"reset":"software"` within the time in the table.
 4. **Hang.** Type `fault hang` (`--send $'fault hang\r'`, reading for at least the timeout + 20 s).
    Expect the `faulttest ... hang` line, silence for about the timeout, then a fresh `hello` with
-   `"reset":"watchdog"`. Time it: it should match the table within ~20 %.
+   `"reset":"watchdog"`. Time it: it should match the table within ~20 %. Known limit of this check
+   on the C5 nodes: the USB port drops and returns about 0.4 s after the reset and the node's
+   `hello` is printed before the port is back, so that line cannot be seen over USB. The restart
+   TIME is the observable for nodes. (The gateway's `hello` prints later and is seen; the P4 uses a
+   UART bridge and is seen.) Follow-up idea: repeat the reset reason in a later status line.
 5. **Hub view (nodes behind a hub).** During 3 and 4 the hub shows the node going quiet, then its
    Hello again; nothing else on the hub changes.
 6. **P4 only: evidence.** After step 4, the evidence file's boot event for the new boot ends with
@@ -375,6 +390,8 @@ Now:
   for as long as it runs.
 * **The flashing tools check.** `tools/dev-board.sh` and `tools/flash-node.sh` find the
   `bench-build:` tag in an ELF and refuse to flash it without `ROTORSCOPE_BENCH=1` (and warn with it).
+  The hub-p4 ELF carries no such tag (its hello line and evidence boot event carry the list instead)
+  and no tool reads P4 ELFs, so a P4 image is not checked at flash time.
 
 | Firmware | Bench features | Bench build switches (environment at build time) |
 |---|---|---|
@@ -436,7 +453,9 @@ only (2026-11-18, branch `sec/lane-a`). On the bench:
    character (if the beacon can send one), the P4's `THREAT` console line and evidence text show
    `?` in its place.
 
-## Origin checks (2026-11-18, compile-checked only)
+## Origin checks (2026-11-18, gateway case run on hardware)
+
+Item 1 below (keyed gateway, node-wifi `forgetest`) was run on 2026-11-18; see "Bench results, 2026-11-18". Items 2 to 7 were not run.
 
 Who may send which frame type (docs/ESPNOW.md "Who may send what") is checked by the gateway, the P4
 hub, the P4's web-head feed, the S3 web head and the wired bus. Host tests cover the rules (`cargo test -p link -p
@@ -469,13 +488,14 @@ Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench EL
 | `forge threat` | `forged_link` report naming 02:00:00:00:00:99 | appear as the gateway's report |
 | `forge join` | a `BusJoin` | reach the bus master or the tracker |
 
-### To check on hardware (not yet run)
+### To check on hardware (item 1 run 2026-11-18; the rest not yet run)
 
 1. **Gateway (keyed kit; c5a forgetest node, c5c gateway, P4 hub).** After each `forge` command:
    the gateway's `"t":"gw"` line's `refused` goes up by one (for `forge via` the `Via`; the `Stats`
    after it is relayed under c5a's own address), and within a second a `{"t":"threat","kind":"forged_link",
-   "src":"<c5a>","why":"origin",...}` line. On the P4: `hub-p4: THREAT Forged node traffic` naming
-   c5a (detail 5); its `hub-p4: link` line's `refused=` does **not** move (the gateway already
+   "src":"<c5a>","why":"origin",...}` line. On the P4: `hub-p4: THREAT Forged node traffic`: one console line in total,
+   naming `node 0` (the gateway reports it; IDs are not shown by default); later forgeries only raise
+   that threat's count (detail 5), no new line; its `hub-p4: link` line's `refused=` does **not** move (the gateway already
    dropped the frames). Nothing in the "Must never" column happens on the P4 screen or the web head.
 2. **Gateway, open kit.** The same with the gateway and node built `ROTORSCOPE_LINK_KEY_FILE=none`
    (`OPEN LINK` on the P4): the same refusals; the rules do not depend on the key.
