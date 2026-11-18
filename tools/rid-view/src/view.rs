@@ -301,6 +301,7 @@ impl View {
         if rows.is_empty() {
             let _ = writeln!(s, "  (no drones yet){eol}");
         }
+        let any_unconfirmed = rows.iter().any(|(t, _)| !t.confirmed());
         for (t, g) in rows {
             let mut heard: Vec<&str> = t.transports().map(short_transport).collect();
             if t.dji.ocusync.heard() {
@@ -314,7 +315,7 @@ impl View {
                 .announced
                 .get(&t.id)
                 .is_some_and(|at| ctx.now_ms.saturating_sub(*at) < NEW_HIGHLIGHT_MS);
-            let (pre, post) = if ctx.state(t) == TrackState::Stale {
+            let (pre, post) = if ctx.state(t) == TrackState::Stale || !t.confirmed() {
                 (self.style(DIM), self.style(RESET))
             } else if new {
                 (self.style(BOLD_YELLOW), self.style(RESET))
@@ -339,7 +340,13 @@ impl View {
             let _ = writeln!(
                 s,
                 "{pre}{} {:<22} {:<7} {:<11} {:>5} {:>6} {:>8} {:>8} {:>6} {:>6}  {:<16} {}{post}{eol}",
-                if new { '*' } else { ' ' },
+                if new {
+                    '*'
+                } else if !t.confirmed() {
+                    '?'
+                } else {
+                    ' '
+                },
                 fit(&display_id(t, ctx.config.hide_droneid_ids), 22),
                 short_ua(t.ua_type),
                 heard.join("+"),
@@ -358,6 +365,12 @@ impl View {
                     .map_or("-".into(), |v| format!("{v:.1}")),
                 fit(&opr, 16),
                 fit(&self_id, 24),
+            );
+        }
+        if any_unconfirmed {
+            let _ = writeln!(
+                s,
+                "  ? unconfirmed: not yet heard again a second after it was first heard; not announced, possibly forged{eol}"
             );
         }
         self.render_links(&mut s, tr, ctx, eol);

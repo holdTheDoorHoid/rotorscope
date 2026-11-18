@@ -125,6 +125,9 @@ OPTIONS:
     --json                   Print the hub's JSON track lines instead of the
                              table (once a second, or at the end with --once).
     --realtime               Play recorded files back at their captured speed.
+                             Without it a recording is read at once but
+                             timed by its own up_us, so drones are
+                             confirmed and age as in the original run.
     --http ADDR              Serve the hub's phone page and API on ADDR, e.g.
                              127.0.0.1:8080 (port 0 picks a free one). The
                              page can set --own-pos (POST /api/own-pos).

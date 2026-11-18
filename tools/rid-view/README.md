@@ -4,6 +4,17 @@ Laptop viewer: a live table of Remote ID drones from Rotorscope nodes (their USB
 recorded files, stdin, a laptop Bluetooth adapter, an ADSBee, or `--demo`. It runs the same
 `tracker` code as the hub. `rid-view --help` lists every option.
 
+## Replaying a recording
+
+A file, or stdin from a pipe, is a recording. Without `--realtime` it is read as fast as it
+can be, but each line is timed by the node's own clock (`up_us` on detection, open-link and
+stats lines; an ADSBee recording moves on one second per `#S:` report), so the tracker sees
+the run as it happened: a drone heard over several seconds is confirmed and announced, one
+heard in a single instant stays unconfirmed (`?` in the table, `"confirmed":false` in
+`--json`) and is not. A serial port, or a terminal on stdin, keeps the wall clock. Several
+recordings at once are each timed from their own first line, so their drones are not
+aligned with one another.
+
 ## Laptop Bluetooth as a Remote ID sensor (`--ble`)
 
 Any Linux laptop adapter can listen for Bluetooth Remote ID through BlueZ. It needs no root and
