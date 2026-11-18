@@ -378,6 +378,14 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
             }
         },
     }
+    // Claims: the dispute, and where the other claim is (one more range
+    // solve, for disputed drones only).
+    v.disputed = t.claims.disputed(ctx.now_ms);
+    if v.disputed && let Some(r) = t.claims.rival(ctx.now_ms) {
+        v.other_claim = ctx.own.map(|o| polar(geo::range_bearing(o.lat, o.lon, r.position.lat, r.position.lon)));
+        v.claims_apart_m = tracker::claims::apart_m(t, ctx.now_ms).map(|m| m as f32);
+    }
+    v.auth_seen = t.spoof.auth_pages != 0;
     if let Some(m) = t.dji.product_name() {
         let _ = v.model.push_str(m);
     } else if let Some(st) = t.dji.o4.state() {

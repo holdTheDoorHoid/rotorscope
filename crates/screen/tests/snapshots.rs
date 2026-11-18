@@ -405,6 +405,30 @@ fn detail() {
     shot("detail_no_fix", &ui, &st);
 }
 
+/// WP-10: a forger repeats this drone's ID 1.9 km away. The shown position
+/// stays the established one; the list puts "!" before the ID, the radar
+/// shows the other claim as a hollow "?" diamond joined to it, and the
+/// detail page says DISPUTED with where the other claim is. A quiet drone's
+/// detail says "broadcast, not verified" (see `detail`).
+#[test]
+fn disputed() {
+    let mut st = one_drone(true);
+    let d = &mut st.drones[0];
+    d.disputed = true;
+    d.other_claim = Some(Polar { distance_m: 1_900.0, bearing_deg: 80.0 });
+    d.claims_apart_m = Some(1_640.0);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Select]);
+    shot("radar_disputed", &ui, &st);
+    press(&mut ui, &st, &[Button::Select]);
+    assert_eq!(ui.mode(), Mode::Detail);
+    shot("detail_disputed", &ui, &st);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("list_disputed", &ui, &st);
+}
+
 #[test]
 fn health() {
     let mut st = five_drones(true);

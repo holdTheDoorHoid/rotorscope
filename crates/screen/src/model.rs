@@ -204,6 +204,19 @@ pub struct DroneView {
     pub radios: Radios,
     /// Latest RSSI per radio, dBm, indexed by [`Radio::index`].
     pub rssi: [Option<i8>; 6],
+    /// Two transmitters claim this ID (tracker `claims`): "!" before its
+    /// ID in the list, DISPUTED on its detail page, both positions on the
+    /// radar when it is focused. Never a verdict on which is real.
+    pub disputed: bool,
+    /// The other claimed position, from the unit, while it is heard (the
+    /// shown one, `drone`, is the established claim). `None` without an
+    /// own fix or when the dispute is over text only.
+    pub other_claim: Option<Polar>,
+    /// Metres between the two claimed positions (needs no own fix).
+    pub claims_apart_m: Option<f32>,
+    /// An authentication message was heard. The hub checks no signature:
+    /// shown as "auth msg, not checked", never as verified.
+    pub auth_seen: bool,
     /// Model name from DJI DroneID ("Mavic 3"); empty when unknown.
     pub model: String<20>,
     /// Self-ID description (free text from the operator).

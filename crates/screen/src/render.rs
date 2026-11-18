@@ -347,6 +347,18 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
         text_boxed(d, "P", b.x + 6, b.y - 13, F_SMALL, p.operator, p.bg, 1)?;
     }
 
+    // The other claimed position of a disputed, focused drone: a hollow
+    // diamond marked "?", joined to the shown one.
+    if let Some((_, f, _)) = foc
+        && let (Some(dp), Some(other)) = (f.drone, f.other_claim)
+    {
+        let a = plot(c, dp);
+        let b = plot(c, other);
+        line(d, a, b, p.dim, 1)?;
+        diamond(d, b, 6, p.fg, false)?;
+        text_boxed(d, "?", b.x + 7, b.y - 13, F_SMALL, p.fg, p.bg, 1)?;
+    }
+
     // Stale first, then active, focused last so it is on top.
     let mut unplaced = 0u32;
     for pass in 0..3 {
@@ -460,7 +472,12 @@ fn readout<D: DrawTarget<Color = Rgb565>>(
             let _ = write!(b, "{} up", metres(dv.height_m));
             text(d, "HEIGHT", x0, 152, F_SMALL, p.dim)?;
             text(d, &b, x0, 163, F_BODY, col)?;
-            text(d, &short_id(dv, 11), x0, 180, F_LABEL, p.dim)?;
+            if dv.disputed {
+                // Two transmitters claim it: say so where the ID would be.
+                text_boxed(d, "DISPUTED", x0, 179, F_SMALL, p.accent_ink, p.accent, 2)?;
+            } else {
+                text(d, &short_id(dv, 11), x0, 180, F_LABEL, p.dim)?;
+            }
         }
         None => {
             let msg: &[&str] = if s.drones.is_empty() {
@@ -719,7 +736,13 @@ fn row<D: DrawTarget<Color = Rgb565>>(
         let _ = write!(b, "{}", rank + 1);
     }
     text_right(d, &b, 16, y, F_BODY, fg)?;
-    text(d, &short_id(dv, 8), C_ID, y, F_BODY, fg)?;
+    if dv.disputed {
+        // Two transmitters claim this ID: "!" and the ID one shorter.
+        let x = text(d, "!", C_ID, y, F_BODY, fg)?;
+        text(d, &short_id(dv, 7), x, y, F_BODY, fg)?;
+    } else {
+        text(d, &short_id(dv, 8), C_ID, y, F_BODY, fg)?;
+    }
     if fix {
         match dv.drone {
             Some(pos) => {
@@ -1001,6 +1024,30 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
         );
     }
     text(d, &b, vx, y, F_BODY, col)?;
+    y += rh;
+
+    // What the data is: a claim. Quiet unless two transmitters disagree.
+    label(d, "CLAIM", y)?;
+    if dv.disputed {
+        let x = text_boxed(d, "DISPUTED", vx, y - 1, F_SMALL, p.accent_ink, p.accent, 2)?;
+        b.clear();
+        match (dv.other_claim, dv.claims_apart_m) {
+            (Some(o), _) => {
+                let _ = write!(b, "other at {} {}", distance_short(o.distance_m), compass(o.bearing_deg));
+            }
+            (None, Some(m)) => {
+                let _ = write!(b, "other {} away", distance_short(m));
+            }
+            (None, None) => {
+                let _ = b.push_str("2 transmitters, 1 ID");
+            }
+        }
+        text(d, &b, x + 6, y, F_BODY, col)?;
+    } else if dv.auth_seen {
+        text(d, "not verified; auth msg not checked", vx, y + 2, F_SMALL, p.dim)?;
+    } else {
+        text(d, "broadcast, not verified", vx, y + 2, F_SMALL, p.dim)?;
+    }
 
     text(
         d,
