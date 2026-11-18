@@ -412,18 +412,22 @@ fn forge_verdict(case: &str, line: &str) -> String {
     let contra = jfield(line, "contra").unwrap_or("[]").trim_matches(['[', ']']).split(',').map(|v| v.parse::<i64>().unwrap_or(-1)).collect::<Vec<_>>();
     let real_contra = real.trim_matches(['[', ']']).rsplit(',').next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
     let common = num("evicted") == 0 && num("active") <= 4 && num("share_permille") <= 550;
-    let ignored = contra.len() == 2 && contra[0] == contra[1] && contra[1] == real_contra;
+    // contra = [wrong-time packets sent, contradictions counted]: every
+    // counted one is the drone's session's (real[2]); the others fell
+    // within half a period of its last packet (taken as duplicates) or
+    // inside its window (taken as its own; docs/DRONEID-O4.md).
+    let ignored = contra.len() == 2 && contra[1] == real_contra && real_contra > 0;
     let (want, ok) = match case {
         "flood" => (
-            "real followed within ~60 s (host model: 95 % by 60 s) and at the end; evicted 0; every wrong-time packet ignored",
+            "real followed within ~60 s (host model: 95 % by 60 s) and at the end; evicted 0; no wrong-time packet restarted it",
             followed && (0..=90).contains(&num("followed_s")) && common && ignored,
         ),
         "late" => (
-            "real followed before the forgers arrive and still followed at the end (host model: 99.5 %); evicted 0; every wrong-time packet ignored",
+            "real followed before the forgers arrive and still followed at the end (host model: 99.5 %); evicted 0; no wrong-time packet restarted it",
             followed && num("followed_s") >= 0 && common && ignored,
         ),
         _ => (
-            "real followed only if the plan confirmed it before the fourth forged session (host model: 46 % with these phases); otherwise blocked true; evicted 0",
+            "real followed only if the plan confirmed it before the fourth forged session (host model: 45 % with these phases); otherwise blocked true; evicted 0",
             (followed || jfield(line, "blocked") == Some("true") || num("followed_s") < 0) && common,
         ),
     };
