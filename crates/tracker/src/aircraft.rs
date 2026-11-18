@@ -95,6 +95,15 @@ pub struct AircraftTrack {
     pub last_seen_ms: u64,
     /// Reports received (heard or not).
     pub reports: u32,
+    /// Navigation integrity category (0-11, `adsb::nicnac`) from the latest
+    /// report that updated the position (it describes that position), so
+    /// it is as fresh as [`Self::position`]. `None` until then, and always
+    /// for FLARM / OGN, which carry none.
+    pub nic: Option<u8>,
+    /// Navigation accuracy for position (1-11) from the latest report that
+    /// carried a non-zero value (and heard the aircraft). 0 is not taken: the ADSBee and our UAT
+    /// decoder print 0 both for "10 NM or worse" and for "not received".
+    pub nacp: Option<u8>,
 }
 
 impl AircraftTrack {
@@ -153,6 +162,16 @@ impl AircraftTrack {
         self.airborne = a.airborne();
         self.military |= a.military();
         self.rssi_dbm = a.signal_dbm;
+        // Only from lines that heard the aircraft: the ADSBee repeats an
+        // aircraft's last values for a while after it goes quiet.
+        if matches!(a.source, Source::ModeS | Source::Uat) && a.heard() {
+            if a.position_updated() {
+                self.nic = Some(a.nic());
+            }
+            if a.nacp() != 0 {
+                self.nacp = Some(a.nacp());
+            }
+        }
         if a.heard() {
             self.last_seen_ms = self.last_seen_ms.max(now_ms);
         }
@@ -294,6 +313,8 @@ impl<const A: usize> AircraftTable<A> {
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
             reports: 0,
+            nic: None,
+            nacp: None,
         };
         new.update(r, now_ms);
         if self.aircraft.is_full() {

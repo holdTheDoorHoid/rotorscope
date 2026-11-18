@@ -62,6 +62,7 @@
 #![no_std]
 
 pub mod aircraft;
+pub mod area_gnss;
 pub mod continuity;
 pub mod ctrllinks;
 pub mod cot;
@@ -1196,6 +1197,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
 mod tests;
 #[cfg(test)]
 mod tests_aircraft;
+#[cfg(test)]
+mod tests_area_gnss;
 #[cfg(test)]
 mod tests_conflict;
 #[cfg(test)]

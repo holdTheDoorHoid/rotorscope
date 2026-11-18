@@ -592,6 +592,13 @@ impl SpoofState {
         &self.flags
     }
 
+    /// Position jumps the [`Check::PositionJump`] test has counted on this
+    /// track (saturating). `area_gnss` watches it rise to see several
+    /// drones jump at once.
+    pub fn jumps(&self) -> u8 {
+        self.jumps
+    }
+
     pub fn flag(&self, check: Check) -> Option<&Flag> {
         self.flags.iter().find(|f| f.check == check)
     }
