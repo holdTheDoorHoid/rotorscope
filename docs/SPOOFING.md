@@ -76,7 +76,7 @@ are given in brackets.
 
 | Code | Check | Fires when | Confidence |
 |---|---|---|---|
-| 1 | `position_jump` (m) | Two Remote ID positions from the same track, at most 120 s apart, are further apart than 60 m + 2 x declared accuracy (default 30 m, max 150 m) + 100 m/s x (time between them + 2 s) | 1 jump 25, 2 jumps 50, 3-5 jumps 75, 6 or more 90 |
+| 1 | `position_jump` (m) | One transmitter jumps: two positions for the same ID, at most 120 s apart, further apart than 60 m + 2 x declared accuracy (default 30 m, max 150 m) + 100 m/s x (time between them + 2 s), **and** the track followed the jumped claim (nothing on the old path for 10 s while it continued), or reports keep jumping with nothing on the old path for 10 s. Since WP-10 a jump while the old path continues is not this flag: it is a rival claim, and a dispute when it persists (see "Impersonation and disputes") | each such jump one step stronger: 25, 50, 75, 90 |
 | 2 | `motion_mismatch` (m/s, or minus degrees) | Over windows of 5 to 30 s, the distance actually covered, less 2 x accuracy + 10 m, gives a speed above 1.5 x the highest reported speed + 8 m/s. Or, above 5 m/s, the straight line between the window's ends points more than 100 degrees away from both the starting and the ending reported direction | Needs 2 bad windows and more than a third of all windows bad: 40; 4 bad windows: 60 |
 | 3 | `altitude_mismatch` (m) | In the same windows, the change in geodetic altitude and the change in height differ by more than 40 m + 30 % of the height change | 2 windows 30, 4 windows 50 |
 | 4 | `implausible_value` (kind) | In 3 frames: speed over 120 m/s (1); geodetic altitude outside -500 to 9000 m (2); height above **ground** below -50 m (3); geodetic and pressure altitude more than 800 m apart (4) | 35 |
@@ -145,7 +145,7 @@ that is not done (see "Known gaps").
 | 11 | `spoofer_swarm` (group size) | At least 4 new tracks born within 10 s on one node and slot, with first RSSI within 3 dB of each other | 4-5 tracks 20, 6 or more 25; 65 once two members claim distances from the unit that differ by 4x or more (12 dB of path loss), with the farther one at least 400 m away |
 | 12 | `serial_format` (fault) | A Remote ID serial number fails ANSI/CTA-2063-A (see below) | 20 (weak) |
 | 13 | `vendor_mismatch` (kind) | A DJI serial (maker code 1581) from a globally administered Wi-Fi address outside DJI's blocks (1, conf 25); from an Espressif block (2, conf 45); a valid non-DJI serial from a DJI block (3, conf 30); DJI legacy Wi-Fi DroneID from an Espressif address (4, conf 45) or another non-DJI global address (5, conf 20) | as listed |
-| 14 | `drone_id_disagrees` (m) | A plaintext DroneID position lies more than 100 m + 2 x accuracy + 30 m/s x age from a Remote ID position under 3 s old on the same track. Needs at least 2 such readings, and more disagreements than agreements | 55; 5 or more 75 |
+| 14 | `drone_id_disagrees` (m) | A plaintext DroneID position lies more than 100 m + 2 x accuracy + 30 m/s x age from a Remote ID position under 3 s old on the same track, but inside the `position_jump` limit (further than that it is a rival claim and a dispute, not a flag). Needs at least 2 such readings, and more disagreements than agreements | 55; 5 or more 75 |
 
 Why these work, and the honest cases they allow for:
 
@@ -157,11 +157,12 @@ Why these work, and the honest cases they allow for:
   sharers stay weak unless their frames arrive at identical strength, which
   two separate aircraft rarely do. Three or more sharers at once is a
   multi-drone transmitter.
-- **Alternation.** If someone clones a real drone's ID, the tracker merges
-  both transmitters onto one track, and their addresses alternate. A BLE
-  address rotates every few minutes, which is one switch, not a pattern.
-  Wi-Fi beacon and NAN share one MAC. In tests, a cloned ID also triggers
-  `position_jump`.
+- **Alternation.** A transmitter whose ID arrives from addresses that
+  alternate within 2 s. A BLE address rotates every few minutes, which is
+  one switch, not a pattern. Wi-Fi beacon and NAN share one MAC. Since
+  WP-10 a clone of a real drone's ID that claims a position off the
+  drone's path does not reach this check (its frames are a rival claim,
+  not applied); only a clone inside the path limit still alternates here.
 - **Swarm.** A spoofer swarm is born together and, coming from one
   antenna, at one strength. Drones in a light show also power up together.
   But they sit close together, so their claimed distances are similar and
@@ -321,6 +322,11 @@ while let Some(ev) = tracker.take_spoof_flag(now_ms) {
     let text = tracker::spoof::event_text(&ev, tracker.get(ev.track));
     evidence.event(EventCode::SpoofSuspect, text.as_bytes(), &ev.data()); // [check code, confidence]
 }
+while let Some(d) = tracker.take_dispute(now_ms) {  // two transmitters, one ID (WP-10)
+    let text = tracker::claims::event_text(&d, tracker.get(d.track));
+    evidence.event(EventCode::IdDisputed, text.as_bytes(), &d.data()); // [track id u32, what, source]
+}
+track.claims.dispute(now_ms); track.claims.rival(now_ms);  // for screens
 track.spoof.score(); track.spoof.flags();         // for screens
 tracker::spoof::Summary(&track)                  // one-line text (Display)
 track.continuity.previous / .identity_changed
@@ -427,12 +433,187 @@ table).
   fakes, faint and last. They are never announced, never sent to TAK, and
   never ranked above a real drone.
 
+## Impersonation and disputes
+
+Floods make new identities. Impersonation reuses a real one: anyone in
+range can transmit well-formed frames carrying a real drone's ID (serials
+are broadcast in clear) with any position, operator position, Self-ID or
+operator ID. Nothing in Remote ID or DroneID is authenticated: CRCs are
+public, and a decrypted DJI O4 record proves only that its sender had the
+receiver's public key or a recording. Before WP-10 the tracker treated each
+frame as an instruction to the track its ID named:
+
+- one frame with a victim's serial moved the victim's position, operator
+  position, Self-ID and operator ID, and the real drone's next frame moved
+  it back; two such jumps gave the **real drone** a `position_jump` flag at
+  50 (three, 75), for the life of the track, and a "SPOOF?" evidence event
+  against its serial. A legacy DJI Wi-Fi element or a plaintext OcuSync
+  record with the victim's serial did the same while Remote ID was quiet
+  for 3 s;
+- one frame naming two drones' IDs (a serial and another drone's session
+  ID) merged them for good; one frame with A's serial from B's address
+  folded B's address-only track into A; one frame with two serials renamed
+  A;
+- a decrypted O4 record merged its session into the serial's track and
+  moved it; a repeated CRYP cost a curve operation every time;
+- an undecodable frame from a drone's address kept a departed drone
+  "active";
+- CoT markers (`drone-<UAS ID>`) moved with every forged frame, and nothing
+  said that any of it was a claim.
+
+`crates/tracker/src/claims.rs` holds the rule and its numbers. A frame is
+now evidence about a transmitter, not a command to the track.
+
+### The rule
+
+| Rule | Value | Why |
+|---|---|---|
+| A track has an **established path** when it is confirmed and has a position under 120 s old | `claims::ESTABLISHED_MAX_AGE_MS` | Before confirmation (1 s, `probation`) there is nothing to protect yet |
+| A report fits the path when it is within the `position_jump` limit of the shown position | 60 m + 2 x worse declared accuracy (30 m default, 150 m max) + 100 m/s x (time between + 2 s) | The existing check's maths, unchanged: any honest drone fits |
+| A report that does not fit is a **rival claim**: not applied, nor anything else in its frame (operator position, texts, IDs), and its address does not join the track | one rival per track: position, first and last heard, reports along its path, source, address | A frame with no position from the rival's own address is the rival's too |
+| **Disputed** when the rival forms its own path while the original continues | 3 rival reports over at least 2 s, each within the path limit of the last, and 4 switches between the two paths | Text fields that differed in the rival's frames join the dispute. A glitch that recovers switches twice |
+| The dispute ends | 15 s after the rival was last heard (`RIVAL_TTL_MS`) | `ever` stays set in JSON |
+| The track **follows** the rival | when nothing has been heard on the old path for 10 s and the rival has its own path (`FOLLOW_AFTER_MS`) | See below |
+| A changed Self-ID, operator ID, session ID (or a third ID type) | adopted after 3 frames over 5 s with the old value not heard between (`ADOPT_MIN_FRAMES`, `ADOPT_MS`); old and new alternating 3 times is a dispute over that field | One shared pending slot per track: two fields changing at once are adopted one after the other |
+| DJI flight purpose (Wi-Fi DroneID, O4 INFP-11) | fills an empty Self-ID, never replaces one | Remote ID's and DJI's texts are different fields of the same drone |
+| Two tracks with their own IDs merge | after 3 frames over 2 s say they are one drone (both IDs, or one's ID from the other's address), positions within 60 m + 2 x accuracy + 30 m/s x (time between + 1 s), neither disputed (`MERGE_MIN_FRAMES`, `MERGE_SPAN_MS`) | A frame naming two tracks is applied to the one whose path it fits, and an ID another track holds is never added to it. 4 pending merges, tracker-wide |
+| An ID-less track (Bluetooth 4: one message per advert) joins an ID's track | on the first frame carrying that ID from its address, if its position fits | Address rotation and Location-before-ID keep working |
+| Several different IDs of one type in one frame | counted (`claims.contradictory`, `Tracker::contradictory_frames`), applied to nothing | F3411 allows one per type; no honest drone sends two |
+| A frame with no position, by address only | goes to the track on that address whose path its position fits when there are several | One forged frame from B's address does not pull B's later frames onto A |
+| An undecodable frame | counts a decode error, refreshes nothing | It can come from anyone |
+
+**Why 10 s to follow.** A real drone's GPS can glitch (re-acquisition,
+multipath) for a second or two; a real drone can also stop transmitting
+(landed, out of range, switched off) while a forger carries on. Following
+at once is the old defect; never following leaves a frozen marker over a
+drone that has really moved (or a teleporting single transmitter never
+shown where it is). Remote ID repeats its position at least once a second,
+so 10 s is ten missed reports on the old path while the other continues:
+longer than the glitches the tests use, short enough that an operator does
+not watch a stale marker for long. Following during a dispute is said
+(`followed`: "now showing the claim that continued"); following without
+one is a single transmitter that really jumped, and only that earns
+`position_jump`. Reports that keep jumping with nothing on the old path for
+10 s also step it up.
+
+### DJI sources
+
+Plaintext OcuSync DroneID, legacy Wi-Fi DroneID, decrypted O4 and Remote ID
+are separate claims about one serial. A DJI position is judged against the
+track's path like any report: one that fits agrees (Remote ID's is still
+preferred while under 3 s old, and DJI's is shown when Remote ID is quiet);
+one that does not is a rival claim with its source (`DroneId`, `DjiWifi`,
+`DroneIdO4`), never applied, a dispute if both continue. A DJI record's
+serial finds the most established track holding it and never merges
+tracks. A decrypted O4 record whose serial another track holds is judged
+against that track: off its path, a rival claim on it (source `DroneIdO4`);
+on it, evidence for the merge rule above (3 records over 2 s with
+compatible positions), and the session keeps its own track until then.
+`drone_id_disagrees` still covers DroneID within the path limit but more
+than 100 m off.
+
+"Decrypted" is shown as "decrypted, not authenticated" everywhere.
+`djicrypt` refuses what it can (tested):
+
+| Rule | Value |
+|---|---|
+| A CRYP whose key ID is already filed | decrypts with the stored key: no curve operation (a repeat cost one each before) |
+| New unwraps (curve operations) | a bucket of 4, refilled 2 a second (`UNWRAP_BURST`, `UNWRAP_PER_S`); over it, `Error::RateLimited` |
+| INFP-10 sequence number or GPS time not newer than the session's last accepted one, or an altered copy of the last one (same sequence, other content) | `Error::Replay`, counted (`stats.replayed`); an identical repeat (a second node) is fine |
+| INFP-10 further ahead than the time since the last allows (sequence: 50 a second; GPS time: hub time + 10 s) | `Error::TooFarAhead`, counted, and the session does not move on, so a forged "future" record cannot lock the real ones out |
+
+### What the operator sees
+
+Tensions, and what was chosen (the owner delegated these):
+
+- **Every track is a claim, but a label on every row is noise.** The list
+  says it once ("IDs and positions are what drones broadcast; none is
+  verified."); each detail page and screen detail has one quiet line
+  ("broadcast, not verified"). JSON carries nothing extra for a quiet track
+  (`"claims":null`). CoT, which leaves the hub and is read without context,
+  says `Claim: unverified broadcast` in every remark.
+- **A dispute must be visible without accusing anyone.** The word is
+  DISPUTED, never "spoof" or "fake": two transmitters claim one ID, and
+  either could be the real drone. Screen list: "!" before the ID. Radar
+  readout and detail page: a DISPUTED box with where the other claim is;
+  the radar draws the other claim as a hollow "?" diamond joined to the
+  shown position. Phone page: a dashed DISPUTED tag (not the alert colour)
+  and a section with both positions, how far apart, the other's source and
+  what else differs. Evidence: event 23 `id_disputed`, text `track 7
+  SerialNumber 1ZZZ9FAKE00001: two transmitters claim this ID; another
+  Remote ID claim 2163 m from the shown one. Neither is verified.` No
+  buzzer: a dispute does not mean a new drone.
+- **Which position to show.** The established one (heard first), with the
+  other beside it. Showing both as equals would let one forged frame put a
+  second marker on every map; showing only the newer is the old defect.
+- **CoT uid.** Kept as `drone-<UAS ID>` (other sensors and tools key the
+  same drone on it). Because the track's position no longer follows forged
+  frames, a forger moves nothing on TAK; the dispute and the other
+  claimed position are in the remarks.
+- **Authentication.** The hub verifies no Remote ID signature. Where an
+  auth message was heard, the most anything says is "auth message present,
+  not checked" (page, screen detail, CoT).
+
+### Cost
+
+| Item | Before | After |
+|---|---|---|
+| `Claims` per track | | 48 B: the rival claim (position, first and last heard, folded address, reports, source: 21 B), the dispute's times (6 B), a pending text/ID change (16 B), flags and counters |
+| `Track` | 848 B | 896 B |
+| `Tracker<64,32>` (P4, and the S3 web head's tracker) | 70 208 B | 73 368 B (+3 160: 64 x 48, a 4-entry merge table, a counter) |
+| `Tracker<32,0>` (C5) | 37 436 B (computed: 32 x 48 + 92 less) | 39 064 B |
+| `json::MAX_LINE` | 2816 | 3008 (worst case 2897; `"claims":null` adds 14 B to every line, a full object up to 195) |
+
+Per frame: one equirectangular distance against the established fix per
+track the frame names (two while a rival is alive), a pass over the table
+for IDs held elsewhere and for another track on the address (both O(table),
+a compare each), an FNV hash of each text field, and a 4-entry merge
+table. A known CRYP now costs one AES-CTR pass instead of a scalar
+multiplication.
+
+### What an attacker can still do
+
+- **Forge first and be the original.** Whoever establishes a track first
+  (before it is confirmed, or before the real drone comes into range) is
+  the original; the real drone then appears as the rival claim, and a
+  dispute. The dispute is still raised, and says neither is verified.
+- **Stay inside the path limit.** Reports within 60 m + 2 x accuracy + 100
+  m/s x (gap + 2 s) of the real drone are applied: at 2 Hz that is about
+  320 m, and a forger that declares the worst accuracy widens it to about
+  610 m. The shown position then wanders within that, and `motion_mismatch`
+  or `address_alternation` may fall on the real drone. A tighter limit
+  would flag honest fast drones.
+- **Take over.** Jam or outlast the real drone: 10 s after its last report
+  the track follows the forger. A dispute at the time is said; without one
+  it is a `position_jump` at 25.
+- **Clone the address too.** Position-less frames from the real drone's own
+  address cannot be told apart; their text fields still go through the
+  adoption rule, and alternating ones become a dispute.
+- **Two forgers.** Rivals at two different places reset the single rival
+  slot, so neither forms a path and no dispute is raised; nothing they send
+  is applied either (`claims.rejected` counts it).
+- **Merge two drones that fly together.** Frames naming both IDs, repeated
+  for 2 s, merge two real drones within about 100 m of each other.
+- **Raise disputes at will.** Any drone can be put into a dispute by
+  repeating its ID elsewhere. That is the truth (two transmitters claim
+  it), and it costs the attacker a sustained transmission.
+- **O4.** Mint records with the receiver's public key, replay a recorded
+  session after it has been unused for 30 min (the hub has forgotten it), or
+  flip position bits in a new record: all decrypt. They are claims, judged
+  like any other.
+
 ## Known false-alarm cases
 
 - **Two Autels sharing a fixed MAC.** `shared_address` at 25 (weak), or 45
   if their frames happen to arrive at the same strength for most conflicts.
-- **A GPS re-acquisition jump.** A single `position_jump` is 25 (weak).
-  Repeated glitches are rare.
+- **A GPS re-acquisition jump.** Not shown and not flagged while it lasts
+  under 10 s (the reports are held as a rival claim; tested). A glitch that
+  lasts longer is followed, which is one `position_jump` at 25 (weak).
+- **A dispute on an honest drone.** Two GPS glitches to the same offset
+  within 15 s, or a receiver that keeps flicking between two solutions,
+  make the reports switch between two paths: a dispute. Two honest
+  transmitters configured with the same serial (bench test modules) are a
+  true dispute.
 - **Non-conforming serials** (Autel, Parrot `PI040`). `serial_format` at 20
   (weak).
 - **ESP32-based add-on modules.** `dev_board` at 15 (weak).
@@ -471,7 +652,8 @@ A careful attacker can beat every check here.
   somewhere else.
 - **Cloning by taking over.** Cloning a real drone works best when the
   real drone is out of range. With nothing to alternate against, there is
-  no jump or alternation.
+  no dispute; the track follows the clone after 10 s (see "Impersonation
+  and disputes").
 - **DroneID forgery.** An SDR DroneID forger that sends matching Remote ID
   defeats `drone_id_disagrees`.
 - **Slow identity changes.** An identity change made during a gap of more
