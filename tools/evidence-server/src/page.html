@@ -46,7 +46,7 @@ async function devices() {
   const r = await fetch('/api/devices', { headers: headers() });
   if (!r.ok) { $('rows').innerHTML = '<tr><td colspan=6>' + r.status + ' (token?)</td></tr>'; return; }
   const list = await r.json();
-  $('dev').innerHTML = list.map(d => `<option value="${d.key_id}">${d.name} (${d.key_id}, ${d.detections} detections)</option>`).join('');
+  $('dev').innerHTML = list.map(d => `<option value="${esc(d.key_id)}">${esc(d.name)} (${esc(d.key_id)}, ${esc(d.detections)} detections)</option>`).join('');
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 async function show() {
@@ -64,11 +64,11 @@ async function show() {
     layer = L.layerGroup().addTo(map);
     for (const p of pts) {
       if (p.lat != null) { L.circleMarker([p.lat, p.lon], { radius: 5, color: '#d33' }).bindPopup(`#${p.seq} ${esc(p.drone_id)}<br>${esc(p.summary)}`).addTo(layer); bounds.push([p.lat, p.lon]); }
-      if (p.hub_lat != null) { L.circleMarker([p.hub_lat, p.hub_lon], { radius: 4, color: '#06f' }).bindPopup('hub (' + p.hub_position + ')').addTo(layer); bounds.push([p.hub_lat, p.hub_lon]); }
+      if (p.hub_lat != null) { L.circleMarker([p.hub_lat, p.hub_lon], { radius: 4, color: '#06f' }).bindPopup('hub (' + esc(p.hub_position) + ')').addTo(layer); bounds.push([p.hub_lat, p.hub_lon]); }
     }
     if (bounds.length) map.fitBounds(bounds, { maxZoom: 16 }); else map.setView([39.95, -75.16], 10);
   }
-  $('rows').innerHTML = pts.slice().reverse().slice(0, 500).map(p => `<tr><td>${p.seq}</td><td>${p.utc_ms ? new Date(p.utc_ms).toISOString() : 'NO UTC'} (${p.time_source})</td><td>${esc(p.drone_id)}</td><td>${p.lat != null ? p.lat.toFixed(6) + ', ' + p.lon.toFixed(6) : '-'}</td><td>${p.hub_lat != null ? p.hub_lat.toFixed(6) + ', ' + p.hub_lon.toFixed(6) + ' (' + p.hub_position + ')' : 'NO POSITION'}</td><td class="s">${esc(p.summary)}</td></tr>`).join('');
+  $('rows').innerHTML = pts.slice().reverse().slice(0, 500).map(p => `<tr><td>${p.seq}</td><td>${p.utc_ms ? new Date(p.utc_ms).toISOString() : 'NO UTC'} (${esc(p.time_source)})</td><td>${esc(p.drone_id)}</td><td>${p.lat != null ? p.lat.toFixed(6) + ', ' + p.lon.toFixed(6) : '-'}</td><td>${p.hub_lat != null ? p.hub_lat.toFixed(6) + ', ' + p.hub_lon.toFixed(6) + ' (' + esc(p.hub_position) + ')' : 'NO POSITION'}</td><td class="s">${esc(p.summary)}</td></tr>`).join('');
   $('export').onclick = async (e) => {
     e.preventDefault();
     const r = await fetch(`/api/devices/${id}/export`, { headers: headers() });

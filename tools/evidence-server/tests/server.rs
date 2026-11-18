@@ -461,3 +461,16 @@ async fn registration_needs_the_token_unless_opened_explicitly() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The page is built with innerHTML, and a unit's name is whatever its
+/// registrant typed: every value that came from the server must go through
+/// `esc()` (there is no JS runner here, so this checks the source).
+#[test]
+fn page_escapes_server_text() {
+    let page = include_str!("../src/page.html");
+    assert!(!page.contains("${d.name}"), "the unit name must be escaped");
+    assert!(page.contains("${esc(d.name)}"));
+    for raw in ["${d.key_id}", "${p.time_source}", "p.hub_position +", "+ p.hub_position"] {
+        assert!(!page.contains(raw), "{raw} is not escaped");
+    }
+}

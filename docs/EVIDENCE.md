@@ -122,18 +122,22 @@ target/release/evidence-server keygen --out ~/p4-dev.evkey
 cd firmware/hub-p4 && ROTORSCOPE_DEV_KEY=$(cat ~/p4-dev.evkey) cargo fw   # then flash as usual
 # without ROTORSCOPE_DEV_KEY the hub uses the published test key (class "public test")
 
+# Registering a unit needs the token: without --token the server refuses it.
+# (--open-registration lifts that, for a bench laptop nobody else can reach.)
+export EVIDENCE_TOKEN=<a long random string>   # the server and the uploader both read it
 target/release/evidence-server serve --data ~/evidence-data          # http://127.0.0.1:8650
 target/release/evidence-upload --server http://127.0.0.1:8650 \
     --serial /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --replay --register "bench P4"
 #  check that the fingerprint it registers matches the one the hub prints at boot
 #  ("hub-p4: evidence key ... fingerprint xxxx-xxxx-xxxx-xxxx")
-curl -o bundle.json http://127.0.0.1:8650/api/devices/<fingerprint>/export
+curl -H "Authorization: Bearer $EVIDENCE_TOKEN" -o bundle.json http://127.0.0.1:8650/api/devices/<fingerprint>/export
 target/release/evidence-verify bundle.json
 # or straight from the card in a card reader:
 target/release/evidence-verify /media/<card>/ROTORSCP/EVIDENCE/
 ```
 
-The map and list page is at the server's address. Every view, export and
+With a token set, every call except an upload needs it (the page asks for
+it). The map and list page is at the server's address. Every view, export and
 note is written to the access log with the name you type.
 
 Verifier exit codes: **0** verified (every record linked and signed),
