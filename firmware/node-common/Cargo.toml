@@ -2,6 +2,8 @@
 # this board holds (so the node can report its `can` mask), and switching to
 # another image with a job that survives the reboot. The pure logic is
 # crates/nodeimage (host-tested); this is the part that touches flash.
+# Also `fault`: reboot after a panic, the hang watchdog and the reset
+# reason, for the nodes and the gateway (docs/BENCH.md "Crash recovery").
 # A library used by path from each firmware; it builds inside that firmware's
 # workspace, for that firmware's chip.
 [package]
@@ -25,6 +27,11 @@ esp32c3 = ["esp-hal/esp32c3", "esp-bootloader-esp-idf/esp32c3"]
 # UART, polled by the hub. `src/bus.rs`; used by node-wifi, node-ble and
 # node-sdr when they are built with their own `wirebus` feature.
 wirebus = ["dep:wirebus", "dep:embassy-time", "dep:critical-section", "dep:portable-atomic"]
+# Bench only (docs/BENCH.md "Crash recovery"): `fault::console`, typed
+# `fault panic` / `fault hang` on USB to prove the reboot and the watchdog.
+# Enabled only through a firmware's own `faulttest` feature, which is in no
+# `default` list.
+faulttest = ["dep:embassy-time"]
 
 [dependencies]
 link      = { path = "../../crates/link" }

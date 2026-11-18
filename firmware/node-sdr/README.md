@@ -30,7 +30,9 @@ cargo fw-lite   # capture/trigger/dump only, for a C5 without PSRAM
 cargo fw-now    # cargo fw + the ESP-NOW hub uplink (TRANSMITS between captures)
 #   -> firmware/node-sdr/target-espnow/riscv32imac-unknown-none-elf/release/node-sdr
 #   -> firmware/node-sdr/target/riscv32imac-unknown-none-elf/release/node-sdr (+ node-sdr.map)
-NODE_SDR_BOOT="level;grab;dump" cargo fw   # bake console commands that run after boot
+# Bench only (docs/BENCH.md "Bench builds"; the build stops without ROTORSCOPE_BENCH=1):
+ROTORSCOPE_BENCH=1 cargo fw --features bringup                               # the bring-up console
+ROTORSCOPE_BENCH=1 NODE_SDR_BOOT="level;grab;dump" cargo fw --features bringup   # + baked commands
 ```
 
 `build.rs` refuses to build against any `libphy.a` but the one the private ABI was checked against
@@ -51,7 +53,10 @@ antenna fitted.
 
 Everything is JSON lines on USB-Serial-JTAG (`"t"` tags: `hello psram mem phy stats burst ev snap
 grab held decode bus err ok help boot_cmd`), plus dump lines (`@H/@D/@E`). Commands (one per line;
-`help` lists them; grammar in `crates/rawcap/src/cmd.rs`):
+`help` lists them; grammar in `crates/rawcap/src/cmd.rs`). A normal build answers only `help`,
+`stats`, `phy`, `plan`, `jam`, `uplink [now]` and `fpv verbose on|off`; everything else below
+(and `role`, `hop`, `assign`, `@F`, `hil run`) needs a bench build with the feature `bringup`
+(BRINGUP.md "Bring-up builds"), and is refused otherwise:
 
 `stats`, `phy`, `freq <MHz>`, `offset <kHz>`, `gain <idx>`, `lpf <0-63>|off`, `dcal [ref | auto on|off]`,
 `win clip|fold5|fold`, `edge rise|fall`, `pins xiao|alt`, `swap on|off`,
@@ -210,8 +215,12 @@ into the stopped ring, a fresh trigger, `window`: length gate, half-band, DC rem
 redacted `burst` line, hub sighting). HIL sightings are encoded and round-tripped but **never
 queued for the hub**: a recording must not appear on the hub as a live drone.
 
+It needs a `bringup` build (`@F` and `hil run` are refused otherwise):
+
 ```sh
 tools/fetch-droneid-samples.sh
+export ROTORSCOPE_BENCH=1
+(cd firmware/node-sdr/c5 && cargo fw --features bringup)
 tools/dev-board.sh --run 'target/release/droneid-hil --rms 200,150,125' 800 c5b
 ```
 

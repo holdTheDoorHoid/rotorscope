@@ -74,6 +74,10 @@ pub static RENDER_MAX_US: AtomicU32 = AtomicU32::new(0);
 pub static FLUSH_US: AtomicU32 = AtomicU32::new(0);
 pub static FEED_US: AtomicU32 = AtomicU32::new(0);
 pub static BUTTONS: AtomicU32 = AtomicU32::new(0);
+/// The Select button is held right now (sampled every 10 ms). The C5 build
+/// uses it as the "someone is at the box" button for the hotspot password
+/// commands on USB (see `usb.rs`); the S3 uses its BOOT button.
+pub static SELECT_HELD: AtomicBool = AtomicBool::new(false);
 /// The SD task has had its first look at the card (see `display`).
 pub static SD_PROBED: AtomicBool = AtomicBool::new(false);
 
@@ -306,6 +310,7 @@ pub async fn display(p: DisplayParts) {
         // Buttons: sampled every 10 ms; ButtonDecoder debounces and turns
         // levels into presses (short, long = Back, auto-repeat).
         let [up, down, select] = &buttons;
+        SELECT_HELD.store(select.is_low(), Relaxed);
         if let Some(b) = keys.poll(up.is_low(), down.is_low(), select.is_low(), now) {
             BUTTONS.fetch_add(1, Relaxed);
             let g = UI_STATE.lock().await;

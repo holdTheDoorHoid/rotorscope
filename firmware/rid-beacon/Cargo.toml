@@ -55,7 +55,8 @@ esp-hal = { version = "~1.2.2", features = ["log-04", "unstable"] }
 esp-rtos = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio", "log-04"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["log-04"] }
 esp-alloc = { version = "0.11.0" }
-esp-backtrace = { version = "0.20.0", features = ["panic-handler", "println"] }
+# custom-halt: reboot after a panic (`custom_halt` in src/bin/main.rs).
+esp-backtrace = { version = "0.20.0", features = ["panic-handler", "println", "custom-halt"] }
 # `jtag-serial` pins console output to the USB-Serial-JTAG port on both chips:
 # that is the USB connector the laptop reads JSON lines from (and the one we
 # read single-letter commands from).

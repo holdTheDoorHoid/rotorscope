@@ -94,7 +94,7 @@ printf 'AT+PROTOCOL_OUT?\r\n' > "$PORT"                  # check both interfaces
 ```sh
 cd firmware/hub/s3
 . ~/export-esp.sh
-cargo fw --features adsbee            # add ,demo for the demo drones and a demo helicopter too
+cargo fw --features adsbee            # add ,demo (with ROTORSCOPE_BENCH=1) for the demo drones and a demo helicopter
 cd ../../..
 tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 90
 ```

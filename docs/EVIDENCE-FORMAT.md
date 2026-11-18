@@ -12,8 +12,15 @@ Format version 1. All integers little-endian. "SHA-256" is FIPS 180-4.
 On the hub's SD card (FAT32): `ROTORSCP/EVIDENCE/EVnnnnnn.EVL`, six decimal
 digits. The hub creates a new file each time it mounts the card (each boot,
 and again after a card is reinserted), numbered one past the highest file
-already there. It never writes to an existing file. A file is just records
+already there; when no number above it is free (an `EV999999.EVL` on the
+card), the lowest free number, with no previous file to link to. Only
+regular files count; a name taken by a folder is skipped. It never writes
+to an existing file. A file is just records
 back to back, no file header.
+
+File numbers are **not** unique over the card's life: if the newest files
+are deleted, the next mount reuses their numbers. Nothing on the card
+records how many files or boots there have been.
 
 ## Record
 
@@ -133,13 +140,23 @@ It is a convenience: the raw bytes are the record.
 | 64 | signature r ‖ s, 32 bytes each, big-endian |
 
 The signature is ECDSA P-256 with SHA-256 (`ecdsa-with-SHA256`) over the
-record's bytes from offset 0 up to, not including, the signature. Those bytes
+record's bytes from offset 0 up to, not including, the signature. `s` is
+always in the **low-S** form (s <= n/2, n the P-256 group order); a
+signature with s > n/2 is refused even though plain ECDSA would accept it,
+because anyone can turn (r, s) into (r, n - s) and so make a second valid
+copy of a checkpoint. (Firmware built before 2026-11-18 did not normalise
+`s`; about half its checkpoints are high-S and fail.) Those bytes
 include the previous-record hash (the chain head), the count and the time,
 so one valid checkpoint vouches for every record before it in its chain.
 
 The published test key (class 0) has secret scalar
 SHA-256("rotorscope evidence public test key - not secret - do not trust").
-A signature with it proves nothing.
+A signature with it proves nothing; the reference verifier refuses it unless
+told to accept it for testing.
+
+The **key class** byte (here and in the boot event) is written by whoever
+signs. It is a claim, not a proof: a key generated on any laptop can be
+written with class 2.
 
 ## Checking a log by hand
 
@@ -150,11 +167,19 @@ A signature with it proves nothing.
    gaps; #0 is a boot event with an all-zero previous hash; every other
    record's previous hash is the SHA-256 of the record before it.
 3. Check every checkpoint's signature with the public key named in the boot
-   event; check its count equals its sequence number.
+   event; check its count equals its sequence number. Then confirm that
+   key **from outside the log** (the key the unit printed at setup, kept
+   with the custody record): the log names its own key, so a log that
+   checks against the key it names shows only that it is self-consistent.
+   Reject the published test key.
 4. Records after the last checkpoint are linked but not yet signed.
 5. Files: in file *n*'s card_mounted event, the previous file's length and
    last whole record must match file *n-1* exactly.
 6. Re-decode each detection's raw bytes and compare with the summary.
+
+None of these checks can show that the log is complete: records cut off at
+a checkpoint, the newest files deleted, a reformatted card or a boot never
+copied off leave nothing behind to check.
 
 ## Console stream
 
@@ -184,6 +209,9 @@ JSON, from evidence-server (`/api/devices/{id}/export`):
   Actions: register, upload, view, annotate, export, timestamp.
 - **key_id**: the first 8 bytes of SHA-256 of the public key, hex, grouped
   `xxxx-xxxx-xxxx-xxxx`.
+- **device.public_key** is the key the server registered for the device.
+  It is the server's word, not a confirmation of who signed: check the
+  records against the unit's key obtained independently.
 - **Time-stamps**: `imprint` = SHA-256(boot id ‖ seq as u64 LE ‖ record
   hash); `token` is the RFC 3161 TimeStampResp. Check it with
   `openssl ts -verify -digest <imprint> -in token.tsr -CAfile <roots>`.

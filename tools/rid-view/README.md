@@ -127,8 +127,8 @@ crate), no libzmq. Off by default, receive-only like the rest of Rotorscope.
 
 ```bash
 rid-view /dev/ttyACM0 --own-pos 39.9526,-75.1652 \
-    --dragonsync tcp://0.0.0.0:4230 \
-    --dragonsync-signals tcp://0.0.0.0:4231
+    --dragonsync tcp://127.0.0.1:4230 \
+    --dragonsync-signals tcp://127.0.0.1:4231
 ```
 
 There are two sockets because DragonSync reads two streams. **There are no default ports**, so
@@ -141,7 +141,8 @@ ones. The two must differ.
 | `--dragonsync-signals BIND` | one JSON array per radio-signal alert | the FPV/signal stream (`fpv_zmq_port`, WarDragon's 4226) |
 
 `BIND` is `tcp://HOST:PORT` (`tcp://127.0.0.1:4230` if DragonSync is on the same machine,
-`0.0.0.0` to let other machines connect). Each option can be used alone.
+the laptop's own address to let one other machine connect; avoid `0.0.0.0`, which lets anyone on
+the network read the drone stream). Each option can be used alone.
 
 ### DragonSync settings
 

@@ -139,10 +139,10 @@ hub's console with a bench-only build (below), not from the node.
 
 * **One role at a time.** With one listener node the coordinator always gives it Wi-Fi 2.4. A bench
   build switch makes the node offer only one role, so the hub assigns that role:
-  `ROTORSCOPE_BENCH_CAN=wifi24|wifi5|ble tools/flash-node.sh c5a` (`node_common::bench_can_mask`;
+  `ROTORSCOPE_BENCH=1 ROTORSCOPE_BENCH_CAN=wifi24|wifi5|ble tools/flash-node.sh c5a` (`node_common::bench_can_mask`;
   both images get the same mask; any other value stops the build; unset = no restriction). Never
   for a deployed node.
-* **Hub evidence.** `cargo build --release --features benchlog` in `firmware/hub-p4`
+* **Hub evidence.** `ROTORSCOPE_BENCH=1 cargo build --release --features benchlog` in `firmware/hub-p4`
   (`src/bench.rs`): a `bench new-slot` / `new-link` / `new-rf` / `new-wifidrone` line the moment the
   tracker gets a new drone slot (transport and band), open-link stream, RF emitter or Wi-Fi drone,
   a table summary every 5 s, and at boot a count by kind of every row in the previous SD log file.
@@ -272,3 +272,238 @@ beacons than the 0.4/s with the controller stop, but commands still arrive). Eac
 | Wi-Fi drone makers (Tello, Parrot, ...) | a real one; we never imitate a maker's network |
 | China GB 46750 Remote ID | a test-beacon mode or a DJI on 2026 firmware |
 | wfb-ng's real LDPC/STBC video | OpenIPC hardware |
+
+## Crash recovery (2026-11-18, not yet run on hardware)
+
+Every board now reboots after a panic, and every board except `rid-beacon` has a hang watchdog
+(the chip's RTC watchdog) that resets it if its main work stops. After any restart the board's
+`hello` line says why it last reset: `"reset":"power_on"`, `"software"` (a panic, or a restart the
+firmware chose: image switch, BLE host restart, gateway epoch roll-over), `"watchdog"`, `"usb"`
+(the flasher or a monitor reset it), `"brownout"`. The P4 hub says `last reset: ...` in its
+`hub-p4: hello` line and in the evidence log's boot event.
+
+| Board | Watchdog fed by | Timeout | Panic: back after | Hang: back after |
+|---|---|---|---|---|
+| `gateway` | relay loop, only while the beacon loop is alive (5 s) | 10 s | ~0.5 s + boot | ~10 s |
+| `node-wifi` (S3, C5, `band24`, `espnow`, `wirebus`) | channel hopper, every hop | 30 s (a hub plan may dwell 10 s) | ~0.5 s + boot | ~30 s |
+| `node-sdr` | capture loop, every pass, and every dump line | 10 s | ~0.5 s + boot | ~10 s |
+| `node-ble` (S3, C5) | stats task, once a second | 10 s | ~0.5 s + boot | ~10 s |
+| `node-lr` | stats loop in `main`, once a second | 10 s | ~0.5 s + boot | ~10 s |
+| `hub-p4` | main loop, every pass | 30 s | 0.5 s (5 s within 10 s of boot) + boot | ~30 s |
+| `rid-beacon` | (no watchdog) | | ~0.5 s + boot | |
+
+The RTC watchdog runs from the chip's internal slow oscillator, so "10 s" may come out a few
+percent either way. "Boot" is the board's normal start-up (a second or two for the nodes; longer for
+the P4, which tests its PSRAM first).
+
+### The `faulttest` build
+
+To trigger the faults on purpose, build with the feature `faulttest`. It is in no `default` list, so
+a normal build cannot be made to panic or hang from the console; its `hello` line says
+`"faulttest":true` and `"bench":["faulttest"]` (P4: `FAULT TEST BUILD`, and `BENCH BUILD` on the
+screen). It is a bench feature: `export ROTORSCOPE_BENCH=1` in the shell first, or the build
+stops (see "Bench builds" below). Type a whole line and Enter:
+
+* `fault panic`: the board panics (backtrace on USB) and must come back on its own.
+* `fault hang`: the board stops feeding the watchdog (spins without yielding) and must come back
+  after the timeout above.
+
+Nodes and the gateway read it on their USB-Serial-JTAG port (the same port their JSON comes out
+of); node-sdr through its normal console; the P4 hub on the USB-C (CH340) console, where `f`
+starts the line (Esc cancels).
+
+| Board | Build (from the firmware's folder, as usual, plus the feature; `ROTORSCOPE_BENCH=1` exported) |
+|---|---|
+| gateway | `cargo build --release --features faulttest` |
+| node-wifi C5 | in `c5/`: `cargo build --release --features esp32c5,faulttest` (add `band24`, `espnow` as for `fw24` / `fw24-now`) |
+| node-wifi S3 | in `s3/`: `cargo build --release --features esp32s3,faulttest` |
+| node-sdr | in `c5/`: `cargo build --release --features faulttest` |
+| node-ble S3 / C5 | `cargo build --release --features faulttest` / `cargo +stable build --release --no-default-features --features esp32c5,faulttest --target riscv32imac-unknown-none-elf` |
+| node-lr | `cargo build --release --features faulttest` |
+| hub-p4 | `cargo build --release --features faulttest` (flash as in firmware/hub-p4/BRINGUP.md) |
+
+### The checklist (one board at a time)
+
+Flash the `faulttest` build with the board's usual tool (`tools/dev-board.sh <elf> 90 <board>` for
+the S3 and C5 boards; the P4 as in its BRINGUP.md). Note: opening the serial port resets the board,
+so the first `hello` after flashing says `"usb"` or `"power_on"`, not a fault.
+
+1. **First boot.** The `hello` line has `"faulttest":true` and a `reset` field. P4: the boot log
+   also has `hub-p4: watchdog on: resets the chip if the main loop stops for N s`, with N close
+   to 30 (between 15 and 60 is accepted; anything else prints `watchdog LEFT OFF` and is a FAIL to
+   report with the numbers it shows).
+2. **Normal running, 5 minutes.** No restart (`up_us` / uptime keeps growing, no second `hello`).
+   This is the important one on the P4: run it with the SD card in, an airspace pack on the card
+   (so the pack's load and check happen during the run) and the screen on. A restart here means
+   the timeout is too short for something legitimate: record the last lines before it.
+3. **Panic.** Type `fault panic` (for example
+   `tools/dev-board.sh --log 40 c5b --send $'fault panic\r'`). Expect the `PANIC` banner with
+   `faulttest: panic requested on the console`, a backtrace, then a fresh `hello` with
+   `"reset":"software"` within the time in the table.
+4. **Hang.** Type `fault hang` (`--send $'fault hang\r'`, reading for at least the timeout + 20 s).
+   Expect the `faulttest ... hang` line, silence for about the timeout, then a fresh `hello` with
+   `"reset":"watchdog"`. Time it: it should match the table within ~20 %.
+5. **Hub view (nodes behind a hub).** During 3 and 4 the hub shows the node going quiet, then its
+   Hello again; nothing else on the hub changes.
+6. **P4 only: evidence.** After step 4, the evidence file's boot event for the new boot ends with
+   `last reset: watchdog` (console `r` replays it, or read the card on the laptop).
+7. **P4 only: panic at start-up.** Not testable from the console; it is covered by the 5 s wait in
+   `fault.rs`. If you ever see a P4 boot-looping, the panic message repeats every ~5 s plus boot.
+8. Finish by flashing the normal build again (no `faulttest`, in a shell without
+   `ROTORSCOPE_BENCH`) and checking its `hello` has `"faulttest":false` and `"bench":[]`.
+
+Under a Wi-Fi frame flood, `node-wifi` must not reset: the drain task now yields to the hopper
+every 2 ms. If a busy bench (many access points, a `rid-beacon` at 10 Hz) ever shows
+`"reset":"watchdog"` on a node-wifi without `fault hang`, that is a FAIL worth reporting.
+
+## Bench builds (2026-11-18, compile-checked only)
+
+Some cargo features and build switches exist only for the bench: they fake data (a made-up drone
+whose frames are written to the **signed** evidence log, a made-up GPS fix), loop the board's own
+pins back, or open debug doors on the console (panic on request, inject samples, un-redact serial
+numbers, drop to the ROM loader). Nothing in an image used to tell such a build from a field build.
+Now:
+
+* **The build refuses** unless the environment has `ROTORSCOPE_BENCH=1`. Each firmware's `build.rs`
+  checks its own list (`crates/link/src/benchfence.rs`) and stops with a message naming what is on.
+  For a bench session: `export ROTORSCOPE_BENCH=1` in that shell only. `tools/bench/run.py` sets it
+  for its own runs.
+* **The image says so.** Every hello line has `"bench":[...]` (`[]` for a normal build), and a bench
+  image prints `{"t":"warn","what":"bench_build","tag":"bench-build:<list>",...}` after it. The P4
+  hub lists them in its `hub-p4: hello` line and in the evidence log's boot event
+  (`...; bench: fakedrone,faulttest`, or `bench: none`), and shows **BENCH BUILD** on the screen
+  for as long as it runs.
+* **The flashing tools check.** `tools/dev-board.sh` and `tools/flash-node.sh` find the
+  `bench-build:` tag in an ELF and refuse to flash it without `ROTORSCOPE_BENCH=1` (and warn with it).
+
+| Firmware | Bench features | Bench build switches (environment at build time) |
+|---|---|---|
+| gateway | `faulttest` | |
+| node-wifi | `faulttest`, `forgetest` (send frames a node may not originate: "Origin checks" below) | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-lr | `faulttest` | |
+| node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
+| hub (S3/C5 web head) | `demo` (fake drones, a made-up position, the build machine's clock), `open-hotspot` (no hotspot password) | |
+| hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` (console `p`: own position to a fixed test point) | (`AIRSPACE_PAK` only with `embedpack`) |
+
+Not fenced, on purpose: `rid-beacon` (it is the test transmitter; nothing fields it), hub-p4
+`show-link-ids` (an operator privacy choice, not a bench aid), `modes` (a field feature), node-wifi
+`ROTORSCOPE_ESPNOW_RATE` (a radio tuning). The S3 web head (`firmware/hub`) has `"bench"` in its
+`boot` line (it has no `hello` line) and in `/api/state`, where the phone page shows a striped
+**BENCH BUILD, NOT FOR USE** banner.
+
+**Link key (since the same date).** A firmware build with ESP-NOW and no `tools/link.key` stops
+(docs/ESPNOW.md "Securing the link"); `ROTORSCOPE_LINK_KEY_FILE=none` builds an open kit on purpose,
+and `tools/flash-node.sh` then wants `--open`. The bench tests in `tools/bench/run.py` build only
+wired images (no key needed).
+
+### To check on hardware (not yet run)
+
+Everything in this section, and the hub-p4 screen and evidence changes below, is compile-checked
+only (2026-11-18, branch `sec/lane-a`). On the bench:
+
+1. **Normal builds**: each board's hello has `"bench":[]` and no `bench_build` warning; the P4's
+   hello says `evidence key: public_test (...)` (or `development_software`) and `bench: []`.
+2. **A bench build** (e.g. node-wifi with `faulttest`): `"bench":["faulttest"]` plus the warning
+   line; `tools/dev-board.sh <elf>` without `ROTORSCOPE_BENCH=1` refuses it before touching the
+   board, with it flashes and warns.
+3. **P4 screen, test key**: a strip at the bottom edge reads `TEST KEY: log not evidence` on every
+   page (with a dev key: `DEV KEY: not evidence-grade`); a bench build adds `BENCH BUILD`. Check it
+   is readable in both themes and does not hide anything needed (it covers the bottom 11 px).
+4. **Open gateway**: flash the gateway with `ROTORSCOPE_LINK_KEY_FILE=none`; the P4 shows
+   `OPEN LINK` within a few seconds of the gateway's Hello, and it goes away after the keyed gateway
+   is back (its next Hello).
+5. **Evidence not written**: (a) boot the P4 with no card: the strip shows
+   `NO EVIDENCE (no SD): N waiting` with N growing; insert a card: the line goes away and REC shows.
+   (b) On a spare card, create a *file* `ROTORSCP/EVIDENCE/EV000005.EVL` (any content) and a
+   *folder* `ROTORSCP/EVIDENCE/EV000006.EVL`: the next boot writes `EV000007.EVL` (the folder's
+   name is skipped) and links it to `EV000005.EVL`. Then add a *file* `EV999999.EVL`: the next
+   mount uses the lowest free number (console: `using the lowest free number 1`) and evidence
+   keeps recording.
+   (c) Make `ROTORSCP/EVIDENCE` a *file* instead of a folder: the CSV still records, the status
+   bar shows a boxed `NO EVID` instead of `REC`, the health page says `CSV only - NO EVIDENCE`,
+   the strip says `NO EVIDENCE (file error): N waiting`, and the console prints a retry every
+   15 s with the same `ev_errors` growing (no `TooManyOpenDirs` after many retries). Pull the
+   card, delete the file on a laptop, put the card back: evidence records again (into the same
+   new file chain, the queued records first).
+6. **Console `p`** on a normal P4 build answers `p (test position) is in bench builds only`; a
+   `testpoint` build sets the test position and logs the Setting event as before.
+7. **node-sdr**: a normal build answers `freq 5756`, `reveal on`, `bootloader` and an `@F` line
+   with `"e":"bring-up command: needs a bringup build (BRINGUP.md)"`; `stats`, `phy`, `plan` still
+   work. A `bringup` build runs BRINGUP.md as before, and `tools/droneid-hil` passes on it.
+   `@F fffffff8 AAAA` must be counted as a feed error (`hil` counters) and change nothing.
+8. **Over-the-air text**: with `rid-beacon` or a fake open network whose SSID holds a control
+   character (if the beacon can send one), the P4's `THREAT` console line and evidence text show
+   `?` in its place.
+
+## Origin checks (2026-11-18, compile-checked only)
+
+Who may send which frame type (docs/ESPNOW.md "Who may send what") is checked by the gateway, the P4
+hub, the P4's web-head feed, the S3 web head and the wired bus. Host tests cover the rules (`cargo test -p link -p
+wirebus`); the firmware changes are compile-checked only. On the bench, a node built with the bench
+feature **`forgetest`** sends frames it must never originate, and both hops must refuse them.
+
+### The `forgetest` build (node-wifi only)
+
+`export ROTORSCOPE_BENCH=1` first (bench fence). Not together with `faulttest` (both read the USB
+console). From `firmware/node-wifi/c5/`:
+
+| Link under test | Build |
+|---|---|
+| ESP-NOW through the gateway | `cargo build --release --features esp32c5,band24,espnow,forgetest --target-dir ../target-espnow` |
+| Wired bus | `cargo build --release --features esp32c5,band24,wirebus,forgetest --target-dir ../target-bus` |
+| Point-to-point wire (the P4 in legacy mode) | `cargo build --release --features esp32c5,band24,forgetest` |
+
+Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench ELF without
+`ROTORSCOPE_BENCH=1`). Its `hello` has `"bench":["forgetest"]` and a `bench_build` warning, then
+`{"t":"forge","note":"FORGE TEST BUILD: ..."}`. Type a whole line and Enter (for example
+`tools/dev-board.sh --log 20 c5a --send $'forge hubfix\r'`); each answers `{"t":"forge","sent":"..."}`:
+
+| Command | Sends | Must never |
+|---|---|---|
+| `forge hubfix` | a `HubFix` at 0 N 0 E, UTC in 2001 | move the web head's map or clock |
+| `forge csbee` | an ADS-B line for a made-up aircraft | show an aircraft `FA4E00` |
+| `forge flags` | an FAA flag report for `FORGED` | show a flag |
+| `forge via` | `Via` naming 02:00:00:00:00:99, then a `Stats` | create node 02:00:00:00:00:99 on the hub |
+| `forge hello` | `Hello` role Gateway, `gw key FAKE` | change the hub's `"gw"` field or `OPEN LINK` state |
+| `forge threat` | `forged_link` report naming 02:00:00:00:00:99 | appear as the gateway's report |
+| `forge join` | a `BusJoin` | reach the bus master or the tracker |
+
+### To check on hardware (not yet run)
+
+1. **Gateway (keyed kit; c5a forgetest node, c5c gateway, P4 hub).** After each `forge` command:
+   the gateway's `"t":"gw"` line's `refused` goes up by one (for `forge via` the `Via`; the `Stats`
+   after it is relayed under c5a's own address), and within a second a `{"t":"threat","kind":"forged_link",
+   "src":"<c5a>","why":"origin",...}` line. On the P4: `hub-p4: THREAT Forged node traffic` naming
+   c5a (detail 5); its `hub-p4: link` line's `refused=` does **not** move (the gateway already
+   dropped the frames). Nothing in the "Must never" column happens on the P4 screen or the web head.
+2. **Gateway, open kit.** The same with the gateway and node built `ROTORSCOPE_LINK_KEY_FILE=none`
+   (`OPEN LINK` on the P4): the same refusals; the rules do not depend on the key.
+3. **P4, wired bus (forgetest node on the bus).** After each command the `{"t":"hub"}` line's
+   `"bus":{...,"refused":N}` goes up, and within a second `hub-p4: refused 1 frame(s) from <node
+   MAC> ...` plus a `THREAT Forged node traffic` line. `forge via`: the `Stats` arrives under the
+   node's own MAC; no node 02:00:00:00:00:99 appears in the node list.
+4. **P4, point-to-point wire (legacy mode).** `forge hubfix`, `csbee`, `flags`, `join`: the
+   `hub-p4: link` line's `refused=` goes up and the hub raises its own `forged_link` with an
+   all-zero source (the link's own stream). `forge hello` and `forge threat` are **accepted** here
+   on purpose: a frame with no `Via` on a point-to-point link is the gateway's own. `forge via`: the
+   `Via` names the node's `Stats`, so node 02:00:00:00:00:99 appears: that is what a one-node wire
+   can do, and why the bus is the default.
+5. **Old gateway (defence in depth).** Flash the gateway built from a commit before this change
+   (for example `git show 0d0bfe3:firmware/gateway/src/main.rs`; build it in a scratch checkout),
+   keep the P4 on this change. `forge hubfix|csbee|flags|hello|threat|join` now reach the P4 after a
+   `Via`: its `refused=` goes up for each, a hub `forged_link` names c5a, and nothing in the "Must
+   never" column happens. `forge via`: one refusal (the `Via` after the gateway's `Via`); the
+   `Stats` is c5a's, and the gateway's next `Hello` still sets `"gw"` (no lingering).
+6. **Web head.** The `hub-p4: webhead` line's `refused=` moves with the `hub-p4: link` line's
+   `refused=` (so not in 1 and 3, where the gateway or the bus already dropped the frames), and
+   the web head shows none of the forged frames in any of 1-5. Then wire the forgetest node (the
+   point-to-point build) straight to the S3 web head's link 1 (`webhead` build): `forge hubfix`,
+   `csbee`, `flags` and `join` raise the S3 `hub` line's `relay_refused` and change nothing on the
+   page; on link 0 (the P4's) the first three are taken, by design.
+7. **Node table.** With 16 relayed nodes known to the P4 (the bus and a gateway together, or
+   `fakenode` plus real nodes), power one node off; after 60 s a new node takes its slot
+   (`evicted=` on the `hub-p4: link` line goes up); before that the new node's frames count as
+   `table_full=`. A keyed gateway with 16 nodes: a 17th node's packets count as `table_full` on the
+   `"t":"gw"` line and arrive on the P4 as `forged_link` detail 6.
+8. Finish by flashing the normal node build (no `forgetest`) and checking `"bench":[]`.

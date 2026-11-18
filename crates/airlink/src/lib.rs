@@ -30,6 +30,10 @@
 
 pub mod auth;
 mod hmac;
+/// The build script's key decision, compiled here for its tests only.
+#[cfg(test)]
+#[allow(dead_code)]
+mod keysrc;
 
 /// First two bytes of every packet.
 pub const MAGIC: [u8; 2] = *b"RS";

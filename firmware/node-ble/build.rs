@@ -1,4 +1,14 @@
+//! Linker checks (esp-generate), and the bench fence
+//! (crates/link/src/benchfence.rs): a build with a bench-only feature or
+//! build switch stops unless `ROTORSCOPE_BENCH=1`, and the list goes into the
+//! hello line.
+
+#[path = "../../crates/link/src/benchfence.rs"]
+mod benchfence;
+
 fn main() {
+    println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
+    benchfence::run("node-ble", &["faulttest"], &["ROTORSCOPE_BENCH_CAN", "ROTORSCOPE_BENCH_FLIP"]);
     linker_be_nice();
     check_xtensa_linker_available();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)

@@ -532,14 +532,14 @@ fn http(addr: &str, req: &str) -> (u16, String, Vec<u8>) {
 }
 
 fn get(addr: &str, path: &str) -> (u16, String, Vec<u8>) {
-    http(addr, &format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"))
+    http(addr, &format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n"))
 }
 
 fn post(addr: &str, path: &str, body: &str) -> (u16, String, Vec<u8>) {
     http(
         addr,
         &format!(
-            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ),
     )
@@ -584,7 +584,7 @@ fn http_serves_page_and_state() {
     let etag = header(&head, "etag").unwrap().to_string();
     let (status, _, body) = http(
         addr,
-        &format!("GET / HTTP/1.1\r\nHost: x\r\nIf-None-Match: {etag}\r\n\r\n"),
+        &format!("GET / HTTP/1.1\r\nHost: {addr}\r\nIf-None-Match: {etag}\r\n\r\n"),
     );
     assert_eq!(status, 304);
     assert!(body.is_empty());
@@ -677,4 +677,41 @@ fn http_with_once_is_refused() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// A page in the user's browser must not be able to move "own position",
+/// either by posting from another site or by rebinding a name to 127.0.0.1.
+#[test]
+fn http_refuses_cross_site_and_rebound_requests() {
+    let srv = serve(&[]);
+    let addr = &srv.1;
+    let body = r#"{"lat":40.0,"lon":-75.5}"#;
+    let req = |extra: &str, ct: &str| {
+        format!(
+            "POST /api/own-pos HTTP/1.1\r\n{extra}Content-Type: {ct}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    // A form post from another site: simple content type, foreign Origin.
+    let evil = req(&format!("Host: {addr}\r\nOrigin: http://evil.example\r\n"), "text/plain");
+    assert_eq!(http(addr, &evil).0, 403);
+    let evil = req(&format!("Host: {addr}\r\nOrigin: http://evil.example\r\n"), "application/json");
+    assert_eq!(http(addr, &evil).0, 403);
+    // DNS rebinding: the browser connects to us but the Host is the attacker's name.
+    let port = addr.rsplit(':').next().unwrap();
+    let rebound = req(&format!("Host: evil.example:{port}\r\n"), "application/json");
+    assert_eq!(http(addr, &rebound).0, 403);
+    assert_eq!(
+        http(addr, &format!("GET /api/state HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n")).0,
+        403
+    );
+    // Right host, wrong content type.
+    let plain = req(&format!("Host: {addr}\r\n"), "text/plain");
+    assert_eq!(http(addr, &plain).0, 415);
+    // The page's own request (same origin, JSON) still works.
+    let ok = req(&format!("Host: {addr}\r\nOrigin: http://{addr}\r\n"), "application/json; charset=utf-8");
+    assert_eq!(http(addr, &ok).0, 200);
+    // `localhost` on the right port is the same machine.
+    let local = req(&format!("Host: localhost:{port}\r\n"), "application/json");
+    assert_eq!(http(addr, &local).0, 200);
 }

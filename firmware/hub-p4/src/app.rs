@@ -45,6 +45,21 @@ pub struct Ext {
     pub adsb: Option<(tracker::json::AdsbStatus, u32)>,
     /// The FLAGS page (Phase 12).
     pub flags: Option<screen::FlagsView>,
+    /// Key class, bench build, open link, evidence not written: kept on
+    /// screen while they hold.
+    pub caveats: screen::Caveats,
+}
+
+/// Over-the-air text (a drone ID, a callsign, an SSID, a decrypted serial)
+/// inside a hub-built line, copied with every character outside printable
+/// ASCII shown as `?` (`link::printable`), before it goes to the console or
+/// into evidence text. Nodes clean what they send; the hub does not rely on
+/// it.
+fn clean<const N: usize>(text: &str) -> heapless::String<N> {
+    use core::fmt::Write;
+    let mut out = heapless::String::new();
+    let _ = write!(out, "{}", link::printable::Printable(text));
+    out
 }
 /// A relayed node not heard for this long shows as down.
 const NODE_ALIVE_MS: u64 = 5_000;
@@ -73,8 +88,8 @@ pub struct App {
     last_touch: u64,
     pub frames_drawn: u32,
     pub max_band_us: u64,
-    /// Set over the console (`p`), kept until cleared (`c`). Not kept across
-    /// reboots.
+    /// Set over the console (`p`, bench builds with `testpoint` only), kept
+    /// until cleared (`c`). Not kept across reboots.
     pub manual: Option<OwnPos>,
     /// New drones since the last report, for the `{"t":"new"}` lines.
     pub new_drones: heapless::Deque<u32, 8>,
@@ -177,7 +192,8 @@ impl App {
     fn announce_conflicts(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
         while let Some(c) = self.tracker.take_new_conflict(now) {
             let Some(drone) = self.tracker.get(c.drone) else { continue };
-            let text = tracker::conflict::describe(&c, drone, self.tracker.get_aircraft(c.aircraft));
+            // Drone ID and callsign arrived over the air.
+            let text: heapless::String<160> = clean(&tracker::conflict::describe(&c, drone, self.tracker.get_aircraft(c.aircraft)));
             let mut data = [0u8; 10];
             data[0] = c.level as u8;
             data[1..5].copy_from_slice(&c.drone.0.to_le_bytes());
@@ -192,7 +208,8 @@ impl App {
     /// event and one console line each time a track's suspicion rises.
     fn announce_spoof(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
         while let Some(e) = self.tracker.take_spoof_flag(now) {
-            let text = tracker::spoof::event_text(&e, self.tracker.get(e.track));
+            // The track's ID arrived over the air.
+            let text: heapless::String<192> = clean(&tracker::spoof::event_text(&e, self.tracker.get(e.track)));
             ev.event(evidence::format::EventCode::SpoofSuspect, text.as_bytes(), &e.data());
             crate::println!("hub-p4: SPOOF? {}", text);
         }
@@ -239,7 +256,8 @@ impl App {
                 write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
             };
             if !t.ssid.is_empty() {
-                let _ = write!(text, " \"{}\"", t.ssid);
+                // From a link frame: never printed or logged as received.
+                let _ = write!(text, " \"{}\"", link::printable::Printable(&t.ssid));
             }
             if let Some(maker) = tracker::threats::drone_maker(t) {
                 let _ = write!(text, " ({maker})");
@@ -275,11 +293,13 @@ impl App {
         self.tracker.ingest_o4_decrypted(key_id, rec, now);
         let mut text: heapless::String<160> = heapless::String::new();
         let deg = droneid::payload::rad_e7_to_deg;
+        // The serial numbers come out of a radio payload: shown cleaned.
+        use link::printable::Printable as P;
         let _ = match &plain {
             Plain::Cryp(a) => write!(
                 text,
                 "CRYP sn={} pos={:.6},{:.6} valid={}",
-                a.serial_str().unwrap_or("?"),
+                P(a.serial_str().unwrap_or("?")),
                 deg(a.lat_raw),
                 deg(a.lon_raw),
                 a.position_valid()
@@ -287,7 +307,7 @@ impl App {
             Plain::Infp10(t) => write!(
                 text,
                 "INFP-10 sn={} pos={:.6},{:.6} alt={}m h={:.1}m pilot={:.6},{:.6} type={} state={:04x}",
-                t.serial_str().unwrap_or("?"),
+                P(t.serial_str().unwrap_or("?")),
                 t.lat(),
                 t.lon(),
                 t.altitude_m,
@@ -297,7 +317,7 @@ impl App {
                 t.product_type,
                 t.state
             ),
-            Plain::Infp11(p) => write!(text, "INFP-11 sn={} purpose", p.serial_str().unwrap_or("?")),
+            Plain::Infp11(p) => write!(text, "INFP-11 sn={} purpose", P(p.serial_str().unwrap_or("?"))),
         };
         let mut data = [0u8; 5];
         data[..4].copy_from_slice(&key_id);
@@ -470,6 +490,7 @@ impl App {
             screen::from_tracker::fill_control(ct, &ctx, &mut self.state);
         }
         self.state.sd = ext.sd;
+        self.state.caveats = ext.caveats;
         self.state.flags = ext.flags.clone();
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,

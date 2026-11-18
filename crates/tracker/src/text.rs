@@ -121,10 +121,22 @@ pub(crate) struct CsvField<'a>(pub &'a str);
 
 impl fmt::Display for CsvField<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A spreadsheet runs a cell that starts with one of these as a
+        // formula, and these fields come off the air. A leading `'` makes it
+        // text. Numbers never go through here (a negative RSSI starts with
+        // `-`), only text fields.
+        let guard = self.0.starts_with(['=', '+', '-', '@', '\t', '\r']);
+        if !guard && !self.0.contains([',', '"', '\n', '\r']) {
+            return f.write_str(self.0);
+        }
         if !self.0.contains([',', '"', '\n', '\r']) {
+            f.write_char('\'')?;
             return f.write_str(self.0);
         }
         f.write_char('"')?;
+        if guard {
+            f.write_char('\'')?;
+        }
         for c in self.0.chars() {
             if c == '"' {
                 f.write_str("\"\"")?;
@@ -217,6 +229,25 @@ mod tests {
         assert_eq!(s, "plain");
         let s: heapless::String<64> = render(CsvField("a,\"b\""));
         assert_eq!(s, "\"a,\"\"b\"\"\"");
+    }
+
+    #[test]
+    fn csv_formula_prefix_is_neutralised() {
+        for bad in ["=1+1", "+1", "-1", "@SUM(A1)", "\tx", "\rx"] {
+            let s: heapless::String<64> = render(CsvField(bad));
+            assert!(
+                s.starts_with('\'') || s.starts_with("\"'"),
+                "{bad:?} -> {s:?}"
+            );
+        }
+        let s: heapless::String<64> = render(CsvField("=cmd|' /C calc'!A0"));
+        assert_eq!(s, "'=cmd|' /C calc'!A0");
+        // Quoted when it also has a comma: the guard goes inside the quotes.
+        let s: heapless::String<64> = render(CsvField("=a,b"));
+        assert_eq!(s, "\"'=a,b\"");
+        // Only a leading character matters; ordinary text is untouched.
+        let s: heapless::String<64> = render(CsvField("a=b-c"));
+        assert_eq!(s, "a=b-c");
     }
 
     #[test]

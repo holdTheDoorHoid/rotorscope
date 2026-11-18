@@ -16,7 +16,19 @@
 //! @F <offset hex> <base64>  HIL: write sample bytes into the staging buffer
 //! hil run <len> <crc32 hex> HIL: check the staged bytes and run them through
 //!                           the live capture path (Radio::hil_run)
+//! fault panic|hang          `faulttest` builds only: panic, or spin in the
+//!                           capture loop until the watchdog resets the chip
 //! ```
+//!
+//! **Bring-up commands need a `bringup` build** (a bench feature: the build
+//! needs `ROTORSCOPE_BENCH=1`; BRINGUP.md, docs/BENCH.md "Bench builds").
+//! They retune, park or stop the receiver, change its plan or calibration,
+//! inject samples (`@F`, `hil run`), dump raw captures, un-redact serials
+//! (`reveal`) or drop the chip into ROM download mode (`bootloader`): all
+//! fine on a bench, none wanted on a fielded node, whose job comes from the
+//! hub. A normal build answers only `help`, `stats`, `phy`, `plan`, `jam`,
+//! `uplink [now]` and `fpv verbose on|off`; anything else gets an error line
+//! saying it needs a `bringup` build ([`bringup_only`]).
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering::Relaxed};
 
@@ -65,6 +77,9 @@ pub enum Local {
     Uplink(bool),
     Assign(Assignment),
     HilRun { len: usize, crc: u32 },
+    /// `faulttest` builds only: true = panic, false = hang.
+    #[cfg(feature = "faulttest")]
+    Fault(bool),
 }
 
 fn on_off(s: Option<&str>) -> Result<bool, &'static str> {
@@ -83,8 +98,35 @@ fn role(s: Option<&str>) -> Result<NodeRole, &'static str> {
     }
 }
 
+/// A bring-up or test command (see the module docs): only a `bringup`
+/// build accepts it.
+pub fn bringup_only(c: &Cmd) -> bool {
+    match c {
+        Cmd::Raw(c) => c.bringup_only(),
+        Cmd::Local(l) => match l {
+            Local::Role(_) | Local::Hop(_) | Local::Edge(_) | Local::Assign(_) | Local::HilRun { .. } => true,
+            Local::Plan | Local::FpvVerbose(_) | Local::Jam | Local::Uplink(_) => false,
+            // Already a bench feature of its own.
+            #[cfg(feature = "faulttest")]
+            Local::Fault(_) => false,
+        },
+    }
+}
+
+/// What a normal build answers to a bring-up command.
+pub const NEEDS_BRINGUP: &str = "bring-up command: needs a bringup build (BRINGUP.md)";
+
 /// One console line: a node-sdr command, else a rawcap capture command.
+/// A bring-up command is refused unless this is a `bringup` build.
 pub fn parse(line: &str) -> Result<Option<Cmd>, &'static str> {
+    let c = parse_any(line)?;
+    if !cfg!(feature = "bringup") && c.as_ref().is_some_and(bringup_only) {
+        return Err(NEEDS_BRINGUP);
+    }
+    Ok(c)
+}
+
+fn parse_any(line: &str) -> Result<Option<Cmd>, &'static str> {
     let mut w = line.split_ascii_whitespace();
     let local = match w.next() {
         Some("role") => {
@@ -119,6 +161,12 @@ pub fn parse(line: &str) -> Result<Option<Cmd>, &'static str> {
                 Local::HilRun { len, crc }
             }
             _ => return Err("hil run <len> <crc32 hex>"),
+        },
+        #[cfg(feature = "faulttest")]
+        Some("fault") => match w.next() {
+            Some("panic") => Local::Fault(true),
+            Some("hang") => Local::Fault(false),
+            _ => return Err("fault panic|hang"),
         },
         _ => return cmd::parse(line).map(|c| c.map(Cmd::Raw)),
     };
@@ -160,7 +208,8 @@ fn decode_b64(s: &[u8], out: &mut [u8]) -> Option<usize> {
 }
 
 /// `@F <offset hex> <base64>`: write into the staging buffer. Errors are
-/// only counted (the `hil run` CRC check catches any loss).
+/// only counted (the `hil run` CRC check catches any loss). `bringup`
+/// builds only (the console task refuses `@F` otherwise).
 pub fn feed_line(l: &str) {
     let mut w = l[3..].split_ascii_whitespace();
     let (Some(off), Some(data)) = (w.next(), w.next()) else {
@@ -173,7 +222,10 @@ pub fn feed_line(l: &str) {
         return;
     };
     let p = STAGE.load(Relaxed);
-    if p.is_null() || off + n > STAGE_LEN {
+    // `checked_add`: on this 32-bit chip `off + n` wraps for an offset near
+    // usize::MAX (`@F fffffff8 ...`; release builds have no overflow
+    // checks), and the copy below would then write outside the buffer.
+    if p.is_null() || off.checked_add(n).is_none_or(|end| end > STAGE_LEN) {
         FEED_ERR.fetch_add(1, Relaxed);
         return;
     }

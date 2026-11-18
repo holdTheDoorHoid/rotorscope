@@ -11,10 +11,28 @@ ELF=firmware/node-sdr/target/riscv32imac-unknown-none-elf/release/node-sdr
 B=c5b                     # the board name in tools/boards.local (see docs/BENCH.md)
 ```
 
+**Bring-up builds.** Almost every command below (`freq`, `gain`, `trig`, `mode`, `snap`, `grab`,
+`level`, `dump`, `resume`, `win`, `dcal`, `reveal`, `role`, `hop`, `assign`, `@F` / `hil run`,
+`bootloader`, ...) exists only in a build with the bench feature `bringup`; a normal build
+answers them with `"e":"bring-up command: needs a bringup build (BRINGUP.md)"` and keeps only
+`help`, `stats`, `phy`, `plan`, `jam`, `uplink` and `fpv verbose`. Bench features (and
+`NODE_SDR_BOOT`) stop the build unless `ROTORSCOPE_BENCH=1` (docs/BENCH.md "Bench builds"), so
+for a bring-up session:
+
+```sh
+export ROTORSCOPE_BENCH=1          # this shell only
+cd firmware/node-sdr/c5 && cargo fw --features bringup     # (or fw-lite / fw-now, same flag)
+```
+
+The `hello` line then says `"bench":["bringup"]` and a `bench_build` warning follows it. The ELF
+lands where the normal one does: rebuild with plain `cargo fw` (in a shell without
+`ROTORSCOPE_BENCH`) before the node goes anywhere; `tools/flash-node.sh` refuses a bench ELF
+unless `ROTORSCOPE_BENCH=1`.
+
 `tools/dev-board.sh` flashes and *reads* the port; it does not send anything. Two ways to give
 console commands:
 
-- **Baked in** (works with dev-board.sh alone): `NODE_SDR_BOOT="snap;grab;dump" cargo fw` from
+- **Baked in** (works with dev-board.sh alone): `NODE_SDR_BOOT="snap;grab;dump" cargo fw --features bringup` from
   `firmware/node-sdr/c5`; the commands run 2 s after boot, one every 500 ms, each echoed as a
   `boot_cmd` line. Most steps below are written this way.
 - **Typed**: while `tools/dev-board.sh --log 120 $B | tee c5.log` runs, write to the same port
@@ -79,12 +97,12 @@ Good, in this order:
 | `dc_cal.n` 0 on the second line, `valid:false`, or `us` ≫ 30,000 | Our receive DC calibration (`phy::dc_recal`) did not run or did not finish; expect the DC offset to rail the ADC at gain ≥ 75 (step 6). |
 | `dc_cal.iq_kept:false` | The PHY's IQ-calibrated flag is clear. Nothing we call runs the IQ step (which transmits a tone), but report it. |
 | `gain_max` 0 or > 95 | Different PHY register map; the snapshot gain field (step 5) is the cross-check. |
-| Board will not take the next flash | The modem domain keeps running across the USB reset (C5VRX saw this). Type or bake `bootloader` first; failing that, hold BOOT while plugging in. |
+| Board will not take the next flash | The modem domain keeps running across the USB reset (C5VRX saw this). In a `bringup` build, type or bake `bootloader` first; a normal build has no `bootloader` command: hold BOOT while plugging in. |
 
 ## 3. Is the PHY really ours?
 
 ```sh
-NODE_SDR_BOOT="phy" cargo fw && tools/dev-board.sh $ELF 10 $B
+NODE_SDR_BOOT="phy" cargo fw --features bringup && tools/dev-board.sh $ELF 10 $B
 ```
 
 Good: the `phy` line as above, and a `bus` line:
@@ -118,7 +136,7 @@ settles; `rises` small in a quiet band.
 ## 5. Path A snapshot
 
 ```sh
-NODE_SDR_BOOT="snap" cargo fw && tools/dev-board.sh $ELF 10 $B
+NODE_SDR_BOOT="snap" cargo fw --features bringup && tools/dev-board.sh $ELF 10 $B
 ```
 
 Good: `{"t":"snap","words":16380,"us":82x,...,"dc":[d,d],"rms":[r,r],"peak":p,"railed":0,...,"gain_word":[83,83],"advice":"..."}`.
@@ -140,7 +158,7 @@ The snapshot holds; `resume` (or the next boot) restarts the ring.
 ## 6. Set the gain
 
 ```sh
-NODE_SDR_BOOT="gain 40;level;gain 55;level;gain 65;level;gain 75;level;gain 79;level;gain 83;level" cargo fw
+NODE_SDR_BOOT="gain 40;level;gain 55;level;gain 65;level;gain 75;level;gain 79;level;gain 83;level" cargo fw --features bringup
 tools/dev-board.sh $ELF 20 $B
 ```
 
@@ -164,7 +182,7 @@ clip window will be quantisation-limited: compare `win fold` in step 9.
 Same scene, both paths, pulled to the laptop:
 
 ```sh
-NODE_SDR_BOOT="gain <G>;snap;dump;resume;grab;dump" cargo fw
+NODE_SDR_BOOT="gain <G>;snap;dump;resume;grab;dump" cargo fw --features bringup
 tools/dev-board.sh $ELF 25 $B > c5.log
 cargo run --release -p rawcap-pull -- c5.log --out caps --spectrum
 ```
@@ -187,7 +205,7 @@ Use any 5 GHz access point on channel 149 (centre 5745 MHz, 20 MHz wide; a phone
 shows the channel). Tune 5 MHz below it so its band sits on the positive side:
 
 ```sh
-NODE_SDR_BOOT="freq 5740;gain <G>;snap;dump;resume;grab;dump" cargo fw
+NODE_SDR_BOOT="freq 5740;gain <G>;snap;dump;resume;grab;dump" cargo fw --features bringup
 ```
 
 `rawcap-pull --spectrum`: the access point's bursts should put clearly more energy at **0..+10
@@ -199,7 +217,7 @@ DroneID's Zadoff-Chu references do not correlate mirrored, and nothing would eve
 ## 9. Window comparison
 
 ```sh
-NODE_SDR_BOOT="gain <G>;grab;dump;win fold;resume;grab;dump;win fold5;resume;grab;dump;win clip" cargo fw
+NODE_SDR_BOOT="gain <G>;grab;dump;win fold;resume;grab;dump;win fold5;resume;grab;dump;win clip" cargo fw --features bringup
 ```
 
 Fold windows show finer noise but fold strong signals back (spurs in the spectrum when a strong
@@ -247,8 +265,10 @@ cargo run --release -p droneid-file -- caps/c5-N.cs16 --rate 40000000 --format c
 ## 12. Soak
 
 Ten minutes of plain detect mode. Good: `overrun` false, `lapped`/`skipped` only around dumps,
-`dma_err` 0, `gain_lost` 0, `heap_free` constant, no resets (`up_us` monotonic). Before
-reflashing: `bootloader` (or bake it as the last boot command) so the ROM loader answers.
+`dma_err` 0, `gain_lost` 0, `heap_free` constant, no resets (`up_us` monotonic). Run it on the
+**normal** build too (`cargo fw`, no `bringup`): that is what a fielded node runs. Before
+reflashing a `bringup` build: `bootloader` (or bake it as the last boot command) so the ROM loader
+answers; a normal build has no `bootloader`: hold BOOT while plugging in if the flash will not take.
 
 ## Report back
 

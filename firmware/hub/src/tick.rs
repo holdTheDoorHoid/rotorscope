@@ -94,6 +94,11 @@ struct HubLine {
     /// each follows), and relayed frames from nodes that did not fit.
     relayed: usize,
     relayed_full: u32,
+    /// Frames the link readers refused because their sender may not
+    /// originate them (`link::origin`): hub-only frames relayed for a node
+    /// or, in a `webhead` build, off the P4's link; relayed gateway or bus
+    /// frames; a `Via` after a `Via`. All links together.
+    relay_refused: u32,
     heap_used: usize,
     heap_free: usize,
     /// Lowest `heap_free` seen since boot.
@@ -104,6 +109,8 @@ struct HubLine {
     cot_no_utc: u32,
     cot_err: u32,
     http_req: u32,
+    /// HTTP requests refused by the Host / Origin / Content-Type checks.
+    http_refused: u32,
     /// This tick's housekeeping + USB dump, microseconds.
     tick_us: u32,
     /// Longest CoT pass in the last second, microseconds.
@@ -241,6 +248,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
                 .collect(),
             relayed: hub.relayed.borrow().len(),
             relayed_full: hub.relayed_full.get(),
+            relay_refused: crate::links::STATS.iter().fold(0u32, |n, s| n.wrapping_add(s.refused.load(Relaxed))),
             heap_used: esp_alloc::HEAP.used(),
             heap_free,
             heap_min_free,
@@ -250,6 +258,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
             cot_no_utc: cot::NO_UTC.load(Relaxed),
             cot_err: cot::ERRORS.load(Relaxed),
             http_req: http::REQUESTS.load(Relaxed),
+            http_refused: http::REFUSED.load(Relaxed),
             tick_us: Instant::now().duration_since(t0).as_micros() as u32,
             cot_us: cot::TICK_MAX_US.swap(0, Relaxed),
             lag_max_us: LAG_MAX_US.swap(0, Relaxed),

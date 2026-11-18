@@ -266,6 +266,9 @@ impl Hub {
             }
             node
         };
+        // The kit's own position and clock, aircraft and FAA flags reach
+        // here only from the P4 hub itself: the link reader sorted the frame
+        // by `link::origin` and dropped them behind a `Via` (`links.rs`).
         match frame {
             // Protocol 5, from a P4 hub this board is the web head of.
             Frame::HubFix(fix) => gnss::set_upstream(&fix, now),

@@ -1,7 +1,15 @@
 //! Link script plus a guard that the chip feature matches the target, so a
-//! wrong combination fails here with a clear message instead of deep inside esp-hal.
+//! wrong combination fails here with a clear message instead of deep inside esp-hal;
+//! and the bench fence (crates/link/src/benchfence.rs): a build with a
+//! bench-only feature or build switch stops unless `ROTORSCOPE_BENCH=1`, and
+//! the list goes into the hello line.
+
+#[path = "../../crates/link/src/benchfence.rs"]
+mod benchfence;
 
 fn main() {
+    println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
+    benchfence::run("node-wifi", &["faulttest", "forgetest"], &["ROTORSCOPE_BENCH_CAN", "ROTORSCOPE_BENCH_FLIP"]);
     let target = std::env::var("TARGET").unwrap_or_default();
     let s3 = std::env::var_os("CARGO_FEATURE_ESP32S3").is_some();
     let c5 = std::env::var_os("CARGO_FEATURE_ESP32C5").is_some();

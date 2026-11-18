@@ -9,6 +9,14 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod forward;
+pub mod origin;
+pub mod printable;
+
+/// The firmware build scripts' bench-feature check (`std`; included by path
+/// from each `build.rs`, compiled here only for its tests).
+#[cfg(test)]
+#[allow(dead_code)]
+mod benchfence;
 
 /// The control-link types `Frame::Control` carries (protocol 12).
 pub use ctrlwatch;
@@ -522,7 +530,22 @@ pub enum ThreatKind {
     ///   not try;
     /// - 4 **stale**: a genuine packet from before the gateway's last
     ///   restart, more than a minute after it (expected, and not reported,
-    ///   for the few seconds a node takes to resync after a restart).
+    ///   for the few seconds a node takes to resync after a restart);
+    /// - 5 **origin** ([`origin::FORGED_ORIGIN`]): a frame of a type the
+    ///   sender may not originate ([`origin::origin`]): a node sending a
+    ///   hub-only frame (`HubFix`, `Csbee`, `Flags`), a `Via` of its own,
+    ///   bus control, or the gateway's own `Hello` / `ForgedLink` report.
+    ///   Raised by the gateway (`source` = the node), and by the hub for
+    ///   what reaches it anyway (from an old or compromised gateway, or a
+    ///   wired-bus node). The hub's own report has `target`, `channel` and
+    ///   `freq` 0, and `source` all zero when the refused frame was the
+    ///   link's own (no `Via` before it);
+    /// - 6 **table full** ([`origin::FORGED_TABLE_FULL`]): a genuine node
+    ///   packet a keyed gateway dropped because its node table (16) was full.
+    ///
+    /// Codes 5 and 6 need no protocol change: the frame is the same and
+    /// `detail` was always a number; a hub that does not know them shows
+    /// the threat with an unknown reason.
     ForgedLink,
     /// Protocol 13 (docs/DRONE-ATTACKS.md). Deauthentication or
     /// disassociation aimed at a network that `crates/wifidrone` recognises
@@ -1107,6 +1130,87 @@ impl<T: for<'de> Deserialize<'de>> StreamDecoder<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hub_fix() -> Frame {
+        Frame::HubFix(HubFix {
+            state: GnssState::Fix3d,
+            sats: Some(9),
+            position: Some(HubPosition { lat_e7: 399_526_000, lon_e7: -751_652_000, alt_hae_mm: None, age_ms: 0 }),
+            utc_ms: Some(1_700_000_000_000),
+            utc_pps: false,
+        })
+    }
+
+    fn flags() -> Frame {
+        Frame::Flags(FlagReport {
+            who: heapless::String::try_from("X").unwrap(),
+            level: 3,
+            items: Vec::new(),
+            pack_date: 0,
+        })
+    }
+
+    /// The web head's rule for the hub-only frames (`HubFix`, `Csbee`,
+    /// `Flags`): taken from the P4 itself, never behind a `Via`, and never
+    /// from a link whose own end is not a hub (`origin::Sorter`).
+    #[test]
+    fn hub_only_frames_are_refused_when_relayed() {
+        use origin::{Origin, Sorted, Sorter};
+        let csbee = Frame::Csbee(b"#A:x".iter().copied().collect());
+        let via = Frame::Via { node: [2; 6], rssi: -50 };
+        for f in [hub_fix(), csbee, flags()] {
+            assert_eq!(origin::origin(&f), Origin::Hub);
+            assert_eq!(Sorter::hub_link().sort(&f), Sorted::Own, "from the hub itself: {f:?}");
+            let mut s = Sorter::hub_link();
+            assert_eq!(s.sort(&via), Sorted::Marker);
+            assert!(matches!(s.sort(&f), Sorted::Refused { .. }), "relayed for a node: {f:?}");
+            assert!(matches!(Sorter::new().sort(&f), Sorted::Refused { .. }), "from a node link: {f:?}");
+        }
+        // Node frames pass either way.
+        let det = Frame::Detection(detection(1, 1));
+        assert_eq!(Sorter::hub_link().sort(&det), Sorted::Own);
+        let mut s = Sorter::hub_link();
+        s.sort(&via);
+        assert_eq!(s.sort(&det), Sorted::Relayed { node: [2; 6], rssi: -50 });
+    }
+
+    /// The byte stream a web head reads: a node's forged `HubFix` arrives
+    /// behind a `Via`, the P4's own one without. Sorted the way the web
+    /// head's link reader does (a `Via` names exactly the next frame).
+    #[test]
+    fn forged_hub_fix_behind_a_via_is_refused_in_a_stream() {
+        use origin::{Sorted, Sorter};
+        let frames = [
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            hub_fix(), // a node pretending to be the hub
+            hub_fix(), // the hub itself
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            flags(),
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            Frame::Detection(detection(3, 1)),
+            // A Via after a Via: refused, and the held one with it, so the
+            // hub's next own frame is still the hub's.
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            Frame::Via { node: [2, 0, 0, 0, 0, 8], rssi: -60 },
+            hub_fix(),
+        ];
+        let mut wire = std::vec::Vec::new();
+        for f in &frames {
+            let mut buf = [0u8; MAX_FRAME];
+            wire.extend_from_slice(encode(f, &mut buf).unwrap());
+        }
+        let mut dec = Decoder::new();
+        let mut sorter = Sorter::hub_link();
+        let mut verdicts = std::vec::Vec::new();
+        dec.feed(&wire, |r| match sorter.sort(&r.unwrap()) {
+            Sorted::Marker => {}
+            Sorted::Relayed { .. } => verdicts.push((true, true)),
+            Sorted::Own => verdicts.push((false, true)),
+            Sorted::Refused { from, .. } => verdicts.push((from.is_some(), false)),
+        });
+        // (relayed, accepted) for HubFix, HubFix, Flags, Detection, Via, HubFix.
+        assert_eq!(verdicts, [(true, false), (false, true), (true, false), (true, true), (true, false), (false, true)]);
+    }
 
     fn detection(fill: u8, n: usize) -> Detection {
         let mut messages = Vec::new();

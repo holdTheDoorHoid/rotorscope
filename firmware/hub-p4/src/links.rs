@@ -12,7 +12,25 @@
 //!
 //! A gateway link speaks for many nodes: a `Frame::Via { node, rssi }` names
 //! the sender of the one frame after it. Frames without a `Via` belong to the
-//! link itself (a wired node).
+//! link itself (a wired node, or the gateway's own `Hello` and reports).
+//!
+//! **Who may send what** (`link::origin`, docs/ESPNOW.md): every frame is
+//! sorted by `link::origin::Sorter` before anything here or the web-head
+//! feed uses it. A frame after a `Via` must be one a node may originate; a
+//! frame with no `Via` one a node or the gateway may originate; a `Via`
+//! names exactly the next frame and is dropped with it if that frame is
+//! refused, and a `Via` straight after a `Via` (a node's own, passed by an
+//! old gateway) is refused with the one it follows, so it can never lend its
+//! name to the gateway's next own frame. A fixed gateway already drops all
+//! of these; this is the second line, for an old or compromised gateway and
+//! the wired bus. Refusals are counted (`refused`) and raised once a second
+//! per claimed sender as the hub's own `Threat` / `ForgedLink`, `detail` 5,
+//! to the tracker and the web head.
+//!
+//! **Node table.** [`MAX_RELAYED`] entries; when it is full, a new sender
+//! takes the slot of the node silent longest, if that one has been silent
+//! for [`EVICT_AFTER_MS`] (`evicted`). Otherwise its frames are dropped and
+//! counted (`table_full`) until a slot frees up.
 //!
 //! The UART FIFO (128 bytes) fills in 1.4 ms at 921600 baud, but a screen
 //! band takes ~6 ms to draw and a touch read ~3 ms. So the UART interrupt
@@ -72,6 +90,14 @@ fn on_uart() {
 
 pub const BAUD: u32 = 921_600;
 pub const MAX_RELAYED: usize = 16;
+/// A relayed node silent this long may give its table slot to a new
+/// sender: longer than the coverage coordinator's `coverage::GONE_MS` (15 s,
+/// when it hands the node's job to someone else) and the evidence log's
+/// node-gone time (30 s), so both have seen the node go before its slot
+/// (and node number) is reused.
+pub const EVICT_AFTER_MS: u64 = 60_000;
+/// Refusals are reported at most once per this window per claimed sender.
+const REFUSAL_WINDOW_MS: u32 = 1000;
 
 #[derive(Clone, Copy, Default)]
 pub struct NodeStats {
@@ -113,15 +139,37 @@ pub struct LinkStats {
     pub ring_full: u32,
     /// Frames with no `Via` before them: a node wired straight to this link.
     pub direct: u32,
+    /// Frames refused because their sender may not originate them
+    /// (`link::origin`): after a `Via`, not a node's; with none, the hub's
+    /// or bus control. A refused frame's `Via` is not counted again.
+    pub refused: u32,
+    /// Relayed nodes that gave their slot to a new sender after
+    /// [`EVICT_AFTER_MS`] of silence, and frames from new senders dropped
+    /// because every slot was in use.
+    pub evicted: u32,
+    pub table_full: u32,
+    /// Hub-raised `ForgedLink` threats for refusals (link and bus).
+    pub refusal_threats: u32,
     /// The gateway's own Hello firmware string: `"gw key <id>"` when the
     /// ESP-NOW link is signed, `"gw OPEN no key"` when it is not.
     pub gw_hello: heapless::String<16>,
 }
 
+impl LinkStats {
+    /// The gateway's last Hello says its ESP-NOW link is open (built
+    /// without a link key): anyone nearby can inject node reports and
+    /// commands. Shown on the screen for as long as it holds.
+    pub fn gw_open(&self) -> bool {
+        self.gw_hello.starts_with("gw OPEN")
+    }
+}
+
 pub struct GatewayLink<'d> {
     _uart: core::marker::PhantomData<&'d ()>,
     dec: Decoder,
-    via: Option<([u8; 6], i8)>,
+    sorter: link::origin::Sorter,
+    /// Refusals per claimed sender, for the once-a-second threat.
+    refusals: link::origin::RefusalLog<8>,
     pub stats: LinkStats,
     pub nodes: heapless::Vec<NodeStats, MAX_RELAYED>,
     /// Detections and open-link sightings waiting for the tracker.
@@ -166,7 +214,8 @@ impl<'d> GatewayLink<'d> {
         Self {
             _uart: core::marker::PhantomData,
             dec: Decoder::new(),
-            via: None,
+            sorter: link::origin::Sorter::new(),
+            refusals: link::origin::RefusalLog::new(),
             stats: LinkStats::default(),
             nodes: heapless::Vec::new(),
             out: Out::new(),
@@ -240,25 +289,28 @@ impl<'d> GatewayLink<'d> {
                 break;
             }
             self.stats.bytes += n as u32;
-            let (stats, nodes, via, feed) = (&mut self.stats, &mut self.nodes, &mut self.via, &mut self.feed);
+            let (stats, nodes, sorter, refusals, feed) =
+                (&mut self.stats, &mut self.nodes, &mut self.sorter, &mut self.refusals, &mut self.feed);
             let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
             self.dec.feed(&buf[..n], |r| {
                 handled += 1;
                 match r {
                     Ok(f) => {
                         // The web head gets the stream as it came, before
-                        // anything here consumes the frame.
+                        // anything here consumes the frame; its forwarder
+                        // sorts it exactly as `on_frame` does, so it passes
+                        // on nothing refused here.
                         if let Some(feed) = feed.as_mut() {
                             feed.relay(&f);
                         }
-                        Self::on_frame(stats, nodes, via, &mut q, now_ms, f)
+                        Self::on_frame(stats, nodes, sorter, refusals, &mut q, now_ms, f)
                     }
                     Err(e) => {
                         match e {
                             LinkError::Corrupt => stats.corrupt += 1,
                             LinkError::Overflow => stats.overflow += 1,
                         }
-                        *via = None;
+                        sorter.reset();
                         if let Some(feed) = feed.as_mut() {
                             feed.stream_error();
                         }
@@ -266,42 +318,91 @@ impl<'d> GatewayLink<'d> {
                 }
             });
         }
+        self.report_refusals(now_ms);
         if let Some(f) = self.feed.as_mut() {
             f.pump();
         }
         handled
     }
 
+    /// Once a second per claimed sender: the refusals here and on the wired
+    /// bus as the hub's own `Threat` / `ForgedLink` (`detail` 5), to the
+    /// tracker (node 0, the link) and the web head.
+    fn report_refusals(&mut self, now_ms: u64) {
+        let mut out: heapless::Vec<link::origin::Refusal, 12> = heapless::Vec::new();
+        self.refusals.drain(now_ms, REFUSAL_WINDOW_MS, |r| {
+            let _ = out.push(r);
+        });
+        crate::bus::drain_refusals(now_ms, REFUSAL_WINDOW_MS, |r| {
+            let _ = out.push(r);
+        });
+        for r in &out {
+            let t = link::origin::forged_link(r, [0; 6], 0, 0, now_ms * 1000);
+            crate::println!(
+                "hub-p4: refused {} frame(s) from {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} in {} ms: not theirs to send (forged_link detail {})",
+                r.count, r.source[0], r.source[1], r.source[2], r.source[3], r.source[4], r.source[5], r.window_ms, r.detail
+            );
+            let f = Frame::Threat(t);
+            if let Some(feed) = self.feed.as_mut() {
+                feed.fwd.send(&f);
+            }
+            let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
+            q.push(0, f);
+            self.stats.refusal_threats += 1;
+        }
+    }
+
     fn on_frame(
         stats: &mut LinkStats,
         nodes: &mut heapless::Vec<NodeStats, MAX_RELAYED>,
-        via: &mut Option<([u8; 6], i8)>,
+        sorter: &mut link::origin::Sorter,
+        refusals: &mut link::origin::RefusalLog<8>,
         q: &mut Queues<'_>,
         now_ms: u64,
         f: Frame,
     ) {
+        use link::origin::Sorted;
         stats.frames += 1;
-        if let Frame::Via { node, rssi } = f {
-            *via = Some((node, rssi));
-            return;
-        }
-        let Some((mac, rssi)) = via.take() else {
-            stats.direct += 1;
-            if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
-                stats.gw_hello = firmware.clone();
+        let (mac, rssi) = match sorter.sort(&f) {
+            Sorted::Marker => return,
+            Sorted::Refused { from, .. } => {
+                stats.refused += 1;
+                // The link's own stream (no Via): all-zero source.
+                let (src, rssi) = from.unwrap_or(([0; 6], 0));
+                refusals.record(src, link::origin::FORGED_ORIGIN, rssi);
+                return;
             }
-            if is_data(&f) {
-                q.push(0, f);
+            Sorted::Own => {
+                stats.direct += 1;
+                if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
+                    stats.gw_hello = firmware.clone();
+                }
+                if is_data(&f) {
+                    q.push(0, f);
+                }
+                return;
             }
-            return;
+            Sorted::Relayed { node, rssi } => (node, rssi),
         };
         let i = match nodes.iter().position(|n| n.mac == mac) {
             Some(i) => i,
-            None => {
-                if nodes.push(NodeStats { mac, ..Default::default() }).is_err() {
-                    return;
-                }
+            None if !nodes.is_full() => {
+                let _ = nodes.push(NodeStats { mac, ..Default::default() });
                 nodes.len() - 1
+            }
+            None => {
+                // Full: the slot of the node silent longest, once it has
+                // been silent long enough.
+                let stale = (0..nodes.len())
+                    .filter(|&i| now_ms.saturating_sub(nodes[i].last_ms) > EVICT_AFTER_MS)
+                    .min_by_key(|&i| nodes[i].last_ms);
+                let Some(i) = stale else {
+                    stats.table_full += 1;
+                    return;
+                };
+                stats.evicted += 1;
+                nodes[i] = NodeStats { mac, ..Default::default() };
+                i
             }
         };
         let n = &mut nodes[i];

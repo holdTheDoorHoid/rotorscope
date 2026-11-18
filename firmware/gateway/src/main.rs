@@ -25,6 +25,14 @@
 //! A keyed gateway accepts keyed nodes only. Built without a key it runs
 //! open, as before, and says so at boot and in its `Hello` to the hub.
 //!
+//! Origin (docs/ESPNOW.md "Who may send what", `link::origin`): of a
+//! node's frames only those a node may originate are relayed. A `HubFix`,
+//! `Csbee`, `Flags`, bus control, a `Hello` or `Status` claiming the gateway
+//! role, a `ForgedLink` report or a `Via` of the node's own is dropped,
+//! counted (`refused`) and reported like a rejected packet, `detail` 5. A
+//! frame that does not decode is not relayed either (it cannot be checked).
+//! Each `Via` goes to the UART in one write with its frame.
+//!
 //! Time (link protocol 11): the hub's `Command::TimeSync`, about once a
 //! second, goes to every aero node (one that has said it is `NodeRole::Aero`
 //! or that the hub assigned that role) as its own command packet, unicast,
@@ -34,6 +42,12 @@
 //! skew the node's clock. The `To` + `Assign` path is unchanged.
 //!
 //! This board transmits (the beacons); see docs/ESPNOW.md.
+//!
+//! Crash recovery (docs/BENCH.md "Crash recovery"): a panic prints its
+//! backtrace on USB and reboots (`custom_halt`); the RTC watchdog
+//! ([`WATCHDOG`]) is fed by the relay loop while the beacon loop is alive
+//! ([`BEACON_ALIVE_MS`]), so a stuck radio, a task that never yields or a
+//! dead beacon resets the chip. The `hello` line says why it last reset.
 #![no_std]
 #![no_main]
 
@@ -58,6 +72,25 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// Unattended relay: after a panic (backtrace already printed to USB),
+/// reboot rather than sit halted until someone power-cycles the box.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    node_common::fault::reboot_after_panic()
+}
+
+/// Hang watchdog timeout. The relay loop goes round at least once a second
+/// (its receive wait ends at the next threat report) and the beacon loop
+/// twice a second; nothing legitimate holds either for more than a few
+/// hundred milliseconds once the radio is up.
+const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(10);
+/// The relay loop feeds the watchdog only while the beacon loop (`air_tx`)
+/// has gone round this recently: a send that never completes stops the
+/// beacons, and nodes then lose the gateway.
+const BEACON_ALIVE_MS: u32 = 5_000;
+/// When `air_tx` last went round (uptime ms, wrapping).
+static AIR_TX_AT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// The gateway's channel. The 2.4 GHz node dwells on 6 for 300 of every
 /// 400 ms of its hop plan, so it can send without leaving its plan.
 pub const CHANNEL: u8 = 6;
@@ -68,9 +101,13 @@ const HUB_BAUD: u32 = 921_600;
 const CMD_ATTEMPTS: u8 = 4;
 /// Do not retry one node's command more often than this.
 const CMD_RETRY_MS: u64 = 20;
-/// Nodes tracked for stats. More can still relay; they just are not counted.
-/// With a key, a node must be in this table to be relayed (its replay state
-/// lives here), so it is also the most keyed nodes one gateway serves.
+/// Nodes in the table. With a key, a node must be in it to be relayed (its
+/// replay state lives here), so this is also the most keyed nodes one
+/// gateway serves: a further node's packets are dropped, counted
+/// (`table_full`) and reported to the hub (`ForgedLink`, `detail` 6). Open,
+/// a further node is still relayed, only counted. Entries are never evicted:
+/// forgetting a node's replay state would let a recording of its packets
+/// from this gateway boot be played back once.
 const MAX_NODES: usize = 16;
 /// Answer a node's stale or out-of-order packets with a sync at most this often.
 const SYNC_EVERY_MS: u64 = 1000;
@@ -144,6 +181,12 @@ static SYNCS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new
 static THREATS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Open builds: sealed packets relayed without checking (we have no key).
 static UNVERIFIED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Node frames not relayed because a node may not originate them
+/// (`link::origin`), and the same per claimed node for the threat report;
+/// node packets that found the node table full (keyed: dropped).
+static REFUSED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static TABLE_FULL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static REFUSALS: Mutex<RefCell<link::origin::RefusalLog<8>>> = Mutex::new(RefCell::new(link::origin::RefusalLog::new()));
 
 /// One node's downlink: the latest command from the hub not yet delivered.
 #[derive(Clone)]
@@ -228,12 +271,23 @@ async fn main(spawner: Spawner) -> ! {
     // The radio is on, so the hardware RNG is a true RNG: a fresh epoch.
     let gw_auth = auth::Key::kit().map(|k| auth::Gateway::new(k, esp_hal::rng::Rng::new().random()));
     println!(
-        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}"}}"#,
+        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}","reset":"{}","faulttest":{},"bench":{}}}"#,
         env!("CARGO_PKG_VERSION"),
         lr == 0,
         Mac(mac),
-        auth::KEY_TAG
+        auth::KEY_TAG,
+        node_common::fault::reset_reason(),
+        cfg!(feature = "faulttest"),
+        env!("ROTORSCOPE_BENCH_JSON")
     );
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/dev-board.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        println!(
+            r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: never leave it on a fielded unit"}}"#,
+            env!("ROTORSCOPE_BENCH_TAG")
+        );
+    }
     if gw_auth.is_none() {
         println!(
             r#"{{"t":"warn","what":"link_key","note":"built WITHOUT a link key: anyone nearby can inject or replay node packets and commands. See docs/ESPNOW.md 'Securing the link'."}}"#
@@ -245,7 +299,28 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(air_tx(manager, sender, gw_auth, mac).expect("spawn air_tx"));
     spawner.spawn(hub_commands(hub_rx).expect("spawn hub_commands"));
     spawner.spawn(stats().expect("spawn stats"));
+    #[cfg(feature = "faulttest")]
+    {
+        let (rx, tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(p.USB_DEVICE).split();
+        spawner.spawn(faulttest(rx, tx).expect("spawn faulttest"));
+    }
+    alive_now(&AIR_TX_AT);
+    node_common::fault::arm(WATCHDOG);
     relay(receiver, hub, relay_key, mac).await
+}
+
+/// Bench only: `fault panic` / `fault hang` typed on USB (docs/BENCH.md).
+#[cfg(feature = "faulttest")]
+#[embassy_executor::task]
+async fn faulttest(
+    mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    _tx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Blocking>,
+) {
+    node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| println!("{l}")).await
+}
+
+fn alive_now(at: &core::sync::atomic::AtomicU32) {
+    at.store(Instant::now().as_millis() as u32, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Next stamp from the gateway's clock; restart for a new epoch once it has
@@ -294,6 +369,7 @@ async fn air_tx(manager: EspNowManager, mut sender: EspNowSender, mut auth: Opti
     let period = Duration::from_millis(500);
     let mut next_beacon = Instant::now();
     loop {
+        alive_now(&AIR_TX_AT);
         let wait = next_beacon.saturating_duration_since(Instant::now());
         match with_timeout(wait, KICK.receive()).await {
             Ok(Job::Command(mac)) => {
@@ -545,6 +621,11 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
     let mut next_report = Instant::now() + Duration::from_millis(u64::from(THREAT_WINDOW_MS));
     loop {
         let now = Instant::now();
+        // Fed here, at least once a second, while the beacon loop is alive too.
+        let air_age = (now.as_millis() as u32).wrapping_sub(AIR_TX_AT.load(Relaxed));
+        if air_age < BEACON_ALIVE_MS {
+            node_common::fault::feed();
+        }
         if now >= next_hello {
             next_hello = now + Duration::from_millis(HELLO_EVERY_MS);
             hello(&mut hub).await;
@@ -585,8 +666,9 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
         let fresh = critical_section::with(|cs| {
             let mut nodes = NODES.borrow_ref_mut(cs);
             let Some(i) = node_index(&mut nodes, src, rssi) else {
-                // Table full. Open: relay, do not count. Keyed: no replay
-                // state for it, so it cannot be relayed safely.
+                // Table full. Open: relay, not counted per node. Keyed: no
+                // replay state for it, so it cannot be relayed safely.
+                TABLE_FULL.fetch_add(1, Relaxed);
                 return if auth.is_some() { Err(None) } else { Ok(true) };
             };
             let n = &mut nodes[i];
@@ -616,7 +698,10 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
         });
         let fresh = match fresh {
             Ok(f) => f,
-            Err(None) => continue,
+            Err(None) => {
+                refuse(src, link::origin::FORGED_TABLE_FULL, rssi);
+                continue;
+            }
             Err(Some((r, sync))) => {
                 reject(src, r, rssi);
                 if let Some((session, counter)) = sync {
@@ -636,38 +721,48 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
         if waiting {
             let _ = KICK.try_send(Job::Command(src));
         }
-        let mut via = [0u8; 16];
-        let Ok(via) = link::encode(&link::Frame::Via { node: src, rssi }, &mut via) else { continue };
-        let via: &[u8] = via;
+        let mut out = [0u8; 16 + link::MAX_FRAME];
+        let Ok(via_len) = link::encode(&link::Frame::Via { node: src, rssi }, &mut out).map(|v| v.len()) else { continue };
         // Whether this node says it is an aero node (it then gets time syncs).
         // Not `MavlinkEvidence`: since protocol 13 Wi-Fi nodes send it too
         // (MAVLink over open Wi-Fi), and an aero node says so anyway.
         let mut aero = false;
-        for frame in pkt.payload.split_inclusive(|&b| b == 0) {
-            if frame.last() != Some(&0) {
-                break; // a truncated tail: never relay half a frame
+        // Only frames a node may originate (`link::origin`): never a `Via`
+        // of its own, a hub-only frame, bus control or our own frame types.
+        // (offset, length) of each frame to relay; the shortest frame is 3 bytes.
+        let mut keep: heapless::Vec<(u16, u16), { airlink::MAX_PAYLOAD / 3 }> = heapless::Vec::new();
+        link::origin::node_batch(pkt.payload, |c| match c {
+            link::origin::NodeChunk::Relay { bytes, frame } => {
+                DECODED.fetch_add(1, Relaxed);
+                if matches!(frame, link::Frame::Detection(_)) {
+                    DETECTIONS.fetch_add(1, Relaxed);
+                }
+                aero |= matches!(
+                    frame,
+                    link::Frame::Hello { role: link::NodeRole::Aero, .. }
+                        | link::Frame::Status { role: link::NodeRole::Aero, .. }
+                        | link::Frame::AeroStatus(_)
+                        | link::Frame::Air(_)
+                        | link::Frame::Control(_)
+                        | link::Frame::ControlEnergy(_)
+                );
+                // Where it sits in the payload (a slice of it).
+                let at = bytes.as_ptr() as usize - pkt.payload.as_ptr() as usize;
+                let _ = keep.push((at as u16, bytes.len() as u16));
             }
-            link::Decoder::new().feed(frame, |r| match r {
-                Ok(f) => {
-                    DECODED.fetch_add(1, Relaxed);
-                    if matches!(f, link::Frame::Detection(_)) {
-                        DETECTIONS.fetch_add(1, Relaxed);
-                    }
-                    aero |= matches!(
-                        f,
-                        link::Frame::Hello { role: link::NodeRole::Aero, .. }
-                            | link::Frame::Status { role: link::NodeRole::Aero, .. }
-                            | link::Frame::AeroStatus(_)
-                            | link::Frame::Air(_)
-                            | link::Frame::Control(_)
-                            | link::Frame::ControlEnergy(_)
-                    );
-                }
-                Err(_) => {
-                    CORRUPT.fetch_add(1, Relaxed);
-                }
-            });
-            if write_all(&mut hub, via).await.is_err() || write_all(&mut hub, frame).await.is_err() {
+            link::origin::NodeChunk::Refused { .. } => {
+                REFUSED.fetch_add(1, Relaxed);
+                refuse(src, link::origin::FORGED_ORIGIN, rssi);
+            }
+            link::origin::NodeChunk::Corrupt => {
+                CORRUPT.fetch_add(1, Relaxed);
+            }
+        });
+        for (at, len) in keep {
+            let (at, len) = (usize::from(at), usize::from(len));
+            // One write: a `Via` never goes out without its frame.
+            out[via_len..via_len + len].copy_from_slice(&pkt.payload[at..at + len]);
+            if write_all(&mut hub, &out[..via_len + len]).await.is_err() {
                 UART_DROPPED.fetch_add(1, Relaxed);
             }
         }
@@ -697,32 +792,42 @@ fn reject(src: [u8; 6], r: Reject, rssi: i8) {
     });
 }
 
+/// Count a node frame or packet refused for `detail` (`link::origin`:
+/// 5 origin, 6 table full) for the next `Threat` report.
+fn refuse(src: [u8; 6], detail: u32, rssi: i8) {
+    critical_section::with(|cs| REFUSALS.borrow_ref_mut(cs).record(src, detail, rssi));
+}
+
 /// One `Threat` / `ForgedLink` frame per claimed address and reason rejected
 /// in the last window. `detail` = the reason (`airlink::auth::Reject` code:
-/// 1 bad tag, 2 replay, 3 unauthenticated, 4 stale).
+/// 1 bad tag, 2 replay, 3 unauthenticated, 4 stale; `link::origin`: 5 a frame
+/// type the node may not originate, 6 node table full).
 async fn report_threats(hub: &mut UartTx<'static, esp_hal::Async>, me: [u8; 6]) {
-    let mut out: heapless::Vec<auth::RejectReport, 32> = heapless::Vec::new();
+    let mut out: heapless::Vec<link::origin::Refusal, 40> = heapless::Vec::new();
+    let mut why: heapless::Vec<&'static str, 40> = heapless::Vec::new();
     let now = Instant::now();
     critical_section::with(|cs| {
         REJECTS.borrow_ref_mut(cs).drain(now.as_millis(), THREAT_WINDOW_MS, |r| {
-            let _ = out.push(r);
-        })
-    });
-    for r in out {
-        let f = link::Frame::Threat(link::ThreatSighting {
-            kind: link::ThreatKind::ForgedLink,
-            channel: CHANNEL,
-            freq: CHANNEL_FREQ,
-            width_khz: 0,
-            level: r.rssi,
-            count: r.count,
-            window_ms: r.window_ms,
-            source: r.source,
-            target: me,
-            detail: r.reason.code(),
-            ssid: heapless::String::new(),
-            uptime_us: now.as_micros(),
+            let refusal = link::origin::Refusal {
+                source: r.source,
+                detail: r.reason.code(),
+                count: r.count,
+                rssi: r.rssi,
+                window_ms: r.window_ms,
+            };
+            if out.push(refusal).is_ok() {
+                let _ = why.push(r.reason.name());
+            }
         });
+        REFUSALS.borrow_ref_mut(cs).drain(now.as_millis(), THREAT_WINDOW_MS, |r| {
+            let name = if r.detail == link::origin::FORGED_TABLE_FULL { "table_full" } else { "origin" };
+            if out.push(r).is_ok() {
+                let _ = why.push(name);
+            }
+        });
+    });
+    for (r, why) in out.iter().zip(why) {
+        let f = link::Frame::Threat(link::origin::forged_link(r, me, CHANNEL, CHANNEL_FREQ, now.as_micros()));
         let mut buf = [0u8; link::MAX_FRAME];
         if let Ok(b) = link::encode(&f, &mut buf) {
             let b: &[u8] = b;
@@ -733,7 +838,7 @@ async fn report_threats(hub: &mut UartTx<'static, esp_hal::Async>, me: [u8; 6]) 
         println!(
             r#"{{"t":"threat","kind":"forged_link","src":"{}","why":"{}","count":{},"rssi":{}}}"#,
             Mac(r.source),
-            r.reason.name(),
+            why,
             r.count,
             r.rssi
         );
@@ -777,7 +882,7 @@ async fn stats() {
         let nodes = critical_section::with(|cs| NODES.borrow_ref(cs).clone());
         let rej = critical_section::with(|cs| REJECTS.borrow_ref(cs).totals);
         println!(
-            r#"{{"t":"gw","up_ms":{now},"key":"{}","beacons":{},"decoded":{},"detections":{},"corrupt":{},"foreign":{},"uart_dropped":{},"nodes":{},"hub_bytes":{},"hub_cmds":{},"hub_corrupt":{},"hub_orphans":{},"bad_tag":{},"replay":{},"unauth":{},"stale":{},"auth_dups":{},"syncs":{},"threats":{},"unverified":{},"hub_syncs":{},"time_sent":{},"time_unacked":{},"time_nobody":{},"aero_nodes":{}}}"#,
+            r#"{{"t":"gw","up_ms":{now},"key":"{}","beacons":{},"decoded":{},"detections":{},"corrupt":{},"foreign":{},"uart_dropped":{},"nodes":{},"hub_bytes":{},"hub_cmds":{},"hub_corrupt":{},"hub_orphans":{},"bad_tag":{},"replay":{},"unauth":{},"stale":{},"auth_dups":{},"syncs":{},"threats":{},"unverified":{},"refused":{},"table_full":{},"hub_syncs":{},"time_sent":{},"time_unacked":{},"time_nobody":{},"aero_nodes":{}}}"#,
             auth::KEY_ID,
             BEACONS.load(Relaxed),
             DECODED.load(Relaxed),
@@ -798,6 +903,8 @@ async fn stats() {
             SYNCS.load(Relaxed),
             THREATS.load(Relaxed),
             UNVERIFIED.load(Relaxed),
+            REFUSED.load(Relaxed),
+            TABLE_FULL.load(Relaxed),
             HUB_SYNCS.load(Relaxed),
             TIME_SENT.load(Relaxed),
             TIME_UNACKED.load(Relaxed),

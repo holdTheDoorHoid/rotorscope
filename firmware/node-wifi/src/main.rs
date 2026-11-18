@@ -22,6 +22,12 @@
 //! `uplink` sends hub frames to an ESP-NOW gateway instead of the UART. With
 //! `wirebus` the hub frames go on the shared wired bus instead
 //! (`node_common::bus`, docs/WIREBUS.md), still receive-only on the air.
+//!
+//! Crash recovery (docs/BENCH.md "Crash recovery"): a panic prints its
+//! backtrace and reboots (`custom_halt`); the hopper feeds the RTC watchdog
+//! at every hop ([`WATCHDOG`]), so anything that stops the hopper (a task
+//! that never yields, a stuck driver call) resets the chip. The `hello` line
+//! says why it last reset.
 #![no_std]
 #![no_main]
 #![deny(
@@ -34,9 +40,13 @@
 compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one");
 #[cfg(all(feature = "wirebus", not(feature = "esp32c5")))]
 compile_error!("`wirebus` pins are set for the XIAO ESP32-C5 only");
+#[cfg(all(feature = "forgetest", feature = "faulttest"))]
+compile_error!("`forgetest` and `faulttest` both read the USB console; build one");
 
 mod chip;
 mod detect;
+#[cfg(feature = "forgetest")]
+mod forge;
 mod report;
 mod role;
 mod rx;
@@ -58,6 +68,21 @@ use rid::wifi::{BEACON_OUI, BEACON_OUI_TYPE, NAN_DEST};
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Unattended node: after a panic (backtrace already printed to USB),
+/// reboot rather than sit halted until someone power-cycles the box.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    node_common::fault::reboot_after_panic()
+}
+
+/// Hang watchdog timeout. The hopper feeds it at every hop; the longest
+/// legitimate gap is one dwell, which a hub plan may stretch to 10 s
+/// (`role::MAX_DWELL_MS`), plus a scout visit and a retune.
+const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(30);
+/// The drain task yields after this long of back-to-back frames, so a frame
+/// flood cannot starve the hopper (and with it the watchdog).
+const DRAIN_SLICE: Duration = Duration::from_millis(2);
 
 /// Diagnostic log level. Off by default because USB carries machine-read JSON
 /// lines; raise it (e.g. `Warn`) when debugging esp-radio itself.
@@ -153,8 +178,39 @@ async fn main(spawner: Spawner) -> ! {
         spawner.spawn(mavlink().expect("spawn mavlink"));
     }
 
+    #[cfg(feature = "faulttest")]
+    {
+        let (rx, tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+        spawner.spawn(faulttest(rx, tx).expect("spawn faulttest"));
+    }
+
+    #[cfg(feature = "forgetest")]
+    {
+        let (rx, _tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).split();
+        spawner.spawn(forgetest(rx).expect("spawn forgetest"));
+    }
+
+    node_common::fault::arm(WATCHDOG);
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
     hop_forever(&mut wifi).await
+}
+
+/// Bench only: `fault panic` / `fault hang` typed on USB (docs/BENCH.md).
+#[cfg(feature = "faulttest")]
+#[embassy_executor::task]
+async fn faulttest(
+    mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
+    _tx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Blocking>,
+) {
+    node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| esp_println::println!("{l}")).await
+}
+
+/// Bench only: `forge <what>` typed on USB sends a frame this node may not
+/// originate (docs/BENCH.md "Origin checks").
+#[cfg(feature = "forgetest")]
+#[embassy_executor::task]
+async fn forgetest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>) {
+    forge::console(|b| rx.drain_rx_fifo(b)).await
 }
 
 /// The wired-bus node: hub frames from `report::HUB_QUEUE`, `Assign`s to
@@ -192,6 +248,8 @@ async fn hop_forever(wifi: &mut WifiController<'_>) -> ! {
         let plan = role::current().plan;
         'plan: loop {
             for hop in &plan {
+                // The hopper going round is what keeps the node seeing.
+                node_common::fault::feed();
                 tuner.tune(wifi, hop.channel()).await;
                 if with_timeout(Duration::from_millis(hop.dwell_ms()), role::CHANGED.wait()).await.is_ok() {
                     break 'plan;
@@ -303,7 +361,14 @@ async fn drain() {
     let mut detect = detect::Detect::new();
     // Beacon-side attack detection (~4.3 KB, in the task's static state).
     let mut watch = wifiwatch::beacons::Beacons::new();
+    let mut slice = Instant::now();
     loop {
+        // `rx::next` does not yield while frames are queued: under a flood
+        // this task would hold the executor and starve the hopper.
+        if slice.elapsed() >= DRAIN_SLICE {
+            embassy_futures::yield_now().await;
+            slice = Instant::now();
+        }
         let f = rx::next().await;
         if f.truncated() {
             TRUNCATED.fetch_add(1, Relaxed);

@@ -713,6 +713,36 @@ fn status_warnings() {
     shot("status_warnings", &Ui::default(), &st);
 }
 
+/// The P4 hub's caveats strip: a test-key bench build on an open link,
+/// with evidence not reaching the card while the CSV log records.
+#[test]
+fn caveats_strip() {
+    let mut st = five_drones(true);
+    st.caveats = Caveats {
+        key: EvidenceKey::Test,
+        bench: true,
+        link_open: true,
+        evidence: Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 1234, dropped: 56 }),
+    };
+    st.sd = SdLog::Recording;
+    shot("caveats_all", &Ui::default(), &st);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("caveats_health", &ui, &st);
+    // Only the key class: the usual development hub.
+    let mut st = five_drones(true);
+    st.caveats.key = EvidenceKey::Development;
+    shot("caveats_dev_key", &Ui::default(), &st);
+    // The longest numbers still stay on the panel (checked by `shot`).
+    let mut st = base(true);
+    st.caveats.evidence = Some(EvidenceStop { why: EvidenceStopWhy::CardError, waiting: u32::MAX, dropped: u32::MAX });
+    st.caveats.key = EvidenceKey::Development;
+    st.caveats.bench = true;
+    st.caveats.link_open = true;
+    shot("caveats_long", &Ui::default(), &st);
+}
+
 // ---------------------------------------------------------------------------
 // Banded rendering (the hub has no PSRAM for a full framebuffer)
 // ---------------------------------------------------------------------------
@@ -754,6 +784,14 @@ fn banded_render_matches_full_frame() {
     let mut st = base(false);
     st.gps.fix = Fix::Absent;
     cases.push(("absent", Ui::default(), st));
+    let mut st = five_drones(true);
+    st.caveats = Caveats {
+        key: EvidenceKey::Test,
+        bench: true,
+        link_open: true,
+        evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 7, dropped: 0 }),
+    };
+    cases.push(("caveats", Ui::default(), st));
 
     for (name, ui, st) in &cases {
         let mut full = Fb::new();

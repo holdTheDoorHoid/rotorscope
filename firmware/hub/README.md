@@ -27,8 +27,9 @@ The chip is chosen by the directory you build from, as with the nodes.
 . ~/export-esp.sh
 cd firmware/hub/s3
 cargo fw                              # the real hub
-cargo fw --features demo              # + two synthetic drones, no nodes needed
-cargo fw --features demo,open-hotspot # bench only: hotspot with no password
+# Bench builds (refused unless ROTORSCOPE_BENCH=1, see below):
+ROTORSCOPE_BENCH=1 cargo fw --features demo              # + two synthetic drones, no nodes needed
+ROTORSCOPE_BENCH=1 cargo fw --features demo,open-hotspot # + hotspot with no password
 #   -> firmware/hub/target/xtensa-esp32s3-none-elf/release/hub
 
 # ESP32-C5 (RISC-V: stable Rust). Kept compiling; two node links only.
@@ -37,6 +38,16 @@ cd firmware/hub/c5 && cargo fw
 ```
 
 `cargo fw` is `cargo build --release --features esp32s3` (or `esp32c5`).
+
+**Bench builds are fenced off.** `demo` (fake drones, a made-up own position, the build machine's
+clock) and `open-hotspot` (no password) make a unit unfit for use, so `build.rs` stops any build with
+either of them unless the environment has `ROTORSCOPE_BENCH=1` (the shared fence every Rotorscope
+firmware uses, `crates/link/src/benchfence.rs`). Such a build says so: a cargo warning,
+`"bench":["demo",...]` in the USB boot line followed by a
+`{"t":"warn","what":"bench_build","tag":"bench-build:demo",...}` line, `"bench"` in `/api/state`,
+which the phone page shows as a striped **BENCH BUILD, NOT FOR USE** banner at the top of every
+view, and the `bench-build:` tag in the ELF, for which `tools/dev-board.sh` refuses to flash it
+without `ROTORSCOPE_BENCH=1`.
 
 Flash and watch through the shared lock. Never call espflash directly:
 
@@ -50,6 +61,16 @@ radio): `cargo fw --features webhead`, with P4 GPIO31 wired to node A RX (GPIO4)
 hub): `Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone node list), the
 P4's GPS (`HubFix`) becomes the own position and UTC when this board has no GPS of its own, and
 protocol 4 frames reach the tracker; `webhead` adds the aircraft table for forwarded ADS-B lines.
+
+**Web head trust.** Each link reader sorts its frames by the one table of who may send what
+(`link::origin`, docs/ESPNOW.md "Who may send what"), as the P4 and the gateway do. `HubFix` (the
+kit's own position and clock), `Csbee` (aircraft) and `Flags` (FAA flags) describe the P4 itself,
+so they are applied only when they come from the relay itself, never when a `Via` marker says the
+relay passed them on for one of its nodes. A relayed frame must be one a node may send (a relayed
+gateway `Hello` or `ForgedLink` report, or a bus-control frame, is refused), and a `Via` straight
+after a `Via` is refused with the one it follows. In a `webhead` build the P4's frames are taken
+only on link 0 (node A RX), so a node wired straight to link 1 or 2 cannot send them; a build
+without `webhead` takes them on any link. Refused frames count in the `hub` line's `relay_refused`.
 
 Other features: `ili9341` (an ILI9341 panel instead of the default ST7789), `gps-uart` (GPS on
 UART2 instead of I2C; costs node link 2), `adsbee` (an ADSBee 1090 on UART2; costs node link 2;
@@ -163,39 +184,70 @@ reports `"show_link_ids"`. Video and MAVLink content is never decoded.
 |---|---|
 | SSID | `Rotorscope-XXXX`: the last two bytes of the chip's MAC, in hex (bench board: `Rotorscope-6DF0`) |
 | Channel | **11**. Remote ID lives on channel 6, where Node A spends about 75% of its time, so the hub (the only transmitter in the box) stays as far from it as 2.4 GHz allows |
-| Security | WPA2-PSK. With `--features open-hotspot` it is open; that build prints a warning on USB at every boot |
-| Address | `192.168.4.1/24`. DHCP hands out .50-.200, with the hub as router and DNS |
+| Security | WPA2-PSK with the unit's own password (below). With `--features open-hotspot` (a bench build) it is open; that build prints a warning on USB at every boot and the phone page shows the bench banner |
+| Address | `192.168.4.1/24`. DHCP hands out .50-.57 (8 addresses, 10-minute leases), with the hub as router and DNS |
 | Clients | Up to 4 phones |
 | TX power | esp-radio's default, 5 dBm. Low on purpose: the nodes' antennas are centimetres away |
 
 ### Password scheme
 
-Each unit gets its own default password, for example `tx2y-b8g4-b4xd`:
-- It is 12 characters in 3 groups (60 bits).
-- It uses lower-case Crockford base32. There is no i, l, o or u, so nothing can be misread as 1 or 0.
+Each unit has its own password, for example `tx2y-b8g4-b4xd`: 12 characters in 3 groups (60 bits),
+lower-case Crockford base32 (no i, l, o or u, so nothing is misread as 1 or 0).
 
 ```
-SHA-256("rotorscope hotspot password v1" || OPTIONAL_UNIQUE_ID eFuse (16 bytes) || base MAC (6 bytes))
+SHA-256("rotorscope hotspot password v2" || salt (16 bytes) || OPTIONAL_UNIQUE_ID eFuse (16 bytes) || base MAC (6 bytes))
   -> first 60 bits -> 12 symbols
 ```
 
-**Why not hash only the MAC?** The MAC is broadcast in every beacon (as the BSSID), and this code is
-public, so anyone nearby could compute the password. The chip's 128-bit `OPTIONAL_UNIQUE_ID` is
-written at the factory, and it is never sent over the air. That makes the password impossible to work
-out from the air, yet stable across reflashes.
+The **salt** is what makes the password secret. It is 16 random bytes, made on the unit's first boot
+from the chip's true random number generator (on the S3: the hardware RNG with the ADC as its
+entropy source, before Wi-Fi starts; on the C5, which has no such source in esp-hal 1.2, the radio
+is started first without the hotspot) and stored in flash. The MAC is broadcast in every beacon,
+this code is public, and the unique-ID eFuse is blank (all zero) on some chips, so without the salt
+anyone nearby could work the password out. The ID and MAC stay in the hash so that a whole flash
+image copied to another board still gives that board a different password. Code and tests:
+`crates/webui/src/hotspot.rs`.
 
-If that eFuse is blank on some batch, the password falls back to the MAC alone. When that happens,
-the hotspot line shows `"pw_secret":false` and a warning appears. The bench board reports
-`"pw_secret":true`.
+**Existing units get a new password once.** Units flashed before this change used
+`"…password v1" || ID || MAC`; their first boot on this firmware makes a salt, and from then on the
+password is the new one. Read it as below.
 
-The password is printed on USB at boot:
+**Where the salt lives.** The last 4 KB sector of the `nvs` partition: 0xE000 with the partition
+table espflash writes by default (`nvs` 0x9000-0xEFFF, `phy_init` 0xF000, `factory` app from 0x10000
+to the end of the flash, so there is no free space after the app). The hub finds the sector by
+reading the partition table at boot, one entry at a time. Nothing in this firmware uses NVS:
+esp-radio 1.0.0-beta.1 runs the Wi-Fi blobs with NVS disabled and its NVS hooks are stubs. A normal
+reflash (`tools/dev-board.sh`, `espflash flash`) writes only the bootloader, table and app, so the
+password survives it; `espflash erase-flash` (or erasing `nvs`) gives the unit a new one. The record
+is magic, version, salt and an 8-byte SHA-256 check, so a half-written or foreign sector is never
+taken for a salt.
+
+**If the salt cannot be read or stored** (no `nvs` partition, a flash error), the hotspot still never
+comes up with a guessable password: it uses a fresh random salt for that boot only. The
+`hotspot` line then says `"salt":"this_boot_only"`, an `err` line says why, and the password changes
+at every boot until the flash is fixed. That is meant to be noticed.
+
+**Reading the password: hold BOOT, press `h`.** USB is the only place to read it (on a P4 kit the
+screen belongs to the P4, which cannot know the web head's password). It is printed only while the
+board's **BOOT** button (GPIO0) is held, so a cable alone is not enough: someone has to be at the box.
+Press and hold BOOT *after* the hub has started (held during power-up or RESET, it starts the ROM
+downloader instead), then type `h`:
 
 ```
-{"t":"hotspot","ssid":"Rotorscope-6DF0","channel":11,"security":"wpa2","password":"…","pw_secret":true,…}
+{"t":"hotspot","ssid":"Rotorscope-6DF0","channel":11,"security":"wpa2","password":"…","salt":"stored",…}
 ```
 
-It is also handed to the screen seam (`UiState::ssid` and `password`), ready for a QR code. Changing
-the password at runtime isn't supported yet.
+Without the button the same line has no `password` field, and a `help` line says how to get it. The
+boot output never contains the password (boot logs get pasted into issues). The C5 build, whose BOOT
+pin drives the buzzer, uses the panel's Select button instead.
+
+**A new password: hold BOOT, press `R`** (capital). The hub asks its next boot for a new salt (a
+flag in RTC memory) and restarts at once; every phone is dropped and must join again with the new
+password, which `h` (with BOOT held) then shows. Use it when the password has been shared too widely.
+Each new password costs one erase of the salt sector.
+
+`salt` in the `hotspot` line: `stored` (as last boot), `new` (first boot or after `R`; a `warn` line
+says how to read it), `this_boot_only` (see above), `none` (`open-hotspot`).
 
 ## Station mode (fixed sensor, O5): owner's steps
 
@@ -224,6 +276,17 @@ The password ends up inside the firmware image, so don't share images built with
 On the joined network the hub serves the same page and API on port 80 (one connection at a time). It
 also sends CoT multicast there, and gets its address by DHCP.
 
+**On someone else's network the hub is read-only by default.** Anyone on that network can open the
+page and read `/api/state` (tracks, and the hub's own position), but `POST /api/own-pos` and
+`POST /api/cot` answer `403 {"error":"changes are off on this network"}`. To let the LAN change them,
+add `allow_writes = true` to `wifi.local.toml` (the build then warns
+`station mode: the LAN may change ...`). The hotspot is unaffected. CoT multicast leaves with an IP
+hop limit (TTL) of 1 on both networks, so a multicast router does not carry the positions further.
+
+Not done (station mode): pinning the router's BSSID (another access point with the same name and
+password would be joined just the same) and an access token for the API. Use station mode only on a
+network you trust.
+
 **AP+STA works**, through esp-radio's `Config::AccessPointStation`, and the hotspot stays up. A single
 radio brings two limits:
 - **The hotspot follows the router's channel.** If your router is on channel 6, the hub has to
@@ -239,12 +302,38 @@ Station mode has not been run on hardware yet. Nobody has created the file.
 
 | | |
 |---|---|
-| `GET /` | The phone page: `webui::INDEX_HTML_GZ` (about 16 KB), sent with `Content-Encoding: gzip` and an `ETag`. If the phone's `If-None-Match` matches, the hub answers `304` |
-| `GET /api/state` | The state object (schema in `crates/tracker/README.md`), sent with `Transfer-Encoding: chunked` and `Cache-Control: no-store` |
+| `GET /` | The phone page: `webui::INDEX_HTML_GZ` (about 16 KB), sent with `Content-Encoding: gzip`, an `ETag` and its Content-Security-Policy. If the phone's `If-None-Match` matches, the hub answers `304` |
+| `GET /api/state` | The state object (schema in `crates/tracker/README.md`), sent with `Transfer-Encoding: chunked` and `Cache-Control: no-store`. This hub adds `"bench"` (bench features compiled in) and `"cot"` (the TAK switch) at the start of the object |
 | `POST /api/own-pos` | Body `{"lat":..,"lon":..,"alt":..}` or `{"clear":true}`, checked with `json::parse_own_pos`. Answers `200 {"ok":true}`, or `400 {"error":"…"}` |
 | `GET` / `POST /api/cot` | Read or set the CoT toggle: `{"on":true}` |
-| anything else | `302` to `/`. This catches every captive-portal probe (Android `/generate_204`, Apple `/hotspot-detect.html`, Windows, Firefox) |
+| anything else | `302` to `http://<the hub's address>/`. This catches every captive-portal probe (Android `/generate_204`, Apple `/hotspot-detect.html`, Windows, Firefox) |
 
+**Which requests are answered** (`webui::request`, host-tested). A web page open on a joined phone
+could otherwise switch the TAK feed off or move the position with a plain cross-site form POST, or
+read `/api/state` (including the hub's own position) by pointing its own name at 192.168.4.1 (DNS
+rebinding). So every route except the redirect checks:
+- `Host` must be the hub's own address on that network: `192.168.4.1` (or `:80`), or the station
+  address. Anything else gets `421 {"error":"wrong host"}`, except the page itself (`GET /`), which
+  is redirected to `http://192.168.4.1/` like a captive-portal probe (it holds no data). Use the
+  address, not a name.
+- The two `POST`s also need `Content-Type: application/json` and an `Origin` that is absent or the
+  hub's own (`http://192.168.4.1`); otherwise `403`. curl works:
+  `curl -H 'Content-Type: application/json' -d '{"on":false}' http://192.168.4.1/api/cot`.
+- On the station network, `POST`s are off unless `allow_writes = true` (above).
+
+Refusals count in the `hub` line's `http_refused`. Every response carries
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; the page also
+`Content-Security-Policy: default-src 'none'; script-src 'sha256-…'; style-src 'sha256-…'; img-src data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`.
+The two hashes are computed by `crates/webui/build.rs` from `web/index.html` itself, so they follow
+every edit of the page; a hash policy also blocks inline `on...=` handlers and `style="..."`
+attributes, and a `webui` test fails if the page gains one. A new connection must send its request
+within 2 s (idle connections cannot hold the eight sockets for long).
+
+**DHCP pool.** edge-dhcp 0.8 reuses an expired lease only once *every* address in its range is in
+its lease table. The old range (.50-.200, 151 addresses) with an 8-entry table never got there: the
+ninth different phone since boot was refused until a reboot. The range is now exactly as large as
+the table (.50-.57) and leases last 10 minutes, so an address frees within 10 minutes of a phone
+leaving. `crates/webui/src/dhcp.rs` drives the same server type past the table size in its tests.
 **Captive portal.** DNS answers every name with 192.168.4.1, and probe URLs get the redirect above, so
 phones pop the page open. DHCP also sends the RFC 8910 captive-portal URL.
 
@@ -278,7 +367,10 @@ CoT needs UTC. It comes from the GPS (`"utc_src":"gps_pps"` or `"gps"`), so ever
 once the receiver has time. Without a GPS, events are skipped and counted in `cot_no_utc`. Demo
 builds fall back to the build machine's clock plus uptime, labelled `"utc_src":"build"`.
 
-To toggle CoT, press `m` on USB or `POST /api/cot`. It is on by default.
+To toggle CoT, press `m` on USB or `POST /api/cot`. It is on by default. The switch is shared by
+every phone, so the phone page shows a **TAK off** chip in its status strip (and the state under
+Settings, Hub status) whenever it is off. Datagrams go out with an IP hop limit of 1 (same network
+only).
 
 ## USB (USB-Serial-JTAG)
 
@@ -288,7 +380,7 @@ start with `{` (bootloader text, panics).
 | `t` | When |
 |---|---|
 | `boot` | Once: firmware, features, pins, `track_bytes` (static RAM of the track table) |
-| `hotspot` | At boot, and on `h`: SSID, channel, security, password |
+| `hotspot` | At boot, and on `h`: SSID, channel, security, `salt` state; the password only on `h` with BOOT held |
 | `track` | Every second, one per track (`tracker::json::track_line`) |
 | `link` | Every second, one per open FPV link (`tracker::json::link_line`) |
 | `hub` | Every second: tracks, own position, per-link counters, heap, CoT/HTTP counts, timings (below), and `gps`, `sd`, `screen`, `batt`, `buzz` ("What each status means") |
@@ -298,6 +390,11 @@ start with `{` (bootloader text, panics).
 | `state_check` | Streamed `/api/state` vs `json::state` |
 | `sta` | Station up, down or failed |
 | `warn`, `err`, `cmd`, `help`, `demo` | Messages |
+
+The `hub` line also counts `relay_refused` (frames refused because their sender may not originate
+them, such as the P4's own-position/clock, ADS-B and flag frames arriving relayed for a node: see
+"Web head trust") and `http_refused` (requests
+refused by the Host / Origin / Content-Type checks).
 
 The `hub` line also counts open FPV links: `open_links` (in the table) and `open_active` (heard in the
 last minute). The boot line has `max_open_links` and `show_link_ids`.
@@ -323,7 +420,8 @@ Commands are one character, with no Enter:
 | `c` | Clear it |
 | `m` | Toggle CoT |
 | `s` | Print the state body plus `state_check` |
-| `h` | Show the hotspot details and help |
+| `h` | Show the hotspot details and help. With **BOOT held**: also the hotspot password |
+| `R` | With **BOOT held**: make a new hotspot password and restart (every phone must join again) |
 
 ## Design notes
 
@@ -408,11 +506,66 @@ stalls. These paths have **not** run against real parts yet:
   have run), its real line rate in a busy sky, and GPIO41 on the actual module.
 
 Not done:
+- station mode: BSSID pinning and an API token (see "Station mode");
+- WPA3 (esp-radio 1.0.0-beta.1 has no setting for it) and client isolation on the hotspot;
 - SNTP time in station mode;
 - keeping the manual position and screen settings across reboots;
 - a hub-to-node command channel on the reserved TX pins;
 - PPS to the node chips for cross-node time sync (P3): the hub timestamps PPS for its own UTC only.
 
+
+## Security checks still to run on hardware (WP-05)
+
+Everything in the hotspot / web-head security work is compile-checked for the S3 and C5 and
+host-tested in `crates/webui` and `crates/link`; none of it has run on a board yet. On the S3 bench
+board, in this order:
+
+1. **First boot makes a salt.** Flash a build of this branch (`tools/dev-board.sh ... 60`). The
+   `hotspot` line says `"salt":"new"` and a `warn` line says how to read the password; no line
+   contains a `password` field. Reset: now `"salt":"stored"`.
+2. **Password needs BOOT.** Type `h`: no `password`, plus the `help` hint. Hold BOOT (after the hub has
+   started), type `h`: the line has `"password":"xxxx-xxxx-xxxx"`. A phone joins `Rotorscope-XXXX`
+   with it.
+3. **Reflash keeps it.** Flash again (no erase): `"salt":"stored"`, same password.
+4. **New password.** Hold BOOT, type `R`: a `warn` line, the board restarts, `"salt":"new"`; BOOT +
+   `h` shows a different password; the phone has to rejoin with it. Without BOOT, `R` only prints
+   the hint.
+5. **Erased salt.** `espflash erase-flash`, then flash again: `"salt":"new"` and a new password. (A
+   flash read/write fault cannot be staged on the bench; it takes the `this_boot_only` branch, which
+   only a code review has checked.)
+6. **DHCP recovers.** With the hub up, join and leave with 9+ distinct clients (or one laptop whose
+   MAC is changed between joins); after 10 minutes the next client still gets an address in
+   .50-.57.
+7. **Request checks.** From a joined laptop:
+   `curl -i http://192.168.4.1/api/state` (200);
+   `curl -i -H 'Host: evil.example' http://192.168.4.1/api/state` (421);
+   `curl -i -H 'Host: evil.example' http://192.168.4.1/` (302 to `http://192.168.4.1/`);
+   `curl -i -d '{"on":false}' http://192.168.4.1/api/cot` (403, not JSON);
+   `curl -i -H 'Content-Type: application/json' -H 'Origin: http://evil.example' -d '{"on":false}' http://192.168.4.1/api/cot` (403);
+   `curl -i -H 'Content-Type: application/json' -d '{"on":false}' http://192.168.4.1/api/cot` (200).
+   `http_refused` in the `hub` line counts the refused ones.
+8. **Captive portal still opens.** A phone joining the hotspot pops the page (Android and iOS);
+   `curl -i -H 'Host: connectivitycheck.gstatic.com' http://192.168.4.1/generate_204` is a 302 to
+   `http://192.168.4.1/`.
+9. **The page works under its CSP.** On a phone, and in a desktop browser with the console open:
+   no CSP violation reports; the radar arrows point the right way; the bench banner shows on a
+   `ROTORSCOPE_BENCH=1 ... --features demo` build and not on a normal one; switching CoT off (USB `m`)
+   shows the **TAK off** chip within a second.
+10. **Headers.** `curl -i http://192.168.4.1/` shows `Content-Security-Policy`,
+    `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`.
+11. **Idle sockets.** Open 8 idle TCP connections to port 80 (`nc 192.168.4.1 80` x 8, send
+    nothing): within about 2 s the page loads again for a phone.
+12. **Station mode** (needs `wifi.local.toml`): from a LAN machine, `GET /api/state` works and
+    `POST /api/cot` answers 403 "changes are off"; with `allow_writes = true` it works. A packet
+    capture of the CoT multicast on the LAN shows TTL 1.
+13. **Web head trust** (P4 kit): `relay_refused` stays 0 in normal operation, and the P4's GPS still
+    becomes the own position (`"own"` in the `hub` line) on a web head without its own GPS.
+14. **RAM.** `heap_min_free` in the `hub` line, and core 0's stack. (On 2026-11-18 the S3 build did
+    not link before this change either: static RAM over by 17,344 bytes at `stack.x`. This change
+    adds 712 bytes, measured from the same linker error (`0x3fcdfac0` -> `0x3fcdfd88`): the request
+    check in each of the nine HTTP tasks' futures, and the flash routines the salt code needs, which
+    must run from RAM. Sorting each link by the origin table adds 32 more: `0x3fcdfda8`, 18,088
+    bytes over in all.)
 
 ## Bench tests
 

@@ -90,6 +90,17 @@ compile_error!("`adsbee` and `gps-uart` both need the S3's third UART; use the I
 
 const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" };
 
+/// Bench-only features compiled in, comma separated, empty for a deployable
+/// build: the shared fence (`build.rs`, crates/link/src/benchfence.rs)
+/// refuses them without `ROTORSCOPE_BENCH=1`. Listed in the boot line and in
+/// `/api/state` (`bench`), where the phone page shows a banner.
+pub const BENCH_LIST: &str = env!("ROTORSCOPE_BENCH_LIST");
+
+/// [`BENCH_LIST`], one feature at a time.
+pub fn bench() -> impl Iterator<Item = &'static str> {
+    BENCH_LIST.split(',').filter(|s| !s.is_empty())
+}
+
 /// Heap in RAM that the second-stage bootloader used and gives back (the
 /// largest block that is otherwise wasted), plus a block of ordinary DRAM.
 /// esp-radio allocates Wi-Fi buffers and its task stacks here; embassy-net
@@ -137,6 +148,8 @@ struct BootLine {
     ver: &'static str,
     chip: &'static str,
     proto: u8,
+    /// Bench-only features in this build (empty for a deployable one).
+    bench: heapless::Vec<&'static str, 4>,
     demo: bool,
     station: bool,
     open_hotspot: bool,
@@ -163,12 +176,22 @@ struct BootLine {
     pins: &'static [(&'static str, u8)],
 }
 
+/// `{"t":"warn","what":"bench_build","tag":"bench-build:<list>",...}`.
+#[derive(Serialize)]
+struct BenchWarn {
+    t: &'static str,
+    what: &'static str,
+    tag: &'static str,
+    note: &'static str,
+}
+
 static HUB: StaticCell<Hub> = StaticCell::new();
 static UART_EXECUTOR: StaticCell<InterruptExecutor<2>> = StaticCell::new();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
+    #[cfg_attr(not(feature = "esp32s3"), allow(unused_mut))]
+    let mut peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: RECLAIMED_HEAP);
     esp_alloc::heap_allocator!(size: EXTRA_HEAP);
 
@@ -179,9 +202,21 @@ async fn main(spawner: Spawner) -> ! {
     let (usb_rx, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
     spawner.spawn(usb::writer(usb_tx).expect("spawn usb writer"));
 
+    // The hotspot password's salt (hotspot.rs). The S3 settles it here,
+    // before Wi-Fi (the password is part of its configuration) and before
+    // the second core (flash writes); a C5 that needs a new one waits for
+    // the radio, its only entropy source.
+    #[cfg(feature = "esp32s3")]
+    hotspot::init_salt_and_identity(peripherals.FLASH, peripherals.RNG, peripherals.ADC1.reborrow());
+    #[cfg(not(feature = "esp32s3"))]
+    let salt_pending = hotspot::init_identity_unless_new(peripherals.FLASH);
+
     let pins = pins::take!(peripherals);
+    #[cfg(feature = "esp32s3")]
+    let presence = usb::Presence::new(pins.boot);
+    #[cfg(not(feature = "esp32s3"))]
+    let presence = usb::Presence::new();
     let hub: &'static Hub = HUB.init(Hub::new());
-    hotspot::init_identity();
     screen::init_state();
 
     usb::line(&BootLine {
@@ -190,6 +225,7 @@ async fn main(spawner: Spawner) -> ! {
         ver: env!("CARGO_PKG_VERSION"),
         chip: CHIP,
         proto: link::PROTOCOL_VERSION,
+        bench: bench().take(4).collect(),
         demo: cfg!(feature = "demo"),
         station: cfg!(hub_station),
         open_hotspot: hotspot::OPEN,
@@ -206,7 +242,16 @@ async fn main(spawner: Spawner) -> ! {
         heap_free: esp_alloc::HEAP.free(),
         pins: pins::TABLE,
     });
-    hotspot::print_info();
+    // Bench features compiled in: say so, with the tag tools/dev-board.sh
+    // looks for in the ELF (as every other firmware does).
+    if !BENCH_LIST.is_empty() {
+        usb::line(&BenchWarn {
+            t: "warn",
+            what: "bench_build",
+            tag: env!("ROTORSCOPE_BENCH_TAG"),
+            note: "BENCH BUILD: never leave it on a fielded unit",
+        });
+    }
 
     // ---- Node links, on the interrupt executor (see links.rs) ----
     let uart_exec = UART_EXECUTOR.init(InterruptExecutor::new(peripherals.FROM_CPU_INTR2));
@@ -283,10 +328,16 @@ async fn main(spawner: Spawner) -> ! {
     let ap_iface = Interface::access_point();
     #[cfg(hub_station)]
     let sta_iface = Interface::station();
-    #[cfg(hub_station)]
-    let initial = esp_radio::wifi::Config::AccessPointStation(station::config(), hotspot::ap_config());
-    #[cfg(not(hub_station))]
-    let initial = esp_radio::wifi::Config::AccessPoint(hotspot::ap_config());
+    #[cfg(feature = "esp32s3")]
+    let initial = wifi_config();
+    // A C5 making a new salt starts the radio without the hotspot (there is
+    // no password yet) and switches to the full configuration below.
+    #[cfg(not(feature = "esp32s3"))]
+    let initial = if salt_pending.is_some() {
+        esp_radio::wifi::Config::Station(Default::default())
+    } else {
+        wifi_config()
+    };
     // Fewer driver buffers than esp-radio's defaults (10 static RX, 32
     // dynamic RX/TX): the hub moves a web page and small JSON, not bulk data,
     // and every buffer is ~1.6 KB of heap when in use.
@@ -295,8 +346,21 @@ async fn main(spawner: Spawner) -> ! {
         .with_dynamic_rx_buf_num(16)
         .with_dynamic_tx_buf_num(16)
         .with_initial_config(initial);
-    let wifi = WifiController::new(peripherals.WIFI, ctl).expect("Wi-Fi init");
+    #[cfg_attr(feature = "esp32s3", allow(unused_mut))]
+    let mut wifi = WifiController::new(peripherals.WIFI, ctl).expect("Wi-Fi init");
     set_country_us();
+    #[cfg(not(feature = "esp32s3"))]
+    if let Some(store) = salt_pending {
+        // The RF subsystem now feeds the RNG.
+        Timer::after_millis(50).await;
+        let (salt, how) = store.store(hotspot::radio_salt());
+        hotspot::init_identity(&salt, how);
+        if wifi.set_config(&wifi_config()).is_err() {
+            usb::msg("err", "wifi config");
+        }
+    }
+    // Never the password here: boot output ends up in logs and bug reports.
+    hotspot::print_info(false);
 
     let rng = Rng::new();
     let seed = || (u64::from(rng.random()) << 32) | u64::from(rng.random());
@@ -306,7 +370,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(hotspot::dhcp(ap_stack).expect("spawn dhcp"));
     spawner.spawn(hotspot::dns(ap_stack).expect("spawn dns"));
     for i in 0..http::AP_TASKS {
-        spawner.spawn(http::task(i, ap_stack, hub).expect("spawn http"));
+        spawner.spawn(http::task(i, http::Side::hotspot(ap_stack), hub).expect("spawn http"));
     }
     spawner.spawn(cot::task(ap_stack, hub).expect("spawn cot"));
 
@@ -314,7 +378,7 @@ async fn main(spawner: Spawner) -> ! {
     {
         let (sta_stack, sta_runner) = station::stack(sta_iface, seed());
         spawner.spawn(hotspot::net_runner(sta_runner).expect("spawn sta net"));
-        spawner.spawn(http::task(http::AP_TASKS, sta_stack, hub).expect("spawn sta http"));
+        spawner.spawn(http::task(http::AP_TASKS, http::Side::station(sta_stack), hub).expect("spawn sta http"));
         spawner.spawn(cot::task(sta_stack, hub).expect("spawn sta cot"));
         spawner.spawn(station::task(wifi).expect("spawn station"));
     }
@@ -336,11 +400,19 @@ async fn main(spawner: Spawner) -> ! {
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.RTC_TIMER);
     spawner.spawn(tick::task(hub, rtc).expect("spawn tick"));
     spawner.spawn(tick::lag_probe().expect("spawn lag probe"));
-    spawner.spawn(usb::commands(usb_rx, hub).expect("spawn usb commands"));
+    spawner.spawn(usb::commands(usb_rx, hub, presence).expect("spawn usb commands"));
 
     loop {
         Timer::after_secs(3600).await;
     }
+}
+
+/// The Wi-Fi configuration: the hotspot, plus the station when built.
+fn wifi_config() -> esp_radio::wifi::Config {
+    #[cfg(hub_station)]
+    return esp_radio::wifi::Config::AccessPointStation(station::config(), hotspot::ap_config());
+    #[cfg(not(hub_station))]
+    esp_radio::wifi::Config::AccessPoint(hotspot::ap_config())
 }
 
 /// Demo builds check once, after both demo drones exist, that the streamed

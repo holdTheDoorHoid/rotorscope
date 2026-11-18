@@ -3,9 +3,13 @@
 //! ```text
 //! evidence-server serve --data DIR [--listen 127.0.0.1:8650]
 //!                 [--tls-cert cert.pem --tls-key key.pem] [--token T]
-//!                 [--tsa URL] [--name NAME]
+//!                 [--tsa URL] [--name NAME] [--open-registration]
 //! evidence-server keygen --out FILE
 //! ```
+//!
+//! Registering a unit needs the token. Without `--token` the server refuses
+//! to register anything unless `--open-registration` is given (a bench
+//! laptop nobody else can reach).
 //!
 //! Plain HTTP is for the bench on one laptop only: anyone on the path can
 //! read or block uploads (they still cannot forge records: the unit's
@@ -31,7 +35,7 @@ fn main() {
         Some("serve") => serve(&args),
         Some("keygen") => keygen(&args),
         _ => {
-            eprintln!("usage: evidence-server serve --data DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--token T] [--tsa URL] [--name NAME]");
+            eprintln!("usage: evidence-server serve --data DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--token T] [--tsa URL] [--name NAME] [--open-registration]");
             eprintln!("       evidence-server keygen --out FILE");
             std::process::exit(2);
         }
@@ -82,9 +86,16 @@ fn serve(args: &[String]) {
         _ => panic!("--tls-cert and --tls-key go together"),
     };
     let name = arg(args, "--name").unwrap_or_else(|| format!("{}://{listen}", if tls.is_some() { "https" } else { "http" }));
-    let app = Arc::new(App { store: Mutex::new(store), token: arg(args, "--token").or_else(|| std::env::var("EVIDENCE_TOKEN").ok()), server_name: name.clone(), tsa_url: arg(args, "--tsa") });
-    let n = app.store.lock().unwrap().devices.len();
+    let app = Arc::new(App { store: Mutex::new(store), open_registration: args.iter().any(|a| a == "--open-registration"), token: arg(args, "--token").or_else(|| std::env::var("EVIDENCE_TOKEN").ok()), server_name: name.clone(), tsa_url: arg(args, "--tsa") });
+    let n = app.lock().devices.len();
     eprintln!("evidence-server: data {data}, {n} devices, listening on {name}{}", if tls.is_none() { " (plain HTTP: bench only, not evidence-grade transport)" } else { "" });
+    if app.token.is_none() {
+        if app.open_registration {
+            eprintln!("evidence-server: WARNING: no --token and --open-registration: anyone who can reach {listen} can register units and read everything");
+        } else {
+            eprintln!("evidence-server: no --token: registering units is refused (add --token T, or --open-registration for a bench laptop)");
+        }
+    }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(listen).await.expect("bind");

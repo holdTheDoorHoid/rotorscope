@@ -57,6 +57,15 @@ pub struct Pins {
     /// Only one wire plus ground: the ADSBee takes no commands on that port.
     #[cfg(feature = "adsbee")]
     pub adsbee_rx: AnyPin<'static>,
+    /// S3 only: the dev board's BOOT button (GPIO0, active low). Held while
+    /// a USB command is typed, it shows the hotspot password (`h`) or makes
+    /// a new one (`R`): proof that someone is at the box, not just on the
+    /// USB cable. GPIO0 is a strapping pin, which matters only at reset
+    /// (held then, the chip starts its ROM downloader instead); afterwards it
+    /// is an ordinary input. The C5 build's BOOT pin (GPIO28) is its buzzer,
+    /// so there the panel's Select button stands in (`screen::SELECT_HELD`).
+    #[cfg(feature = "esp32s3")]
+    pub boot: AnyPin<'static>,
 }
 
 // ---------------------------------------------------------------- ESP32-S3 --
@@ -76,7 +85,7 @@ mod imp {
         ("spi_sck", 12), ("spi_mosi", 11), ("spi_miso", 13),
         ("screen_cs", 10), ("screen_dc", 17), ("screen_bl", 18), ("sd_cs", 14),
         ("btn0", 38), ("btn1", 39), ("btn2", 40),
-        ("buzzer", 21), ("battery_adc", 1),
+        ("buzzer", 21), ("battery_adc", 1), ("boot_btn", 0),
     ];
     /// As above with the ADSBee on UART2 instead of node C (feature
     /// `adsbee`). GPIO41 is free on N16R8 modules (octal PSRAM is 33-37)
@@ -90,7 +99,7 @@ mod imp {
         ("spi_sck", 12), ("spi_mosi", 11), ("spi_miso", 13),
         ("screen_cs", 10), ("screen_dc", 17), ("screen_bl", 18), ("sd_cs", 14),
         ("btn0", 38), ("btn1", 39), ("btn2", 40),
-        ("buzzer", 21), ("battery_adc", 1),
+        ("buzzer", 21), ("battery_adc", 1), ("boot_btn", 0),
     ];
 
     macro_rules! take {
@@ -113,6 +122,7 @@ mod imp {
                 battery: $p.GPIO1,
                 #[cfg(feature = "adsbee")]
                 adsbee_rx: $p.GPIO41.degrade(),
+                boot: $p.GPIO0.degrade(),
             }
         };
     }

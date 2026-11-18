@@ -41,6 +41,13 @@ extern "Rust" fn custom_halt() -> ! {
     esp_hal::system::software_reset()
 }
 
+/// Hang watchdog timeout (docs/BENCH.md "Crash recovery"). `stats_task`
+/// feeds it once a second, so it fires when the executor stops going round
+/// (a task that never yields, a deadlock, interrupts left off). The BLE
+/// controller's own faults already end in a reset (the host restart below).
+/// Not fed from the scan itself: a quiet field can have no adverts at all.
+const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(10);
+
 fn hello_line<'a>(images: &'a [Option<&'static str>]) -> HelloLine<'a> {
     HelloLine {
         t: "hello",
@@ -60,6 +67,9 @@ fn hello_line<'a>(images: &'a [Option<&'static str>]) -> HelloLine<'a> {
         can: role::CAN.load(core::sync::atomic::Ordering::Relaxed),
         images,
         plan_id: role::PLAN_ID.load(core::sync::atomic::Ordering::Relaxed),
+        reset: node_common::fault::reset_reason(),
+        faulttest: cfg!(feature = "faulttest"),
+        bench: node_common::bench_list(env!("ROTORSCOPE_BENCH_LIST")),
     }
 }
 
@@ -91,8 +101,10 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     // USB: the laptop / DragonSync side.
-    let (_, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
+    let (_usb_rx, usb_tx) = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
     spawner.spawn(usb_task(usb_tx).unwrap());
+    #[cfg(feature = "faulttest")]
+    spawner.spawn(faulttest(_usb_rx).unwrap());
 
     // Which images this board holds (OTA slots) and the job, if this image
     // was started by a role switch.
@@ -148,6 +160,17 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut line = [0u8; 512];
     out::json_line(&hello_line(&names), &mut line);
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/flash-node.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        let warn = concat!(
+            r#"{"t":"warn","what":"bench_build","tag":""#,
+            env!("ROTORSCOPE_BENCH_TAG"),
+            r#"","note":"BENCH BUILD: never leave it on a fielded unit"}"#,
+            "\n"
+        );
+        out::emit(&out::USB, warn.as_bytes(), &COUNTERS.usb_drops);
+    }
     out::hub_frame(&hello_frame());
     out::hub_frame(&role::status_frame());
 
@@ -220,6 +243,7 @@ async fn main(spawner: Spawner) -> ! {
             }
         }
     };
+    node_common::fault::arm(WATCHDOG);
     join(host, scan).await;
     // The Wi-Fi controller must outlive the uplink (dropping it stops Wi-Fi).
     #[cfg(feature = "espnow")]
@@ -394,6 +418,22 @@ impl Snapshot {
     }
 }
 
+/// Bench only: `fault panic` / `fault hang` typed on USB (docs/BENCH.md).
+#[cfg(feature = "faulttest")]
+#[embassy_executor::task]
+async fn faulttest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, Async>) {
+    node_common::fault::console(
+        |b| rx.drain_rx_fifo(b),
+        |l| {
+            let mut s: heapless::String<160> = heapless::String::new();
+            let _ = s.push_str(l);
+            let _ = s.push('\n');
+            out::emit(&out::USB, s.as_bytes(), &COUNTERS.usb_drops);
+        },
+    )
+    .await
+}
+
 #[embassy_executor::task]
 async fn stats_task() {
     let mut line = [0u8; 1024];
@@ -404,6 +444,7 @@ async fn stats_task() {
     let mut secs: u64 = 0;
     loop {
         ticker.next().await;
+        node_common::fault::feed();
         secs += 1;
         let now = Instant::now();
         let cur = Snapshot::take();

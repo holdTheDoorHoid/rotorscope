@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build and flash a multi-image radio node (XIAO ESP32-C5) through the board lock.
 #
-#   tools/flash-node.sh <board> [seconds=20]
+#   tools/flash-node.sh [--open] <board> [seconds=20]
 #
 # Slots (tools/partitions-node.csv):
 #   ota_0  node-wifi  (ESP-NOW, boots as Wi-Fi 2.4 GHz; the hub picks the band)
@@ -24,25 +24,45 @@
 # other nodes when it boots.
 #
 # ESP-NOW link key (docs/ESPNOW.md "Securing the link"): the images are built
-# with the kit key in tools/link.key (or $ROTORSCOPE_LINK_KEY_FILE; "none" for
-# an open build). Every image on the board must carry the same key as the
-# gateway; this script refuses to flash a board whose images disagree (e.g. a
-# node-sdr ELF built before the key was made).
+# with the kit key in tools/link.key (or $ROTORSCOPE_LINK_KEY_FILE). With no key
+# the script stops (exit 1); `--open` builds and flashes an OPEN kit on purpose
+# (no authentication: anyone nearby can inject node packets and commands).
+# Every image on the board must carry the same key as the gateway; this script
+# refuses to flash a board whose images disagree (e.g. a node-sdr ELF built
+# before the key was made).
+#
+# Bench builds (docs/BENCH.md "Bench builds"): an image built with a
+# bench-only feature or switch (faulttest, bringup, ROTORSCOPE_BENCH_CAN, ...)
+# is refused unless ROTORSCOPE_BENCH=1 is set, which the build itself needs
+# anyway; e.g. `ROTORSCOPE_BENCH=1 ROTORSCOPE_BENCH_CAN=ble tools/flash-node.sh c5a`.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(dirname "$here")
-board=${1:?usage: flash-node.sh <board> [seconds]}
+open=0
+if [[ ${1:-} == --open ]]; then open=1; shift; fi
+board=${1:?usage: flash-node.sh [--open] <board> [seconds]}
 secs=${2:-20}
 pt=$here/partitions-node.csv
 
 keyfile=${ROTORSCOPE_LINK_KEY_FILE:-$here/link.key}
-if [[ $keyfile != none && -f $keyfile ]]; then
+if [[ ${NODE_WIRED:-0} == 1 || ${NODE_BUS:-0} == 1 ]]; then
+  # Wired images have no ESP-NOW (no airlink, no key); nothing to check.
+  :
+elif (( open )); then
+  export ROTORSCOPE_LINK_KEY_FILE=none
+  echo "flash-node: --open: building an OPEN kit: the ESP-NOW link will NOT be authenticated." >&2
+elif [[ $keyfile != none && -f $keyfile ]]; then
   export ROTORSCOPE_LINK_KEY_FILE=$keyfile
   echo "flash-node: building with the link key in $keyfile"
 else
-  export ROTORSCOPE_LINK_KEY_FILE=none
-  echo "flash-node: WARNING: no link key ($here/link.key): the ESP-NOW link will NOT be authenticated." >&2
-  echo "flash-node:          Make one with: cargo run -p link-key -- new  (then reflash the gateway and every node)" >&2
+  if [[ $keyfile == none ]]; then
+    echo "flash-node: ROTORSCOPE_LINK_KEY_FILE=none asks for an open kit: pass --open to confirm." >&2
+  else
+    echo "flash-node: no link key ($keyfile): refusing to build an unauthenticated node." >&2
+    echo "flash-node: make the kit key once with: cargo run -p link-key -- new  (then reflash the gateway and every node)," >&2
+    echo "flash-node: or pass --open to build an open kit on purpose." >&2
+  fi
+  exit 1
 fi
 
 chip=$("$here/dev-board.sh" --resolve "$board" | awk '{print $2}')
@@ -94,6 +114,19 @@ if [[ ${NODE_BUS:-0} == 1 ]]; then
     fi
   done
 fi
+
+# No bench image into a node unless the caller says so (the hello line and the
+# boot warning carry the list; the ELF carries "bench-build:<list>").
+for f in "${images[@]}"; do
+  b=$(grep -aoE 'bench-build:[A-Za-z0-9_,:-]+' "$f" 2>/dev/null | grep -v '^bench-build:none$' | head -1 || true)
+  if [[ -n $b ]]; then
+    if [[ ${ROTORSCOPE_BENCH:-} != 1 ]]; then
+      echo "flash-node: $(basename "$f") is a BENCH build (${b#bench-build:}); refusing without ROTORSCOPE_BENCH=1 (docs/BENCH.md \"Bench builds\")" >&2
+      exit 1
+    fi
+    echo "flash-node: WARNING: $(basename "$f") is a BENCH build (${b#bench-build:}): never leave it in a fielded node" >&2
+  fi
+done
 
 # Same link key in every ESP-NOW image (wired images carry none and are skipped).
 keys=()

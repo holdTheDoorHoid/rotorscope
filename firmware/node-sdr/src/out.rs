@@ -62,6 +62,9 @@ impl Write for Usb {
 /// Print one line of a dump. Returns false if the host stopped reading, so
 /// the caller can abandon the rest instead of waiting on every line.
 pub fn line(args: fmt::Arguments) -> bool {
+    // A dump runs inside the capture loop and can take seconds behind a slow
+    // host; each line counts as the loop going round.
+    node_common::fault::feed();
     let ok = Usb(WAIT).write_fmt(args).is_ok() && Usb(WAIT).write_str("\n").is_ok();
     flush();
     ok

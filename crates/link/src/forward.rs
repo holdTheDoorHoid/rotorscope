@@ -13,22 +13,33 @@
 //! - **A `Via` travels with its frame.** [`Frame::Via`] names the node of the
 //!   *next* frame. The forwarder holds a `Via` back and queues it together
 //!   with the frame it belongs to, or drops both, so a lost frame can never
-//!   shift a node's name onto someone else's frame. A `Via` followed by
-//!   another `Via` (or by a stream error, [`Forwarder::reset_via`]) is
-//!   dropped, as the receiving hub would ignore it anyway.
+//!   shift a node's name onto someone else's frame. A `Via` followed by a
+//!   stream error ([`Forwarder::reset_via`]) is dropped.
+//!
+//! And one rule keeps it honest: **only what the sender may originate**
+//! (`origin`). The relayed stream is sorted exactly as the hub sorts it
+//! ([`crate::origin::Sorter`]): a relayed frame must be one a node may send,
+//! a frame with no `Via` one a node or the gateway may send, and a `Via`
+//! straight after a `Via` is refused with the one it follows. So a
+//! `HubFix`, `Csbee` or `Flags` from the node link never reaches the web
+//! head looking like the hub's own; only [`Forwarder::send`] queues those.
 
 use heapless::Deque;
 
+use crate::origin::{Sorted, Sorter};
 use crate::{Frame, MAX_FRAME, encode};
 
 /// Byte queue of whole, COBS-delimited frames for a second board.
 pub struct Forwarder<const N: usize> {
     queue: Deque<u8, N>,
-    via: Option<Frame>,
+    sorter: Sorter,
     /// Frames queued (a `Via` and its frame count as two).
     pub frames: u32,
     /// Frames dropped because the queue had no room for them.
     pub dropped: u32,
+    /// Relayed frames refused because their sender may not originate them
+    /// (`origin`); a refused frame's `Via` is not counted again.
+    pub refused: u32,
     /// Frames that would not encode (cannot happen for decoded frames; kept
     /// so a mistake shows up as a number instead of silence).
     pub encode_err: u32,
@@ -42,20 +53,17 @@ impl<const N: usize> Default for Forwarder<N> {
 
 impl<const N: usize> Forwarder<N> {
     pub const fn new() -> Self {
-        Self { queue: Deque::new(), via: None, frames: 0, dropped: 0, encode_err: 0 }
+        Self { queue: Deque::new(), sorter: Sorter::new(), frames: 0, dropped: 0, refused: 0, encode_err: 0 }
     }
 
     /// Pass on one frame from the decoded stream, in stream order.
     pub fn relay(&mut self, frame: &Frame) {
-        if matches!(frame, Frame::Via { .. }) {
-            if self.via.replace(frame.clone()).is_some() {
-                // The previous Via had no frame after it.
-                self.dropped += 1;
-            }
-            return;
+        match self.sorter.sort(frame) {
+            Sorted::Marker => {}
+            Sorted::Relayed { node, rssi } => self.push(Some(&Frame::Via { node, rssi }), frame),
+            Sorted::Own => self.push(None, frame),
+            Sorted::Refused { .. } => self.refused += 1,
         }
-        let via = self.via.take();
-        self.push(via.as_ref(), frame);
     }
 
     /// Queue a frame of the sender's own (not part of the relayed stream).
@@ -67,7 +75,7 @@ impl<const N: usize> Forwarder<N> {
     /// The decoded stream had an error: a held `Via` no longer names
     /// anything (the receiving hub does the same).
     pub fn reset_via(&mut self) {
-        if self.via.take().is_some() {
+        if self.sorter.reset() {
             self.dropped += 1;
         }
     }
@@ -207,13 +215,69 @@ mod tests {
     #[test]
     fn orphan_via_is_dropped() {
         let mut f = Forwarder::<4096>::new();
-        f.relay(&via(1));
-        f.relay(&via(2));
-        f.relay(&det(2));
         f.relay(&via(3));
         f.reset_via();
         f.relay(&det(9)); // a frame of the link itself
-        assert_eq!(drain(&mut f), [via(2), det(2), det(9)].to_vec());
-        assert_eq!(f.dropped, 2);
+        assert_eq!(drain(&mut f), [det(9)].to_vec());
+        assert_eq!(f.dropped, 1);
+    }
+
+    /// Two `Via`s in a row: the second is a node's frame posing as a marker
+    /// (a gateway writes each `Via` with its frame). Neither is passed on,
+    /// and neither names the frame after them.
+    #[test]
+    fn via_after_via_is_refused_with_the_one_it_follows() {
+        let mut f = Forwarder::<4096>::new();
+        f.relay(&via(1));
+        f.relay(&via(2));
+        let gw_hello = Frame::Hello { role: NodeRole::Gateway, protocol: 13, firmware: "gw key x".try_into().unwrap() };
+        f.relay(&gw_hello);
+        f.relay(&via(1));
+        f.relay(&det(1));
+        assert_eq!(drain(&mut f), [gw_hello, via(1), det(1)].to_vec());
+        assert_eq!((f.refused, f.dropped), (1, 0));
+    }
+
+    fn hub_only() -> [Frame; 3] {
+        [
+            Frame::HubFix(crate::HubFix { state: crate::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true }),
+            Frame::Csbee(b"#A:x".iter().copied().collect()),
+            Frame::Flags(crate::FlagReport { who: "x".try_into().unwrap(), level: 3, items: heapless::Vec::new(), pack_date: 0 }),
+        ]
+    }
+
+    #[test]
+    fn relayed_hub_frames_never_reach_the_output() {
+        let mut f = Forwarder::<4096>::new();
+        for fr in &hub_only() {
+            f.relay(&via(1)); // from a node, through the gateway
+            f.relay(fr);
+            f.relay(fr); // the link's own (no Via): not the gateway's to send either
+        }
+        f.relay(&via(2));
+        f.relay(&det(2));
+        assert_eq!(drain(&mut f), [via(2), det(2)].to_vec());
+        assert_eq!(f.refused, 6);
+        // The hub's own go through.
+        for fr in &hub_only() {
+            f.send(fr);
+        }
+        assert_eq!(drain(&mut f), hub_only().to_vec());
+    }
+
+    #[test]
+    fn relayed_bus_control_and_forged_reports_are_refused() {
+        let mut f = Forwarder::<4096>::new();
+        let forged = [
+            Frame::BusJoin { mac: [1; 6], want: 0, check: 0 },
+            Frame::BusDone { addr: 1, seq: 1, more: false, crc: 0 },
+            Frame::Hello { role: NodeRole::Gateway, protocol: 13, firmware: "gw key x".try_into().unwrap() },
+        ];
+        for fr in &forged {
+            f.relay(&via(1));
+            f.relay(fr);
+        }
+        assert!(drain(&mut f).is_empty());
+        assert_eq!(f.refused, 3);
     }
 }

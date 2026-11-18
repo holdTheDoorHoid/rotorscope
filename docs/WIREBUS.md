@@ -53,6 +53,39 @@ the hub build. Nobody has wired it yet. The bench checklist is at the end.
 * **Orders to nodes.** `To { node: MAC }` then `Assign`, as on the gateway
   link. Every node hears it; only the named one acts on it. The hub sends
   orders only between answers, as whole frames.
+* **Who may send what.** A wire is no proof of honesty: anything soldered
+  onto the two wires, or a node running bad firmware, can answer polls.
+  The hub passes on only what a node may send (see below).
+
+### Who may send what
+
+The same origin rules as the ESP-NOW link (docs/ESPNOW.md "Who may send
+what", `crates/link/src/origin.rs`) apply on the bus, checked by the hub's
+`wirebus::Attributor` as each checked answer is unpacked (in the UART
+interrupt; it reads only each frame's first bytes):
+
+* A bus node's frame is passed on (with a `Via` naming the node) only if a
+  node may originate it. `HubFix`, `Csbee`, `Flags`, a `BusJoin` or
+  `BusDone` inside an answer, a `Hello` or `Status` claiming the gateway
+  role, and a `forged_link` report are refused.
+* A `Via` written by a bus node is honoured only from a node registered as
+  a gateway (`Attributor::register_gateway`; a gateway relaying radio
+  nodes onto the bus). From any other node it is refused, and the node's
+  next frame goes under its own MAC: a node cannot attribute its frames to
+  another node. No firmware registers a gateway today (the ESP-NOW gateway
+  has no bus mode), so every node-supplied `Via` is refused.
+* A registered gateway's `Via` is held and passed on together with its
+  frame, which must itself be a node's; its own frames (`Hello`,
+  `forged_link`) pass with no `Via`, as on a point-to-point gateway link.
+* What reaches the hub's stream is sorted again in `links.rs` like a
+  gateway's stream (docs/ESPNOW.md), and the web-head feed sorts it too.
+
+Refusals are counted (`"refused"` in the `"bus"` part of the hub's
+`{"t":"hub"}` line) and reported once a second per node as the hub's own
+`Threat` `forged_link`, `detail` 5, naming the node's MAC. There is no key
+on the bus: anyone with access to the wires can still make up node reports
+under any MAC it can join with (a `BusJoin` claims a MAC), but not the
+hub-only or gateway frames above, and not under another node's `Via`.
 
 ### Messages (protocol 10, appended; sizes at their largest)
 
@@ -334,5 +367,7 @@ never polls.
 * Up to 16 nodes on the P4 (its node table), 32 addresses in the protocol;
   8 is the size the timing table covers.
 * The ESP-NOW gateway firmware has no bus mode (it cannot sit on the bus
-  next to wired nodes); it stays the point-to-point gateway it was.
+  next to wired nodes); it stays the point-to-point gateway it was. The hub
+  registers no bus node as a gateway, so a `Via` from the bus is always
+  refused; a gateway with a bus mode would need a hub setting naming it.
 * RS-485 with driver-enable pins needs node firmware support (not done).

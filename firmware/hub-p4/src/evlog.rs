@@ -23,9 +23,16 @@
 //!
 //! **Key.** A development key built into the firmware image
 //! (`ROTORSCOPE_DEV_KEY`, 64 hex digits, at build time), or the published
-//! test key when unset. Every checkpoint says which. Not evidence-grade:
-//! see docs/EVIDENCE.md for the hardware key design. Nothing here touches
-//! eFuses.
+//! test key when unset. A set but malformed value stops the build
+//! (build.rs). Every checkpoint says which, the hello line says which, and
+//! the screen keeps saying so ("TEST KEY: log not evidence" / "DEV KEY: not
+//! evidence-grade"). Not evidence-grade: see docs/EVIDENCE.md for the
+//! hardware key design. Nothing here touches eFuses. Key bytes are never
+//! printed or logged; only the public key and its fingerprint are.
+//!
+//! **Bench builds.** The boot event's text lists the bench features
+//! compiled in (`bench: none` for a normal build), so a log made by a build
+//! that can fake data says so in its first record.
 
 use core::fmt::Write as _;
 
@@ -55,8 +62,19 @@ const JUMP_MPS: f64 = 150.0;
 /// A clock correction smaller than this is not logged.
 const CLOCK_STEP_MS: i64 = 500;
 
-/// The dev key, if the build has one (`ROTORSCOPE_DEV_KEY`).
+/// The dev key, if the build has one (`ROTORSCOPE_DEV_KEY`; build.rs has
+/// checked it is 64 hex digits and not zero).
 const DEV_KEY_HEX: Option<&str> = option_env!("ROTORSCOPE_DEV_KEY");
+
+/// The key class this build means to sign with, for the hello line (before
+/// the signer exists). The signer's own class is what the screen shows.
+pub fn built_key_class() -> KeyClass {
+    if DEV_KEY_HEX.is_some() { KeyClass::DevelopmentSoftware } else { KeyClass::PublicTest }
+}
+
+/// Bench features compiled in (build.rs), comma separated, empty for a
+/// normal build.
+pub const BENCH: &str = env!("ROTORSCOPE_BENCH_LIST");
 
 fn dev_key() -> Option<[u8; 32]> {
     let h = DEV_KEY_HEX?.as_bytes();
@@ -118,6 +136,8 @@ pub struct Evidence {
     pub max_sign_us: u64,
     pub last_sign_us: u64,
     pub drained: u32,
+    /// Records in `q` (see `queued_records`).
+    queued_records: u32,
 }
 
 impl Evidence {
@@ -134,7 +154,14 @@ impl Evidence {
         };
         let signer = match dev_key().and_then(|k| SoftSigner::new(&k, KeyClass::DevelopmentSoftware)) {
             Some(s) => s,
-            None => SoftSigner::public_test(),
+            None => {
+                if DEV_KEY_HEX.is_some() {
+                    // Well-formed digits (build.rs) but not a usable P-256
+                    // scalar: say so loudly; the screen shows TEST KEY.
+                    println!("hub-p4: evidence dev key REFUSED (not a valid P-256 private key): signing with the PUBLISHED TEST KEY");
+                }
+                SoftSigner::public_test()
+            }
         };
         let pk = signer.public_key();
         let fp = evidence::fingerprint(&pk);
@@ -178,7 +205,18 @@ impl Evidence {
             max_sign_us: 0,
             last_sign_us: 0,
             drained: 0,
+            queued_records: 0,
         }
+    }
+
+    /// The class of the key actually signing (for the screen).
+    pub fn key_class(&self) -> KeyClass {
+        self.signer.key_class()
+    }
+
+    /// Records in the queue not yet flushed to a card file.
+    pub fn queued_records(&self) -> u32 {
+        self.queued_records
     }
 
     pub fn fw_hash(&self) -> [u8; 32] {
@@ -197,6 +235,7 @@ impl Evidence {
     fn keep(&mut self, buf: &[u8], n: usize) {
         self.q[self.len..self.len + n].copy_from_slice(&buf[..n]);
         self.len += n;
+        self.queued_records += 1;
         self.chain.commit();
         self.records += 1;
         self.bytes += n as u32;
@@ -210,14 +249,23 @@ impl Evidence {
     }
 
     /// The first record: who signs, which firmware.
-    pub fn boot(&mut self, chip: (u8, u8)) {
+    /// `reset` is why the chip last reset (`fault::reset_reason`).
+    pub fn boot(&mut self, chip: (u8, u8), reset: &str) {
         let mut data = [0u8; 1 + format::PUBKEY_LEN + 2];
         data[0] = self.signer.key_class() as u8;
         data[1..66].copy_from_slice(&self.signer.public_key());
         data[66] = chip.0;
         data[67] = chip.1;
-        let mut text: heapless::String<64> = heapless::String::new();
-        let _ = write!(text, "hub-p4 {} {}", env!("CARGO_PKG_VERSION"), option_env!("ROTORSCOPE_GIT").unwrap_or(""));
+        // Version (~6), git (~40), reset reason (~10) and the bench list
+        // (every hub-p4 bench feature at once is ~110): 256 holds them all.
+        let mut text: heapless::String<256> = heapless::String::new();
+        let _ = write!(
+            text,
+            "hub-p4 {} {} last reset: {reset}; bench: {}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("ROTORSCOPE_GIT").unwrap_or(""),
+            if BENCH.is_empty() { "none" } else { BENCH }
+        );
         self.event(EventCode::Boot, text.as_bytes(), &data);
     }
 
@@ -368,6 +416,14 @@ impl Evidence {
             let i = match self.nodes.iter().position(|s| s.mac == n.mac) {
                 Some(i) => i,
                 None => {
+                    // Full: a node already logged as gone that the link's
+                    // table has since forgotten (`links::EVICT_AFTER_MS`)
+                    // makes room.
+                    if self.nodes.is_full()
+                        && let Some(j) = self.nodes.iter().position(|s| !s.alive && !nodes.iter().any(|m| m.mac == s.mac))
+                    {
+                        self.nodes.swap_remove(j);
+                    }
                     if self.nodes.push(NodeSeen { mac: n.mac, alive: false }).is_err() {
                         continue;
                     }
@@ -454,6 +510,17 @@ impl Evidence {
     /// records leave the queue.
     pub fn flushed(&mut self) {
         let w = self.written;
+        // Whole records only are flushed (sd.rs flushes at a record boundary).
+        let mut at = 0;
+        while at < w {
+            match format::peek_len(&self.q[at..w]) {
+                Ok(l) if l > 0 => {
+                    at += l;
+                    self.queued_records = self.queued_records.saturating_sub(1);
+                }
+                _ => break,
+            }
+        }
         self.q.copy_within(w..self.len, 0);
         self.len -= w;
         self.written = 0;

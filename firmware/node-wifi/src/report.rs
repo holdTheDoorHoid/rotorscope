@@ -62,6 +62,13 @@ struct HelloLine<'a> {
     /// Plan id applied (0 = built-in) and the plan.
     plan_id: u16,
     plan: &'a Plan,
+    /// Why the chip last reset (`node_common::fault::name`), and whether
+    /// this is a `faulttest` bench build.
+    reset: &'static str,
+    faulttest: bool,
+    /// Bench features and build switches compiled in (`[]`: a normal build;
+    /// build.rs, docs/BENCH.md "Bench builds").
+    bench: heapless::Vec<&'static str, 8>,
 }
 
 pub fn hello_json(images: &[Option<&'static str>]) {
@@ -78,8 +85,19 @@ pub fn hello_json(images: &[Option<&'static str>]) {
         images,
         plan_id: job.id,
         plan: &job.plan,
+        reset: node_common::fault::reset_reason(),
+        faulttest: cfg!(feature = "faulttest"),
+        bench: node_common::bench_list(env!("ROTORSCOPE_BENCH_LIST")),
     };
     emit(&line, &mut [0u8; 768], "hello");
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/flash-node.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        esp_println::println!(
+            r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: never leave it on a fielded unit"}}"#,
+            env!("ROTORSCOPE_BENCH_TAG")
+        );
+    }
 }
 
 /// Hello, then Status (protocol 4: the hub learns `can` and the plan id).
@@ -472,7 +490,7 @@ pub fn mavlink_evidence(e: &link::MavlinkEvidence) {
     to_hub(&link::Frame::MavlinkEvidence(e.clone()));
 }
 
-fn to_hub(frame: &link::Frame) {
+pub(crate) fn to_hub(frame: &link::Frame) {
     let mut buf = [0u8; link::MAX_FRAME];
     let queued = link::encode(frame, &mut buf)
         .ok()

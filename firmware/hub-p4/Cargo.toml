@@ -83,6 +83,18 @@ modes = []
 # laptop (2026-11-15, real aircraft), at their recorded pace, looped. Leave
 # GPIO30 unconnected while it runs.
 modesloop = ["modes"]
+# Bench only (docs/BENCH.md "Crash recovery"): console line `fault panic` or
+# `fault hang` (start with `f`, end with Enter) to prove the reboot after a
+# panic and the hang watchdog. Never in a normal build (not in `default`).
+faulttest = []
+# Bench only: console `p` sets the hub's own position to a fixed test point
+# (Philadelphia), for a bench with no GPS. Never in a normal build: in the
+# field it would put every distance and flag in the wrong place.
+testpoint = []
+#
+# Every feature above marked "Bench only" (and `selftest`) is fenced by
+# build.rs: the build stops unless ROTORSCOPE_BENCH=1, and the hello line,
+# the evidence boot event and the screen ("BENCH BUILD") say which are in.
 
 # Bench only: console `w` prints the last six seconds the microphone heard
 # as hex (src/ear.rs), to check the recorded sound on a laptop. Never in a
@@ -133,7 +145,8 @@ embedded-graphics = "0.8"
 # same FAT driver the S3 hub uses. MIT/Apache.
 sdnative = { path = "../../crates/sdnative" }
 embedded-sdmmc = { version = "0.10", default-features = false }
-esp-backtrace          = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-backtrace", features = ["esp32p4", "panic-handler", "println"] }
+# custom-halt: reboot after a panic (`custom_halt` in main.rs, `fault.rs`).
+esp-backtrace          = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-backtrace", features = ["esp32p4", "panic-handler", "println", "custom-halt"] }
 esp-bootloader-esp-idf = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-bootloader-esp-idf", features = ["esp32p4"] }
 esp-hal                = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-hal", features = ["esp32p4", "unstable", "log-04"] }
 esp-println            = { path = "../patches/esp-hal-p4-pre-v3/upstream/esp-println", features = ["esp32p4", "log-04"] }

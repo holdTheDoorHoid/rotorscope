@@ -5,7 +5,8 @@
 //! event that could matter later (boot, clock and GPS changes, SD card,
 //! nodes, settings, operator notes). Records are **hash-chained**: each
 //! carries the SHA-256 of the one before it, so changing, removing or
-//! reordering any record breaks every later link. About once a minute the
+//! reordering any record breaks every later link (removing records from the
+//! end leaves no later link to break: completeness is not proven). About once a minute the
 //! hub adds a **checkpoint**: the chain head, the record count and the time,
 //! signed with ECDSA P-256. A checkpoint vouches for every record before it.
 //!
@@ -20,9 +21,15 @@
 //! - [`summary`] (feature `decode`): the decode summary of a stored frame.
 //! - [`verify`] (feature `verify`, host): check a whole log.
 //! - [`b64`]: base64 for the console stream and bundles.
+//! - [`files`]: evidence file names on the card and the next one to create.
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 pub mod b64;
+/// The hub build script's `ROTORSCOPE_DEV_KEY` check (included by path from
+/// `firmware/hub-p4/build.rs`; compiled here only for its tests).
+#[cfg(test)]
+mod devkey;
+pub mod files;
 pub mod format;
 pub mod sign;
 #[cfg(feature = "decode")]

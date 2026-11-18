@@ -27,6 +27,10 @@
 #                      (e.g. tools/droneid-hil). Combine with an <elf> to flash first.
 #   --dry-run          print what would happen; touch no hardware, take no lock
 #
+# Bench builds (docs/BENCH.md "Bench builds"): an ELF built with a bench-only
+# feature or switch carries "bench-build:<list>"; flashing one needs
+# ROTORSCOPE_BENCH=1 (as building it did), and it is announced either way.
+#
 # ESP-NOW link key: before flashing, every ELF that carries a link-key tag
 # (gateway, ESP-NOW nodes) is checked against the kit key (tools/link.key, or
 # $ROTORSCOPE_LINK_KEY_FILE): a WARNING if it was built without a key or with
@@ -89,6 +93,22 @@ check_link_keys() {  # check_link_keys <elf>...: report each image's key, warn o
     fi
     if [[ $kit != "?" && $k != "$kit" ]]; then
       echo "dev-board: WARNING: $(basename "$f") has link key '$k' but the kit key is '$kit' ($keyfile): it will not talk to the rest of the kit; rebuild it" >&2
+    fi
+  done
+}
+
+# The bench list an ELF was built with, empty for a normal build.
+elf_bench() { grep -aoE 'bench-build:[A-Za-z0-9_,:-]+' "$1" 2>/dev/null | grep -v '^bench-build:none$' | head -1 | cut -d: -f2- || true; }
+check_bench() {  # check_bench <dry> <elf>...: announce bench images; refuse them without ROTORSCOPE_BENCH=1
+  local dry=$1 f b; shift
+  for f in "$@"; do
+    [[ -f $f ]] || continue
+    b=$(elf_bench "$f"); [[ -n $b ]] || continue
+    if [[ ${ROTORSCOPE_BENCH:-} != 1 ]]; then
+      echo "dev-board: $(basename "$f") is a BENCH build ($b); refusing to flash it without ROTORSCOPE_BENCH=1" >&2
+      (( dry )) || exit 1
+    else
+      echo "dev-board: WARNING: $(basename "$f") is a BENCH build ($b): never leave it on a fielded unit" >&2
     fi
   done
 }
@@ -214,6 +234,7 @@ chip=$(chip_of "$board")
 link_elfs=(); [[ -n $elf ]] && link_elfs+=("$elf")
 for a in "${apps[@]}"; do link_elfs+=("${a#*=}"); done
 (( ${#link_elfs[@]} )) && check_link_keys "${link_elfs[@]}"
+(( ${#link_elfs[@]} )) && check_bench "$dry" "${link_elfs[@]}"
 
 if (( dry )); then
   echo "[dry-run] board=$board chip=$chip port=$port"

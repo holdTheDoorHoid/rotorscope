@@ -11,20 +11,34 @@
 //!
 //! options:
 //!   --list               print every record, one line each
-//!   --key <hex>          only accept checkpoints signed by this public key
-//!                        (65-byte uncompressed SEC1, 130 hex digits)
-//!   --allow-gaps         missing sequence numbers are gaps, not failures
-//!                        (for records collected from several places)
-//!   --quiet              verdict line only
+//!   --key <hex>          the unit's public key, confirmed OUTSIDE the log
+//!                        (65-byte uncompressed SEC1, 130 hex digits);
+//!                        checkpoints signed by any other key fail
+//!   --keys <file>        trusted keys, one per line: 130 hex digits, then a
+//!                        label (free text); `#` starts a comment
+//!   --allow-gaps         missing sequence numbers or files are gaps, not
+//!                        failures (for records collected from several
+//!                        places); a gap may hide removed records
+//!   --allow-test-key     accept the published test key (this project's
+//!                        own tests only: anyone can sign with it)
+//!   --quiet              verdict lines only
 //!
 //! exit codes:
-//!   0  verified: every link and signature checks out and a signature
-//!      covers every record
-//!   1  FAILED: the log is not what the unit wrote (details name the file,
-//!      byte offset, chain and record number)
+//!   0  VERIFIED: every link and signature checks out against a key given
+//!      with --key/--keys, and a signature covers every record checked
+//!   1  FAILED: the log is not what its signer wrote, or it is signed with
+//!      the published test key, or by a key not supplied (details name the
+//!      file, byte offset, chain and record number)
 //!   2  could not run (bad arguments, unreadable input)
-//!   3  nothing contradicts the log, but some records are not covered by a
-//!      signature or some are missing (gaps listed)
+//!   3  SIGNER CHECKED, WITH GAPS: nothing contradicts the log and the
+//!      signer is a supplied key, but some records are not covered by a
+//!      signature or (with --allow-gaps) are missing
+//!   4  SELF-CONSISTENT, SIGNER NOT CHECKED: no key was supplied, so the
+//!      log was checked only against the key it names itself; anyone could
+//!      have made it
+//!
+//! No verdict proves the log is complete: records after the last one, newer
+//! files, a reformatted card or a boot never uploaded leave no trace.
 //! ```
 //!
 //! What it checks and what it cannot: docs/EVIDENCE.md. The record layout,
@@ -37,9 +51,42 @@ use evidence::format;
 use evidence::verify::{self, hex, Input, Level, Options, Report};
 
 fn usage() -> ExitCode {
-    eprintln!("usage: evidence-verify [--list] [--key HEX] [--allow-gaps] [--quiet] <EVIDENCE-dir | EVnnnnnn.EVL... | records.bin | bundle.json>");
-    eprintln!("exit: 0 verified, 1 failed, 2 could not run, 3 gaps or unsigned records");
+    eprintln!("usage: evidence-verify [--list] [--key HEX | --keys FILE] [--allow-gaps] [--allow-test-key] [--quiet] <EVIDENCE-dir | EVnnnnnn.EVL... | records.bin | bundle.json>");
+    eprintln!("  --key HEX    the unit's public key (130 hex digits), confirmed outside the log:");
+    eprintln!("               from the unit's screen or console at setup, or your own key record");
+    eprintln!("  --keys FILE  trusted keys, one per line: HEX then a label; # comments");
+    eprintln!("  Without --key or --keys the log is checked only against the key it names itself,");
+    eprintln!("  which anyone could have generated: the result is never VERIFIED.");
+    eprintln!("exit: 0 verified, 1 failed, 2 could not run, 3 signer checked but gaps or unsigned records,");
+    eprintln!("      4 self-consistent but signer not checked (no key supplied)");
     ExitCode::from(2)
+}
+
+fn parse_key(h: &str) -> Option<[u8; 65]> {
+    verify::unhex(h).and_then(|v| <[u8; 65]>::try_from(v).ok())
+}
+
+/// A trusted-keys file: `HEX label...` per line, `#` comments, blank lines.
+fn load_keys(path: &Path) -> Result<Vec<([u8; 65], String)>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (h, label) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let Some(k) = parse_key(h) else {
+            return Err(format!("{} line {}: not a 130-hex-digit public key", path.display(), i + 1));
+        };
+        let label = label.trim();
+        let label = if label.is_empty() { format!("{} line {}", path.display(), i + 1) } else { label.to_string() };
+        out.push((k, label));
+    }
+    if out.is_empty() {
+        return Err(format!("{}: no keys", path.display()));
+    }
+    Ok(out)
 }
 
 fn main() -> ExitCode {
@@ -53,12 +100,30 @@ fn main() -> ExitCode {
             "--list" => list = true,
             "--quiet" => quiet = true,
             "--allow-gaps" => opts.gaps_allowed = true,
+            "--allow-test-key" => opts.allow_test_key = true,
             "--key" => {
-                let Some(k) = args.next().and_then(|h| verify::unhex(&h)).and_then(|v| <[u8; 65]>::try_from(v).ok()) else {
+                let Some(k) = args.next().and_then(|h| parse_key(&h)) else {
                     eprintln!("--key needs 130 hex digits");
                     return usage();
                 };
-                opts.expect_key = Some(k);
+                if opts.expect_key.is_none() {
+                    opts.expect_key = Some(k);
+                } else {
+                    opts.trusted_keys.push((k, "the key given with --key".into()));
+                }
+            }
+            "--keys" => {
+                let Some(f) = args.next() else {
+                    eprintln!("--keys needs a file");
+                    return usage();
+                };
+                match load_keys(Path::new(&f)) {
+                    Ok(k) => opts.trusted_keys.extend(k),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return ExitCode::from(2);
+                    }
+                }
             }
             "-h" | "--help" => {
                 usage();
@@ -85,7 +150,7 @@ fn main() -> ExitCode {
             println!("bundle {}  SHA-256 {sha}", paths[0].display());
             println!("  (compare with the export entry in the server's audit log and the custody record)");
         }
-        verify::verify_bundle(&bytes)
+        verify::verify_bundle(&bytes, &opts)
     } else {
         let inputs = match load(&paths) {
             Ok(i) => i,
@@ -105,14 +170,8 @@ fn main() -> ExitCode {
         print_report(&report, list);
     }
     let code = report.exit_code();
-    println!(
-        "{}",
-        match code {
-            0 => "VERIFIED: every record links, every signature checks, a signature covers every record.",
-            1 => "FAILED: the log is not what the unit wrote. See the FAIL lines above.",
-            _ => "VERIFIED WITH GAPS: nothing contradicts the log, but not every record is covered (see GAP lines).",
-        }
-    );
+    println!("{}", report.verdict());
+    println!("{}", verify::NOT_PROVEN);
     ExitCode::from(code as u8)
 }
 
@@ -173,11 +232,15 @@ fn print_report(r: &Report, list: bool) {
         if let Some(k) = c.key {
             let class = c.key_class.and_then(evidence::KeyClass::from_u8);
             println!(
-                "  key {} ({})",
+                "  key {} (log claims: {})",
                 std::str::from_utf8(&evidence::fingerprint(&k)).unwrap_or("?"),
                 class.map_or("unknown class", |c| c.note())
             );
             println!("  public key {}", hex(&k));
+        }
+        match &c.trusted_as {
+            Some(label) => println!("  signer: checked against {label}"),
+            None => println!("  signer: NOT CHECKED (no matching key supplied from outside the log)"),
         }
         if let Some(f) = c.fw_hash {
             println!("  firmware SHA-256 {}{}", hex(&f), if f == [0; 32] { " (not filled in: flashed without espflash)" } else { "" });

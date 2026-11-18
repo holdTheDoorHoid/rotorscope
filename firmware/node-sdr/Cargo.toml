@@ -38,7 +38,17 @@ espnow = ["esp-radio/esp-now", "dep:airlink"]
 # hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). Nothing is transmitted on the air and the capture never pauses
 # to send. Build with `cargo fw-bus` from c5/. Not with `espnow`.
-wirebus = ["dep:node-common", "node-common/wirebus"]
+wirebus = ["node-common/wirebus"]
+# Bench only (docs/BENCH.md "Crash recovery"): console commands `fault panic`
+# and `fault hang` to prove the reboot after a panic and the hang watchdog.
+# Never in a normal build.
+faulttest = []
+# Bench only (BRINGUP.md, docs/BENCH.md "Bench builds"): the bring-up and
+# test console commands (retune, gain, mode, snap / grab / dump, reveal,
+# role / hop / assign, `@F` + `hil run` for tools/droneid-hil, bootloader).
+# Without it the console only reports (help, stats, phy, plan, jam, uplink,
+# fpv verbose). build.rs stops the build unless ROTORSCOPE_BENCH=1.
+bringup = []
 
 [dependencies]
 rawcap  = { path = "../../crates/rawcap", default-features = false }
@@ -48,15 +58,18 @@ djilink = { path = "../../crates/djilink" }
 jamwatch = { path = "../../crates/jamwatch" }
 link    = { path = "../../crates/link" }
 airlink = { path = "../../crates/airlink", optional = true }
-# The wired-bus node glue (feature `wirebus`), shared with node-wifi and node-ble.
-node-common = { path = "../node-common", optional = true, features = ["esp32c5"] }
+# Crash recovery (`node_common::fault`: watchdog, reboot after a panic, reset
+# reason), and the wired-bus node glue (feature `wirebus`), shared with
+# node-wifi and node-ble.
+node-common = { path = "../node-common", features = ["esp32c5"] }
 heapless = "0.8"
 
 esp-hal                = { version = "~1.2.2", features = ["esp32c5", "unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["esp32c5", "embassy", "esp-alloc", "esp-radio"] }
 esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c5"] }
 esp-alloc              = { version = "0.11.0", features = ["esp32c5"] }
-esp-backtrace          = { version = "0.20.0", features = ["esp32c5", "panic-handler", "println"] }
+# custom-halt: reboot after a panic (`custom_halt` in main.rs).
+esp-backtrace          = { version = "0.20.0", features = ["esp32c5", "panic-handler", "println", "custom-halt"] }
 # USB-Serial-JTAG only, like node-wifi.
 esp-println = { version = "0.18.0", default-features = false, features = ["esp32c5", "jtag-serial", "critical-section", "log-04"] }
 # Same pin as node-wifi: beta.2 is yanked. Used only to start the Wi-Fi

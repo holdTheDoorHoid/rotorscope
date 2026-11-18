@@ -51,6 +51,10 @@ espnow = ["esp-radio/wifi", "esp-radio/esp-now", "esp-radio/coex", "dep:airlink"
 # hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). The scan never pauses (no Wi-Fi at all). C5 only; not with `espnow`.
 wirebus = ["node-common/wirebus"]
+# Bench only (docs/BENCH.md "Crash recovery"): type `fault panic` / `fault hang`
+# on USB to prove the reboot after a panic and the hang watchdog. Never in a
+# normal build (and in no `default` list).
+faulttest = ["node-common/faulttest"]
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }

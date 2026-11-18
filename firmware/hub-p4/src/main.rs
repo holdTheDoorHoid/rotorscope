@@ -39,6 +39,7 @@ mod downlink;
 mod ear;
 mod evlog;
 mod faa;
+mod fault;
 mod gps;
 #[cfg(feature = "gpsloop")]
 mod gpsloop;
@@ -65,6 +66,13 @@ use esp_hal::{
     time::{Duration, Instant},
 };
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Unattended hub: after a panic (backtrace already printed on the USB-C
+/// console), reboot rather than sit halted on a stale screen (`fault.rs`).
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    fault::reboot_after_panic()
+}
 
 /// STC8 helper MCU on the board I2C (SDA GPIO45, SCL GPIO46): register 0x20
 /// takes the backlight brightness, 0..=100.
@@ -194,7 +202,19 @@ fn main() -> ! {
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
     // Console first: from here on log lines never block the loop.
     console::init(p.UART0, p.GPIO37, p.GPIO38);
-    println!("hub-p4: hello, chip revision {:?}", esp_hal::efuse::chip_revision());
+    println!(
+        "hub-p4: hello, chip revision {:?}, last reset: {} (cause {:#04x}), evidence key: {} ({}), bench: [{}]{}",
+        esp_hal::efuse::chip_revision(),
+        fault::reset_reason(),
+        fault::reset_code(),
+        evlog::built_key_class().name(),
+        evlog::built_key_class().note(),
+        evlog::BENCH,
+        if cfg!(feature = "faulttest") { ", FAULT TEST BUILD: console 'fault panic' / 'fault hang'" } else { "" }
+    );
+    if !evlog::BENCH.is_empty() {
+        println!("hub-p4: BENCH BUILD ({}): fakes data or opens debug doors; never leave it on a fielded hub", evlog::BENCH);
+    }
     // SAFETY: read-only CACHE register (IDF 5.4.2 cache_reg.h, rev<3 map):
     // L2_CACHE_CACHESIZE_CONF, bit 10 = 256 KB.
     let l2 = unsafe { (0x3FF1_0278 as *const u32).read_volatile() };
@@ -343,7 +363,7 @@ fn main() -> ! {
         );
     }
     ev.ctx.uptime_ms = app::now_ms();
-    ev.boot((chip.major, chip.minor));
+    ev.boot((chip.major, chip.minor), fault::reset_reason());
     let mut note: Option<heapless::String<120>> = None;
     // Console `L`: one site-file line being typed (node position / mute).
     let mut site_line: Option<heapless::String<120>> = None;
@@ -385,7 +405,14 @@ fn main() -> ! {
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
     let mut prev = Instant::now();
+    // Hang watchdog (fault.rs): armed here, after the slow parts of boot,
+    // and fed once per loop below.
+    match fault::arm() {
+        Ok(s) => println!("hub-p4: watchdog on: resets the chip if the main loop stops for {s:.1} s"),
+        Err((why, v)) => println!("hub-p4: watchdog LEFT OFF: {why} ({v:.2})"),
+    }
     loop {
+        fault::feed();
         let now = Instant::now();
         max_gap_us = max_gap_us.max((now - prev).as_micros());
         loops += 1;
@@ -477,6 +504,7 @@ fn main() -> ! {
                 sd: sdlog.ui_state(),
                 adsb: Some((adsbee.status(ms), adsbee.stats.map_or(0, |s| s.uptime_s))),
                 flags: Some(faa.view(app.tracker)),
+                caveats: caveats(&ev, &gw, &sdlog),
             };
             app.draw(panel, &mut gw, &ext, ms, |gw| {
                 gw.poll(app::now_ms());
@@ -584,8 +612,8 @@ fn main() -> ! {
                 r
             });
             println!(
-                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} nodes={} out_full={} tx={} tx_full={} cmds={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
-                s.bytes, s.frames, s.corrupt, s.uart_err, s.ring_full, s.direct, gw.nodes.len(), gw.out_full,
+                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} refused={} nodes={} evicted={} table_full={} out_full={} tx={} tx_full={} cmds={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
+                s.bytes, s.frames, s.corrupt, s.uart_err, s.ring_full, s.direct, s.refused, gw.nodes.len(), s.evicted, s.table_full, gw.out_full,
                 gw.tx_bytes, gw.tx_full, down.commands,
                 app.tracker.tracks().len(), vs, err, app.frames_drawn, app.max_band_us, loops, max_gap_us
             );
@@ -593,8 +621,8 @@ fn main() -> ! {
                 print_gps_adsb(&app, &gps, &adsbee, ms);
                 if let Some(f) = gw.feed.as_ref() {
                     println!(
-                        "hub-p4: webhead tx={} frames={} dropped={} queued={} csbee_err={} encode_err={}",
-                        f.tx_bytes, f.fwd.frames, f.fwd.dropped, f.fwd.len(), f.csbee_err, f.fwd.encode_err
+                        "hub-p4: webhead tx={} frames={} dropped={} refused={} queued={} csbee_err={} encode_err={}",
+                        f.tx_bytes, f.fwd.frames, f.fwd.dropped, f.fwd.refused, f.fwd.len(), f.csbee_err, f.fwd.encode_err
                     );
                 }
             }
@@ -607,6 +635,21 @@ fn main() -> ! {
             loops = 0;
             max_gap_us = 0;
         }
+    }
+}
+
+/// What must stay on screen (`screen::Caveats`): the evidence key class,
+/// a bench build, an open gateway link, evidence not reaching the card.
+fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -> screen::Caveats {
+    screen::Caveats {
+        key: match ev.key_class() {
+            evidence::KeyClass::PublicTest => screen::EvidenceKey::Test,
+            evidence::KeyClass::DevelopmentSoftware => screen::EvidenceKey::Development,
+            evidence::KeyClass::HardwareEfuse => screen::EvidenceKey::NotShown,
+        },
+        bench: !evlog::BENCH.is_empty(),
+        link_open: gw.stats.gw_open(),
+        evidence: sd.evidence_stop(ev),
     }
 }
 
@@ -653,6 +696,51 @@ struct Lines<'a> {
     site: &'a mut Option<heapless::String<120>>,
 }
 
+/// `faulttest` builds: the console line being typed after `f`.
+#[cfg(feature = "faulttest")]
+static mut FAULT_LINE: Option<heapless::String<16>> = None;
+
+/// `faulttest`: one console byte while a `fault ...` line is being typed;
+/// true if it was taken. On Enter, `fault panic` panics and `fault hang`
+/// spins in the main loop until the watchdog resets the chip.
+#[cfg(feature = "faulttest")]
+fn fault_line(c: u8) -> bool {
+    // SAFETY: only the main loop touches it (single-threaded, no interrupt uses it).
+    let line = unsafe { &mut *(&raw mut FAULT_LINE) };
+    let Some(l) = line.as_mut() else {
+        if c != b'f' {
+            return false;
+        }
+        let mut l = heapless::String::new();
+        let _ = l.push('f');
+        *line = Some(l);
+        return true;
+    };
+    match c {
+        b'\r' | b'\n' => {
+            match line.take().as_deref() {
+                Some("fault panic") => panic!("faulttest: panic requested on the console"),
+                Some("fault hang") => {
+                    esp_println::println!("hub-p4: faulttest hang: spinning; the watchdog should reset the chip within {} s", fault::WATCHDOG.as_secs());
+                    #[allow(clippy::empty_loop)]
+                    loop {
+                        core::hint::spin_loop();
+                    }
+                }
+                _ => println!("hub-p4: cmd faulttest: type 'fault panic' or 'fault hang', then Enter"),
+            }
+        }
+        0x1b => *line = None,
+        c if c.is_ascii() && !c.is_ascii_control() => {
+            if l.push(c as char).is_err() {
+                *line = None;
+            }
+        }
+        _ => {}
+    }
+    true
+}
+
 /// The control-link opt-ins from the site settings to the coverage
 /// coordinator (which puts them in the LR2021 nodes' plans and, protocol
 /// 13, the Wi-Fi nodes' plans: content decoding also turns on their scan
@@ -688,6 +776,10 @@ fn command(
     now: u64,
 ) -> Option<heapless::String<120>> {
     let c = console::read_command()?;
+    #[cfg(feature = "faulttest")]
+    if lines.site.is_none() && lines.note.is_none() && fault_line(c) {
+        return None;
+    }
     if let Some(n) = lines.site.as_mut() {
         match c {
             b'\r' | b'\n' => return lines.site.take(),
@@ -753,6 +845,9 @@ fn command(
             sdlog.flush_now();
             println!("hub-p4: cmd evidence shutdown checkpoint queued; the card is safe to remove after the next 'evidence ... flushes' line shows queued=0");
         }
+        // Bench only (`testpoint`): a fixed position would put every
+        // distance and flag in the wrong place in the field.
+        #[cfg(feature = "testpoint")]
         b'p' => {
             // The S3 hub's test point (300 m south of its demo circle).
             app.manual = Some(app::OwnPos {
@@ -790,7 +885,9 @@ fn command(
             *lines.site = Some(heapless::String::new());
             println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
         }
-        b'h' | b'?' => println!("hub-p4: cmd help: p=set test own position, c=clear it, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'."),
+        #[cfg(not(feature = "testpoint"))]
+        b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), L=site line (node position / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }
