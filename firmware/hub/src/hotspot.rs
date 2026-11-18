@@ -177,9 +177,9 @@ pub async fn net_runner(mut runner: Runner<'static, Interface>) -> ! {
     runner.run().await
 }
 
-/// DHCP: hands out 192.168.4.50-200 with the hub as router and DNS, and the
-/// RFC 8910 captive-portal URL (Android 11+ and iOS 14+ read it and open the
-/// page without probing).
+/// DHCP: hands out 192.168.4.50-57 (`webui::dhcp`) with the hub as router
+/// and DNS, and the RFC 8910 captive-portal URL (Android 11+ and iOS 14+
+/// read it and open the page without probing).
 #[embassy_executor::task]
 pub async fn dhcp(stack: Stack<'static>) {
     static BUFFERS: StaticCell<UdpBuffers<1, 600, 600, 2>> = StaticCell::new();
@@ -192,9 +192,13 @@ pub async fn dhcp(stack: Stack<'static>) {
     options.dns = &dns;
     options.captive_url = Some("http://192.168.4.1/");
     // Short leases: phones come and go, and a reboot of the hub loses the table.
-    options.lease_duration_secs = 3600;
-    // 8 leases: MAX_CLIENTS plus phones that left without releasing.
-    let mut server = DhcpServer::<_, 8>::new_with_et(IP);
+    options.lease_duration_secs = webui::dhcp::LEASE_SECS;
+    // A range exactly as large as the lease table: only then does edge-dhcp
+    // reuse an expired lease once the table is full (see webui::dhcp, which
+    // drives this same server type past the table size in its tests).
+    let mut server = DhcpServer::<_, { webui::dhcp::LEASES }>::new_with_et(IP);
+    server.range_start = Ipv4Addr::new(192, 168, 4, webui::dhcp::FIRST);
+    server.range_end = Ipv4Addr::new(192, 168, 4, webui::dhcp::LAST);
     loop {
         let mut socket = match udp
             .bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DEFAULT_SERVER_PORT)))
