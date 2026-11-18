@@ -28,6 +28,9 @@ channel reads as ~12/s; the thresholds leave room for that.
 | `EvilTwin` | An **open** network using the name of a protected network heard recently | protected seen 5+ times in the last 60 s, open copy 2+ times | `(original security << 8) \| 0` (`wifiwatch::mac::Security`) |
 | `ChannelSwitch` | CSA (element 37) / extended CSA (60) in beacons, probe responses or action frames | contradicts the same BSSID's plain beacons on that channel (2 + 2 within 3 s); names no valid channel; still going after 10 s and 20 frames; switch count not falling 10 times; or 10 CSA action frames in 1 s | announced channel |
 | `AttackTool` | A tool's own signature (table below) | one frame | index into `wifiwatch::TOOLS` |
+| `DroneDeauth` | Deauth / disassoc at a drone's own network (`crates/wifidrone`), retries not counted | 3 in 5 s | reason code + flags + maker; see docs/DRONE-ATTACKS.md |
+| `DroneTakeover` | A new station joining a drone's network just after its pilot was kicked off, or while the pilot still flies it | 2 frames from the newcomer | what was seen + why + maker; see docs/DRONE-ATTACKS.md |
+| `DroneNetClone` | A drone's network name from a second address (or its own address on a second channel), or a drone name from an address the maker does not own | 2 frames (3 without an original) | flags + maker; see docs/DRONE-ATTACKS.md |
 | `BleSpam` | Pairing pop-up adverts (Apple Continuity 0x07/0x0F, Samsung 0x0075, Microsoft Swift Pair, Google Fast Pair 0xFE2C) from addresses not heard in the last 5-10 s | 20 new addresses of one family in 5 s (keeps reporting down to 10) | new addresses in the window; `ssid` = family (`apple`, `samsung`, `microsoft`, `google`) |
 
 Other fields: `source` is the claimed transmitter (all zero when many),
@@ -44,11 +47,18 @@ Indices travel on the wire: append only.
 | 1 | Wi-Fi Pineapple | Setup network `Pineapple_XXXX` (4 hex digits); transmitter OUI `00:13:37` (or `02:13:37`) | Hak5 Mark VII docs; Lab401 PineScan write-up |
 | 2 | ESP8266 Deauther | Control network `pwned` | SpacehuhnTech esp8266_deauther wiki, Setup |
 | 3 | Ghost ESP | Web-UI network `GhostNet` | Ghost ESP zine (Iffy Books); release notes v1.4.9 |
+| 4 | RemoteIDSpoofer | Setup network `ESP_RIDS` | jjshoots/RemoteIDSpoofer `frontend.cpp` line 8 (docs/DRONE-ATTACKS.md) |
+| 5 | DroneSploit | A drone renamed to `TELLO-abcdef` / `C-me-abcdef` (module defaults) | dhondta/dronesploit `tello.py` line 28, `cme.py` line 47 (docs/DRONE-ATTACKS.md) |
+| 6 | Wifiphisher | Rogue AP address `00:00:00:xx:xx:xx` (`DEFAULT_OUI`) | wifiphisher `constants.py` line 50, `interfaces.py` lines 932-943 (docs/DRONE-ATTACKS.md) |
 
 ESP32 Marauder (and the Flipper Zero Wi-Fi dev board, which usually runs it)
 has no fixed beacon of its own; its beacon spam, "Rick Roll" list, deauth and
 probe floods are caught by behaviour. The lyric list is deliberately not
 stored.
+
+Drone hijack tools (SkyJack, DroneJack, Drone-Hacking-Tool, DroneSploit's
+attack modules) have no fixed signature of their own; the drone kinds above
+catch what they do. See docs/DRONE-ATTACKS.md, "Wi-Fi drone hijacking".
 
 ## Node integration
 
@@ -59,7 +69,11 @@ queues them**: only beacons, probe responses and action frames (what Remote ID
 and the other detectors need) take one of the 32 slots. A deauth flood of
 thousands of frames a second costs one short callback each and cannot starve
 Remote ID. The `threats` task closes the flood windows four times a second;
-the drain task runs `wifiwatch::beacons::Beacons` on queued frames. Stats line:
+the drain task runs `wifiwatch::beacons::Beacons` on queued frames. Once
+`Beacons` has recognised a drone's network, the callback also hands
+deauth / disassoc, authentication, (re)association requests and responses
+and data-frame addresses to `wifiwatch::drones::DroneLinks` (`rx::DRONES`;
+association responses are no longer queued). Stats line:
 `kill` (deauth+disassoc), `auth`, `probe`, `csa`, `threat` totals, `scout`
 `[visits, last channel]`.
 

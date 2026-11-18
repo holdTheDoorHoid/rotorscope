@@ -201,7 +201,7 @@ impl App {
         while let Some(id) = self.tracker.take_new_threat(now) {
             let Some(t) = self.tracker.get_threat(id) else { continue };
             let mac = t.node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
-            let mut text: heapless::String<160> = heapless::String::new();
+            let mut text: heapless::String<192> = heapless::String::new();
             let _ = write!(text, "{} (node {}", t.label(), t.node);
             if t.channel != 0 {
                 let _ = write!(text, ", ch {}", t.channel);
@@ -227,6 +227,9 @@ impl App {
             };
             if !t.ssid.is_empty() {
                 let _ = write!(text, " \"{}\"", t.ssid);
+            }
+            if let Some(maker) = tracker::threats::drone_maker(t) {
+                let _ = write!(text, " ({maker})");
             }
             let mut data = [0u8; 7];
             data[0] = t.kind as u8;

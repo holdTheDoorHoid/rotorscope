@@ -4,7 +4,9 @@
 
 /// Management subtypes (frame control bits 4-7, type 0).
 pub const ASSOC_REQ: u8 = 0;
+pub const ASSOC_RESP: u8 = 1;
 pub const REASSOC_REQ: u8 = 2;
+pub const REASSOC_RESP: u8 = 3;
 pub const PROBE_REQ: u8 = 4;
 pub const PROBE_RESP: u8 = 5;
 pub const BEACON: u8 = 8;
@@ -15,6 +17,8 @@ pub const ACTION: u8 = 13;
 
 /// Element IDs used here.
 pub const EID_SSID: u8 = 0;
+pub const EID_DS: u8 = 3;
+pub const EID_HT_OP: u8 = 61;
 pub const EID_CSA: u8 = 37;
 pub const EID_RSN: u8 = 48;
 pub const EID_ECSA: u8 = 60;
@@ -25,6 +29,15 @@ pub const EID_VENDOR: u8 = 221;
 /// A node can count these in its receive callback and never queue them.
 pub const fn header_only(subtype: u8) -> bool {
     matches!(subtype, ASSOC_REQ | REASSOC_REQ | PROBE_REQ | DISASSOC | AUTH | DEAUTH)
+}
+
+/// Management subtypes the drone-link watch ([`crate::drones`]) reads from
+/// the header plus at most two body bytes: deauth / disassoc, authentication,
+/// (re)association requests and responses. Every one but the responses is
+/// also [`header_only`]; the responses are needed by nothing else, so a node
+/// need not queue them either.
+pub const fn drone_link(subtype: u8) -> bool {
+    matches!(subtype, ASSOC_REQ | ASSOC_RESP | REASSOC_REQ | REASSOC_RESP | DISASSOC | AUTH | DEAUTH)
 }
 
 /// A management frame's header.
@@ -124,6 +137,12 @@ pub struct BssInfo<'a> {
     pub whisper_first: Option<u8>,
     /// All elements parsed to exactly the end (a sane frame).
     pub clean: bool,
+    /// Timestamp field: the transmitter's TSF timer, microseconds since its
+    /// radio started (an access point's uptime, near enough).
+    pub tsf: u64,
+    /// The channel the network says it is on: DS Parameter Set (element 3),
+    /// else the primary channel of HT Operation (61). `None` if neither.
+    pub ds_channel: Option<u8>,
 }
 
 /// OUI and type of the Wi-Fi Alliance OWE Transition Mode element.
@@ -141,7 +160,18 @@ pub fn bss_info<'a>(h: &Header, f: &'a [u8]) -> Option<BssInfo<'a>> {
     let fixed = f.get(h.body_at..h.body_at + 12)?;
     let privacy = fixed[10] & 0x10 != 0;
     let ies = &f[h.body_at + 12..];
-    let mut info = BssInfo { ssid: &[], security: Security::Open, csa: None, whisper: 0, whisper_first: None, clean: false };
+    let tsf = u64::from_le_bytes(fixed[..8].try_into().ok()?);
+    let mut info = BssInfo {
+        ssid: &[],
+        security: Security::Open,
+        csa: None,
+        whisper: 0,
+        whisper_first: None,
+        clean: false,
+        tsf,
+        ds_channel: None,
+    };
+    let mut ht_channel: Option<u8> = None;
     let mut rsn: Option<Security> = None;
     let (mut wpa, mut owe_transition) = (false, false);
     let mut consumed = 0usize;
@@ -149,6 +179,8 @@ pub fn bss_info<'a>(h: &Header, f: &'a [u8]) -> Option<BssInfo<'a>> {
         consumed += 2 + body.len();
         match id {
             EID_SSID => info.ssid = body,
+            EID_DS if body.len() == 1 => info.ds_channel = Some(body[0]),
+            EID_HT_OP if !body.is_empty() => ht_channel = Some(body[0]),
             EID_RSN => rsn = Some(rsn_akm(body)),
             EID_CSA if body.len() >= 3 => info.csa = Some((body[1], body[2])),
             EID_ECSA if body.len() >= 4 => info.csa = Some((body[2], body[3])),
@@ -164,6 +196,7 @@ pub fn bss_info<'a>(h: &Header, f: &'a [u8]) -> Option<BssInfo<'a>> {
         }
     }
     info.clean = consumed == ies.len();
+    info.ds_channel = info.ds_channel.or(ht_channel);
     info.security = match (rsn, wpa, privacy, owe_transition) {
         (Some(s), _, _, _) => s,
         (None, true, _, _) => Security::Psk,
@@ -211,6 +244,31 @@ fn rsn_akm(rsn: &[u8]) -> Security {
         }
     }
     best.unwrap_or(Security::Other)
+}
+
+/// A unicast data frame between a station and its access point:
+/// `(bssid, station, from_station)`. `from_station` is true for "to DS"
+/// frames (station -> access point). `None` for anything else: not a data
+/// frame, ad hoc / mesh (both or neither DS bit), a group destination, or
+/// too short. Null-data frames count (a station saying it is still there).
+pub fn data_link(f: &[u8]) -> Option<([u8; 6], [u8; 6], bool)> {
+    let fc0 = *f.first()?;
+    let fc1 = *f.get(1)?;
+    // Version 0, type 2 (data).
+    if fc0 & 0x0F != 0x08 {
+        return None;
+    }
+    let a1: [u8; 6] = f.get(4..10)?.try_into().ok()?;
+    let a2: [u8; 6] = f.get(10..16)?.try_into().ok()?;
+    let (bssid, sta, up) = match fc1 & 0x03 {
+        0x01 => (a1, a2, true),
+        0x02 => (a2, a1, false),
+        _ => return None,
+    };
+    if sta[0] & 0x01 != 0 || bssid[0] & 0x01 != 0 {
+        return None;
+    }
+    Some((bssid, sta, up))
 }
 
 /// Channel switch carried by an action frame: Spectrum Management (category
@@ -284,6 +342,19 @@ pub(crate) mod build {
 
     pub fn open(bssid: [u8; 6], ssid: &[u8]) -> Vec<u8> {
         beacon(bssid, ssid, false, &[])
+    }
+
+    /// A data frame between `sta` and `bssid`: station -> AP (`to_ds`) or
+    /// AP -> station.
+    pub fn data(sta: [u8; 6], bssid: [u8; 6], to_ds: bool) -> Vec<u8> {
+        let (a1, a2, fc1) = if to_ds { (bssid, sta, 0x01) } else { (sta, bssid, 0x02) };
+        let mut f = std::vec![0x08, fc1, 0, 0];
+        f.extend_from_slice(&a1);
+        f.extend_from_slice(&a2);
+        f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]);
+        f.extend_from_slice(&[0x10, 0x00]);
+        f.extend_from_slice(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x08, 0x00]);
+        f
     }
 
     /// Deauth / disassoc with a reason code.
@@ -365,6 +436,33 @@ mod tests {
         // Some other action (block ack).
         let f = mgmt(ACTION, [0xFF; 6], AP, AP, &[3, 0, 1]);
         assert_eq!(action_csa(&header(&f).unwrap(), &f), None);
+    }
+
+    #[test]
+    fn timestamp_and_channel() {
+        let mut f = beacon(AP, b"x", false, &ie(3, &[11]));
+        f[24..32].copy_from_slice(&123_456_789u64.to_le_bytes());
+        let i = bss_info(&header(&f).unwrap(), &f).unwrap();
+        assert_eq!((i.tsf, i.ds_channel), (123_456_789, Some(11)));
+        // 5 GHz: HT Operation's primary channel.
+        let f = beacon(AP, b"x", false, &ie(61, &[149, 0, 0]));
+        assert_eq!(bss_info(&header(&f).unwrap(), &f).unwrap().ds_channel, Some(149));
+        assert_eq!(bss_info(&header(&open(AP, b"x")).unwrap(), &open(AP, b"x")).unwrap().ds_channel, None);
+    }
+
+    #[test]
+    fn data_frames() {
+        let sta = [0x00, 0xAA, 0, 0, 0, 1];
+        assert_eq!(data_link(&data(sta, AP, true)), Some((AP, sta, true)));
+        assert_eq!(data_link(&data(sta, AP, false)), Some((AP, sta, false)));
+        // Null data (subtype 4) counts; group destination does not.
+        let mut f = data(sta, AP, true);
+        f[0] = 0x48;
+        assert!(data_link(&f).is_some());
+        assert_eq!(data_link(&data([0xFF; 6], AP, false)), None);
+        assert_eq!(data_link(&kill(DEAUTH, sta, AP, AP, 7)), None);
+        assert_eq!(data_link(&[0x08, 0x01, 0, 0]), None);
+        assert!(drone_link(ASSOC_RESP) && drone_link(DEAUTH) && !drone_link(PROBE_REQ) && !drone_link(BEACON));
     }
 
     #[test]

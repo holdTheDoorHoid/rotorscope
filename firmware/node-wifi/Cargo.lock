@@ -167,6 +167,7 @@ dependencies = [
 name = "coverage"
 version = "0.1.0"
 dependencies = [
+ "ctrlwatch",
  "heapless 0.8.0",
  "link",
 ]
@@ -203,6 +204,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "ctrlwatch"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "serde",
 ]
 
 [[package]]
@@ -1435,6 +1444,7 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 name = "link"
 version = "0.1.0"
 dependencies = [
+ "ctrlwatch",
  "heapless 0.8.0",
  "openlink",
  "postcard",
@@ -1523,6 +1533,7 @@ dependencies = [
  "heapless 0.8.0",
  "link",
  "nodeimage",
+ "portable-atomic",
  "wirebus",
 ]
 
@@ -2245,6 +2256,7 @@ version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
  "link",
+ "wifidrone",
 ]
 
 [[package]]

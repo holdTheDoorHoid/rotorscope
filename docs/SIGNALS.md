@@ -132,7 +132,7 @@ channel.
 | Autel SkyLink | 2407–2472, 5154–5246, 5728–5847 (+ 900 MHz) | LTE-style OFDM family (1.4/5/10/20 MHz) | **Not built** (fingerprint). 900 MHz **Can't** |
 | Skydio 2/2+/X10 | 2.4 / 5 GHz Wi-Fi | Remote ID beacon (already decoded); Wi-Fi headers | RID **On air**-capable; narrow modes **Not built** |
 | Skydio X10D | 1625–2500 | — | mostly **Can't** |
-| Wi-Fi toy and hobby drones (Tello, Parrot, Holy Stone, ...) | 2.4 / 5 GHz Wi-Fi | Maker by network name and address prefix | **Built, hub side** (2026-11-14): maker table `crates/wifidrone` (13 makers; prefixes checked against the IEEE registry), `Frame::WifiDrone` table and outputs. **Node not yet** (it must call `wifidrone::classify`) |
+| Wi-Fi toy and hobby drones (Tello, Parrot, Holy Stone, ...) | 2.4 / 5 GHz Wi-Fi | Maker by network name and address prefix | **Built** (2026-11-14): maker table `crates/wifidrone` (13 makers; prefixes checked against the IEEE registry), `Frame::WifiDrone` table and outputs; node-wifi calls `wifidrone::classify` (`detect.rs`). Hijacking of these networks: docs/DRONE-ATTACKS.md |
 
 ## 6. Control links (the pilot's stick signals)
 

@@ -17,11 +17,19 @@
 //! probe requests never take a slot either: `wifiwatch::floods` counts them
 //! from their headers right here ([`FLOODS`]) and the `threats` task reports
 //! floods. Only beacons, probe responses and action frames (what Remote ID
-//! and the other detectors read) are queued, so a deauth flood of thousands
+//! and the other detectors need) are queued, so a deauth flood of thousands
 //! of frames a second cannot crowd Remote ID out.
+//!
+//! Drone hijacking (`wifiwatch::drones`, docs/DRONE-ATTACKS.md) works the
+//! same way once the drain task has recognised a drone's network: the
+//! callback hands deauth / disassoc, authentication, (re)association
+//! requests and responses, and the addresses of data frames, to
+//! [`DRONES`]. While no drone is known ([`DRONES_ON`] false) that costs one
+//! atomic load. Association responses are needed by nothing else, so they
+//! are not queued either.
 
 use core::cell::{RefCell, UnsafeCell};
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering::Relaxed};
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -90,6 +98,14 @@ pub static SIGHTINGS: critical_section::Mutex<RefCell<openlink::Sightings<OPEN_S
 /// probe requests), counted by the callback, judged by the `threats` task.
 pub static FLOODS: critical_section::Mutex<RefCell<wifiwatch::floods::Floods>> =
     critical_section::Mutex::new(RefCell::new(wifiwatch::floods::Floods::new()));
+/// Who is joined to the drone networks the node knows, and who is kicking
+/// them off: fed by the callback, learned from beacons by the drain task,
+/// judged by the `threats` task.
+pub static DRONES: critical_section::Mutex<RefCell<wifiwatch::drones::DroneLinks>> =
+    critical_section::Mutex::new(RefCell::new(wifiwatch::drones::DroneLinks::new()));
+/// [`DRONES`] has at least one drone network: only then does the callback
+/// take the lock for it.
+pub static DRONES_ON: AtomicBool = AtomicBool::new(false);
 /// Management frames lost because every slot was in use.
 pub static DROPPED: AtomicU32 = AtomicU32::new(0);
 /// Callbacks for anything else: control (or other) frames past the filter,
@@ -130,12 +146,21 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
         c => c.min(255) as u8,
     };
 
-    // Header-only subtypes: count them here, never queue them.
-    if wifiwatch::mac::header_only(data[0] >> 4) {
+    // Header-only subtypes (and association responses): count them here,
+    // never queue them.
+    let subtype = data[0] >> 4;
+    let drone_link = wifiwatch::mac::drone_link(subtype);
+    if wifiwatch::mac::header_only(subtype) || drone_link {
         let mpdu = &data[..data.len().saturating_sub(crate::chip::FCS_LEN)];
         let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
         let now = embassy_time::Instant::now().as_micros();
-        critical_section::with(|cs| FLOODS.borrow_ref_mut(cs).frame(mpdu, rssi, channel, now));
+        let drones = drone_link && DRONES_ON.load(Relaxed);
+        critical_section::with(|cs| {
+            FLOODS.borrow_ref_mut(cs).frame(mpdu, rssi, channel, now);
+            if drones {
+                DRONES.borrow_ref_mut(cs).frame(mpdu, rssi, channel, now);
+            }
+        });
         if let Some(c) = crate::PER_CHANNEL.get(usize::from(channel)) {
             c.fetch_add(1, Relaxed);
         }
@@ -165,16 +190,20 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
 /// A data frame: classify it in place and count a hit. No slot, no queue.
 fn on_data(pkt: &PromiscuousPkt<'_>) {
     DATA_SEEN.fetch_add(1, Relaxed);
-    // `data` ends with the FCS slot, which `classify` expects. Its first test
-    // is the frame-control byte, so ordinary (QoS) data costs one compare.
-    let Some(link) = openlink::classify(pkt.data) else { return };
-    OPEN_SEEN.fetch_add(1, Relaxed);
     let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
     let channel = match pkt.rx_cntl.channel {
         0 => TUNED_CHANNEL.load(Relaxed),
         c => c.min(255) as u8,
     };
     let now = embassy_time::Instant::now().as_micros();
+    // Who is talking to a known drone (addresses only; FCS harmless).
+    if DRONES_ON.load(Relaxed) {
+        critical_section::with(|cs| DRONES.borrow_ref_mut(cs).data(pkt.data, rssi, channel, now));
+    }
+    // `data` ends with the FCS slot, which `classify` expects. Its first test
+    // is the frame-control byte, so ordinary (QoS) data costs one compare.
+    let Some(link) = openlink::classify(pkt.data) else { return };
+    OPEN_SEEN.fetch_add(1, Relaxed);
     critical_section::with(|cs| SIGHTINGS.borrow_ref_mut(cs).record(&link, channel, rssi, now));
 }
 

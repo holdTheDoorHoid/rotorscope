@@ -16,6 +16,14 @@
 //! drowned out: the hub raises [`ThreatKind::Blinded`] for it itself, so a
 //! jammer the node cannot characterise still shows. See [`DeafWatch`].
 //!
+//! **Drone Wi-Fi hijacking** (`DroneDeauth`, `DroneTakeover`,
+//! `DroneNetClone`, docs/DRONE-ATTACKS.md): one threat per drone network
+//! (its BSSID) for the first two, whoever the attacker is, so a takeover by
+//! a second newcomer updates the same entry (`source` follows the latest);
+//! a copy of a drone's network is one per name and copy, like an evil twin.
+//! The maker travels in `detail >> 24` and is shown as `maker`
+//! ([`drone_maker`]).
+//!
 //! **Privacy.** Transmitter and target addresses (often a neighbour's access
 //! point) are shown only with [`crate::Config::show_link_ids`], as for open
 //! links. Network names are what any phone lists, and are shown. The
@@ -67,6 +75,23 @@ pub const fn threat_label(kind: ThreatKind) -> &'static str {
         ThreatKind::MavlinkAttack => "Hostile drone telemetry",
         ThreatKind::AreaGnss => "GPS interference nearby",
     }
+}
+
+/// Drone kinds carry the `wifidrone` maker index in `detail >> 24`.
+pub const DRONE_MAKER_SHIFT: u32 = 24;
+
+/// Whether `kind` is about a drone's own Wi-Fi network (maker in `detail`).
+pub const fn is_drone_wifi(kind: ThreatKind) -> bool {
+    matches!(kind, ThreatKind::DroneDeauth | ThreatKind::DroneTakeover | ThreatKind::DroneNetClone)
+}
+
+/// The drone maker a drone Wi-Fi threat is about (`wifidrone` name),
+/// `None` for other kinds or a maker this build does not know.
+pub fn drone_maker(t: &Threat) -> Option<&'static str> {
+    if !is_drone_wifi(t.kind) {
+        return None;
+    }
+    wifidrone::maker_name((t.detail >> DRONE_MAKER_SHIFT) as u8)
 }
 
 /// One threat.
@@ -277,6 +302,10 @@ impl ThreatTable {
         t.peak_level = t.peak_level.max(s.level);
         t.count = t.count.saturating_add(u64::from(s.count));
         t.detail = s.detail;
+        // Keyed by the drone, not the attacker: show the latest one.
+        if matches!(s.kind, ThreatKind::DroneDeauth | ThreatKind::DroneTakeover) && s.source != [0; 6] {
+            t.source = s.source;
+        }
         if !s.ssid.is_empty() {
             t.ssid = s.ssid.clone();
         }
@@ -547,6 +576,9 @@ struct ThreatLine<'a> {
     transmitters: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rule: Option<&'static str>,
+    /// Drone Wi-Fi kinds: the drone's maker (`wifidrone`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maker: Option<&'static str>,
     n: u32,
     first_ms: u64,
     last_ms: u64,
@@ -554,7 +586,7 @@ struct ThreatLine<'a> {
 }
 
 /// A buffer this size always holds one threat line (see the test).
-pub const MAX_THREAT_LINE: usize = 512;
+pub const MAX_THREAT_LINE: usize = 576;
 const _: () = assert!(MAX_THREAT_LINE <= crate::json::MAX_LINE);
 
 /// Write one threat as a JSON object followed by `\n` (`"t":"threat"`).
@@ -585,6 +617,7 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         ctrl_system: t.contested().and_then(|d| d.system).map(|s| s.label()),
         transmitters: t.contested().map(|d| d.transmitters),
         rule: t.contested().map(|d| ctrlwatch::contested::rule_name(d.rules)),
+        maker: drone_maker(t),
         n: t.reports,
         first_ms: t.first_seen_ms,
         last_ms: t.last_seen_ms,
@@ -616,6 +649,86 @@ mod tests {
             ssid: heapless::String::try_from("x".repeat(32).as_str()).unwrap(),
             uptime_us: 1,
         }
+    }
+
+    #[test]
+    fn drone_wifi_threats_are_per_drone() {
+        let mut tr: Tracker = Tracker::default();
+        let drone = [0x60, 0x60, 0x1F, 1, 2, 3];
+        let tello = |kind, source: [u8; 6], ssid: &str| ThreatSighting {
+            kind,
+            channel: 6,
+            freq: 24370,
+            width_khz: 20_000,
+            level: -50,
+            count: 3,
+            window_ms: 1000,
+            source,
+            target: drone,
+            detail: (1 << DRONE_MAKER_SHIFT) | 7,
+            ssid: heapless::String::try_from(ssid).unwrap(),
+            uptime_us: 1,
+        };
+        let a = [0x00, 0xC0, 0xCA, 1, 1, 1];
+        let b = [0x00, 0xC0, 0xCA, 2, 2, 2];
+        // Deauth and takeover: one each per drone, the latest attacker shown.
+        let d1 = tr.ingest_threat(1, &tello(ThreatKind::DroneDeauth, a, "TELLO-010203"), 1_000);
+        let d2 = tr.ingest_threat(1, &tello(ThreatKind::DroneDeauth, b, "TELLO-010203"), 2_000);
+        assert_eq!(d1, d2);
+        let t1 = tr.ingest_threat(1, &tello(ThreatKind::DroneTakeover, a, "TELLO-010203"), 2_000);
+        let t2 = tr.ingest_threat(1, &tello(ThreatKind::DroneTakeover, b, "TELLO-010203"), 3_000);
+        assert_eq!(t1, t2);
+        assert_ne!(d1, t1);
+        let t = tr.get_threat(t1).unwrap();
+        assert_eq!(t.source, b);
+        assert_eq!(t.count, 6);
+        assert_eq!(drone_maker(t), Some("DJI Tello"));
+        assert_eq!(t.label(), "Drone Wi-Fi taken over");
+        // Copies: one per name and copy.
+        let c1 = tr.ingest_threat(1, &tello(ThreatKind::DroneNetClone, a, "TELLO-010203"), 3_000);
+        let c2 = tr.ingest_threat(1, &tello(ThreatKind::DroneNetClone, b, "TELLO-010203"), 3_000);
+        let c3 = tr.ingest_threat(1, &tello(ThreatKind::DroneNetClone, a, "TELLO-010203"), 4_000);
+        assert_ne!(c1, c2);
+        assert_eq!(c1, c3);
+        assert_eq!(tr.get_threat(c1).unwrap().source, a);
+        // Every one is announced once.
+        let mut new = Vec::<ThreatId, 8>::new();
+        while let Some(id) = tr.take_new_threat(4_000) {
+            new.push(id).unwrap();
+        }
+        assert_eq!(new.len(), 4);
+        // Muting a drone's takeover silences that drone only.
+        let m = Mute::for_threat(tr.get_threat(t1).unwrap());
+        assert_eq!((m.target, m.source), (drone, [0; 6]));
+        // JSON line names the maker.
+        let ctx = Context { now_ms: 4_000, utc_ms: None, own: None, config: crate::Config::default() };
+        let mut buf = [0u8; MAX_THREAT_LINE];
+        let n = threat_line(tr.get_threat(t1).unwrap(), &ctx, &mut buf).unwrap();
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(text.contains("\"maker\":\"DJI Tello\""), "{text}");
+        assert!(text.contains("\"kind\":\"drone_takeover\""), "{text}");
+        // Other kinds have no maker, whatever their detail says.
+        let mut plain = tello(ThreatKind::Deauth, a, "");
+        plain.target = [0xFF; 6];
+        let p = tr.ingest_threat(1, &plain, 4_000);
+        let n = threat_line(tr.get_threat(p).unwrap(), &ctx, &mut buf).unwrap();
+        assert!(!core::str::from_utf8(&buf[..n]).unwrap().contains("maker"));
+        // The longest drone line still fits.
+        let mut big = tello(ThreatKind::DroneNetClone, [0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], "");
+        big.ssid = heapless::String::try_from("\"".repeat(32).as_str()).unwrap();
+        big.detail = (6 << DRONE_MAKER_SHIFT) | 0xFF_FFFF;
+        big.target = [0xFF; 6];
+        big.channel = u8::MAX;
+        big.freq = u32::MAX;
+        big.width_khz = u32::MAX;
+        big.count = u32::MAX;
+        big.level = i8::MIN;
+        let id = tr.ingest_threat(u8::MAX, &big, u64::MAX / 4);
+        let config = crate::Config { show_link_ids: true, ..Default::default() };
+        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config };
+        let n = threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).unwrap();
+        assert!(n > 512, "{n}: the reason MAX_THREAT_LINE grew from 512");
+        assert!(core::str::from_utf8(&buf[..n]).unwrap().contains("\"maker\":\"Holy Stone\""));
     }
 
     #[test]

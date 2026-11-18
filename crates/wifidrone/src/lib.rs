@@ -377,6 +377,35 @@ pub fn classify(mac: &[u8; 6], ssid: &[u8]) -> Option<u8> {
         .map(|i| i as u8)
 }
 
+/// The first maker one of whose default network names `ssid` matches,
+/// whatever the address, with the pattern that matched. Used to notice a
+/// drone's name on an address that is not the drone's (a copy of its
+/// network): [`classify`] alone would just say "not a drone".
+pub fn name_maker(ssid: &[u8]) -> Option<(u8, &'static Pattern)> {
+    MAKERS.iter().enumerate().find_map(|(i, m)| {
+        m.ssids
+            .iter()
+            .find(|p| p.matches(ssid))
+            .map(|p| (i as u8, p))
+    })
+}
+
+/// Whether `mac` is in one of maker `index`'s registered address blocks
+/// (`alone` or not). False for an unknown index or a maker with no prefix.
+pub fn has_prefix(index: u8, mac: &[u8; 6]) -> bool {
+    MAKERS
+        .get(usize::from(index))
+        .is_some_and(|m| m.prefixes.iter().any(|p| p.matches(mac)))
+}
+
+/// Whether maker `index` has any registered address block, i.e. whether
+/// [`has_prefix`] being false says anything.
+pub fn has_prefixes(index: u8) -> bool {
+    MAKERS
+        .get(usize::from(index))
+        .is_some_and(|m| !m.prefixes.is_empty())
+}
+
 /// The maker's display name, `None` for an index this build does not know
 /// (a newer node).
 pub fn maker_name(index: u8) -> Option<&'static str> {
@@ -521,6 +550,22 @@ mod tests {
     fn randomised_addresses_never_match_a_prefix() {
         // Skydio's prefix with the locally administered bit set.
         assert_eq!(name([0x3A, 0x1D, 0x14, 1, 2, 3], "x"), None);
+    }
+
+    #[test]
+    fn names_without_addresses() {
+        // A DJI Spark name from a laptop: not a drone by `classify`, but
+        // the name is DJI's, and the address is not.
+        let (m, p) = name_maker(b"Spark-45beb8").unwrap();
+        assert_eq!(maker_name(m), Some("DJI"));
+        assert_eq!(p.tail, Tail::Hex(6));
+        assert!(has_prefixes(m));
+        assert!(!has_prefix(m, &OTHER_MAC));
+        assert!(has_prefix(m, &DJI_MAC));
+        assert_eq!(name_maker(b"TELLO-5A1B2C").map(|x| x.0), Some(1));
+        assert!(!has_prefixes(1));
+        assert_eq!(name_maker(b"HomeNet"), None);
+        assert!(!has_prefix(250, &DJI_MAC));
     }
 
     #[test]
