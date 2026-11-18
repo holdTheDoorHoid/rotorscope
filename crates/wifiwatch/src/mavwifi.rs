@@ -394,7 +394,9 @@ pub fn report(m: &Meta, f: &mavwatch::Finding, fr: &mavwatch::Frame<'_>, now_ms:
         window_ms: now_ms.saturating_sub(f.first_ms).min(u64::from(u32::MAX)) as u32,
         source: addr((f.sysid, f.compid)),
         target: f.target.map_or([0; 6], addr),
-        detail: f.kind.code(),
+        // Kind code, plus mavwatch::analyse::DETAIL_SUSPECT for one
+        // uncorroborated frame.
+        detail: f.detail(),
         ssid: f.excerpt.clone(),
         uptime_us: m.up_us,
     };

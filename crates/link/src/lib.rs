@@ -581,7 +581,10 @@ pub enum ThreatKind {
     /// Protocol 13. Hostile content on a drone's MAVLink telemetry
     /// (`crates/mavwatch`): ground-station exploit payloads, shell access
     /// commands, signing downgrade, injected frames. `detail` =
-    /// `mavwatch::Kind` code, `source` / `target` = claimed sender and
+    /// `mavwatch::Kind` code in the low byte, plus bit 24
+    /// ([`MAVLINK_SUSPECT`]) while it is one uncorroborated frame (a
+    /// suspicion; the node reports it again without the bit once backed),
+    /// `source` / `target` = claimed sender and
     /// target system/component in the last two bytes, `ssid` = excerpt.
     /// From an LR2021 node (SiK, mLRS) `channel` is 0; from a Wi-Fi node
     /// (MAVLink over open Wi-Fi, `wifiwatch::mavwifi`) `channel` is the
@@ -1045,6 +1048,12 @@ pub enum Frame {
 /// 237 payload bytes) fit whole unless signed and full. Longer frames are
 /// cut here (`truncated`).
 pub const MAX_MAVLINK_EVIDENCE: usize = 255;
+
+/// `detail` bit of a [`ThreatKind::MavlinkAttack`]: a suspicion (one
+/// checksum-valid frame of a one-frame kind, nothing yet to back it), not an
+/// alarm. Equal to `mavwatch::analyse::DETAIL_SUSPECT`. A `detail` bit, not a
+/// new field: the frame encodes exactly as before.
+pub const MAVLINK_SUSPECT: u32 = 1 << 24;
 
 /// Protocol 13. See [`Frame::MavlinkEvidence`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

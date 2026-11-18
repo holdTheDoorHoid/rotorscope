@@ -178,6 +178,9 @@ pub struct Threat {
 
 impl Threat {
     pub fn label(&self) -> &'static str {
+        if self.suspect() {
+            return "Possible hostile drone telemetry (one frame)";
+        }
         if self.mavlink_over_wifi() {
             return "Hostile drone telemetry over Wi-Fi";
         }
@@ -185,6 +188,13 @@ impl Threat {
             return t.label();
         }
         threat_label(self.kind)
+    }
+
+    /// A `MavlinkAttack` that is still one uncorroborated frame
+    /// ([`link::MAVLINK_SUSPECT`]): listed, but not alerted on until the
+    /// node reports it again without the bit.
+    pub fn suspect(&self) -> bool {
+        self.kind == ThreatKind::MavlinkAttack && self.detail & link::MAVLINK_SUSPECT != 0
     }
 
     /// A `MavlinkAttack` found on open Wi-Fi (protocol 13: a Wi-Fi node
@@ -235,9 +245,10 @@ impl Threat {
             ThreatKind::ControlContested => {
                 self.source == s.source && self.target == s.target && self.detail & 0xFF == s.detail & 0xFF
             }
-            // One per claimed MAVLink sender and finding (`detail` is the
-            // `mavwatch::Kind`; `source` the sender's system/component).
-            ThreatKind::MavlinkAttack => self.source == s.source && self.detail == s.detail,
+            // One per claimed MAVLink sender and finding (`detail` low byte
+            // is the `mavwatch::Kind`, bit 24 the suspicion flag; `source`
+            // the sender's system/component).
+            ThreatKind::MavlinkAttack => self.source == s.source && self.detail & 0xFFFF == s.detail & 0xFFFF,
             // One per table (drones, aircraft, control links).
             ThreatKind::IdFlood => self.detail >> 24 == s.detail >> 24,
             _ => self.target == s.target,
@@ -658,7 +669,13 @@ impl ThreatTable {
         t.level = s.level;
         t.peak_level = t.peak_level.max(s.level);
         t.count = t.count.saturating_add(u64::from(s.count));
-        t.detail = s.detail;
+        // A MAVLink finding once backed stays backed (a later report from
+        // a re-created node entry may carry the suspicion bit again).
+        t.detail = if t.kind == ThreatKind::MavlinkAttack && t.reports > 0 && !t.suspect() {
+            s.detail & !link::MAVLINK_SUSPECT
+        } else {
+            s.detail
+        };
         // Keyed by the drone, not the attacker: show the latest one.
         if matches!(s.kind, ThreatKind::DroneDeauth | ThreatKind::DroneTakeover) && s.source != [0; 6] {
             t.source = s.source;
@@ -1017,7 +1034,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// threats are not handed out.
     pub fn take_new_threat(&mut self, _now_ms: u64) -> Option<ThreatId> {
         loop {
-            let t = self.threats.v.iter_mut().find(|t| !t.announced)?;
+            // A MAVLink suspicion waits until it is backed.
+            let t = self.threats.v.iter_mut().find(|t| !t.announced && !t.suspect())?;
             t.announced = true;
             if !t.muted {
                 return Some(t.id);
@@ -1428,6 +1446,29 @@ mod tests {
         // Muting the owner's own console silences that sender only.
         assert_eq!(tr.mute(Mute::for_threat(tr.get_threat(a).unwrap(), 3_000), 3_000), Ok(true));
         assert_eq!(tr.active_threats(3_000).count(), 1);
+    }
+
+    /// A single uncorroborated MAVLink frame is listed but not alerted on;
+    /// the same finding reported again without the suspicion bit is the
+    /// same threat, alerted on then.
+    #[test]
+    fn mavlink_suspicion_waits_for_backing() {
+        let mut tr: Tracker = Tracker::default();
+        let mut s = sighting(ThreatKind::MavlinkAttack, 0, 9_150);
+        s.source = [0, 0, 0, 0, 255, 190];
+        s.detail = 13 | link::MAVLINK_SUSPECT;
+        let a = tr.ingest_threat(4, &s, 1_000).unwrap();
+        assert!(tr.get_threat(a).unwrap().suspect());
+        assert_eq!(tr.get_threat(a).unwrap().label(), "Possible hostile drone telemetry (one frame)");
+        assert_eq!(tr.take_new_threat(1_000), None, "no alert for a suspicion");
+        s.detail = 13;
+        assert_eq!(tr.ingest_threat(4, &s, 1_500), Some(a), "escalation updates the same threat");
+        assert!(!tr.get_threat(a).unwrap().suspect());
+        assert_eq!(tr.take_new_threat(1_500), Some(a));
+        // A later suspicion report does not demote it.
+        s.detail = 13 | link::MAVLINK_SUSPECT;
+        assert_eq!(tr.ingest_threat(4, &s, 2_000), Some(a));
+        assert!(!tr.get_threat(a).unwrap().suspect());
     }
 
     /// Protocol 13: the same finding from a Wi-Fi node (`channel` set) is

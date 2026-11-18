@@ -4,6 +4,7 @@
 
 use std::vec::Vec;
 
+use crate::analyse::{DETAIL_SUSPECT, NEW_ALARM_BURST, NEW_ALARM_REFILL_MS};
 use crate::frame::encode::{Sign, v1, v2};
 use crate::msg::{self, ftp};
 use crate::*;
@@ -953,6 +954,97 @@ fn strict_frames_behave_as_before_and_bad_checksums_stay_bad() {
     let mut b = enc_len(1, msg::STATUSTEXT, &[b'x'; 70]);
     b[10] ^= 1;
     assert_eq!(crate::parse_at(&b), crate::Parse::Bad);
+}
+
+// ------------------------------------------- one frame, one alarm --
+
+fn shell(sys: u8, cmd: &[u8]) -> Vec<u8> {
+    enc(0, sys, 190, msg::SERIAL_CONTROL, &serial_control(msg::serial_control::DEV_SHELL, cmd.len() as u8, cmd), None)
+}
+
+#[test]
+fn one_attack_frame_is_suspect_and_repetition_escalates() {
+    let mut an = Analyser::new();
+    let got = run(&mut an, LINK, &[(shell(255, b"ls\n"), 1_000)]);
+    assert_eq!(got.len(), 1);
+    assert!(got[0].suspect, "one frame from nowhere is a suspicion");
+    assert_eq!(got[0].detail(), Kind::SerialControl.code() | DETAIL_SUSPECT);
+    // The same again (a different frame, within REPORT_GAP_MS): escalated
+    // and reported at once.
+    let got = run(&mut an, LINK, &[(shell(255, b"reboot\n"), 1_500)]);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(!got[0].suspect);
+    assert_eq!(got[0].detail(), Kind::SerialControl.code());
+    assert_eq!(got[0].hits, 1);
+    // A byte-identical resend is one frame heard twice: no escalation.
+    let mut an = Analyser::new();
+    let f = shell(255, b"ls\n");
+    let got = run(&mut an, LINK, &[(f.clone(), 1_000), (f, 1_200)]);
+    assert_eq!(got.len(), 1);
+    assert!(got[0].suspect);
+}
+
+#[test]
+fn a_system_with_history_sending_the_bait_once_is_an_alarm() {
+    // Ten seconds of the vehicle's telemetry, then one CAMERA_INFORMATION
+    // with a file:// URI from its camera (QGC-01 is sent once).
+    let mut an = Analyser::new();
+    let mut frames: Vec<(Vec<u8>, u64)> = (0..10u64).map(|i| (enc(i as u8, 1, 1, msg::HEARTBEAT, &heartbeat(), None), i * 1_000)).collect();
+    frames.push((enc(0, 1, 100, msg::CAMERA_INFORMATION, &camera_info(b"v", b"m", b"file:///etc/passwd"), None), 10_500));
+    let got = run(&mut an, LINK, &frames);
+    assert_eq!(kinds(&got), [Kind::UriScheme]);
+    assert!(!got[0].suspect);
+}
+
+#[test]
+fn another_frame_on_the_link_corroborates_one_frame_does_not() {
+    // One over-long SERIAL_CONTROL: two findings, from one frame. Neither
+    // vouches for the other.
+    let mut an = Analyser::new();
+    let mut p = serial_control(msg::serial_control::DEV_SHELL, 3, b"ls\n").to_vec();
+    p.extend_from_slice(&[0; 20]);
+    let got = run(&mut an, LINK, &[(enc_len(2, msg::SERIAL_CONTROL, &p), 1_000)]);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|f| f.suspect));
+    // A second, different frame with another finding on the same link
+    // within SUSPECT_WINDOW_MS: that one is corroborated.
+    let mut k = [0u8; 42];
+    k[8] = 1;
+    let got = run(&mut an, LINK, &[(enc(0, 255, 190, msg::SETUP_SIGNING, &k, None), 20_000)]);
+    assert_eq!(got.len(), 1);
+    assert!(!got[0].suspect);
+}
+
+#[test]
+fn kinds_that_need_repeats_are_never_suspect() {
+    let mut an = Analyser::new();
+    let got = run(
+        &mut an,
+        LINK,
+        &[(enc(0, 1, 1, msg::STATUSTEXT, &statustext(4, b"a\x1b[2Jb"), None), 1_000), (enc(1, 1, 1, msg::STATUSTEXT, &statustext(4, b"c\x1b[0m"), None), 2_000)],
+    );
+    assert_eq!(kinds(&got), [Kind::StatusControl]);
+    assert!(!got[0].suspect);
+}
+
+#[test]
+fn forged_frames_cannot_storm_new_alarms() {
+    // One SETUP_SIGNING a second from a new made-up system ID each time,
+    // for a minute: every one is a new alarm (kind, sender).
+    let mut an = Analyser::new();
+    let mut n = 0;
+    for i in 0..60u64 {
+        let mut k = [0u8; 42];
+        k[8] = 1;
+        k[10] = i as u8;
+        let f = enc(0, 10 + i as u8, 1, msg::SETUP_SIGNING, &k, None);
+        n += run(&mut an, LINK, &[(f, 1_000 + i * 1_000)]).len();
+    }
+    // The link's burst, then one every NEW_ALARM_REFILL_MS.
+    let most = NEW_ALARM_BURST as usize + 60_000 / NEW_ALARM_REFILL_MS as usize + 1;
+    assert!(n <= most, "{n} alarms, at most {most}");
+    assert!(n >= NEW_ALARM_BURST as usize);
+    assert!(an.pressure().throttled > 0);
 }
 
 // --------------------------------------------------- link integrity --

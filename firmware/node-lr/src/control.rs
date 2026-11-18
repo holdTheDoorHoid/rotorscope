@@ -626,7 +626,10 @@ fn scan_mavlink(
             window_ms: now_ms.saturating_sub(f.first_ms).min(u64::from(u32::MAX)) as u32,
             source: addr((f.sysid, f.compid)),
             target: f.target.map_or([0; 6], addr),
-            detail: f.kind.code(),
+            // Kind code, plus mavwatch::analyse::DETAIL_SUSPECT for one
+            // uncorroborated frame (the hub holds the alert until it
+            // escalates).
+            detail: f.detail(),
             ssid: f.excerpt.clone(),
             uptime_us: s.t_us,
         };
@@ -642,12 +645,13 @@ fn scan_mavlink(
             frame: Vec::from_slice(&fr.bytes[..n]).unwrap_or_default(),
         }));
         out::line(format_args!(
-            r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"hits":{}}}"#,
+            r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"hits":{},"suspect":{}}}"#,
             f.kind.code(),
             f.sysid,
             f.compid,
             f.msgid,
-            f.hits
+            f.hits,
+            f.suspect
         ));
     });
 }

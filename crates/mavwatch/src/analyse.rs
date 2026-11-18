@@ -145,6 +145,20 @@ impl Kind {
         Self::LABELS[self as usize - 1]
     }
 
+    /// Kinds that fire on a single frame. One such frame, uncorroborated,
+    /// is reported as a suspicion ([`Finding::suspect`]); the others
+    /// already need repeats.
+    pub const fn single_frame(self) -> bool {
+        !matches!(
+            self,
+            Kind::StatusControl
+                | Kind::ParamFlood
+                | Kind::SigningDowngrade
+                | Kind::SeqInterleave
+                | Kind::SignedReplay
+        )
+    }
+
     /// Link-integrity kinds: only meaningful when the frames are known to
     /// come from one radio link ([`Link::distinct`]).
     pub const fn needs_link_id(self) -> bool {
@@ -221,6 +235,46 @@ pub const INTERLEAVE_MIN_FRAMES: u32 = 5;
 /// cannot check, and lost packets, leave gaps).
 pub const SEQ_FORWARD: u8 = 127;
 
+/// `detail` bit of a `MavlinkAttack` threat ([`Finding::detail`]): a
+/// suspicion, not yet an alarm. Every field of a MAVLink frame is the
+/// sender's claim and a checksum is not a signature, so one checksum-valid
+/// frame of a one-frame kind, with nothing else to back it, is reported
+/// with this bit. It is backed (and reported without the bit) when:
+///
+/// - the same finding comes again from the same claimed sender in another
+///   frame within [`SUSPECT_WINDOW_MS`] ([`CONFIRM_HITS`]), or
+/// - another finding on the same link, from another frame, came within
+///   [`SUSPECT_WINDOW_MS`], or
+/// - the claimed system has a history on the link: heard at least
+///   [`HISTORY_FRAMES`] frames over at least [`HISTORY_MS`] before (a real
+///   vehicle or ground station sending the bait once, which is how the
+///   exploit payloads are delivered).
+///
+/// A suspicion that becomes backed is reported again at once. The kind is
+/// in the low byte either way.
+pub const DETAIL_SUSPECT: u32 = 1 << 24;
+/// A claimed system's history that backs a one-frame finding: frames...
+pub const HISTORY_FRAMES: u32 = 5;
+/// ...over at least this long.
+pub const HISTORY_MS: u64 = 5_000;
+/// Frames with the same finding from one claimed sender that escalate it.
+pub const CONFIRM_HITS: u32 = 2;
+/// ...within this long; also how recent a corroborating finding must be.
+pub const SUSPECT_WINDOW_MS: u64 = 60_000;
+/// New alarms (a kind from a claimed sender not reported before) per link:
+/// a burst of this many...
+pub const NEW_ALARM_BURST: u32 = 3;
+/// ...then one every this long. A forger inventing system IDs gets a new
+/// alarm out of each frame; this caps the storm, and every alarm held back
+/// is counted ([`Pressure::throttled`]).
+pub const NEW_ALARM_REFILL_MS: u64 = 10_000;
+/// The same over all links of the analyser (a forger can invent links too,
+/// when link IDs are on).
+pub const NEW_ALARM_BURST_ALL: u32 = 6;
+pub const NEW_ALARM_REFILL_ALL_MS: u64 = 5_000;
+/// Links with a new-alarm budget of their own (the stalest makes room).
+pub const MAX_BUDGETS: usize = 4;
+
 /// Systems / components followed at once.
 pub const MAX_SOURCES: usize = 12;
 /// Parameter-name sets held at once (one per system sending PARAM_VALUE).
@@ -267,6 +321,51 @@ pub struct Finding {
     /// The offending text, printable characters only (a URI, a file name,
     /// shell input), or a short description. Never key material.
     pub excerpt: heapless::String<32>,
+    /// One frame of a one-frame kind with nothing yet to back it (see
+    /// [`DETAIL_SUSPECT`]).
+    pub suspect: bool,
+}
+
+impl Finding {
+    /// The threat's `detail`: the [`Kind`] code, plus [`DETAIL_SUSPECT`].
+    pub fn detail(&self) -> u32 {
+        self.kind.code() | if self.suspect { DETAIL_SUSPECT } else { 0 }
+    }
+}
+
+/// Signs that a forger is pushing the analyser's limits, for a node's
+/// stats line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pressure {
+    /// New alarms held back by the new-alarm budget.
+    pub throttled: u32,
+}
+
+/// A token bucket.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    link: u32,
+    tokens: u32,
+    at_ms: u64,
+}
+
+impl Bucket {
+    fn take(&mut self, now_ms: u64, burst: u32, refill_ms: u64) -> bool {
+        if self.tokens >= burst {
+            self.at_ms = now_ms;
+        } else {
+            let add = now_ms.saturating_sub(self.at_ms) / refill_ms;
+            if add > 0 {
+                self.tokens = (self.tokens as u64 + add).min(burst as u64) as u32;
+                self.at_ms += add * refill_ms;
+            }
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -300,7 +399,9 @@ struct Source {
     link: u32,
     sysid: u8,
     compid: u8,
+    first_ms: u64,
     last_ms: u64,
+    frames: u32,
     tracks: [Option<Track>; 2],
     last_track: u8,
     switches: Window,
@@ -321,7 +422,9 @@ impl Source {
             link,
             sysid,
             compid,
+            first_ms: now_ms,
             last_ms: now_ms,
+            frames: 0,
             tracks: [None; 2],
             last_track: 0,
             switches: Window::default(),
@@ -355,6 +458,13 @@ struct Report {
     last_report_ms: Option<u64>,
     last_ms: u64,
     hits: u32,
+    /// Hits in the window that started at `since_ms`.
+    total: u32,
+    since_ms: u64,
+    /// Escalated (or a kind that needs repeats).
+    confirmed: bool,
+    /// Hash of the frame behind the latest hit.
+    frame_h: u32,
 }
 
 /// The analyser. Fixed memory (about 4 KB); no allocation.
@@ -364,6 +474,9 @@ pub struct Analyser {
     params: Vec<ParamSet, MAX_PARAM_SETS>,
     reports: Vec<Report, MAX_REPORTS>,
     recent: Deque<(u32, u64), MAX_RECENT>,
+    budgets: Vec<Bucket, MAX_BUDGETS>,
+    budget_all: Bucket,
+    pressure: Pressure,
 }
 
 impl Default for Analyser {
@@ -399,7 +512,54 @@ impl Analyser {
             params: Vec::new(),
             reports: Vec::new(),
             recent: Deque::new(),
+            budgets: Vec::new(),
+            budget_all: Bucket {
+                link: 0,
+                tokens: NEW_ALARM_BURST_ALL,
+                at_ms: 0,
+            },
+            pressure: Pressure { throttled: 0 },
         }
+    }
+
+    /// Counters for a node's stats line.
+    pub fn pressure(&self) -> Pressure {
+        self.pressure
+    }
+
+    /// A token for a new alarm on `link` (and one from the shared bucket).
+    fn new_alarm(&mut self, link: u32, now_ms: u64) -> bool {
+        let i = match self.budgets.iter().position(|b| b.link == link) {
+            Some(i) => i,
+            None => {
+                let b = Bucket {
+                    link,
+                    tokens: NEW_ALARM_BURST,
+                    at_ms: now_ms,
+                };
+                if self.budgets.is_full() {
+                    let i = (0..self.budgets.len())
+                        .min_by_key(|&i| self.budgets[i].at_ms)
+                        .unwrap_or(0);
+                    self.budgets[i] = b;
+                    i
+                } else {
+                    let _ = self.budgets.push(b);
+                    self.budgets.len() - 1
+                }
+            }
+        };
+        // Look before taking, so a refusal costs neither bucket a token.
+        let mut one = self.budgets[i];
+        let mut all = self.budget_all;
+        if !(one.take(now_ms, NEW_ALARM_BURST, NEW_ALARM_REFILL_MS)
+            && all.take(now_ms, NEW_ALARM_BURST_ALL, NEW_ALARM_REFILL_ALL_MS))
+        {
+            return false;
+        }
+        self.budgets[i] = one;
+        self.budget_all = all;
+        true
     }
 
     /// Analyse one CRC-valid frame from `link`. `out` is called with each
@@ -429,6 +589,15 @@ impl Analyser {
         let _ = self.recent.push_back((h, now_ms));
 
         let si = self.source(link.key, f.sysid, f.compid, now_ms);
+        // History of the claimed system before this frame.
+        let known = self.sources.iter().any(|s| {
+            s.link == link.key
+                && s.sysid == f.sysid
+                && s.frames >= HISTORY_FRAMES
+                && now_ms.saturating_sub(s.first_ms) >= HISTORY_MS
+        });
+        let s = &mut self.sources[si];
+        s.frames = s.frames.saturating_add(1);
         let mut hits: Vec<Hit, 4> = Vec::new();
         let mut hit = |k: Kind, t: Option<(u8, u8)>, e: heapless::String<32>| {
             let _ = hits.push((k, t, e));
@@ -448,7 +617,7 @@ impl Analyser {
         self.payload(si, link, f, now_ms, &mut hit);
 
         for (k, t, e) in hits {
-            self.report(k, link, f, t, e, now_ms, out);
+            self.report(k, link, f, h, known, t, e, now_ms, out);
         }
     }
 
@@ -798,6 +967,8 @@ impl Analyser {
         kind: Kind,
         link: Link,
         f: &Frame<'_>,
+        frame_h: u32,
+        known: bool,
         target: Option<(u8, u8)>,
         excerpt: heapless::String<32>,
         now_ms: u64,
@@ -817,6 +988,10 @@ impl Analyser {
                     last_report_ms: None,
                     last_ms: now_ms,
                     hits: 0,
+                    total: 0,
+                    since_ms: now_ms,
+                    confirmed: false,
+                    frame_h,
                 };
                 if self.reports.is_full() {
                     let i = (0..self.reports.len())
@@ -830,14 +1005,36 @@ impl Analyser {
                 }
             }
         };
+        // Another finding on this link, from another frame, recently.
+        let corroborated = self.reports.iter().enumerate().any(|(j, o)| {
+            j != i
+                && o.link == link.key
+                && o.frame_h != frame_h
+                && now_ms.saturating_sub(o.last_ms) <= SUSPECT_WINDOW_MS
+        });
         let r = &mut self.reports[i];
         r.hits += 1;
         r.last_ms = now_ms;
-        if r.last_report_ms
-            .is_some_and(|t| now_ms.saturating_sub(t) < REPORT_GAP_MS)
+        if now_ms.saturating_sub(r.since_ms) > SUSPECT_WINDOW_MS {
+            r.total = 0;
+            r.since_ms = now_ms;
+        }
+        r.total += 1;
+        let was = r.confirmed;
+        r.confirmed |= !kind.single_frame() || r.total >= CONFIRM_HITS || corroborated || known;
+        r.frame_h = frame_h;
+        let escalated = !was && r.confirmed && r.last_report_ms.is_some();
+        if !escalated
+            && r.last_report_ms
+                .is_some_and(|t| now_ms.saturating_sub(t) < REPORT_GAP_MS)
         {
             return;
         }
+        if r.last_report_ms.is_none() && !self.new_alarm(link.key, now_ms) {
+            self.pressure.throttled = self.pressure.throttled.saturating_add(1);
+            return;
+        }
+        let r = &mut self.reports[i];
         let finding = Finding {
             kind,
             link,
@@ -848,6 +1045,7 @@ impl Analyser {
             hits: r.hits,
             first_ms: r.first_ms,
             excerpt,
+            suspect: !r.confirmed,
         };
         r.hits = 0;
         r.last_report_ms = Some(now_ms);

@@ -6,7 +6,7 @@
 //! tail of the last packet and joins it to the next one. Packets lost on
 //! the air simply leave a frame that fails its checksum and is skipped.
 
-use crate::analyse::{Analyser, Finding, Link};
+use crate::analyse::{Analyser, Finding, Link, Pressure};
 use crate::frame::{Frame, MAX_FRAME_LEN, Parse, parse_at};
 
 /// Bytes a stream holds: one frame waiting to complete plus a full packet.
@@ -167,6 +167,11 @@ impl Watch {
         let s = &mut streams[i];
         s.last_ms = now_ms;
         s.push(bytes, &mut |f| analyser.frame(link, f, now_ms, out));
+    }
+
+    /// Counters for a node's stats line (see [`Pressure`]).
+    pub fn pressure(&self) -> Pressure {
+        self.analyser.pressure()
     }
 
     /// Analyse frames that need no reassembly (each `bytes` holds whole

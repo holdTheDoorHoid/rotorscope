@@ -76,7 +76,7 @@ pub mod msg;
 pub mod stream;
 pub mod text;
 
-pub use analyse::{Analyser, Finding, Kind, Link};
+pub use analyse::{Analyser, Finding, Kind, Link, Pressure};
 pub use frame::{Frame, Parse, Signature, frames, parse_at};
 pub use stream::{Stream, StreamKey, Watch};
 
