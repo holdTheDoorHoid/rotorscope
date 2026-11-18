@@ -9,9 +9,11 @@
 //! and clock (`HubFix`), show made-up aircraft (`Csbee`) or flags (`Flags`),
 //! or name another node as the sender of its frames (`Via`).
 //!
-//! [`origin`] is the one table of who may originate each variant. It is an
-//! exhaustive `match` with no wildcard arm, so a new variant does not compile
-//! until someone decides who may send it. Every hop that can check, checks:
+//! [`Head::origin`] is the one table of who may originate each variant
+//! ([`origin`] for a decoded frame, [`origin_of_encoded`] for one still in
+//! bytes). It and [`head`] are exhaustive `match`es with no wildcard arm, so
+//! a new variant does not compile until someone decides who may send it.
+//! Every hop that can check, checks:
 //!
 //! - the ESP-NOW gateway relays only frames a node may originate
 //!   ([`node_batch`]), and never a node's own `Via`;
@@ -97,32 +99,149 @@ pub const fn threat_origin(kind: ThreatKind) -> Origin {
     }
 }
 
-/// Who may originate `f`. No wildcard arm, on purpose: a new variant must
-/// be decided here.
-pub fn origin(f: &Frame) -> Origin {
+/// What decides a frame's origin: its variant and, for `Hello` / `Status`,
+/// the role, for `Threat` the kind. Variants in [`Frame`]'s order, so the
+/// start of an encoded frame decodes as its `Head` ([`head_of_encoded`]):
+/// the wired bus classifies frames in its interrupt handler without
+/// decoding them whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+pub enum Head {
+    Hello(NodeRole),
+    Detection,
+    Stats,
+    OpenLink,
+    Via,
+    Status(NodeRole),
+    DroneId,
+    Rf,
+    DjiWifi,
+    WifiDrone,
+    HubFix,
+    Csbee,
+    Flags,
+    Threat(ThreatKind),
+    BusJoin,
+    BusDone,
+    Air,
+    AeroStatus,
+    Control,
+    ControlEnergy,
+    MavlinkEvidence,
+}
+
+/// The [`Head`] of a frame. Exhaustive: a new `Frame` variant needs a
+/// `Head` of its own, and so a line in [`Head::origin`].
+pub fn head(f: &Frame) -> Head {
     match f {
-        Frame::Hello { role, .. } => role_origin(*role),
-        Frame::Detection(_) => Origin::Node,
-        Frame::Stats { .. } => Origin::Node,
-        Frame::OpenLink(_) => Origin::Node,
-        Frame::Via { .. } => Origin::Gateway,
-        Frame::Status { role, .. } => role_origin(*role),
-        Frame::DroneId(_) => Origin::Node,
-        Frame::Rf(_) => Origin::Node,
-        Frame::DjiWifi { .. } => Origin::Node,
-        Frame::WifiDrone(_) => Origin::Node,
-        Frame::HubFix(_) => Origin::Hub,
-        Frame::Csbee(_) => Origin::Hub,
-        Frame::Flags(_) => Origin::Hub,
-        Frame::Threat(t) => threat_origin(t.kind),
-        Frame::BusJoin { .. } => Origin::Bus,
-        Frame::BusDone { .. } => Origin::Bus,
-        Frame::Air(_) => Origin::Node,
-        Frame::AeroStatus(_) => Origin::Node,
-        Frame::Control(_) => Origin::Node,
-        Frame::ControlEnergy(_) => Origin::Node,
-        Frame::MavlinkEvidence(_) => Origin::Node,
+        Frame::Hello { role, .. } => Head::Hello(*role),
+        Frame::Detection(_) => Head::Detection,
+        Frame::Stats { .. } => Head::Stats,
+        Frame::OpenLink(_) => Head::OpenLink,
+        Frame::Via { .. } => Head::Via,
+        Frame::Status { role, .. } => Head::Status(*role),
+        Frame::DroneId(_) => Head::DroneId,
+        Frame::Rf(_) => Head::Rf,
+        Frame::DjiWifi { .. } => Head::DjiWifi,
+        Frame::WifiDrone(_) => Head::WifiDrone,
+        Frame::HubFix(_) => Head::HubFix,
+        Frame::Csbee(_) => Head::Csbee,
+        Frame::Flags(_) => Head::Flags,
+        Frame::Threat(t) => Head::Threat(t.kind),
+        Frame::BusJoin { .. } => Head::BusJoin,
+        Frame::BusDone { .. } => Head::BusDone,
+        Frame::Air(_) => Head::Air,
+        Frame::AeroStatus(_) => Head::AeroStatus,
+        Frame::Control(_) => Head::Control,
+        Frame::ControlEnergy(_) => Head::ControlEnergy,
+        Frame::MavlinkEvidence(_) => Head::MavlinkEvidence,
     }
+}
+
+impl Head {
+    /// **The table.** Who may originate each frame type. No wildcard arm,
+    /// on purpose: a new variant must be decided here.
+    pub const fn origin(self) -> Origin {
+        match self {
+            // A node introduces itself; the gateway role is the link's own.
+            Head::Hello(role) => role_origin(role),
+            // Radio nodes' reports.
+            Head::Detection => Origin::Node,
+            Head::Stats => Origin::Node,
+            Head::OpenLink => Origin::Node,
+            // Written by a gateway (or the hub's bus attributor) before each
+            // relayed frame; a node's own would name someone else.
+            Head::Via => Origin::Gateway,
+            Head::Status(role) => role_origin(role),
+            Head::DroneId => Origin::Node,
+            Head::Rf => Origin::Node,
+            Head::DjiWifi => Origin::Node,
+            Head::WifiDrone => Origin::Node,
+            // Hub to web head only: the kit's GPS and clock, the hub's
+            // ADS-B receiver, its FAA flags.
+            Head::HubFix => Origin::Hub,
+            Head::Csbee => Origin::Hub,
+            Head::Flags => Origin::Hub,
+            Head::Threat(kind) => threat_origin(kind),
+            // Consumed by the bus master and node; never in a relayed stream.
+            Head::BusJoin => Origin::Bus,
+            Head::BusDone => Origin::Bus,
+            // Aero (LR2021) nodes' reports.
+            Head::Air => Origin::Node,
+            Head::AeroStatus => Origin::Node,
+            Head::Control => Origin::Node,
+            Head::ControlEnergy => Origin::Node,
+            Head::MavlinkEvidence => Origin::Node,
+        }
+    }
+}
+
+/// Who may originate `f` ([`Head::origin`]).
+pub fn origin(f: &Frame) -> Origin {
+    head(f).origin()
+}
+
+/// The [`Head`] of an encoded frame (COBS, delimiter included or not),
+/// from its first few bytes, with no buffer the size of a frame. `None` if
+/// it does not start like any frame.
+pub fn head_of_encoded(bytes: &[u8]) -> Option<Head> {
+    let mut prefix = [0u8; 4];
+    let n = cobs_prefix(bytes, &mut prefix);
+    postcard::from_bytes(&prefix[..n]).ok()
+}
+
+/// [`Head::origin`] of an encoded frame; `None` if it does not start like
+/// any frame.
+pub fn origin_of_encoded(bytes: &[u8]) -> Option<Origin> {
+    head_of_encoded(bytes).map(Head::origin)
+}
+
+/// COBS-decode the first `out.len()` bytes of `src` (or fewer, up to its
+/// delimiter); returns how many.
+fn cobs_prefix(src: &[u8], out: &mut [u8]) -> usize {
+    let (mut i, mut n) = (0, 0);
+    while n < out.len() {
+        let code = match src.get(i) {
+            Some(&c) if c != 0 => c,
+            _ => break,
+        };
+        i += 1;
+        for _ in 1..code {
+            match src.get(i) {
+                Some(&b) if b != 0 && n < out.len() => {
+                    out[n] = b;
+                    n += 1;
+                    i += 1;
+                }
+                _ => return n,
+            }
+        }
+        // A block shorter than 254 ends in a zero, unless it is the last.
+        if code != 0xFF && n < out.len() && src.get(i).is_some_and(|&b| b != 0) {
+            out[n] = 0;
+            n += 1;
+        }
+    }
+    n
 }
 
 /// A node may send `f` (relayed by a gateway, or on the bus).
@@ -505,6 +624,27 @@ mod tests {
         t.push((threat(ForgedLink), Gateway));
         t.push((threat(AreaGnss), Hub));
         t
+    }
+
+    /// The start of every encoded frame decodes as its head, with no full
+    /// decode (what the wired bus relies on).
+    #[test]
+    fn head_of_encoded_matches_head() {
+        let mut buf = [0u8; MAX_FRAME];
+        for (f, want) in table() {
+            let wire = encode(&f, &mut buf).unwrap();
+            assert_eq!(head_of_encoded(wire), Some(head(&f)), "{f:?}");
+            assert_eq!(origin_of_encoded(wire), Some(want), "{f:?}");
+            // Without the delimiter too, and a truncated prefix never panics.
+            let n = wire.len();
+            assert_eq!(head_of_encoded(&wire[..n - 1]), Some(head(&f)));
+            for k in 0..n {
+                let _ = head_of_encoded(&wire[..k]);
+            }
+        }
+        assert_eq!(head_of_encoded(&[]), None);
+        assert_eq!(head_of_encoded(&[0]), None);
+        assert_eq!(head_of_encoded(&[2, 21, 0]), None, "no such variant");
     }
 
     /// Every postcard variant index of `Frame` appears in the table.
