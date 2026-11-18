@@ -57,6 +57,10 @@ espnow = ["esp-radio/esp-now", "dep:airlink"]
 # (GPIO12). Receive-only on the air, like the plain wired build. C5 only; not
 # with `espnow`.
 wirebus = ["node-common/wirebus"]
+# Bench only (docs/BENCH.md "Crash recovery"): type `fault panic` / `fault hang`
+# on USB to prove the reboot after a panic and the hang watchdog. Never in a
+# normal build.
+faulttest = ["node-common/faulttest"]
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }
@@ -78,7 +82,8 @@ esp-hal                = { version = "~1.2.2", features = ["unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["embassy", "esp-alloc", "esp-radio"] }
 esp-bootloader-esp-idf = { version = "0.6.0" }
 esp-alloc              = { version = "0.11.0" }
-esp-backtrace          = { version = "0.20.0", features = ["panic-handler", "println"] }
+# custom-halt: reboot after a panic (`custom_halt` in main.rs).
+esp-backtrace          = { version = "0.20.0", features = ["panic-handler", "println", "custom-halt"] }
 # USB-Serial-JTAG only: "auto" could fall back to UART0, whose pins we give to the hub link.
 esp-println = { version = "0.18.0", default-features = false, features = ["jtag-serial", "critical-section", "log-04"] }
 # beta.2 was yanked (it only fixed ESP32-S31 builds); beta.1 is the newest usable release.
@@ -91,6 +96,8 @@ esp-wifi-sys-esp32c5 = { version = "0.3.0", optional = true }
 embassy-executor = { version = "0.10.0" }
 embassy-time     = { version = "0.5.0" }
 embassy-sync     = { version = "0.7" }
+# `yield_now` in the drain task (already in the build through embassy-executor).
+embassy-futures  = "0.1"
 critical-section = "1.2.0"
 log              = "0.4.27"
 

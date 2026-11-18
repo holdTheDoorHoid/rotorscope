@@ -62,6 +62,10 @@ struct HelloLine<'a> {
     /// Plan id applied (0 = built-in) and the plan.
     plan_id: u16,
     plan: &'a Plan,
+    /// Why the chip last reset (`node_common::fault::name`), and whether
+    /// this is a `faulttest` bench build.
+    reset: &'static str,
+    faulttest: bool,
 }
 
 pub fn hello_json(images: &[Option<&'static str>]) {
@@ -78,6 +82,8 @@ pub fn hello_json(images: &[Option<&'static str>]) {
         images,
         plan_id: job.id,
         plan: &job.plan,
+        reset: node_common::fault::reset_reason(),
+        faulttest: cfg!(feature = "faulttest"),
     };
     emit(&line, &mut [0u8; 768], "hello");
 }
