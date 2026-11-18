@@ -107,6 +107,8 @@ pub struct App {
     /// GPS jamming / spoofing in the area seen through aircraft and drones
     /// (`tracker::area_gnss`), in PSRAM (`aero::Store`); `None` without.
     pub area: Option<&'static mut tracker::area_gnss::AreaWatch>,
+    /// Hub minute of the last deaf-check rate lines (`node_health`).
+    rates_min: u64,
 }
 
 impl App {
@@ -130,6 +132,7 @@ impl App {
             control_flags: (false, false),
             control: None,
             area: None,
+            rates_min: 0,
         }
     }
 
@@ -147,7 +150,7 @@ impl App {
             };
             self.take(gw, ev, actx, node, f, now);
         }
-        self.node_health(gw, now);
+        self.node_health(gw, ev, now);
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
@@ -156,10 +159,12 @@ impl App {
     }
 
     /// Nodes' Status and Stats: role and plan, then the deaf-node and
-    /// node-shed checks (not evidence). Out of line: the main loop's frame
-    /// is the P4's tightest stack budget.
+    /// node-shed checks (evidence only when a node's lower rate is accepted
+    /// as its new normal: a `Setting` event). Out of line: the main loop's
+    /// frame is the P4's tightest stack budget.
     #[inline(never)]
-    fn node_health(&mut self, gw: &mut GatewayLink<'_>, now: u64) {
+    fn node_health(&mut self, gw: &mut GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
+        use core::fmt::Write;
         while let Some(d) = gw.stats_due.pop() {
             if let Some(role) = d.role {
                 self.tracker.ingest_status(d.node, role, d.can, d.plan, now);
@@ -167,6 +172,27 @@ impl App {
             if d.has_stats {
                 let up_us = u64::from(d.up_ms) * 1000;
                 let _ = self.tracker.ingest_node_stats(d.node, up_us, d.seen, d.dropped, now);
+            }
+        }
+        // A "node blinded" alarm that ended because the node's lower rate
+        // became its normal, not because it recovered: say so.
+        while let Some(r) = self.tracker.take_deaf_relearn() {
+            let mut t: heapless::String<128> = heapless::String::new();
+            let _ = write!(
+                t,
+                "node {} now hears {:.0}/s, was {:.0}/s; accepted as its new normal (node blinded alarm ends)",
+                r.node, r.rate, r.was
+            );
+            ev.event(evidence::EventCode::Setting, t.as_bytes(), &[r.node]);
+            crate::println!("hub-p4: {}", t);
+        }
+        // Once a minute, what the deaf-node check holds for each node.
+        if now / 60_000 != self.rates_min {
+            self.rates_min = now / 60_000;
+            for n in self.tracker.nodes() {
+                if let Some((normal, rate)) = self.tracker.node_rates(n.node, now) {
+                    crate::println!("hub-p4: deaf-check node {}: {:.0}/s now, normal {:.0}/s", n.node, rate, normal);
+                }
             }
         }
     }
