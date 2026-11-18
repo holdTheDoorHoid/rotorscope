@@ -564,7 +564,8 @@ board, in this order:
     not link before this change either: static RAM over by 17,344 bytes at `stack.x`. This change
     adds 712 bytes, measured from the same linker error (`0x3fcdfac0` -> `0x3fcdfd88`): the request
     check in each of the nine HTTP tasks' futures, and the flash routines the salt code needs, which
-    must run from RAM.)
+    must run from RAM. Sorting each link by the origin table adds 32 more: `0x3fcdfda8`, 18,088
+    bytes over in all.)
 
 ## Bench tests
 
