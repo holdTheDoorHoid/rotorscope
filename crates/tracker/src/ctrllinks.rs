@@ -30,9 +30,20 @@ use rid::message::{
 
 use crate::{Config, Stamped, TrackId, TrackState, Tracker};
 
-/// Control links held. A sensor rarely hears more than a few at once; when
-/// full, the one heard least recently makes room.
-pub const MAX_CONTROL_LINKS: usize = 4;
+/// Control links held. A sensor rarely hears more than a few at once.
+/// When full, a new link makes room by replacing (WP-09): a stale link,
+/// else an unproven one ([`ControlLink::established`]: heard fewer than
+/// [`ESTABLISH_REPORTS`] times, or over less than [`ESTABLISH_SPAN_MS`];
+/// fewest reports, then heard longest ago), else an established one not
+/// heard for [`QUIET_EVICT_MS`]. Never an established link still being
+/// heard: five forged links cannot push out the real one and its history.
+pub const MAX_CONTROL_LINKS: usize = 8;
+/// Reports that establish a control link...
+pub const ESTABLISH_REPORTS: u16 = 3;
+/// ...spread over at least this long.
+pub const ESTABLISH_SPAN_MS: u64 = 2_000;
+/// An established link not heard for this long may make room.
+pub const QUIET_EVICT_MS: u64 = 15_000;
 /// Energy bands held (band x node).
 pub const MAX_ENERGY_BANDS: usize = 3;
 /// Stick channels kept for display (roll, pitch, throttle, yaw on most
@@ -97,9 +108,17 @@ pub struct ControlLink {
     pub telemetry: Option<TelemetrySnap>,
     /// The drone track its decoded positions feed.
     pub track: Option<TrackId>,
+    /// Reports received for it (saturating), for [`Self::established`].
+    pub reports: u16,
 }
 
 impl ControlLink {
+    /// Heard [`ESTABLISH_REPORTS`] times over at least
+    /// [`ESTABLISH_SPAN_MS`]. Unproven links are the first to make room.
+    pub fn established(&self) -> bool {
+        self.reports >= ESTABLISH_REPORTS && self.last_seen_ms.saturating_sub(self.first_seen_ms) >= ESTABLISH_SPAN_MS
+    }
+
     /// Band name for the screen: "915", "868", "433", "2.4".
     pub fn band(&self) -> &'static str {
         band_name(self.region)
@@ -232,6 +251,11 @@ pub struct ControlTable {
     pub energy: u32,
     /// Decoded positions that became drone track positions.
     pub positions: u32,
+    /// New links refused (no room), and unproven links replaced, since boot.
+    pub refused: u32,
+    pub replaced: u32,
+    /// Unproven links replaced a second, for the flood alarm.
+    flood: crate::probation::FloodWatch,
 }
 
 fn age_ok(last: u64, now: u64, cfg: &Config) -> bool {
@@ -248,6 +272,9 @@ impl ControlTable {
             contents: 0,
             energy: 0,
             positions: 0,
+            refused: 0,
+            replaced: 0,
+            flood: crate::probation::FloodWatch::new(),
         }
     }
 
@@ -264,8 +291,9 @@ impl ControlTable {
         self.bands.retain(|b| age_ok(b.last_seen_ms, now_ms, cfg));
     }
 
-    /// The entry for a report (made if new). Index into `links`.
-    fn entry(&mut self, r: &ControlReport, now_ms: u64) -> usize {
+    /// The entry for a report (made if new, when there is room: see
+    /// [`MAX_CONTROL_LINKS`]). Index into `links`.
+    fn entry(&mut self, r: &ControlReport, now_ms: u64, cfg: &Config) -> Option<usize> {
         let s = &r.sighting;
         let key = (s.system, s.region, s.id);
         if let Some(i) = self
@@ -273,11 +301,29 @@ impl ControlTable {
             .iter()
             .position(|l| (l.system, l.region, l.link_id) == key)
         {
-            return i;
+            return Some(i);
         }
-        if self.links.is_full()
-            && let Some(i) = (0..self.links.len()).min_by_key(|&i| self.links[i].last_seen_ms)
-        {
+        if self.links.is_full() {
+            let quiet = |l: &ControlLink| now_ms.saturating_sub(l.last_seen_ms);
+            let n = self.links.len();
+            let links = &self.links;
+            let victim = (0..n)
+                .filter(|&i| quiet(&links[i]) >= cfg.stale_after_ms)
+                .max_by_key(|&i| quiet(&links[i]))
+                .or_else(|| {
+                    (0..n)
+                        .filter(|&i| !links[i].established())
+                        .min_by_key(|&i| (links[i].reports, links[i].last_seen_ms))
+                })
+                .or_else(|| (0..n).filter(|&i| quiet(&links[i]) >= QUIET_EVICT_MS).max_by_key(|&i| quiet(&links[i])));
+            let Some(i) = victim else {
+                self.refused = self.refused.saturating_add(1);
+                return None;
+            };
+            if !self.links[i].established() && quiet(&self.links[i]) < cfg.stale_after_ms {
+                self.replaced = self.replaced.saturating_add(1);
+                self.flood.note(now_ms);
+            }
             self.links.remove(i);
         }
         let id = ControlLinkId(self.next_id);
@@ -305,8 +351,9 @@ impl ControlTable {
             sticks: None,
             telemetry: None,
             track: None,
+            reports: 0,
         });
-        self.links.len() - 1
+        Some(self.links.len() - 1)
     }
 }
 
@@ -355,20 +402,31 @@ fn location_from(p: &ctrlwatch::content::Position) -> Location {
 
 impl ControlTable {
     /// Feed one `Frame::Control` from `node`. A decoded position goes to a
-    /// drone track in `tracker`. Returns the link's entry id.
+    /// drone track in `tracker`. Returns the link's entry id; `None` for a
+    /// new link with no room (see [`MAX_CONTROL_LINKS`]). Forged links
+    /// replacing each other at [`crate::probation::CONTROL_FLOOD_PER_S`] a
+    /// second raise an `IdFlood` threat (table control links).
     pub fn ingest<const N: usize, const A: usize>(
         &mut self,
         tracker: &mut Tracker<N, A>,
         node: u8,
         r: &ControlReport,
         now_ms: u64,
-    ) -> ControlLinkId {
+    ) -> Option<ControlLinkId> {
         let cfg = *tracker.config();
         self.expire(now_ms, &cfg);
-        let i = self.entry(r, now_ms);
+        if let Some(s) = self.flood.check(
+            now_ms,
+            crate::probation::CONTROL_FLOOD_PER_S,
+            crate::probation::FloodTable::ControlLinks,
+        ) {
+            let _ = tracker.ingest_hub_threat(&s, now_ms);
+        }
+        let i = self.entry(r, now_ms, &cfg)?;
         let s = &r.sighting;
         {
             let l = &mut self.links[i];
+            l.reports = l.reports.saturating_add(1);
             l.probe = s.probe;
             l.freq_hz = s.freq_hz;
             l.version = s.version.or(l.version);
@@ -394,7 +452,7 @@ impl ControlTable {
         for c in &r.content {
             self.content(tracker, i, node, c, now_ms);
         }
-        self.links[i].id
+        Some(self.links[i].id)
     }
 
     fn content<const N: usize, const A: usize>(
