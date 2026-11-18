@@ -43,8 +43,8 @@ fn floor_estimate_is_unbiased() {
         if i < 30 {
             continue;
         }
-        for k in (100..900).step_by(8) {
-            est += f64::from(d.local[k / 8]);
+        for k in (96..900).step_by(16) {
+            est += f64::from(d.local[k / 16]);
             mean += f64::from(d.averaged()[k]);
             n += 1;
         }
@@ -171,4 +171,13 @@ fn wav_header_is_well_formed() {
     assert_eq!(u32::from_le_bytes(h[4..8].try_into().unwrap()), 36 + 32_000);
     assert_eq!(u32::from_le_bytes(h[40..44].try_into().unwrap()), 32_000);
     assert_eq!(u32::from_le_bytes(h[24..28].try_into().unwrap()), 16_000);
+}
+
+#[test]
+fn built_in_place_behaves_like_a_fresh_one() {
+    let pcm = Sound::silence(12.0).noise(0.01, 4).quad(1.0, 12.0, 0.01, 640.0, 8).into_pcm();
+    let mut slot = Box::new(core::mem::MaybeUninit::<Detector>::uninit());
+    let d = Detector::init_in_place(&mut slot);
+    let got: Vec<FrameOut> = pcm.chunks_exact(HOP).map(|c| d.process(c.try_into().unwrap())).collect();
+    assert_eq!(got, run(&pcm));
 }

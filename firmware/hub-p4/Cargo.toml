@@ -84,6 +84,11 @@ modes = []
 # GPIO30 unconnected while it runs.
 modesloop = ["modes"]
 
+# Bench only: console `w` prints the last six seconds the microphone heard
+# as hex (src/ear.rs), to check the recorded sound on a laptop. Never in a
+# unit that is deployed: it sends room audio out of the USB port.
+eardump = []
+
 [dependencies]
 link = { path = "../../crates/link" }
 # The wired bus master (Phase 5a).
@@ -95,6 +100,9 @@ critical-section = "1.2"
 screen = { path = "../../crates/screen", features = ["tracker"] }
 tracker = { path = "../../crates/tracker" }
 ctrlwatch = { path = "../../crates/ctrlwatch" }
+# Phase 15: the rotor-sound detector the microphone feeds (ear.rs).
+acoustic = { path = "../../crates/acoustic" }
+libm = "0.2"
 # Phase 12: airspace pack lookups and the possible-violation rule engine.
 airspace = { path = "../../crates/airspace" }
 faarules = { path = "../../crates/faarules" }
@@ -129,3 +137,8 @@ debug         = true
 opt-level     = "s"
 lto           = "fat"
 codegen-units = 1
+
+# The rotor-sound detector runs 31 times a second; built for size it took
+# 8 ms a frame.
+[profile.release.package.acoustic]
+opt-level = 3

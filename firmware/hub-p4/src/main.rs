@@ -36,6 +36,7 @@ mod civil;
 mod console;
 mod display;
 mod downlink;
+mod ear;
 mod evlog;
 mod faa;
 mod gps;
@@ -44,6 +45,7 @@ mod gpsloop;
 #[cfg(feature = "modesloop")]
 mod modesloop;
 mod links;
+mod mic;
 mod psram_test;
 mod report;
 mod rgb;
@@ -353,6 +355,10 @@ fn main() -> ! {
     let mut whloop = webheadloop::Loop::new();
 
     let tracker = place_tracker(psram);
+    // Phase 15: the board's microphone (PDM, clock GPIO24, data GPIO25) and
+    // the rotor-sound detector (ear.rs).
+    let mut ear = ear::Ear::new(psram, p.GPIO24.degrade(), p.GPIO25.degrade());
+    println!("hub-p4: ear: {}", if ear.is_some() { "microphone on GPIO24/25, 16 kHz" } else { "off (no PSRAM)" });
     // SAFETY: the static is taken exactly once, here, before the loop.
     let band = unsafe { &mut *(&raw mut BAND) };
     let mut app = app::App::new(tracker, band);
@@ -402,12 +408,21 @@ fn main() -> ! {
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
+        #[cfg(feature = "eardump")]
+        if ear::DUMP.swap(false, core::sync::atomic::Ordering::Relaxed) {
+            if let Some(e) = ear.as_ref() {
+                e.dump(6);
+            }
+        }
         let mut lines = Lines { note: &mut note, site: &mut site_line };
         if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut down, &mut lines, ms) {
             let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
             site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev);
         }
         ev.tick(ms);
+        if let Some(e) = ear.as_mut() {
+            e.tick(app.tracker, ms);
+        }
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
             app.housekeeping(&gps, ms);
@@ -748,6 +763,8 @@ fn command(
             println!("hub-p4: cmd manual own position cleared");
         }
         b'b' => faa.bench(),
+        #[cfg(feature = "eardump")]
+        b'w' => ear::DUMP.store(true, core::sync::atomic::Ordering::Relaxed),
         b'a' => {
             // Aero nodes: auto (the coverage default) or one mode for all.
             let next = down.cycle_aero();

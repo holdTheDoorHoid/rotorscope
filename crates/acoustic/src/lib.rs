@@ -67,10 +67,13 @@ pub const BIN_HZ: f32 = SAMPLE_RATE as f32 / FFT_N as f32;
 pub const FRAMES_PER_S: u32 = SAMPLE_RATE / HOP as u32;
 
 /// Spacing of the points where the across-frequency background is measured.
-const FLOOR_STEP: usize = 8;
+const FLOOR_STEP: usize = 16;
 const FLOOR_POINTS: usize = BINS / FLOOR_STEP + 1;
-/// Bins either side of a point that feed its background estimate.
-const FLOOR_HALF: usize = 24;
+/// Bins either side of a point that feed its background estimate; every
+/// [`FLOOR_SKIP`]th one is used (neighbouring bins say nearly the same
+/// thing, and sorting them all cost 4 ms a frame on the hub).
+const FLOOR_HALF: usize = 32;
+const FLOOR_SKIP: usize = 2;
 /// The lower quartile of the averaged noise spectrum sits at this fraction
 /// of its mean. Measured on white noise with [`SMOOTH`] (test
 /// `floor_estimate_is_unbiased`); it is 0.29 for an unaveraged spectrum.
@@ -203,6 +206,22 @@ impl Detector {
         }
     }
 
+    /// Build a detector in place, for memory that is not a `static` (the hub
+    /// keeps it in PSRAM): nothing this size crosses the stack.
+    pub fn init_in_place(slot: &mut core::mem::MaybeUninit<Self>) -> &mut Self {
+        let p = slot.as_mut_ptr();
+        // SAFETY: `p` is valid for one `Self`. All-zero bytes are a valid
+        // value for every field except `cfg` and `track`, which are written
+        // before the reference is made (the number arrays, the counter and
+        // the `ready` flag are plain numbers and a bool).
+        unsafe {
+            core::ptr::write_bytes(p, 0, 1);
+            (&raw mut (*p).cfg).write(Config::DEFAULT);
+            (&raw mut (*p).track).write(track::Tracker::new());
+            &mut *p
+        }
+    }
+
     /// Forget everything heard (not the tuning).
     pub fn reset(&mut self) {
         self.hist = [0; FFT_N];
@@ -239,6 +258,15 @@ impl Detector {
 
     /// Take the next [`HOP`] samples.
     pub fn process(&mut self, hop: &[i16; HOP]) -> FrameOut {
+        self.process_timed(hop, &mut || 0).0
+    }
+
+    /// [`Self::process`], also returning how long each stage took by the
+    /// caller's clock (window, transform, averaging, background, peaks,
+    /// ladder and tracking), for measuring on the chip.
+    pub fn process_timed(&mut self, hop: &[i16; HOP], now: &mut dyn FnMut() -> u32) -> (FrameOut, [u32; 6]) {
+        let mut t = [0u32; 7];
+        t[0] = now();
         if !self.ready {
             self.table.fill();
             self.ready = true;
@@ -248,42 +276,55 @@ impl Detector {
 
         let mut sum_sq = 0.0f32;
         for &s in hop {
-            let v = f32::from(s) / 32768.0;
+            let v = f32::from(s) * (1.0 / 32768.0);
             sum_sq += v * v;
         }
         let level_dbfs = 10.0 * libm::log10f(sum_sq / HOP as f32 + 1e-12);
 
         for n in 0..FFT_N {
-            self.re[n] = f32::from(self.hist[n]) / 32768.0 * self.table.hann(n);
+            self.re[n] = f32::from(self.hist[n]) * (1.0 / 32768.0) * self.table.hann(n);
             self.im[n] = 0.0;
         }
+        t[1] = now();
         fft::forward(&self.table, &mut self.re, &mut self.im);
+        t[2] = now();
+        let w = if self.frames == 0 { 1.0 } else { SMOOTH };
         for k in 0..BINS {
             self.power[k] = self.re[k] * self.re[k] + self.im[k] * self.im[k] + 1e-20;
-            let w = if self.frames == 0 { 1.0 } else { SMOOTH };
             self.avg[k] += w * (self.power[k] - self.avg[k]);
         }
-
+        t[3] = now();
         self.local_floor();
         self.slow_floor();
         self.frames = self.frames.saturating_add(1);
-
+        t[4] = now();
         let (peaks, n) = self.peaks();
+        t[5] = now();
         let cands = comb::candidates(&self.cfg, &peaks[..n]);
         let warm = self.frames > self.cfg.warmup_frames;
-        self.track.step(&self.cfg, &cands, level_dbfs, warm)
+        let out = self.track.step(&self.cfg, &cands, level_dbfs, warm);
+        t[6] = now();
+        let mut d = [0u32; 6];
+        for i in 0..6 {
+            d[i] = t[i + 1].wrapping_sub(t[i]);
+        }
+        (out, d)
     }
 
     /// Lower quartile of the bins around each floor point, scaled to the
     /// mean it implies for noise.
     fn local_floor(&mut self) {
-        let mut buf = [0.0f32; 2 * FLOOR_HALF + 1];
+        let mut buf = [0.0f32; 2 * FLOOR_HALF / FLOOR_SKIP + 1];
         for j in 0..FLOOR_POINTS {
             let c = j * FLOOR_STEP;
             let lo = c.saturating_sub(FLOOR_HALF).max(2);
             let hi = (c + FLOOR_HALF).min(BINS - 1);
-            let w = &mut buf[..hi - lo + 1];
-            w.copy_from_slice(&self.avg[lo..=hi]);
+            let mut n = 0;
+            for k in (lo..=hi).step_by(FLOOR_SKIP) {
+                buf[n] = self.avg[k];
+                n += 1;
+            }
+            let w = &mut buf[..n];
             // Small window: insertion sort.
             for i in 1..w.len() {
                 let v = w[i];

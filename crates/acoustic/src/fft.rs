@@ -45,19 +45,19 @@ pub fn forward(t: &Table, re: &mut [f32; FFT_N], im: &mut [f32; FFT_N]) {
     while len <= FFT_N {
         let step = FFT_N / len;
         let half = len / 2;
-        let mut start = 0;
-        while start < FFT_N {
-            for k in 0..half {
-                let (c, s) = (t.cos[k * step], -t.sin[k * step]);
-                let (a, b) = (start + k, start + k + half);
-                let xr = re[b] * c - im[b] * s;
-                let xi = re[b] * s + im[b] * c;
-                re[b] = re[a] - xr;
-                im[b] = im[a] - xi;
-                re[a] += xr;
-                im[a] += xi;
+        for (rc, ic) in re.chunks_exact_mut(len).zip(im.chunks_exact_mut(len)) {
+            let (ra, rb) = rc.split_at_mut(half);
+            let (ia, ib) = ic.split_at_mut(half);
+            let tw = t.cos.iter().step_by(step).zip(t.sin.iter().step_by(step));
+            for ((((ra, rb), ia), ib), (&c, &s)) in ra.iter_mut().zip(rb).zip(ia).zip(ib).zip(tw) {
+                // Multiply by cos - i*sin.
+                let xr = *rb * c + *ib * s;
+                let xi = *ib * c - *rb * s;
+                *rb = *ra - xr;
+                *ib = *ia - xi;
+                *ra += xr;
+                *ia += xi;
             }
-            start += len;
         }
         len <<= 1;
     }

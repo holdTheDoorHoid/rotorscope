@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "acoustic"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "adsb"
 version = "0.1.0"
 
@@ -1104,6 +1111,7 @@ dependencies = [
 name = "hub-p4"
 version = "0.1.0"
 dependencies = [
+ "acoustic",
  "adsb",
  "airspace",
  "coverage",
@@ -1122,6 +1130,7 @@ dependencies = [
  "flarm",
  "gnss",
  "heapless 0.8.0",
+ "libm",
  "link",
  "modes",
  "rid",
