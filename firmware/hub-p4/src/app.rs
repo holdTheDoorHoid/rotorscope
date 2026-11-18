@@ -147,9 +147,15 @@ impl App {
             };
             self.take(gw, ev, actx, node, f, now);
         }
-        // Nodes' Stats: the deaf-node and node-shed checks (not evidence).
-        while let Some((node, up, seen, dropped)) = gw.stats_due.pop() {
-            let _ = self.tracker.ingest_node_stats(node, up, seen, dropped, now);
+        // Nodes' Status and Stats: role and plan, then the deaf-node and
+        // node-shed checks (not evidence).
+        while let Some(d) = gw.stats_due.pop() {
+            if let Some((role, can, plan)) = d.status {
+                self.tracker.ingest_status(d.node, role, can, plan, now);
+            }
+            if let Some((up, seen, dropped)) = d.stats {
+                let _ = self.tracker.ingest_node_stats(d.node, up, seen, dropped, now);
+            }
         }
         self.announce_new(now);
         self.announce_threats(gw, ev, now);

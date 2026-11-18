@@ -128,11 +128,20 @@ pub struct NodeStats {
 /// index in `nodes` for relayed nodes, 0 for a node wired to the link.
 pub type Out = heapless::Deque<(u8, Frame), 8>;
 
-/// A node's latest `Stats` for the tracker (deaf-node and node-shed
-/// checks): node number, uptime us, frames seen, drop total. Kept apart from
-/// `out` so a flood that fills `out` cannot cost the very report that shows
-/// it, and never logged as evidence. One per node (the latest wins).
-pub type StatsDue = heapless::Vec<(u8, u64, u32, u32), { MAX_RELAYED + 1 }>;
+/// A node's latest `Status` and `Stats` for the tracker: its role and
+/// plan (a change resets what the deaf-node check thinks normal), and its
+/// health for the deaf-node and node-shed checks. Kept apart from `out` so a
+/// flood that fills `out` cannot cost the very report that shows it, and
+/// never logged as evidence. One per node (the latest of each wins).
+#[derive(Clone, Copy)]
+pub struct NodeDue {
+    pub node: u8,
+    /// Role, roles it can take, plan.
+    pub status: Option<(link::NodeRole, u8, u16)>,
+    /// Uptime us, frames seen, drop total.
+    pub stats: Option<(u64, u32, u32)>,
+}
+pub type StatsDue = heapless::Vec<NodeDue, { MAX_RELAYED + 1 }>;
 
 #[derive(Default)]
 pub struct LinkStats {
@@ -398,8 +407,18 @@ impl<'d> GatewayLink<'d> {
                 if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
                     stats.gw_hello = firmware.clone();
                 }
-                if let Frame::Stats { uptime_us, frames_seen, dropped, .. } = &f {
-                    q.stats_due(0, *uptime_us, *frames_seen, *dropped);
+                match &f {
+                    Frame::Stats { uptime_us, frames_seen, dropped, .. } => {
+                        if let Some(d) = q.due(0) {
+                            d.stats = Some((*uptime_us, *frames_seen, *dropped));
+                        }
+                    }
+                    Frame::Status { role, can, plan } => {
+                        if let Some(d) = q.due(0) {
+                            d.status = Some((*role, *can, *plan));
+                        }
+                    }
+                    _ => {}
                 }
                 if is_data(&f) {
                     q.push(0, f);
@@ -443,12 +462,17 @@ impl<'d> GatewayLink<'d> {
                 n.role = Some(*role);
                 n.can = *can;
                 n.plan = *plan;
+                if let Some(d) = q.due(i as u8 + 1) {
+                    d.status = Some((*role, *can, *plan));
+                }
             }
             Frame::Stats { uptime_us, frames_seen, rid_found, dropped, .. } => {
                 n.rid_found = *rid_found;
                 n.dropped = *dropped;
                 n.uptime_s = (*uptime_us / 1_000_000) as u32;
-                q.stats_due(i as u8 + 1, *uptime_us, *frames_seen, *dropped);
+                if let Some(d) = q.due(i as u8 + 1) {
+                    d.stats = Some((*uptime_us, *frames_seen, *dropped));
+                }
             }
             _ => {}
         }
@@ -468,14 +492,17 @@ struct Queues<'a> {
 }
 
 impl Queues<'_> {
-    fn stats_due(&mut self, node: u8, uptime_us: u64, frames_seen: u32, dropped: u32) {
-        let e = (node, uptime_us, frames_seen, dropped);
-        match self.stats.iter_mut().find(|x| x.0 == node) {
-            Some(x) => *x = e,
+    /// The pending entry for `node` (`None`: no room, cannot happen with
+    /// one per node number).
+    fn due(&mut self, node: u8) -> Option<&mut NodeDue> {
+        let i = match self.stats.iter().position(|x| x.node == node) {
+            Some(i) => i,
             None => {
-                let _ = self.stats.push(e);
+                self.stats.push(NodeDue { node, status: None, stats: None }).ok()?;
+                self.stats.len() - 1
             }
-        }
+        };
+        self.stats.get_mut(i)
     }
 
     fn push(&mut self, node: u8, f: Frame) {
