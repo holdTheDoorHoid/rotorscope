@@ -376,7 +376,8 @@ pub enum SdLog {
 
 /// Facts about this unit that must stay on screen for as long as they hold
 /// (P4 hub): what its evidence signatures are worth, a bench build, an open
-/// (unauthenticated) node link, evidence not being written. Drawn as a strip
+/// (unauthenticated) node link, evidence not being written, audio clips
+/// switched on or being recorded. Drawn as a strip
 /// along the bottom edge on every page. The default shows nothing, so hubs
 /// that do not fill it (the S3 hub) are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -391,6 +392,41 @@ pub struct Caveats {
     pub link_open: bool,
     /// Evidence records are not reaching the card; `None` while they are.
     pub evidence: Option<EvidenceStop>,
+    /// The microphone's audio clips (P4 hub): people nearby must be able
+    /// to see that sound may be, or is being, recorded.
+    pub audio: AudioClips,
+}
+
+/// Audio clips, as far as the screen is concerned (docs/ACOUSTIC.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AudioClips {
+    /// `audio clips on`: the hub keeps a tape of sound and may save clips.
+    pub on: bool,
+    /// A clip is being recorded or written to the card right now.
+    pub recording: bool,
+    /// Clips wanted but not saved (limits, card space, no card), since boot.
+    pub not_saved: u32,
+}
+
+impl AudioClips {
+    /// The strip line, when there is one: a standing marker while clips are
+    /// on, a recording marker while one is being made.
+    pub fn line(&self) -> Option<String<64>> {
+        use core::fmt::Write;
+        if !self.on && !self.recording {
+            return None;
+        }
+        let mut s = String::new();
+        let _ = s.push_str(if self.recording { "RECORDING SOUND to SD card" } else { "AUDIO CLIPS ON: sound may be recorded" });
+        if self.not_saved > 0 {
+            if !self.recording {
+                s.clear();
+                let _ = s.push_str("AUDIO CLIPS ON: may record");
+            }
+            let _ = write!(s, "; {} not saved", self.not_saved);
+        }
+        Some(s)
+    }
 }
 
 /// The evidence signing key's class, as far as the screen is concerned.
@@ -439,8 +475,9 @@ impl EvidenceStopWhy {
 impl Caveats {
     /// The bottom strip's lines, top to bottom (`None`: no line). The first
     /// is the evidence state (only while evidence is not being written),
-    /// the second the build marks (key class, bench build, open link).
-    pub fn lines(&self) -> [Option<String<64>>; 2] {
+    /// the second audio clips (while on), the third the build marks (key
+    /// class, bench build, open link).
+    pub fn lines(&self) -> [Option<String<64>>; 3] {
         use core::fmt::Write;
         let ev = self.evidence.map(|e| {
             let mut s = String::new();
@@ -468,7 +505,7 @@ impl Caveats {
         if self.link_open {
             add("OPEN LINK");
         }
-        [ev, (!marks.is_empty()).then_some(marks)]
+        [ev, self.audio.line(), (!marks.is_empty()).then_some(marks)]
     }
 }
 

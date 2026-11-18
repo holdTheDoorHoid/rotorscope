@@ -447,19 +447,50 @@ fn ages() {
 
 #[test]
 fn caveat_lines() {
-    assert_eq!(Caveats::default().lines(), [None, None]);
+    assert_eq!(Caveats::default().lines(), [None, None, None]);
     let mut c = Caveats { key: EvidenceKey::Test, ..Caveats::default() };
     let l = c.lines();
-    assert!(l[0].is_none());
-    assert_eq!(l[1].as_deref(), Some("TEST KEY: log not evidence"));
+    assert!(l[0].is_none() && l[1].is_none());
+    assert_eq!(l[2].as_deref(), Some("TEST KEY: log not evidence"));
     c.bench = true;
     c.link_open = true;
-    assert_eq!(c.lines()[1].as_deref(), Some("TEST KEY: log not evidence  BENCH BUILD  OPEN LINK"));
+    assert_eq!(c.lines()[2].as_deref(), Some("TEST KEY: log not evidence  BENCH BUILD  OPEN LINK"));
     c.key = EvidenceKey::Development;
-    assert_eq!(c.lines()[1].as_deref(), Some("DEV KEY: not evidence-grade  BENCH BUILD  OPEN LINK"));
+    assert_eq!(c.lines()[2].as_deref(), Some("DEV KEY: not evidence-grade  BENCH BUILD  OPEN LINK"));
     c = Caveats { evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 12, dropped: 0 }), ..Caveats::default() };
     assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (no SD): 12 waiting"));
-    assert!(c.lines()[1].is_none());
+    assert!(c.lines()[1].is_none() && c.lines()[2].is_none());
     c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 3, dropped: 9 });
     assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (file error): 3 waiting, 9 dropped"));
+}
+
+/// Audio clips: nothing while off (the default), a standing marker while
+/// on, a recording marker while a clip is made. (Before WP-07 the screen
+/// said nothing in any of these states.)
+#[test]
+fn caveats_audio_markers() {
+    let mut c = Caveats::default();
+    assert!(c.audio.line().is_none(), "off: no marker");
+    c.audio.not_saved = 3;
+    assert!(c.lines()[1].is_none(), "off: refusals alone show nothing");
+    c.audio = AudioClips { on: true, recording: false, not_saved: 0 };
+    assert_eq!(c.lines()[1].as_deref(), Some("AUDIO CLIPS ON: sound may be recorded"));
+    c.audio.recording = true;
+    assert_eq!(c.lines()[1].as_deref(), Some("RECORDING SOUND to SD card"));
+    c.audio.not_saved = 4;
+    assert_eq!(c.lines()[1].as_deref(), Some("RECORDING SOUND to SD card; 4 not saved"));
+    c.audio.recording = false;
+    assert_eq!(c.lines()[1].as_deref(), Some("AUDIO CLIPS ON: may record; 4 not saved"));
+    // The marker sits between the evidence line and the build marks.
+    c.key = EvidenceKey::Test;
+    c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 1, dropped: 0 });
+    let l = c.lines();
+    assert!(l[0].as_deref().unwrap().starts_with("NO EVIDENCE"));
+    assert!(l[1].as_deref().unwrap().starts_with("AUDIO CLIPS ON"));
+    assert_eq!(l[2].as_deref(), Some("TEST KEY: log not evidence"));
+    // The longest form still fits the panel (52 characters of 6x10 font).
+    c.audio = AudioClips { on: true, recording: true, not_saved: u32::MAX };
+    assert!(c.audio.line().unwrap().len() <= 52);
+    c.audio.recording = false;
+    assert!(c.audio.line().unwrap().len() <= 52);
 }

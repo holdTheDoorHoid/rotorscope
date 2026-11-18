@@ -723,6 +723,7 @@ fn caveats_strip() {
         bench: true,
         link_open: true,
         evidence: Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 1234, dropped: 56 }),
+        audio: AudioClips { on: true, recording: true, not_saved: 2 },
     };
     st.sd = SdLog::Recording;
     shot("caveats_all", &Ui::default(), &st);
@@ -740,7 +741,31 @@ fn caveats_strip() {
     st.caveats.key = EvidenceKey::Development;
     st.caveats.bench = true;
     st.caveats.link_open = true;
+    st.caveats.audio = AudioClips { on: true, recording: true, not_saved: u32::MAX };
     shot("caveats_long", &Ui::default(), &st);
+}
+
+/// Audio clips on the P4 hub: the standing marker while clips are on, the
+/// recording marker while a clip is made, and nothing while they are off.
+#[test]
+fn caveats_audio() {
+    let mut st = five_drones(true);
+    let off = shot("caveats_audio_off", &Ui::default(), &st);
+    st.caveats.audio = AudioClips { on: true, recording: false, not_saved: 0 };
+    let on = shot("caveats_audio_on", &Ui::default(), &st);
+    st.caveats.audio.recording = true;
+    let rec = shot("caveats_audio_recording", &Ui::default(), &st);
+    // The bottom 11 rows (one strip line) change when clips are on, and
+    // again when one is being recorded; with clips off they are untouched.
+    let bottom = |fb: &Fb| fb.px[((HEIGHT - 11) * WIDTH) as usize..].to_vec();
+    assert_ne!(bottom(&off), bottom(&on), "clips on must show a marker");
+    assert_ne!(bottom(&on), bottom(&rec), "recording must show its own marker");
+    let mut plain = five_drones(true);
+    plain.caveats.audio.not_saved = 9;
+    assert!(bottom(&shot("caveats_audio_off_refused", &Ui::default(), &plain)) == bottom(&off));
+    st.caveats.audio = AudioClips { on: true, recording: false, not_saved: 7 };
+    st.caveats.key = EvidenceKey::Development;
+    shot("caveats_audio_refused", &Ui::default(), &st);
 }
 
 // ---------------------------------------------------------------------------
@@ -790,6 +815,7 @@ fn banded_render_matches_full_frame() {
         bench: true,
         link_open: true,
         evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 7, dropped: 0 }),
+        audio: AudioClips { on: true, recording: true, not_saved: 1 },
     };
     cases.push(("caveats", Ui::default(), st));
 
