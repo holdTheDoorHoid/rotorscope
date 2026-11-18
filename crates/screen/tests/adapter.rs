@@ -380,3 +380,54 @@ fn control_links_reach_the_screen() {
     assert_eq!(st.drones[0].id.as_str(), "ExpressLRS link 915");
     assert!(st.drones[0].drone.is_some(), "it has a position: on the radar");
 }
+
+/// One frame from a forged drone `k`, claiming to sit on the hub.
+fn fake(t: &mut Tracker, k: u32, now: u64) {
+    let id = Message::BasicId(BasicId {
+        id_type: IdType::SerialNumber,
+        ua_type: UaType::HelicopterOrMultirotor,
+        uas_id: FixedStr::new(format!("FAKE{k:012}").as_bytes()).unwrap(),
+    });
+    let mac = [0x02, 0, (k >> 16) as u8, (k >> 8) as u8, k as u8, 9];
+    t.ingest_messages(&obs(Transport::WifiBeacon, 6, -40, mac, now), &[id, location(CITY_HALL.0, CITY_HALL.1)], 0);
+}
+
+/// A flood of forged drones claiming to be at the hub (200 new IDs a
+/// second for 60 s) never pushes a real, confirmed drone off the screen:
+/// it is always in the list, first, numbered, while the fakes are marked
+/// unconfirmed and the bar says ID FLOOD.
+#[test]
+fn flood_of_fakes_at_the_hub_never_hides_a_real_drone() {
+    let mut t: Tracker = Tracker::default();
+    let id = Message::BasicId(BasicId {
+        id_type: IdType::SerialNumber,
+        ua_type: UaType::HelicopterOrMultirotor,
+        uas_id: FixedStr::new(b"1581F5FKD229400D").unwrap(),
+    });
+    let wifi = [0x60, 0x60, 0x1f, 0, 0, 1];
+    let mut st = UiState { gps: Gps { fix: Fix::Fix3D, sats: 9, ..Gps::default() }, ..UiState::default() };
+    let mut k = 0;
+    let mut now = 0;
+    while now < 65_000 {
+        t.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(40.0), now);
+        if now % 1_000 == 0 {
+            t.ingest_messages(&obs(Transport::WifiBeacon, 6, -70, wifi, now), &[id.clone(), location(INDEPENDENCE.0, INDEPENDENCE.1)], 0);
+        }
+        if now >= 5_000 {
+            fake(&mut t, k, now);
+            k += 1;
+        }
+        if now % 250 == 0 && now >= 2_000 {
+            let ctx = t.context(now, None);
+            fill_from_tracker(&t, &ctx, &mut st);
+            let order = st.order();
+            let first = &st.drones[usize::from(order[0])];
+            assert_eq!(first.id.as_str(), "1581F5FKD229400D", "at {now}");
+            assert!(!first.unconfirmed);
+            assert!(st.drones.iter().filter(|d| d.id.starts_with("FAKE")).all(|d| d.unconfirmed));
+        }
+        now += 5;
+    }
+    assert!(st.threats.flood_per_s >= 150, "{}", st.threats.flood_per_s);
+    assert_eq!(st.drones.len(), MAX_DRONES);
+}
