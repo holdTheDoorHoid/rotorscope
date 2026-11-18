@@ -439,7 +439,7 @@ only (2026-11-18, branch `sec/lane-a`). On the bench:
 ## Origin checks (2026-11-18, compile-checked only)
 
 Who may send which frame type (docs/ESPNOW.md "Who may send what") is checked by the gateway, the P4
-hub, the P4's web-head feed and the wired bus. Host tests cover the rules (`cargo test -p link -p
+hub, the P4's web-head feed, the S3 web head and the wired bus. Host tests cover the rules (`cargo test -p link -p
 wirebus`); the firmware changes are compile-checked only. On the bench, a node built with the bench
 feature **`forgetest`** sends frames it must never originate, and both hops must refuse them.
 
@@ -497,7 +497,10 @@ Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench EL
    `Stats` is c5a's, and the gateway's next `Hello` still sets `"gw"` (no lingering).
 6. **Web head.** The `hub-p4: webhead` line's `refused=` moves with the `hub-p4: link` line's
    `refused=` (so not in 1 and 3, where the gateway or the bus already dropped the frames), and
-   the web head shows none of the forged frames in any of 1-5.
+   the web head shows none of the forged frames in any of 1-5. Then wire the forgetest node (the
+   point-to-point build) straight to the S3 web head's link 1 (`webhead` build): `forge hubfix`,
+   `csbee`, `flags` and `join` raise the S3 `hub` line's `relay_refused` and change nothing on the
+   page; on link 0 (the P4's) the first three are taken, by design.
 7. **Node table.** With 16 relayed nodes known to the P4 (the bus and a gateway together, or
    `fakenode` plus real nodes), power one node off; after 60 s a new node takes its slot
    (`evicted=` on the `hub-p4: link` line goes up); before that the new node's frames count as

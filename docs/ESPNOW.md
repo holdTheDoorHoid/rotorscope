@@ -220,7 +220,8 @@ with an error when there is no key.
   for an open gateway). The **screen** does not show the key ID: it shows
   `OPEN LINK` in the strip at the bottom edge while the gateway's last
   `Hello` says the link is open, and nothing about the link when it is keyed
-  (no strip at all on a normal build with an evidence key). Rejected
+  (until the hub signs with a hardware key the strip also says `TEST KEY`
+  or `DEV KEY`, docs/EVIDENCE.md). Rejected
   packets arrive as `Threat` frames of kind `forged_link` naming the claimed
   node, at most once a second per node and reason, and show up as
   `hub-p4: THREAT Forged node traffic ...` console lines and threats on the

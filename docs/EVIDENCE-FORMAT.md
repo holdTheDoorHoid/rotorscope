@@ -12,7 +12,10 @@ Format version 1. All integers little-endian. "SHA-256" is FIPS 180-4.
 On the hub's SD card (FAT32): `ROTORSCP/EVIDENCE/EVnnnnnn.EVL`, six decimal
 digits. The hub creates a new file each time it mounts the card (each boot,
 and again after a card is reinserted), numbered one past the highest file
-already there. It never writes to an existing file. A file is just records
+already there; when no number above it is free (an `EV999999.EVL` on the
+card), the lowest free number, with no previous file to link to. Only
+regular files count; a name taken by a folder is skipped. It never writes
+to an existing file. A file is just records
 back to back, no file header.
 
 File numbers are **not** unique over the card's life: if the newest files
