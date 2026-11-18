@@ -8,8 +8,11 @@
 //! drone's real element almost never. Here each distinct content from an
 //! address has its own one-second gap, so the forger's content and the
 //! drone's are both forwarded. Bounded: an address may have at most
-//! [`PER_SOURCE`] contents forwarded within one gap (a forger sending many
-//! different contents gets that many a second, not one per frame).
+//! `per_source` contents forwarded within one gap (a forger sending many
+//! different contents gets that many a second, not one per frame). With
+//! `per_source` 2, a drone whose element changes with every beacon is
+//! forwarded twice a second (once before), and still once a second while a
+//! forger holds the other place.
 //!
 //! **Alternating contents.** A real transmitter's reports move forward: a
 //! DJI DroneID element changes with every beacon (its sequence number), a
@@ -20,14 +23,11 @@
 //! alternation, and [`ContentLimit::alternations`] counts them.
 //!
 //! Limits: a forger sending many *different* contents from the drone's
-//! address takes [`PER_SOURCE`] - 1 of the address's places each gap, so the
-//! drone's own report still gets one most of the time but not always; the
-//! address is flagged either way.
+//! address takes the address's places as fast as they free, so the drone's
+//! own report gets one only sometimes; the address is flagged either way.
 
 use crate::util::{Ms, elapsed};
 
-/// Most contents forwarded per address within one gap.
-pub const PER_SOURCE: usize = 4;
 /// How long an address stays flagged after its last alternation.
 pub const FLAG_MS: Ms = 60_000;
 /// Addresses remembered as alternating (the stalest flag is replaced).
@@ -57,13 +57,16 @@ pub struct ContentLimit<const N: usize> {
     seen: heapless::Vec<Entry, N>,
     flagged: heapless::Vec<([u8; 6], Ms), FLAGGED>,
     gap_ms: Ms,
+    per_source: u8,
     /// Alternations seen (A, B, A from one address), total.
     pub alternations: u32,
 }
 
 impl<const N: usize> ContentLimit<N> {
-    pub const fn new(gap_ms: Ms) -> Self {
-        Self { seen: heapless::Vec::new(), flagged: heapless::Vec::new(), gap_ms, alternations: 0 }
+    /// At most one report per (address, content) every `gap_ms`, and at
+    /// most `per_source` contents per address within one gap.
+    pub const fn new(gap_ms: Ms, per_source: u8) -> Self {
+        Self { seen: heapless::Vec::new(), flagged: heapless::Vec::new(), gap_ms, per_source, alternations: 0 }
     }
 
     /// One report from `mac` whose content hashes to `content`, at `now`.
@@ -92,7 +95,7 @@ impl<const N: usize> ContentLimit<N> {
             None => {
                 let gap = self.gap_ms;
                 let active = self.seen.iter().filter(|e| e.mac == mac && elapsed(now, e.sent) < gap).count();
-                if active >= PER_SOURCE {
+                if active >= usize::from(self.per_source) {
                     false
                 } else {
                     if self.seen.is_full()
@@ -151,8 +154,8 @@ mod tests {
     /// with one false content; the victim beacons 10 times a second, its
     /// content `victim(i)` for beacon `i`. Returns how many victim reports
     /// were forwarded, new limiter and old.
-    fn spoof_run(victim: impl Fn(u32) -> u32) -> (u32, u32, ContentLimit<24>) {
-        let mut new = ContentLimit::<24>::new(GAP);
+    fn spoof_run(per_source: u8, victim: impl Fn(u32) -> u32) -> (u32, u32, ContentLimit<24>) {
+        let mut new = ContentLimit::<24>::new(GAP, per_source);
         let mut legacy = RateLimit::<16>::new(GAP);
         let (mut got_new, mut got_old) = (0, 0);
         for ms in 0..10_000u32 {
@@ -176,10 +179,11 @@ mod tests {
     #[test]
     fn spoofed_address_does_not_suppress_a_changing_report() {
         // DJI DroneID: every beacon's element differs (sequence number).
-        let (got_new, got_old, l) = spoof_run(|i| 1000 + i);
-        // At most PER_SOURCE - 1 places a second left after the forger's
-        // one: 3 a second for 10 s.
+        let (got_new, got_old, l) = spoof_run(4, |i| 1000 + i);
+        // per_source - 1 places a second left after the forger's one.
         assert!(got_new >= 27, "victim forwarded {got_new} times");
+        let (got_new, _, _) = spoof_run(2, |i| 1000 + i);
+        assert!(got_new >= 9, "victim forwarded {got_new} times");
         assert_eq!(got_old, 0, "the old limiter let the forger win every second");
         assert!(l.is_flagged(VICTIM, 10_000));
         assert!(l.alternations > 0);
@@ -188,7 +192,7 @@ mod tests {
     #[test]
     fn spoofed_address_does_not_suppress_a_constant_report() {
         // A Wi-Fi drone: its network name never changes.
-        let (got_new, got_old, l) = spoof_run(|_| 7);
+        let (got_new, got_old, l) = spoof_run(2, |_| 7);
         assert!(got_new >= 9, "victim forwarded {got_new} times");
         assert_eq!(got_old, 0);
         assert!(l.is_flagged(VICTIM, 10_000));
@@ -196,7 +200,7 @@ mod tests {
 
     #[test]
     fn one_content_is_still_once_per_gap() {
-        let mut l = ContentLimit::<24>::new(GAP);
+        let mut l = ContentLimit::<24>::new(GAP, 4);
         let sent = (0..10_000u32).filter(|&ms| l.check(VICTIM, 5, ms).send).count();
         assert_eq!(sent, 10);
         assert_eq!(l.alternations, 0);
@@ -204,16 +208,16 @@ mod tests {
 
     #[test]
     fn many_contents_from_one_address_are_bounded() {
-        let mut l = ContentLimit::<24>::new(GAP);
+        let mut l = ContentLimit::<24>::new(GAP, 4);
         // A new content every millisecond for 10 s.
         let sent = (0..10_000u32).filter(|&ms| l.check(VICTIM, ms, ms).send).count();
-        assert!(sent <= PER_SOURCE * 10 + PER_SOURCE, "{sent}");
-        assert!(sent >= PER_SOURCE * 9, "{sent}");
+        assert!(sent <= 4 * 10 + 4, "{sent}");
+        assert!(sent >= 4 * 9, "{sent}");
     }
 
     #[test]
     fn honest_transmitters_are_never_flagged() {
-        let mut l = ContentLimit::<24>::new(GAP);
+        let mut l = ContentLimit::<24>::new(GAP, 4);
         let other = [0x02, 1, 2, 3, 4, 5];
         for ms in (0..60_000u32).step_by(100) {
             // Changing content (DJI), constant content (Wi-Fi drone).
@@ -227,7 +231,7 @@ mod tests {
 
     #[test]
     fn alternation_is_flagged_and_expires() {
-        let mut l = ContentLimit::<24>::new(GAP);
+        let mut l = ContentLimit::<24>::new(GAP, 4);
         assert!(!l.check(VICTIM, 1, 0).alternating);
         assert!(!l.check(VICTIM, 2, 10).alternating);
         // Back to 1: two transmitters.
@@ -244,7 +248,7 @@ mod tests {
     fn a_random_address_flood_does_not_stop_reports() {
         // Many addresses, one frame each: each is forwarded (the hub queue's
         // budget, `shed`, bounds the volume), and the victim still is.
-        let mut l = ContentLimit::<24>::new(GAP);
+        let mut l = ContentLimit::<24>::new(GAP, 4);
         let mut got = 0;
         for ms in 0..10_000u32 {
             let b = ms.to_le_bytes();
