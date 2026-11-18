@@ -91,19 +91,19 @@ faulttest = []
 # (Philadelphia), for a bench with no GPS. Never in a normal build: in the
 # field it would put every distance and flag in the wrong place.
 testpoint = []
-#
-# Every feature above marked "Bench only" (and `selftest`) is fenced by
-# build.rs: the build stops unless ROTORSCOPE_BENCH=1, and the hello line,
-# the evidence boot event and the screen ("BENCH BUILD") say which are in.
-
 # Bench only: console `w` prints the last six seconds the microphone heard
 # as hex (src/ear.rs), to check the recorded sound on a laptop. Never in a
-# unit that is deployed: it sends room audio out of the USB port.
+# unit that is deployed: it sends room audio out of the USB port. Prints
+# nothing while audio clips are off (no sound is kept then).
 eardump = []
 # Bench only: a made-up rotor sound is mixed into the microphone signal
 # inside the chip (20-45 s and 70-80 s after start-up), and every saved clip
 # is read back from the card and checked. See src/ear.rs.
 earfake = []
+#
+# Every feature above marked "Bench only" (and `selftest`) is fenced by
+# build.rs: the build stops unless ROTORSCOPE_BENCH=1, and the hello line,
+# the evidence boot event and the screen ("BENCH BUILD") say which are in.
 
 [dependencies]
 link = { path = "../../crates/link" }
