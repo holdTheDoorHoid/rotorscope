@@ -398,7 +398,11 @@ impl App {
     pub fn housekeeping(&mut self, gps: &crate::gps::Gps, now: u64) {
         match self.own_pos(gps, now) {
             Some(p) => {
-                let stamp = if p.source == OwnSource::Manual { now } else { p.at_ms };
+                // A held GPS fix (docs/GNSS-INTEGRITY.md: counted as fresh,
+                // the hub does not move) keeps its old `at_ms` for the
+                // evidence log's fix age; the tracker must not age it out.
+                let held = p.source == OwnSource::Gps && gps.fix.is_some_and(|f| f.held);
+                let stamp = if p.source == OwnSource::Manual || held { now } else { p.at_ms };
                 self.tracker.set_own_position(p.lat, p.lon, p.alt, stamp);
             }
             None => self.tracker.clear_own_position(),
