@@ -257,10 +257,12 @@ impl App {
             if t.kind == link::ThreatKind::IdFlood {
                 // Raised by the tracker itself (WP-09, `tracker::probation`):
                 // a flood of forged drone IDs, aircraft addresses or
-                // control links, with the rate seen.
+                // control links, with the rate seen; or one node shedding
+                // a flood (its address; zero for the hub-wide tables).
                 let text = tracker::probation::describe(t);
                 let mut data = [0u8; 7];
                 data[0] = t.kind as u8;
+                data[1..7].copy_from_slice(&mac);
                 ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
                 crate::println!("hub-p4: THREAT {}", text);
                 continue;

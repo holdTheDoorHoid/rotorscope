@@ -35,7 +35,7 @@ records how many files or boots there have been.
 | 24 | 32 | SHA-256 of the previous record of this boot id (all zero for #0) |
 | 56 | 8 | hub uptime, milliseconds since power-on (u64) |
 | 64 | 8 | UTC, Unix milliseconds (u64); 0 = unknown |
-| 72 | 1 | time source: 0 none, 1 free-running, 2 gps, 3 gps_pps |
+| 72 | 1 | time source: 0 none, 1 free-running, 2 gps, 3 gps_pps, 4 untrusted |
 | 73 | 1 | GPS receiver: 0 absent, 1 searching, 2 2D fix, 3 3D fix |
 | 74 | 1 | hub position source: 0 none, 1 gps, 2 manual (typed in) |
 | 75 | 1 | satellites used; 255 unknown |
@@ -58,7 +58,10 @@ record carries uptime only). **free-running**: UTC carried forward on the
 hub's crystal since the GPS last gave it (the time-age field says how
 long). **gps**: UTC from the receiver's messages, within about 2.5 s of the
 last one, not locked to the pulse-per-second line (tens of ms uncertain).
-**gps_pps**: UTC anchored to the receiver's PPS edge.
+**gps_pps**: UTC anchored to the receiver's PPS edge. **untrusted**: the
+GPS gave a time the hub did not trust (spoofing suspected with nothing
+trusted to hold, or a time before the build date or the remembered time;
+docs/GNSS-INTEGRITY.md); the UTC field is 0.
 
 Body fields marked "lv" are a u16 length followed by that many bytes.
 
@@ -88,7 +91,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 14 | shutdown | (none); a shutdown checkpoint follows |
 | 15 | gps_receiver | 1 answering, 0 silent |
 | 16 | o4_decrypted | session key ID (4), record selector (1); text is what it decrypted to, never the key |
-| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); text describes it. The raw `Threat` frame is the record before it |
+| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); text describes it. For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
 | 18 | gnss_jamming | kind (1), level (i16); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
