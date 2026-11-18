@@ -330,11 +330,23 @@ struct Sim {
     times: Vec<(u64, Kind)>,
     verdicts: Vec<HopVerdict>,
     sc: Box<Scratch>,
+    /// The decoder's pressure fed on every 5.8 GHz dwell: (skipped, full,
+    /// valid, busy percent), as node-sdr's decode budget reports it.
+    pressure: Option<(u32, u32, u32, u8)>,
 }
 
 impl Sim {
     fn new(probes: usize) -> Self {
-        Sim { w: Watch::new(), t_ms: 1000, probes, reports: vec![], times: vec![], verdicts: vec![], sc: Box::new(Scratch::new()) }
+        Sim {
+            w: Watch::new(),
+            t_ms: 1000,
+            probes,
+            reports: vec![],
+            times: vec![],
+            verdicts: vec![],
+            sc: Box::new(Scratch::new()),
+            pressure: None,
+        }
     }
 
     /// One dwell of `dwell_ms` on hop `freq` (LO `lo`), as the firmware does
@@ -347,6 +359,9 @@ impl Sim {
             let s = start + p * BLOCK;
             let pw: u32 = (s..s + PROBE).map(|n| POWER[scene.byte(n, lo) as usize] as u32).sum();
             ps.feed(pw);
+        }
+        if let Some((sk, full, valid, busy)) = self.pressure.filter(|_| freq > 50_000) {
+            ps.decode_pressure(sk, full, valid, busy);
         }
         let end = start + self.probes as u64 * BLOCK;
         let bytes = ring(scene, lo, end, RING);
@@ -816,5 +831,42 @@ fn noise_never_looks_like_a_tone_or_sweep() {
             assert!(f.tone.is_none() && f.sweep.is_none(), "{db:?}: {f:?}");
             assert!(f.occupancy_pct >= 85, "{db:?}: {f:?}");
         }
+    }
+}
+
+// ------------------------------------------------------ decoder pressure --
+
+#[test]
+fn a_pulse_train_that_floods_the_decoder_is_pulsed_jamming() {
+    // DroneID-length pulses every ~150 ms: few probes are loud (the probe
+    // levels alone show nothing), but on every 5.8 GHz dwell the decode
+    // budget refused windows and nothing decoded. Before: no finding.
+    let mut sim = learnt(1, 400);
+    let mut q = Scene::quiet();
+    sim.pressure = Some((3, 3, 0, 41));
+    for _ in 0..2 {
+        sim.cycle(&mut q, &DRONEID, 700);
+    }
+    let p = sim.of(Kind::Pulsed);
+    assert!(!p.is_empty(), "{:?}", sim.reports);
+    assert!(p.iter().all(|r| r.band == Band::G58 && r.detail == 41), "{p:?}");
+    assert!(sim.verdicts.iter().any(|v| v.pressure && v.notable()));
+    assert!(sim.of(Kind::Broadband).is_empty() && sim.of(Kind::Blinded).is_empty(), "{:?}", sim.reports);
+}
+
+#[test]
+fn a_busy_decoder_with_valid_bursts_is_not_jamming() {
+    // Several real drones on one channel: the budget refuses some windows,
+    // but what it decodes is valid. And a decoder that never had to refuse
+    // anything is never pressure, however busy.
+    for pressure in [(2, 3, 3, 60), (0, 3, 0, 40)] {
+        let mut sim = learnt(1, 400);
+        let mut q = Scene::quiet();
+        sim.pressure = Some(pressure);
+        for _ in 0..2 {
+            sim.cycle(&mut q, &DRONEID, 700);
+        }
+        assert!(sim.reports.is_empty(), "{pressure:?}: {:?}", sim.reports);
+        assert!(sim.verdicts.iter().all(|v| !v.pressure));
     }
 }

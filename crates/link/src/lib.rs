@@ -495,7 +495,11 @@ pub enum ThreatKind {
     JamSweep,
     /// Strong pulsed or reactive interference (on only part of the time).
     /// Raw-capture nodes: `detail` = median percent of probes loud (the
-    /// duty cycle), `level` = the pulses' rise over the floor, dB.
+    /// duty cycle), `level` = the pulses' rise over the floor, dB. node-sdr
+    /// also counts dwells on which a train of DroneID-length pulses flooded
+    /// its decoder (the decode budget refused windows and what it decoded
+    /// was mostly not valid); for those `detail` is the decoder's busy
+    /// percent of the dwell.
     JamPulsed,
     /// The node can hear almost nothing it normally hears while the band is
     /// loud: it is effectively blind. `detail` = percent of the usual
