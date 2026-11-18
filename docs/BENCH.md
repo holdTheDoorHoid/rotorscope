@@ -631,8 +631,11 @@ One `floodtest` node, wired to the P4 (or behind the gateway for step 5). Record
    equals `real.sent` (none lost) and `shed.rid_known` and `shed.health` stay 0:
    * `flood tool 500`: `shed.threat` rises by about 490 a second; the hub gets at most 8 threats a
      second (attack tool, beacon flood).
-   * `flood drone 500`: `wdrone` rises by about 8 a second, `shed.wdrone` by about 490 (`threat`
-     and `shed.threat` rise too: one drone network name from many transmitters reads as clones).
+   * `flood drone 500`: `wdrone` rises by about 8 a second, `shed.wdrone` by about 490; `threat`
+     and `shed.threat` stay flat. (An earlier version of this list expected clone alarms here. The
+     clone check (`wifiwatch::drones::Clones`) wants one copy address heard again and again; every
+     forged beacon here has a new random address, heard once, so none becomes a copy. Bench
+     2026-11-18 agreed: `threat` unchanged over the 60 s.)
    * `flood dji 500`: `dji` rises by about 8 a second, `shed.dji` by about 490 (the real DJI
      element is mostly shed here: it shares the DJI budget).
    * `flood wfb 500`: `open` rises by about 500 a second, `open_ev` rises (64 ids, 16-entry table),
@@ -854,7 +857,20 @@ GPSLOOP_SCENARIO=step1s ROTORSCOPE_BENCH=1 cargo build --release --features gpsl
 
 The emulated UTC starts one day after the firmware's build date. Loop builds
 keep their GPS memory in `ROTORSCP/GPSLOOP.TXT`, never `GPSMEM.TXT`, and do
-not remember the time (the emulation restarts its clock at every boot).
+not remember the time (the emulation restarts its clock at every boot). The
+file is first written when home is learned (15 minutes of steady fixes with
+integrity `ok`), so every boot before that says `GPS memory: none on the card
+(no ROTORSCP/GPSLOOP.TXT yet: written once home is learned)`. That is
+expected. (The first bench pass never saw the file because the rig's late PPS
+edge, fixed since, kept integrity at `suspect_spoofing`, and home is only
+learned while integrity is `ok`.)
+
+**No GPS attached** (a normal build with nothing on the UART3-IN header):
+`gps.state` is `absent`, and `trusted`, `untrusted_pos` and `untrusted_time`
+all read `false`. "Untrusted" means a receiver gave a position or time that
+the hub refused. With no receiver there is nothing to refuse, so there is no
+position, `utc_ms:null`, and evidence records carry time source `none`, not
+`untrusted`.
 Every run starts with `hub-p4: gpsloop scenario <name> (GPSLOOP_SCENARIO;
 emulated UTC starts <s> s)`. Watch the console and the `{"t":"hub"}` line's
 `gps` object: `trusted`, `untrusted_pos`, `untrusted_time`, `time_held`,
@@ -862,7 +878,7 @@ emulated UTC starts <s> s)`. Watch the console and the `{"t":"hub"}` line's
 
 | Scenario | What the emulated receiver does | Expected |
 |---|---|---|
-| `honest` | as before | `trusted:true` from about 10 s after the first fix; `time_step_ms` within +-5 (PPS); no `gps integrity` line, no `gnss_*` evidence event for an hour |
+| `honest` | as before | `trusted:true` from the first fix on; no `gps integrity` line, no `gnss_*` evidence event for an hour; `time_held:false` throughout; after about 15 min `GPS home learned`. `time_step_ms` is the larger of the PPS and message channels, so it follows the message arrival: measured -134 to +17 ms over 18 min (tolerance 150 ms), mostly within +-15 |
 | `step1s` | from second 120 every epoch's UTC is 1 s early | `gpsloop scenario step1s begins now`, then within 2 s `gps integrity ok -> suspect_spoofing: possible GPS spoofing: GPS time jumped -1000 ms against the hub's clock; holding last trusted position and time`. `trusted:false`, `time_held:true` for as long as it runs (it never ends); evidence context goes `free_running` after 2.5 s; the aero `TimeSync` keeps the hub's held clock, not the stepped one |
 | `step500` | at second 120 the epochs and the PPS edge move 500 ms later | as `step1s` with about `-500 ms` |
 | `drift` | from second 120 each epoch 2 ms later than the last (2000 ppm) | with PPS (both emulations drive it) the alarm comes about 3-5 s after `begins now`, `time_step_ms` around -5 to -10; then held as above |
@@ -928,3 +944,92 @@ the chip.
 **Not checked.** Anything on the P4's screen (nobody could see it); the S3 web head; audio clips
 switched on; a real sound through the microphone; the wired bus; an old gateway against the new hub;
 node-table eviction; node-ble and node-lr crash recovery.
+
+## Bench results, 2026-11-18 (Phase 2 fixes)
+
+Two defects from the Phase 2 bench pass, fixed on branch `sec/wp07-audio` and run again on the
+same boards: P4 hub, gateway `c5c`, multi-image node `c5a` (`c5b` was in use for other work and
+was not touched). Logs: `a-*.log` in the session scratchpad (`p2fix/`).
+
+### "Node blinded" after a flood (hub deaf-node check)
+
+**What failed.** About 10 s after a 1 000 frames/s injected flood on `c5a` stopped, the P4 raised
+`THREAT Node blinded (node 2, +0 dB, detail 3)` and held it for the remaining 170 s while the
+node heard its usual ~80 frames/s. The check (`tracker::threats::DeafWatch`) learned a node's
+normal rate with a ~30 s memory per Stats report, so the flood became "normal"; the quiet after it
+read as under a tenth of that; and learning stopped while a node read deaf, so it never recovered.
+This check ran only on the S3 web head before the P4 integration, so it had not met a flood.
+
+**What it does now.** Learning runs on node uptime: a plain average for the first minute, then up
+with a 10 min time constant (one report counts as at most twice the normal) and down with a 3 min
+one. It learns from frames kept (seen minus the Stats `dropped` total, so a flood the node sheds
+is not learned) and judges deafness on frames seen. While a node reads deaf the normal keeps sinking
+(floored at 20 frames/s), so a lasting lower level becomes the new normal: the alarm ends and the
+hub says `node N now hears X/s, was Y/s; accepted as its new normal (node blinded alarm ends)`
+(console and a `Setting` evidence event). A node that hears under 2 frames/s stays raised. Once a
+minute the P4 prints `deaf-check node N: X/s now, normal Y/s`. Host tests: `tests_deaf.rs`.
+
+**Bench** (`a-p4-flood.log`, `a-c5a-flood.log`, `a-c5c-flood.log`; P4 normal build with the fix,
+`c5a` node-wifi `floodtest` behind the keyed gateway). `flood real on` at 45 s; at 180 s `rid`,
+`tool`, `drone`, `dji`, `wfb` at 300 a second each; at 300 s all at 1 000; at 400 s all off;
+watched to 840 s.
+
+| Hub time | Node 2 now | Normal (hub) |
+|---|---|---|
+| 120 s (settled) | 83/s | 103/s |
+| 242 s (300 a second each) | 1 265/s | 104/s |
+| 361 s (1 000 a second each) | 4 042/s | 105/s |
+| 421 s (20 s after) | 85/s | 100/s |
+| 600 s | 75/s | 84/s |
+| 780 s | 105/s | 84/s |
+
+No `Node blinded` at any time (no `blinded` threat line at all). The node-shed alarm raised at
+185.0 s (5 s after the flood began: 1 072 frames a second discarded) and its last report was at
+404.5 s, so it ended about 15 s after the flood stopped, as before. `FLOODREAL0000000001` stayed
+active and confirmed all run. No restart on any board. Node 1 (`c5b`, ~15/s) is under the 20/s
+floor and is not judged.
+
+### The GPS loop rig's late PPS edge
+
+**What failed.** In the bench-only `gpsloop` builds the emulated PPS pad is raised from the hub's
+main loop, which pauses for SD writes (18-35 ms flushes, ~130 ms airspace pack reads). The edge
+interrupt timestamped the physically late edge, more than the 5 ms PPS tolerance, so every scenario
+reported `GPS time jumped -33 ms` about once a minute: `honest` could not pass, the step and drift
+alarms could not be timed, home was never learned and so no `GPSLOOP.TXT` was ever written. The
+real path (a receiver's on-time edge, timestamped in the interrupt) was not affected.
+
+**Fix.** The emulator hands the interrupt the instant the edge was scheduled for
+(`gps::pps_drive_at`, `gpsloop` feature only). Tolerances unchanged; the normal build's interrupt
+is unchanged (its image has no trace of the hand-over).
+
+**Bench** (`a-p4-gps-<scenario>.log`; the gateway and `c5a` stayed attached, `c5a` still on its `floodtest` image injecting only the synthetic real drone). In every
+run the published UTC (`utc_ms - up_ms`) never moved after the first trusted epoch, except as noted
+for `drift`; the aero `TimeSync` is sent from that same clock.
+
+| Scenario | Result |
+|---|---|
+| `honest`, 18 min | No integrity finding, `trusted:true` and `time_held:false` from the first fix (12.7 s) to the end; `UTC set from GPS (PPS-locked)` at 12.5 s; `GPS home learned` at 905 s. A reboot of the same image: `GPS home loaded from the card` (so `GPSLOOP.TXT` was written). PASS |
+| `step1s` | `begins now` 121.98 s; held (`trusted:false`, `time_held:true`) at 122.28 s, the console line `GPS time jumped -1000 ms` at 122.98 s (first stepped epoch). Held to the end; published UTC unchanged |
+| `step500` | `begins now` 121.88 s; the first late epoch is about 1.5 s later; held at 124.48 s, `GPS time jumped -500 ms` at 124.88 s: within two epochs. Published UTC unchanged |
+| `drift` | `begins now` 121.88 s; held at 125.48 s, `GPS time jumped -7 ms` at 125.88 s (4.0 s after). Before the alarm the published UTC followed the walk by 4 ms (inside the 5 ms PPS tolerance, by design), never after |
+| `early` | At the first fix (5.7 s) `GPS time 86394 s before the build date or the last time the hub trusted`; `untrusted_time:true`, `time_floor:true`, no UTC. Console `T` at 90 s: accepted; `ok` at 122.6 s, `trusted:true` at 132.1 s |
+| `spoofboot` | `ok -> spoofing ... 14 satellites all near 46 dB-Hz` at 6.7 s; `untrusted_pos`/`untrusted_time` true, no UTC, no `TimeSync` (`syncs` 0) until trusted; SD log `LOG00119.CSV` opened at 91 s; evidence records marked `untrusted`. `spoofer off now` 601.8 s: `ok` 29.3 s later, `trusted:true` at 640.8 s and the evidence event `UTC set from GPS (PPS-locked)` at 640.6 s; `syncs` grows from then on. Because `honest` had learned a home, the remembered home was held as the own position from the card mount (91 s) while spoofed |
+
+**`GPS memory: none on the card`** on every loop boot was expected before a home was learned (see
+"GPS time and trust scenarios"); the line now names the file it looked for.
+
+**Seen, not fixed.**
+* The message channel has little margin at boot: while the airspace pack loads (main-loop pauses
+  of 130-376 ms, `max_tick ... (pack_read)`), a GPS message read late by more than 150 ms makes that
+  epoch untrusted. In `step500` (30.8 s) and `spoofboot` (91.5 s) the hub held its clock for about
+  10 s with no console or evidence finding, then trusted again. This is the real receiver path too
+  (messages are read in the main loop), not the rig.
+* Between integrity going back to `ok` and `trusted:true` (about 10 s, `early` and `spoofboot`)
+  `own` is `null` even when a remembered home exists, although the home was held as `own` while
+  spoofing was suspected just before.
+
+**Boards left on normal keyed builds.** P4: normal build with both fixes (`bench: []`). `c5a`:
+node-wifi, node-ble and node-sdr normal images, link key 42eeb2c6, `"bench":[]`,
+`"faulttest":false`. `c5c`: gateway as before, link key 42eeb2c6, `"bench":[]`. A 200 s run
+together (`a-p4-final.log`): no restart, `refused` and `corrupt` 0, the deaf check holding node 1
+(`c5a`) at about 82/s now and 91/s normal.

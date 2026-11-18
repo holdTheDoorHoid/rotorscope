@@ -58,6 +58,10 @@ reported and gives one of five verdicts:
   reference (global decoding only), FLARM is counted not decoded, no
   `TimeSync` is sent (aero nodes park after 10 s), the CSV log is numbered
   rather than named by time, the web head gets no hub position or time.
+  With **no receiver at all** the flags stay false (`gps.state` `absent`,
+  `untrusted_pos` / `untrusted_time` false, evidence time source `none`):
+  "untrusted" means a receiver gave a position or time the hub refused, and
+  with no receiver there is nothing to refuse.
 - GPS time found before the build date or the remembered time also drops
   the held time (it was not trustworthy after all).
 - The receiver status (fix type, satellites) still shows what the receiver
