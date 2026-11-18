@@ -92,7 +92,7 @@ pub async fn run(mut now: EspNow) {
             if pkt.kind == airlink::Kind::Frames {
                 continue; // another node's batch
             }
-            let v = auth::node_accept(auth.as_mut(), &src, got.data(), pkt.kind);
+            let v = auth::node_accept(auth.as_mut(), &src, got.data(), pkt.kind, Instant::now().as_millis());
             let beacon_ok = pkt.kind == airlink::Kind::Beacon && auth::proves_gateway(v);
             if !rejects.take(v) && !beacon_ok {
                 continue;
@@ -202,8 +202,8 @@ pub async fn run(mut now: EspNow) {
             if rejects != auth::NodeRejects::default() {
                 let r = rejects.by_reason;
                 out::line(format_args!(
-                    r#"{{"t":"link_auth","bad_tag":{},"replay":{},"unauth":{},"stale":{},"dups":{}}}"#,
-                    r[0], r[1], r[2], r[3], rejects.dups
+                    r#"{{"t":"link_auth","bad_tag":{},"replay":{},"unauth":{},"stale":{},"late":{},"dups":{}}}"#,
+                    r[0], r[1], r[2], r[3], r[4], rejects.dups
                 ));
             }
         }

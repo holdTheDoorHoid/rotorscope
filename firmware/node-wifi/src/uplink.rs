@@ -159,7 +159,7 @@ pub async fn run(mut now: EspNow) {
                 continue; // another node's batch
             }
             // Keyed: tag and freshness before anything else looks at it.
-            let v = auth::node_accept(auth.as_mut(), &got.info.src_address, got.data(), pkt.kind);
+            let v = auth::node_accept(auth.as_mut(), &got.info.src_address, got.data(), pkt.kind, Instant::now().as_millis());
             // A genuine beacon of another epoch (the gateway rebooted) still
             // names our gateway: sending to it earns the sync that moves us
             // to its new epoch. Nothing else is taken from it.
@@ -288,8 +288,8 @@ pub async fn run(mut now: EspNow) {
             if rejects != auth::NodeRejects::default() {
                 let r = rejects.by_reason;
                 crate::usb::usb_line!(
-                    r#"{{"t":"link_auth","bad_tag":{},"replay":{},"unauth":{},"stale":{},"dups":{}}}"#,
-                    r[0], r[1], r[2], r[3], rejects.dups
+                    r#"{{"t":"link_auth","bad_tag":{},"replay":{},"unauth":{},"stale":{},"late":{},"dups":{}}}"#,
+                    r[0], r[1], r[2], r[3], r[4], rejects.dups
                 );
             }
         }

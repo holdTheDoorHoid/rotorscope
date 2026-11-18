@@ -57,6 +57,28 @@
 //! epoch it already has. A beacon from another epoch is not believed (it may
 //! be a recording); the node keeps using its epoch.
 //!
+//! **Age** (WP-12). Order alone does not bound age: an attacker who jams a node while
+//! recording a command, then releases it later (with no newer echoed packet accepted in
+//! between), would get it accepted. So the node also tracks the gateway's clock in time: the
+//! gateway beacons twice a second, so its clock grows by at least two a second (more with
+//! commands). The node keeps a **floor**: the highest gateway clock it has accepted, plus
+//! [`MIN_RATE_PER_S`] (one) for every second of its own uptime since. A gateway packet of the
+//! node's current epoch (command, sync or beacon) whose clock is more than [`LATE_SLACK`]
+//! below the floor is rejected as [`Reject::Late`]. Taking a packet raises the floor to its
+//! clock, never lowers it. A node that has just booted has no floor (and no session a
+//! recording could echo); a packet of a **new** epoch (the gateway rebooted; only an echoed
+//! sync can move the node there) restarts the floor at its clock; a node back from another
+//! channel has its floor grown by its own uptime, which the real gateway clock always
+//! outruns. Commands are stamped at each attempt, so a retried command is never late.
+//!
+//! What it bounds: a recording made while the node heard the gateway up to the moment of
+//! recording is dead `LATE_SLACK` seconds later (at most 16 s). A node jammed for `J` seconds
+//! *before* the recording learns nothing during `J`, and the gateway's clock runs ahead at
+//! its real rate `R` (2 a second plus commands) while the floor counts one: such a recording
+//! stays acceptable for about `J x (R - 1) + 16` seconds after it was made. The node's clock
+//! rule (`aerohop::clock`: three agreeing syncs to move it) and the hub's trust checks are
+//! the next line.
+//!
 //! **Resync.** A node packet with a valid tag but a stale epoch (the gateway
 //! rebooted) or an old pair (the node rebooted and first heard a replayed
 //! beacon) makes the gateway answer with a sync: a unicast beacon echoing the
@@ -134,13 +156,37 @@ pub enum Reject {
     Unauthenticated = 3,
     /// Genuine but from before the receiver's last boot (another epoch).
     Stale = 4,
+    /// Genuine, this epoch, in order, but older (by the gateway clock it carries) than the
+    /// gateway clock the node knows has passed: a recording held back (WP-12). Node side only.
+    /// Code 7: 5 and 6 are `ForgedLink` details of their own (`link::origin`).
+    Late = 7,
 }
 
+/// Reasons a [`Reject`] can have: the size of per-reason count arrays.
+pub const N_REJECT: usize = 5;
+
+/// The gateway clock grows by at least this much per second (it beacons twice a second; half
+/// that for margin, for a beacon loop held up by sends).
+pub const MIN_RATE_PER_S: u64 = 1;
+/// A gateway packet may be this far (gateway clock) below the floor before it is late.
+pub const LATE_SLACK: u32 = 16;
+
 impl Reject {
-    pub const ALL: [Reject; 4] = [Reject::BadTag, Reject::Replay, Reject::Unauthenticated, Reject::Stale];
+    pub const ALL: [Reject; N_REJECT] = [Reject::BadTag, Reject::Replay, Reject::Unauthenticated, Reject::Stale, Reject::Late];
 
     pub const fn code(self) -> u32 {
         self as u32
+    }
+
+    /// Index into per-reason count arrays (`0..N_REJECT`).
+    pub const fn index(self) -> usize {
+        match self {
+            Reject::BadTag => 0,
+            Reject::Replay => 1,
+            Reject::Unauthenticated => 2,
+            Reject::Stale => 3,
+            Reject::Late => 4,
+        }
     }
 
     pub const fn name(self) -> &'static str {
@@ -149,6 +195,7 @@ impl Reject {
             Reject::Replay => "replay",
             Reject::Unauthenticated => "unauthenticated",
             Reject::Stale => "stale",
+            Reject::Late => "late",
         }
     }
 }
@@ -311,6 +358,9 @@ pub struct Node {
     last_echo: Option<(u32, u32)>,
     /// After a counter wrap: send nothing until the clock is above this.
     floor: Option<u32>,
+    /// `(gateway clock, node ms)`: the floor's base (see "Age" in the module docs), for the
+    /// current epoch.
+    heard: Option<(u32, u64)>,
 }
 
 fn nonzero(rng: fn() -> u32) -> u32 {
@@ -326,7 +376,7 @@ impl Node {
     /// `rng`: the hardware RNG (true random while the radio is on). Called
     /// for each new session (boot, counter wrap).
     pub fn new(key: Key, rng: fn() -> u32) -> Self {
-        Node { key, rng, session: nonzero(rng), counter: 0, epoch: None, clock: 0, last_echo: None, floor: None }
+        Node { key, rng, session: nonzero(rng), counter: 0, epoch: None, clock: 0, last_echo: None, floor: None, heard: None }
     }
 
     pub fn session(&self) -> u32 {
@@ -338,9 +388,28 @@ impl Node {
         self.epoch
     }
 
-    /// Freshness of a gateway packet (beacon or command) whose tag was good.
-    /// On `Accept` the node has taken the packet's epoch and clock.
-    pub fn on_gateway(&mut self, kind: Kind, s: &Stamp) -> Verdict {
+    /// The gateway clock the node knows has passed by node time `now_ms` (the floor), if
+    /// it has heard its current epoch.
+    pub fn clock_floor(&self, now_ms: u64) -> Option<u64> {
+        let (c, at) = self.heard?;
+        Some(u64::from(c) + now_ms.saturating_sub(at) / 1000 * MIN_RATE_PER_S)
+    }
+
+    /// A packet of the current epoch with gateway clock `clock`: late?
+    fn late(&self, clock: u32, now_ms: u64) -> bool {
+        self.clock_floor(now_ms).is_some_and(|f| u64::from(clock) + u64::from(LATE_SLACK) < f)
+    }
+
+    /// Raise the floor to `clock` (never lower it).
+    fn heard_at(&mut self, clock: u32, now_ms: u64) {
+        let f = self.clock_floor(now_ms).unwrap_or(0).max(u64::from(clock)).min(u64::from(u32::MAX)) as u32;
+        self.heard = Some((f, now_ms));
+    }
+
+    /// Freshness of a gateway packet (beacon or command) whose tag was good, heard at node
+    /// time `now_ms` (its uptime, ms). On `Accept` the node has taken the packet's epoch and
+    /// clock.
+    pub fn on_gateway(&mut self, kind: Kind, s: &Stamp, now_ms: u64) -> Verdict {
         if s.session == 0 {
             // A broadcast beacon: no proof of freshness.
             if kind != Kind::Beacon {
@@ -350,10 +419,15 @@ impl Node {
                 None => {
                     self.epoch = Some(s.epoch);
                     self.clock = s.clock;
+                    self.heard = Some((s.clock, now_ms));
                     Verdict::Accept
                 }
                 Some(e) if e == s.epoch => {
+                    if self.late(s.clock, now_ms) {
+                        return Verdict::Reject(Reject::Late);
+                    }
                     self.clock = self.clock.max(s.clock);
+                    self.heard_at(s.clock, now_ms);
                     Verdict::Accept
                 }
                 Some(_) => Verdict::Reject(Reject::Stale),
@@ -372,12 +446,18 @@ impl Node {
             Some(l) if k < l => return Verdict::Reject(Reject::Replay),
             _ => {}
         }
+        let same_epoch = self.epoch == Some(s.epoch);
+        if same_epoch && self.late(s.clock, now_ms) {
+            return Verdict::Reject(Reject::Late);
+        }
         self.last_echo = Some(k);
-        if self.epoch == Some(s.epoch) {
+        if same_epoch {
             self.clock = self.clock.max(s.clock);
+            self.heard_at(s.clock, now_ms);
         } else {
             self.epoch = Some(s.epoch);
             self.clock = s.clock;
+            self.heard = Some((s.clock, now_ms));
         }
         Verdict::Accept
     }
@@ -407,12 +487,12 @@ impl Node {
 }
 
 /// A node's whole receive check for one gateway packet (`kind` from
-/// [`crate::parse`]). `node` None = an open build: everything is taken, as
-/// before keys existed. Keyed: the tag, then [`Node::on_gateway`].
-pub fn node_accept(node: Option<&mut Node>, src: &[u8; 6], data: &[u8], kind: Kind) -> Verdict {
+/// [`crate::parse`]), heard at node uptime `now_ms`. `node` None = an open build: everything
+/// is taken, as before keys existed. Keyed: the tag, then [`Node::on_gateway`].
+pub fn node_accept(node: Option<&mut Node>, src: &[u8; 6], data: &[u8], kind: Kind, now_ms: u64) -> Verdict {
     let Some(n) = node else { return Verdict::Accept };
     match verify(&n.key, src, data) {
-        Ok(st) => n.on_gateway(kind, &st),
+        Ok(st) => n.on_gateway(kind, &st, now_ms),
         Err(r) => Verdict::Reject(r),
     }
 }
@@ -425,10 +505,10 @@ pub fn proves_gateway(v: Verdict) -> bool {
 }
 
 /// Counts of gateway packets a node did not take, by [`Reject`] reason
-/// (index = code - 1), and duplicates.
+/// (index = [`Reject::index`]), and duplicates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeRejects {
-    pub by_reason: [u32; 4],
+    pub by_reason: [u32; N_REJECT],
     pub dups: u32,
 }
 
@@ -442,7 +522,7 @@ impl NodeRejects {
                 false
             }
             Verdict::Reject(r) => {
-                let i = r.code() as usize - 1;
+                let i = r.index();
                 self.by_reason[i] = self.by_reason[i].wrapping_add(1);
                 false
             }
@@ -466,7 +546,7 @@ pub struct RejectReport {
 #[derive(Debug, Clone, Copy)]
 struct RejectEntry {
     source: [u8; 6],
-    counts: [u32; 4],
+    counts: [u32; N_REJECT],
     rssi: i8,
 }
 
@@ -477,8 +557,8 @@ struct RejectEntry {
 pub struct RejectLog<const N: usize> {
     entries: [Option<RejectEntry>; N],
     since_ms: u64,
-    /// Totals since boot, by reason (index = code - 1).
-    pub totals: [u32; 4],
+    /// Totals since boot, by reason (index = [`Reject::index`]).
+    pub totals: [u32; N_REJECT],
 }
 
 impl<const N: usize> Default for RejectLog<N> {
@@ -489,11 +569,11 @@ impl<const N: usize> Default for RejectLog<N> {
 
 impl<const N: usize> RejectLog<N> {
     pub const fn new() -> Self {
-        RejectLog { entries: [None; N], since_ms: 0, totals: [0; 4] }
+        RejectLog { entries: [None; N], since_ms: 0, totals: [0; N_REJECT] }
     }
 
     pub fn record(&mut self, source: [u8; 6], reason: Reject, rssi: i8) {
-        let r = reason.code() as usize - 1;
+        let r = reason.index();
         self.totals[r] = self.totals[r].saturating_add(1);
         let pos = |entries: &[Option<RejectEntry>], s: [u8; 6]| entries.iter().position(|e| e.is_some_and(|e| e.source == s));
         let zero = [0u8; 6];
@@ -505,7 +585,7 @@ impl<const N: usize> RejectLog<N> {
                 _ => (pos(&self.entries, zero).unwrap_or(N - 1), zero),
             },
         };
-        self.entries[i].get_or_insert(RejectEntry { source, counts: [0; 4], rssi: i8::MIN });
+        self.entries[i].get_or_insert(RejectEntry { source, counts: [0; N_REJECT], rssi: i8::MIN });
         let e = self.entries[i].as_mut().unwrap();
         e.counts[r] = e.counts[r].saturating_add(1);
         e.rssi = e.rssi.max(rssi);
@@ -524,7 +604,7 @@ impl<const N: usize> RejectLog<N> {
         for slot in &mut self.entries {
             let Some(e) = slot.take() else { continue };
             for reason in Reject::ALL {
-                let count = e.counts[reason.code() as usize - 1];
+                let count = e.counts[reason.index()];
                 if count > 0 {
                     report(RejectReport { source: e.source, reason, count, rssi: e.rssi, window_ms: window });
                     n += 1;
@@ -671,11 +751,13 @@ mod tests {
         gw: Gateway,
         peer: Peer,
         node: Node,
+        /// Node uptime, ms (tests that care move it on).
+        now_ms: u64,
     }
 
     impl Bench {
         fn new() -> Self {
-            Bench { gw: Gateway::new(Key::new(&K1), 0xa1), peer: Peer::default(), node: Node::new(Key::new(&K1), rng_a) }
+            Bench { gw: Gateway::new(Key::new(&K1), 0xa1), peer: Peer::default(), node: Node::new(Key::new(&K1), rng_a), now_ms: 0 }
         }
         /// Gateway beacon (broadcast, or a sync echoing `echo`), as bytes.
         fn gw_packet(&mut self, kind: Kind, echo: Option<(u32, u32)>) -> std::vec::Vec<u8> {
@@ -690,7 +772,18 @@ mod tests {
         }
         fn node_hears(&mut self, pkt: &[u8]) -> Verdict {
             let st = verify(&self.node.key, &GW, pkt).unwrap();
-            self.node.on_gateway(parse(pkt).unwrap().kind, &st)
+            self.node.on_gateway(parse(pkt).unwrap().kind, &st, self.now_ms)
+        }
+        /// `s` seconds of the gateway beaconing twice a second, the node hearing them (or not:
+        /// jammed) and the node's time moving on.
+        fn beacons(&mut self, s: u32, heard: bool) {
+            for _ in 0..2 * s {
+                self.now_ms += 500;
+                let bc = self.gw_packet(Kind::Beacon, None);
+                if heard {
+                    assert_eq!(self.node_hears(&bc), Verdict::Accept);
+                }
+            }
         }
         fn node_packet(&mut self) -> Option<std::vec::Vec<u8>> {
             let st = self.node.next_up()?;
@@ -847,25 +940,25 @@ mod tests {
         let mut b = Bench::new();
         let bc = b.gw_packet(Kind::Beacon, None);
         // Open build: anything parsed is taken, sealed or not.
-        assert_eq!(node_accept(None, &GW, &bc, Kind::Beacon), Verdict::Accept);
-        assert_eq!(node_accept(Some(&mut b.node), &GW, &bc, Kind::Beacon), Verdict::Accept);
+        assert_eq!(node_accept(None, &GW, &bc, Kind::Beacon, 0), Verdict::Accept);
+        assert_eq!(node_accept(Some(&mut b.node), &GW, &bc, Kind::Beacon, 0), Verdict::Accept);
         let mut forged = bc.clone();
         forged[7] ^= 1;
-        let v = node_accept(Some(&mut b.node), &GW, &forged, Kind::Beacon);
+        let v = node_accept(Some(&mut b.node), &GW, &forged, Kind::Beacon, 0);
         assert_eq!(v, Verdict::Reject(Reject::BadTag));
         assert!(!proves_gateway(v));
         let mut plain = [0u8; BEACON_LEN];
         let plain = beacon(&mut plain, 0, 6).to_vec();
-        let v = node_accept(Some(&mut b.node), &GW, &plain, Kind::Beacon);
+        let v = node_accept(Some(&mut b.node), &GW, &plain, Kind::Beacon, 0);
         assert_eq!(v, Verdict::Reject(Reject::Unauthenticated), "a keyed node ignores open gateways");
         let mut c = NodeRejects::default();
         assert!(!c.take(v));
         assert!(c.take(Verdict::Accept));
-        assert_eq!(c.by_reason, [0, 0, 1, 0]);
+        assert_eq!(c.by_reason, [0, 0, 1, 0, 0]);
         // A genuine beacon of a newer epoch still proves the gateway is there.
         b.gw = Gateway::new(Key::new(&K1), 0xc3);
         let other = b.gw_packet(Kind::Beacon, None);
-        let v = node_accept(Some(&mut b.node), &GW, &other, Kind::Beacon);
+        let v = node_accept(Some(&mut b.node), &GW, &other, Kind::Beacon, 0);
         assert_eq!(v, Verdict::Reject(Reject::Stale));
         assert!(proves_gateway(v));
     }
@@ -874,7 +967,7 @@ mod tests {
     fn a_node_never_takes_a_batch_as_a_gateway_packet() {
         let mut b = Bench::new();
         let st = Stamp { epoch: 1, clock: 1, session: b.node.session(), counter: 0 };
-        assert_eq!(b.node.on_gateway(Kind::Frames, &st), Verdict::Reject(Reject::BadTag));
+        assert_eq!(b.node.on_gateway(Kind::Frames, &st, 0), Verdict::Reject(Reject::BadTag));
     }
 
     #[test]
@@ -929,6 +1022,125 @@ mod tests {
         log.drain(3000, 1000, |r| got.push(r));
         assert_eq!(got.len(), 4);
         assert_eq!((got[3].source, got[3].count), ([0; 6], 47));
-        assert_eq!(log.totals, [52, 1, 1, 0]);
+        assert_eq!(log.totals, [52, 1, 1, 0, 0]);
+    }
+
+    /// Echoed command after setting up a node that has been heard by the gateway.
+    fn linked() -> Bench {
+        let mut b = Bench::new();
+        let bc = b.gw_packet(Kind::Beacon, None);
+        b.node_hears(&bc);
+        let p = b.node_packet().unwrap();
+        assert_eq!(b.gw_hears(&p), Verdict::Accept);
+        b
+    }
+
+    /// The attack (WP-12): the node is jammed while a TimeSync to it is recorded; the
+    /// recording is released later, before any newer echoed packet. Order alone accepts it;
+    /// the floor (one gateway packet a second) rejects it as late. Fails before WP-12.
+    #[test]
+    fn stale_echoed_packet_is_rejected_as_late() {
+        let mut b = linked();
+        b.beacons(10, true);
+        let recorded = b.gw_packet(Kind::Command, b.peer.echo);
+        // Jammed for 30 s: the node hears nothing, the gateway beacons on.
+        b.beacons(30, false);
+        assert_eq!(b.node_hears(&recorded), Verdict::Reject(Reject::Late));
+        let mut c = NodeRejects::default();
+        assert!(!c.take(Verdict::Reject(Reject::Late)));
+        assert_eq!(c.by_reason, [0, 0, 0, 0, 1]);
+        // A fresh one is fine.
+        let fresh = b.gw_packet(Kind::Command, b.peer.echo);
+        assert_eq!(b.node_hears(&fresh), Verdict::Accept);
+        // A recorded beacon is late too, and does not lower the floor.
+        let mut b = linked();
+        let old_bc = b.gw_packet(Kind::Beacon, None);
+        b.beacons(30, true);
+        assert_eq!(b.node_hears(&old_bc), Verdict::Reject(Reject::Late));
+    }
+
+    /// Released within the slack it is still taken (the bound is LATE_SLACK seconds for a
+    /// node that heard the gateway right up to the recording).
+    #[test]
+    fn age_bound_is_the_slack() {
+        let mut b = linked();
+        let recorded = b.gw_packet(Kind::Command, b.peer.echo);
+        b.now_ms += u64::from(LATE_SLACK) * 1000 + 999;
+        let mut c = b.clone_node();
+        assert_eq!(c.on_gateway(Kind::Command, &verify(&b.node.key, &GW, &recorded).unwrap(), b.now_ms), Verdict::Accept);
+        b.now_ms += 2_000;
+        assert_eq!(b.node_hears(&recorded), Verdict::Reject(Reject::Late));
+    }
+
+    /// Fresh commands with ordinary traffic, a node away on another channel for a minute,
+    /// and a gateway busy sending commands (clock rate well above one a second): never late.
+    #[test]
+    fn honest_traffic_is_never_late() {
+        let mut b = linked();
+        for _ in 0..600 {
+            b.beacons(1, true);
+            for _ in 0..3 {
+                let c = b.gw_packet(Kind::Command, b.peer.echo);
+                assert_eq!(b.node_hears(&c), Verdict::Accept);
+            }
+        }
+        // Away on another channel for 60 s (hears nothing), back: the first thing it hears
+        // is a fresh command, then beacons.
+        b.beacons(60, false);
+        let c = b.gw_packet(Kind::Command, b.peer.echo);
+        assert_eq!(b.node_hears(&c), Verdict::Accept);
+        b.beacons(5, true);
+        // A gateway beacon loop held up for 5 s (its watchdog limit): still within the slack.
+        b.now_ms += 5_000;
+        b.beacons(1, true);
+    }
+
+    /// A node that has just booted takes its first gateway packet with nothing to compare
+    /// (no floor); a gateway reboot (new epoch, clock from 0) moves the node by the echoed
+    /// sync and restarts the floor there; the old epoch's high clock does not make the new
+    /// epoch's packets late.
+    #[test]
+    fn just_booted_node_and_gateway_reboot() {
+        let mut b = Bench::new();
+        b.now_ms = 3_600_000; // node uptime is irrelevant before it has heard anything
+        assert_eq!(b.node.clock_floor(b.now_ms), None);
+        b.beacons(1, true);
+        let p = b.node_packet().unwrap();
+        assert_eq!(b.gw_hears(&p), Verdict::Accept);
+        b.beacons(600, true);
+        let high = b.node.clock_floor(b.now_ms).unwrap();
+        assert!(high >= 1_200);
+        // Gateway reboot.
+        b.gw = Gateway::new(Key::new(&K1), 0xb2);
+        b.peer = Peer::default();
+        b.now_ms += 3_000;
+        let bc = b.gw_packet(Kind::Beacon, None);
+        assert_eq!(b.node_hears(&bc), Verdict::Reject(Reject::Stale));
+        let p = b.node_packet().unwrap();
+        assert_eq!(b.gw_hears(&p), Verdict::Reject(Reject::Stale));
+        let st = verify(&b.gw.key, &NODE, &p).unwrap();
+        let sync = b.gw_packet(Kind::Beacon, Some((st.session, st.counter)));
+        assert_eq!(b.node_hears(&sync), Verdict::Accept, "new epoch: floor restarts");
+        assert!(b.node.clock_floor(b.now_ms).unwrap() < 10);
+        b.beacons(10, true);
+        let p = b.node_packet().unwrap();
+        assert_eq!(b.gw_hears(&p), Verdict::Accept);
+        let cmd = b.gw_packet(Kind::Command, b.peer.echo);
+        assert_eq!(b.node_hears(&cmd), Verdict::Accept);
+    }
+
+    impl Bench {
+        fn clone_node(&self) -> Node {
+            self.node.clone()
+        }
+    }
+
+    #[test]
+    fn reject_index_and_codes() {
+        for (i, r) in Reject::ALL.iter().enumerate() {
+            assert_eq!(r.index(), i);
+        }
+        assert_eq!(Reject::Late.code(), 7);
+        assert_eq!(Reject::Late.name(), "late");
     }
 }

@@ -140,7 +140,7 @@ impl Uplink {
                 continue; // another node's batch
             }
             // Keyed: tag and freshness before anything else looks at it.
-            let v = auth::node_accept(self.auth.as_mut(), &got.info.src_address, got.data(), p.kind);
+            let v = auth::node_accept(self.auth.as_mut(), &got.info.src_address, got.data(), p.kind, now_us() / 1000);
             // A genuine beacon of another epoch (the gateway rebooted) still
             // names our gateway: sending to it earns the sync that moves us
             // to its new epoch. Nothing else is taken from it.
@@ -298,7 +298,7 @@ impl Uplink {
     pub fn print(&self) {
         let c = &self.c;
         println!(
-            r#"{{"t":"uplink","gw":{},"windows":{},"sent":{},"acked":{},"failed":{},"frames":{},"dropped":{},"beacons":{},"cmd_pkts":{},"no_gw":{},"relock_bad":{},"restart_err":{},"us_last":{},"us_max":{},"us_avg":{},"auth_rej":[{},{},{},{}]}}"#,
+            r#"{{"t":"uplink","gw":{},"windows":{},"sent":{},"acked":{},"failed":{},"frames":{},"dropped":{},"beacons":{},"cmd_pkts":{},"no_gw":{},"relock_bad":{},"restart_err":{},"us_last":{},"us_max":{},"us_avg":{},"auth_rej":[{},{},{},{},{}]}}"#,
             self.gw.is_some(),
             c.windows,
             c.sent,
@@ -317,7 +317,8 @@ impl Uplink {
             c.auth.by_reason[0],
             c.auth.by_reason[1],
             c.auth.by_reason[2],
-            c.auth.by_reason[3]
+            c.auth.by_reason[3],
+            c.auth.by_reason[4]
         );
     }
 }

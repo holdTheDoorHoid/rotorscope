@@ -66,7 +66,8 @@ impl Origin {
 }
 
 /// `ThreatKind::ForgedLink` `detail` for a frame refused because its sender
-/// may not originate that frame type (codes 1-4 are `airlink::auth::Reject`).
+/// may not originate that frame type (codes 1-4 are `airlink::auth::Reject`; 7, `Late`, is
+/// counted by nodes only and never reported by the gateway).
 pub const FORGED_ORIGIN: u32 = 5;
 /// `ThreatKind::ForgedLink` `detail` for a genuine node packet a keyed
 /// gateway could not relay because its node table was full.
