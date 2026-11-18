@@ -10,6 +10,7 @@
 extern crate std;
 
 use crate::tests::{CITY_HALL, det, location, serial};
+use crate::threats::Mute;
 use crate::*;
 use rid::Transport;
 
@@ -307,4 +308,133 @@ fn sizes() {
     );
     // The P4 keeps the tracker in a 1 MiB PSRAM window.
     assert!(size_of::<Tracker<64, 32>>() < 1 << 20);
+}
+
+fn threat(kind: link::ThreatKind, target: u8, freq: u32) -> link::ThreatSighting {
+    link::ThreatSighting {
+        kind,
+        channel: 6,
+        freq,
+        width_khz: 0,
+        level: 20,
+        count: 50,
+        window_ms: 1000,
+        source: [0x02, 0, 0, 0, 0, target],
+        target: [0x0a, 0, 0, 0, 1, target],
+        detail: 7,
+        ssid: heapless::String::new(),
+        uptime_us: 1,
+    }
+}
+
+/// Deauth floods against 24 different targets from two nodes, while a
+/// jammer is active, a node is blinded and a control link is contested, and
+/// someone also spins up a new fake "evil twin" network every 50 ms: none of
+/// the jammer, the blinded node or the contested link is ever evicted,
+/// `partly_blind` stays true throughout.
+#[test]
+fn threat_flood_never_evicts_jamming_or_contested() {
+    use link::ThreatKind::*;
+    let mut tr: Tracker = Tracker::default();
+    let jam = tr.ingest_threat(3, &threat(JamBroadband, 0, 58_000), 0).unwrap();
+    let ctl = tr.ingest_threat(4, &threat(ControlContested, 0, 9_150), 0).unwrap();
+    let blind = tr.ingest_hub_threat(&threat(Blinded, 0, 0), 0).unwrap();
+    let mut t = 0;
+    let mut twin = 0u32;
+    while t < 120_000 {
+        // The jammer, the blinded node and the contested link keep being
+        // reported, once a second.
+        if t % 1_000 == 0 {
+            assert_eq!(tr.ingest_threat(3, &threat(JamBroadband, 0, 58_000), t), Some(jam));
+            assert_eq!(tr.ingest_threat(4, &threat(ControlContested, 0, 9_150), t), Some(ctl));
+            assert_eq!(tr.ingest_hub_threat(&threat(Blinded, 0, 0), t), Some(blind));
+        }
+        // Each node reports floods against a new target every 50 ms.
+        for node in [1, 2] {
+            for kind in [Deauth, Disassoc, ProbeFlood, AuthFlood, BeaconFlood, BleSpam] {
+                tr.ingest_threat(node, &threat(kind, (t / 50 % 24) as u8, 24_370), t);
+            }
+        }
+        // And a new evil twin every 50 ms (each its own entry).
+        let mut s = threat(EvilTwin, 0, 24_370);
+        s.source = [0x02, 0xee, (twin >> 16) as u8, (twin >> 8) as u8, twin as u8, 1];
+        tr.ingest_threat(1, &s, t);
+        twin += 1;
+        assert!(tr.partly_blind(t), "at {t}");
+        assert!(tr.get_threat(jam).is_some() && tr.get_threat(ctl).is_some(), "at {t}");
+        assert!(tr.get_threat(blind).is_some(), "at {t}");
+        assert!(tr.threats().iter().filter(|x| threats::is_flood_kind(x.kind)).count() <= threats::MAX_FLOOD_THREATS);
+        t += 50;
+    }
+}
+
+/// Flood kinds are one entry per reporting node, whatever the target; a
+/// muted target keeps its own (muted) entry outside the aggregate.
+#[test]
+fn flood_threats_aggregate_per_node() {
+    use link::ThreatKind::*;
+    let mut tr: Tracker = Tracker::default();
+    let mut t = 0;
+    while t < 60_000 {
+        for node in [1, 2] {
+            for kind in [Deauth, Disassoc, ProbeFlood, AuthFlood] {
+                tr.ingest_threat(node, &threat(kind, (t / 50 % 24) as u8, 24_370), t);
+            }
+        }
+        t += 50;
+    }
+    assert_eq!(tr.threats().len(), 8, "{:?}", tr.threats());
+    let deauths: std::vec::Vec<_> = tr.threats().iter().filter(|x| x.kind == Deauth).collect();
+    assert_eq!(deauths.len(), 2);
+    assert_eq!(deauths[0].count, 50 * 1_200);
+    let mut m = Mute::for_threat(deauths[0]);
+    assert_eq!(m.target, [0; 6], "muting an aggregate mutes every target");
+    m.target = [0x0a, 0, 0, 0, 1, 99];
+    assert!(tr.mute(m));
+    tr.ingest_threat(1, &threat(Deauth, 99, 24_370), t);
+    let muted: std::vec::Vec<_> = tr.threats().iter().filter(|x| x.kind == Deauth && x.muted).collect();
+    assert_eq!(muted.len(), 1);
+    assert_eq!(muted[0].target[5], 99);
+    assert!(!muted[0].per_node);
+    assert!(tr.threats().iter().filter(|x| x.kind == Deauth && !x.muted).all(|x| x.count == 50 * 1_200));
+}
+
+/// The flood threat's JSON line names the table and the rate.
+#[test]
+fn flood_threat_json_line() {
+    let mut tr: Tracker = Tracker::default();
+    let mut f = probation::FloodWatch::new();
+    for ms in (0..6_000).step_by(4) {
+        f.note(ms);
+    }
+    let s = f.check(6_000, probation::FLOOD_NEW_PER_S, probation::FloodTable::Drones).unwrap();
+    let id = tr.ingest_hub_threat(&s, 6_000).unwrap();
+    let ctx = tr.context(6_000, None);
+    let mut buf = [0u8; threats::MAX_THREAT_LINE];
+    let n = threats::threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).unwrap();
+    let text = core::str::from_utf8(&buf[..n]).unwrap();
+    assert!(text.contains("\"kind\":\"id_flood\""), "{text}");
+    assert!(text.contains("\"label\":\"Flood of new drone IDs\""), "{text}");
+    assert!(text.contains("\"table\":\"drones\",\"per_s\":250"), "{text}");
+    assert_eq!(
+        probation::describe(tr.get_threat(id).unwrap()).as_str(),
+        "Flood of new drone IDs: 250 new a second over 5 s (limit 20); unconfirmed ones are kept out of alerts"
+    );
+    // The longest per-node flood line still fits, with addresses shown.
+    let mut tr: Tracker = Tracker::new(Config { show_link_ids: true, ..Config::default() });
+    for kind in [link::ThreatKind::BeaconFlood, link::ThreatKind::ChannelSwitch, link::ThreatKind::BleSpam] {
+        let mut big = threat(kind, 0xff, u32::MAX);
+        big.ssid = heapless::String::try_from("\"".repeat(32).as_str()).unwrap();
+        big.detail = u32::MAX;
+        big.channel = u8::MAX;
+        big.width_khz = u32::MAX;
+        big.level = i8::MIN;
+        big.count = u32::MAX;
+        let id = tr.ingest_threat(u8::MAX, &big, u64::MAX / 4).unwrap();
+        tr.ingest_threat(u8::MAX, &big, u64::MAX / 4);
+        let ctx = tr.context(u64::MAX / 2, None);
+        let t = tr.get_threat(id).unwrap();
+        assert!(t.per_node);
+        assert!(threats::threat_line(t, &ctx, &mut buf).is_ok(), "{kind:?}");
+    }
 }
