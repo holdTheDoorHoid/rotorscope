@@ -9,6 +9,13 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod forward;
+pub mod printable;
+
+/// The firmware build scripts' bench-feature check (`std`; included by path
+/// from each `build.rs`, compiled here only for its tests).
+#[cfg(test)]
+#[allow(dead_code)]
+mod benchfence;
 
 /// The control-link types `Frame::Control` carries (protocol 12).
 pub use ctrlwatch;
