@@ -591,6 +591,16 @@ pub enum ThreatKind {
     /// the area, seen through other receivers: aircraft reporting degraded
     /// position integrity, or drones' positions jumping together.
     AreaGnss,
+    /// Raised by the hub (never sent on the node link, so no protocol
+    /// change: every existing frame encodes as before, and a node or
+    /// gateway claiming it is refused as a forged origin). Far more new
+    /// drone IDs (or aircraft addresses, or control links) a second than a
+    /// real sky produces: a flood of forged identities meant to bury real
+    /// ones (`tracker::probation`, docs/SPOOFING.md "Floods"). `detail`:
+    /// bits 24-31 which table (0 drones, 1 aircraft, 2 control links), bits
+    /// 0-15 new identities a second over the window; `count` = new
+    /// identities in the window, `window_ms` = the window.
+    IdFlood,
 }
 
 impl ThreatKind {
@@ -619,6 +629,7 @@ impl ThreatKind {
             ControlContested => "control_contested",
             MavlinkAttack => "mavlink_attack",
             AreaGnss => "area_gnss",
+            IdFlood => "id_flood",
         }
     }
 
@@ -1642,7 +1653,7 @@ mod tests {
     fn protocol_9_threat_appended() {
         let mut buf = [0u8; MAX_FRAME];
         let mut dec = Decoder::new();
-        for k in 0..=21u8 {
+        for k in 0..=22u8 {
             let kind: ThreatKind = postcard::from_bytes(&[k]).unwrap();
             let f = Frame::Threat(ThreatSighting {
                 kind,
@@ -1665,7 +1676,7 @@ mod tests {
             dec.feed(wire, |r| got = Some(r));
             assert_eq!(got, Some(Ok(f)));
         }
-        assert!(postcard::from_bytes::<ThreatKind>(&[22]).is_err());
+        assert!(postcard::from_bytes::<ThreatKind>(&[23]).is_err());
         assert!(ThreatKind::Blinded.is_jamming() && !ThreatKind::Deauth.is_jamming());
     }
 

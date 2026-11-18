@@ -346,6 +346,30 @@ fn list_five() {
     shot("list_pick", &ui, &st);
 }
 
+/// WP-09: a flood of forged drones claiming to be at the hub. The real
+/// drones keep their numbered rows at the top; the fakes are listed after
+/// them, dim, numbered "?", hollow on the radar; the bar says ID FLOOD.
+#[test]
+fn list_flood() {
+    let mut st = five_drones(true);
+    for k in 0..6u32 {
+        let mut f = drone(100 + k, "FAKE00000000", 0.0 + k as f32, 10.0 * k as f32, 60.0, 0, &[Radio::WifiBeacon], -40);
+        f.unconfirmed = true;
+        f.first_seen_ms = NOW - 1_000;
+        st.drones.push(f).unwrap();
+    }
+    st.total_drones = 64;
+    st.total_unconfirmed = 58;
+    st.threats = Threats { active: 1, jammed: false, muted: 0, flood_per_s: 230 };
+    let order = st.order();
+    assert!(order.iter().take(5).all(|&i| !st.drones[usize::from(i)].unconfirmed));
+    shot("radar_flood", &Ui::default(), &st);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("list_flood", &ui, &st);
+}
+
 #[test]
 fn no_fix() {
     let mut st = five_drones(false);
@@ -632,7 +656,7 @@ fn settings() {
 #[test]
 fn settings_actions() {
     let mut st = base(true);
-    st.threats = Threats { active: 2, jammed: false, muted: 1 };
+    st.threats = Threats { active: 2, jammed: false, muted: 1, flood_per_s: 0 };
     let mut ui = Ui::default();
     // Settings page, edit, up to the last row (Nodes at hub), up to Alarms.
     press(&mut ui, &st, &[Button::Up, Button::Select, Button::Up, Button::Up]);
@@ -645,7 +669,7 @@ fn threat_warnings() {
     // read as all clear.
     let mut st = base(true);
     st.gps.integrity = GpsIntegrity::Spoofing;
-    st.threats = Threats { active: 2, jammed: true, muted: 0 };
+    st.threats = Threats { active: 2, jammed: true, muted: 0, flood_per_s: 0 };
     let mut ui = Ui::default();
     press(&mut ui, &st, &[Button::Down]);
     shot("threat_warnings", &ui, &st);
@@ -656,7 +680,7 @@ fn health_conflict() {
     // A drone 240 m from a helicopter that is 30 m above it: the status bar
     // shows AIRCRAFT (ahead of jamming) and the health page says which.
     let mut st = with_aircraft();
-    st.threats = Threats { active: 0, jammed: true, muted: 0 };
+    st.threats = Threats { active: 0, jammed: true, muted: 0, flood_per_s: 0 };
     let mut name = heapless::String::new();
     name.push_str("N911PH").unwrap();
     st.conflict = Some(ConflictView { level: 3, drone: 1, aircraft: name, range_m: 240.0, dz_m: Some(30.0), count: 1 });

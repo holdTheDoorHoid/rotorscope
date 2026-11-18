@@ -494,7 +494,7 @@ impl AreaWatch {
             ssid: String::new(),
             uptime_us: now_ms.saturating_mul(1000),
         };
-        Some(tr.ingest_hub_threat(&s, now_ms))
+        tr.ingest_hub_threat(&s, now_ms)
     }
 
     /// Update the per-aircraft state; returns (counted, degraded, dropped).

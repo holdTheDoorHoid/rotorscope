@@ -326,6 +326,107 @@ tracker::spoof::Summary(&track)                  // one-line text (Display)
 track.continuity.previous / .identity_changed
 ```
 
+## Floods: standing before trust
+
+The checks above judge one drone at a time. A cheaper attack ignores them:
+send hundreds of new, well-formed drones a second, each with a random
+serial and address, each claiming to sit on the hub. One ESP32 does it.
+Published work shows the same attack blinding a commercial receiver. Before
+WP-09 every fake got a track, a "new drone" alert, a row at the top of the
+screen (they claimed 0 m), a TAK marker and a rule-engine entry, and a full
+table threw out the least recently heard drone, which between two of its
+own frames was usually the real one.
+
+Nothing here can tell a careful fake from a drone. What the tables can do
+is make a new identity earn its standing before it can cost anything that
+already has some. `crates/tracker/src/probation.rs` holds the rule and its
+numbers.
+
+### Drone tracks
+
+| Rule | Value | Why |
+|---|---|---|
+| A track is **confirmed** when heard again at least this long after it was first heard (2 frames) | 1 s (`CONFIRM_SPAN_MS`) | Remote ID sends a Location at least once a second. A single forged frame never qualifies; the cheap flood sends exactly one per identity |
+| Announce (buzzer, banner, page alert), TAK, the drone-near-aircraft check | confirmed tracks only | |
+| Worst case from first frame to the alert, a drone sending at least once a second | 2 s (`WORST_CASE_ANNOUNCE_MS`) | 1 s plus one frame interval; most drones send several frames a second and make it in about 1 s. Before WP-09 a drone with an ID was announced on its first frame |
+| An unconfirmed track not heard for this long is removed | 30 s (`UNCONFIRMED_REMOVE_MS`) | Confirmed ones keep 60 s stale / 10 min removal |
+| A full table makes room from | a stale track; else the weakest unconfirmed one (fewest frames, then heard longest ago); else a confirmed one not heard for 15 s (`QUIET_EVICT_MS`) | Never a confirmed track heard in the last 15 s. Real drones are heard every second, so a flood never displaces one |
+| When the table is full, a new identity first goes into a sightings table | 4 per track slot, 12 B each (256 for 64 tracks) | It gets a track only when heard again at least 0.5 s later (`SIGHTING_GAP_MS`). The sightings table forgets the least-heard, oldest entry first, so a real drone's first frame survives a single-frame flood of up to 256 new IDs a second for the second it needs |
+| Admission into a busy table | a token bucket of 4, refilled 4 a second | With `k` tokens left an identity needs `2 + (4 - k)` sightings: an attacker who repeats each fake once spends the first tokens, after which a real drone that keeps transmitting outranks fakes that are not kept alive as long |
+| Tracks made, worst case | 64 per 30 s (free slots, refilled only as unconfirmed tracks expire) + 4 a second | |
+
+A track's id and history (first heard, frame counts, spoof flags,
+continuity, FAA timers) are kept for as long as it is in the table, which a
+confirmed, transmitting drone never leaves during a flood.
+
+The screen and the phone page list confirmed drones first, then unconfirmed
+ones, each group nearest first. Unconfirmed rows are faint, numbered `?` on
+the screen and marked "unconfirmed" on the page; the big drone count leaves
+them out ("+58 unconf."). JSON track lines carry `"confirmed"`. CoT is sent
+for confirmed tracks only (`FormatError::Unconfirmed`). The SD CSV is
+unchanged and logs every track.
+
+### The flood alarm
+
+New identities (a frame whose drone matches no track and no remembered
+sighting) are counted per second. At **20 a second averaged over 5 s**
+(`FLOOD_NEW_PER_S`, `FLOOD_WINDOW_S`) the tracker raises a hub threat,
+`id_flood` ("Flood of new drone IDs"), refreshed once a second with the
+rate (`detail` low 16 bits; JSON `table` and `per_s`), and ended 10 s after
+the rate falls. It goes through the ordinary threat path: one evidence
+`Threat` event with a sentence (`probation::describe`), the console, the
+threat count on the screen, mute rules. The screen's bar shows `ID FLOOD`;
+`/api/state` carries `"flood": {new_per_s, refused, since_ms}` and the page
+shows a banner.
+
+The same alarm covers ADS-B (`table` `aircraft`: unproven aircraft still
+being reported thrown out for newer ones, 5 a second) and control links
+(`table` `control`: unproven links replaced, 2 a second).
+
+**False alarms.** A race of 40 drones, all switched on within seconds,
+makes 40 new IDs once and never reaches 20 a second for 5 s (tested). A
+light show that powers up hundreds of drones at once can: a show whose
+drones all fit the table (64) or the sightings table behind it (about 320
+in all) raises it at most briefly while they switch on; a bigger one keeps
+it raised, which is also true (the hub can no longer follow every drone).
+A busy airport does not raise the aircraft alarm: real aircraft are heard
+every second and are never replaced (tested with 50 against a 32-entry
+table).
+
+### The other tables
+
+| Table | Before | Now |
+|---|---|---|
+| Threats (16) | full: drop an ended one, else the oldest; floods keyed per target | flood kinds (deauth, disassociation, beacon, login and probe floods, BLE spam, channel switch) are one entry per kind and **reporting node** (latest target shown), unless a report matches a mute rule; floods hold at most 10 entries; an active jamming, Blinded, AreaGnss or ControlContested threat is never replaced by another kind, and the last live jammer never, so `partly_blind` cannot go false through eviction |
+| ADS-B in the tracker (32) and in the 1090 decoder (32) | keep by distance; the decoder refused new addresses while 32 were heard within 5 s | an aircraft is **established** after 3 plausible position updates over 2 s (decoder: or 10 verified messages over 5 s). Unproven ones hold at most half the table, established ones at most three quarters; a newcomer replaces only a stale or quiet (1.5 s) unproven one; claimed distance ranks only established aircraft. The drone-near-aircraft warning pairs only confirmed drones with established aircraft |
+| Control links (was 4, now 8) | least recently heard goes | established after 3 reports over 2 s; a new link replaces a stale one, else the unproven one with fewest reports, else an established one quiet for 15 s |
+| FAA rule engine (P4: was 32 entries in internal RAM) | `entry()` for every track every second, least recently touched evicted | entries only for tracks with fresh data, confirmed drones and established aircraft first; a full engine replaces only an entry of lower standing or one idle for 5 s; the P4 sizes it for 64 drones + 32 aircraft (~84 KB, in PSRAM at 5 MB), so it never replaces anything |
+| Distances | Vincenty, up to 200 iterations, for every shown drone and operator four times a second | points over 10 degrees apart use the sphere; Vincenty stops at 20 iterations (under 10 in practice); the screen's drone-to-operator distance uses the sphere |
+
+### What an attacker can still do
+
+- **Delay new real drones.** Single-frame fakes faster than about 256 new
+  IDs a second (4 x the track capacity) push a real drone's first sighting
+  out before its second frame, so its admission becomes a matter of luck.
+  An attacker who repeats every fake several times, kept alive over
+  seconds, competes for the 4 admissions a second and can keep a new real
+  drone waiting for as long as that lasts. Confirmed drones are unaffected.
+- **Fill the confirmed tier.** Fakes that transmit like real drones (every
+  ID at least once a second, for as long as the attack lasts) become
+  confirmed, are announced, reach TAK and fill the table. Once 64 are
+  confirmed and transmitting, a new real drone gets no track. This costs
+  the attacker one stream per fake, forever; the flood alarm fires while
+  they are being created.
+- **Forged established aircraft.** A forger that sends three plausible
+  positions over two seconds per address gets established entries, and
+  nearer ones push out the farthest real ones (as nearer real aircraft
+  always did).
+- **Muted floods.** A mute rule for one victim keeps that victim's floods
+  apart; a rule for the whole kind silences every node's aggregate.
+- **Unconfirmed clutter.** The list and the page still show the unconfirmed
+  fakes, faint and last. They are never announced, never sent to TAK, and
+  never ranked above a real drone.
+
 ## Known false-alarm cases
 
 - **Two Autels sharing a fixed MAC.** `shared_address` at 25 (weak), or 45

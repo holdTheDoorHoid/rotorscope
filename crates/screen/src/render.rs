@@ -117,6 +117,10 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         Some("AREA FAKE")
     } else if s.area_gnss.is_some_and(|g| g.jamming) {
         Some("AREA JAM")
+    } else if s.threats.flood_per_s > 0 {
+        // Forged drone IDs by the hundred: unconfirmed rows are mostly
+        // fakes (tracker `probation`).
+        Some("ID FLOOD")
     } else if s.threats.active > 0 {
         Some("ATTACK")
     } else {
@@ -357,7 +361,7 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
             let is_focus = Some(dv.key) == focus_key;
             let want = if is_focus {
                 2
-            } else if dv.stale {
+            } else if dv.stale || dv.unconfirmed {
                 0
             } else {
                 1
@@ -366,7 +370,9 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
                 continue;
             }
             let pt = plot(c, pos);
-            let col = if dv.stale { p.stale } else { p.accent };
+            // Unconfirmed drones are drawn like stale ones: dim and hollow.
+            let faint = dv.stale || dv.unconfirmed;
+            let col = if faint { p.stale } else { p.accent };
             if pos.distance_m > RINGS[RINGS.len() - 1].0 {
                 // Beyond the outer ring: a pointer on the edge, facing out.
                 let tip = draw::offset(c, pos.bearing_deg, RADAR_R as f32 + 2.0);
@@ -375,15 +381,15 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
                 let base = draw::offset(c, pos.bearing_deg, RADAR_R as f32 - 8.0);
                 let l = l + (base - pt);
                 let r = r + (base - pt);
-                triangle(d, tip, l, r, col, !dv.stale)?;
+                triangle(d, tip, l, r, col, !faint)?;
             } else {
                 let r = if is_focus { 7 } else { 5 };
-                diamond(d, pt, r, col, !dv.stale)?;
+                diamond(d, pt, r, col, !faint)?;
             }
             if is_focus {
                 circle(d, pt, 11, p.fg, false, 2)?;
             }
-            if rank < 9 {
+            if rank < 9 && !dv.unconfirmed {
                 let mut n: String<4> = String::new();
                 let _ = write!(n, "{}", rank + 1);
                 let lc = if dv.stale { p.stale } else { p.fg };
@@ -473,7 +479,9 @@ fn readout<D: DrawTarget<Color = Rgb565>>(
     count_block(s, p, d, x0, HEIGHT - 40)
 }
 
-/// "5 DRONES / 2 stale" with the number in big digits.
+/// "5 DRONES / 2 stale" with the number in big digits. Unconfirmed drones
+/// (tracker `probation`) are left out of the number and said instead:
+/// "+58 unconfirmed".
 fn count_block<D: DrawTarget<Color = Rgb565>>(
     s: &UiState,
     p: &Palette,
@@ -481,8 +489,9 @@ fn count_block<D: DrawTarget<Color = Rgb565>>(
     x: i32,
     y: i32,
 ) -> Res<D::Error> {
-    let active = s.active_count();
-    let total = usize::from(s.total_drones).max(s.drones.len());
+    let active = s.confirmed_active_count();
+    let unconfirmed = usize::from(s.total_unconfirmed);
+    let total = usize::from(s.total_drones).max(s.drones.len()).saturating_sub(unconfirmed);
     let mut b: String<24> = String::new();
     let _ = write!(b, "{active}");
     let after = big(
@@ -502,8 +511,10 @@ fn count_block<D: DrawTarget<Color = Rgb565>>(
         p.fg,
     )?;
     b.clear();
-    let stale = total - active;
-    if stale > 0 {
+    let stale = total.saturating_sub(active);
+    if unconfirmed > 0 {
+        let _ = write!(b, "+{unconfirmed} unconf.");
+    } else if stale > 0 {
         let _ = write!(b, "+{stale} stale");
     } else {
         let _ = write!(b, "{}", if active == 0 { "none heard" } else { "active" });
@@ -573,7 +584,10 @@ fn list_page<D: DrawTarget<Color = Rgb565>>(
         y += 19;
     }
     let mut b: String<24> = String::new();
-    let _ = write!(b, "DRONES {}", s.active_count());
+    let _ = write!(b, "DRONES {}", s.confirmed_active_count());
+    if s.total_unconfirmed > 0 {
+        let _ = write!(b, " +{}?", s.total_unconfirmed);
+    }
     text(d, &b, 4, y + 3, F_BAR, p.fg)?;
     let sort = if s.gps.has_position() {
         "nearest first"
@@ -661,6 +675,9 @@ fn rows<D: DrawTarget<Color = Rgb565>>(
             (p.bg, p.fg)
         } else if dv.stale {
             (p.stale, p.bg)
+        } else if dv.unconfirmed {
+            // Quiet: not yet heard long enough to be announced.
+            (p.dim, p.bg)
         } else {
             (p.fg, p.bg)
         };
@@ -695,7 +712,12 @@ fn row<D: DrawTarget<Color = Rgb565>>(
     y: i32,
 ) -> Res<D::Error> {
     let mut b: String<8> = String::new();
-    let _ = write!(b, "{}", rank + 1);
+    if dv.unconfirmed {
+        // No number of its own until it is confirmed: "?".
+        let _ = b.push('?');
+    } else {
+        let _ = write!(b, "{}", rank + 1);
+    }
     text_right(d, &b, 16, y, F_BODY, fg)?;
     text(d, &short_id(dv, 8), C_ID, y, F_BODY, fg)?;
     if fix {

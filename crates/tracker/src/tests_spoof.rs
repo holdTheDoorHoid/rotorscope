@@ -1438,6 +1438,7 @@ fn json_carries_flags_and_link() {
     // CoT remarks carry the same note.
     let ctx = sim.tr.context(1_500, Some(UTC0 + 1_500));
     let mut big = [0u8; 4096];
+    sim.tr.vouch_for_tests(1_500);
     let n = cot::drone_event(sim.track(id), &ctx, &mut big);
     // No position: no CoT event; the summary is still well-formed text.
     assert_eq!(n, Err(FormatError::NoPosition));

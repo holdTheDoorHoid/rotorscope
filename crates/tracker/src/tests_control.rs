@@ -243,6 +243,8 @@ fn control_link_drone_near_aircraft_warns() {
         &crate::tests_conflict::heli(0xA1B2C3, 50.0, 400, 500, 7, 270.0, 60),
         0,
     );
+    // Standing is tested elsewhere (`tests_flood`).
+    tr.vouch_for_tests(0);
     let c = tr.take_new_conflict(100).expect("conflict");
     assert_eq!(c.level, crate::conflict::Level::Warning);
     let drone = tr.get(c.drone).unwrap();
@@ -386,4 +388,48 @@ fn control_line_json() {
             && v["batt_mv"].is_null()
             && v["track"].is_null()
     );
+}
+
+/// A real control link with a history, then forged links (new IDs, as with
+/// the ID opt-in on) at 10 a second for 60 s: the real one keeps its entry,
+/// its id, its history and its drone track; the operator is told.
+#[test]
+fn forged_links_never_displace_an_established_one() {
+    let mut tr: Tracker = Tracker::default();
+    let mut ct = ControlTable::new();
+    let real = |ct: &mut ControlTable, tr: &mut Tracker, t: u64| {
+        ct.ingest(tr, 1,
+            &report(System::ExpressLrs, Some(LinkId::SikNetId(77)), 1, &[pos(PositionKind::Aircraft, 300.0, 80)]),
+            t,
+        )
+    };
+    let mut t = 0;
+    while t < 5_000 {
+        real(&mut ct, &mut tr, t);
+        t += 1_000;
+    }
+    let id = real(&mut ct, &mut tr, t).unwrap();
+    let first = ct.links().iter().find(|l| l.id == id).unwrap().first_seen_ms;
+    let track = ct.links().iter().find(|l| l.id == id).unwrap().track;
+    assert!(ct.links().iter().find(|l| l.id == id).unwrap().established());
+    let mut k = 0u16;
+    while t < 65_000 {
+        for _ in 0..10 {
+            ct.ingest(&mut tr, 2, &report(System::Mlrs, Some(LinkId::MlrsSyncWord(k)), 0, &[]), t);
+            k = k.wrapping_add(1);
+        }
+        if t % 1_000 == 0 {
+            assert_eq!(real(&mut ct, &mut tr, t), Some(id), "at {t}");
+        }
+        let l = ct.links().iter().find(|l| l.id == id).expect("never displaced");
+        assert_eq!((l.first_seen_ms, l.track), (first, track));
+        t += 100;
+    }
+    assert_eq!(ct.links().len(), MAX_CONTROL_LINKS);
+    assert!(ct.replaced > 5_000);
+    let flood = tr
+        .active_threats(t)
+        .find(|x| crate::probation::flood_table(x) == Some(crate::probation::FloodTable::ControlLinks))
+        .expect("control-link flood alarm");
+    assert_eq!(flood.label(), "Flood of new control links");
 }

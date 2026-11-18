@@ -231,6 +231,17 @@ impl App {
                 crate::println!("hub-p4: THREAT {}", text);
                 continue;
             }
+            if t.kind == link::ThreatKind::IdFlood {
+                // Raised by the tracker itself (WP-09, `tracker::probation`):
+                // a flood of forged drone IDs, aircraft addresses or
+                // control links, with the rate seen.
+                let text = tracker::probation::describe(t);
+                let mut data = [0u8; 7];
+                data[0] = t.kind as u8;
+                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+                crate::println!("hub-p4: THREAT {}", text);
+                continue;
+            }
             let mut text: heapless::String<192> = heapless::String::new();
             let _ = write!(text, "{} (node {}", t.label(), t.node);
             if t.channel != 0 {
@@ -495,6 +506,8 @@ impl App {
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
+            // WP-09: a flood of forged drone IDs, shown as FLOOD in the bar.
+            flood_per_s: self.tracker.flood_status(now).map_or(0, |f| f.new_per_s.min(u32::from(u16::MAX)) as u16),
             muted: self.tracker.threats().iter().filter(|t| t.muted && t.active(now)).count().min(255) as u8,
         };
         // No battery sense on this board (the BAT connector's voltage is not

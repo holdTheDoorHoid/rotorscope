@@ -24,9 +24,26 @@
 //!
 //! **Capacity.** The table holds `A` aircraft (a const generic of the
 //! tracker, 0 on hubs built without ADS-B). Near an airport there are more;
-//! when full, the least useful one makes room: stale before active, then no
-//! position before positioned, then farthest from the unit. A newcomer that
-//! would itself be the least useful is not added.
+//! when full, the least useful one makes room: stale before active, then
+//! unproven before established, then no position before positioned, then
+//! farthest from the unit. A newcomer that would itself be the least useful
+//! is not added.
+//!
+//! **Standing** (WP-09, docs/SPOOFING.md "Floods"). ADS-B is unauthenticated:
+//! a software radio can send a frame for 32 invented addresses a second,
+//! each positioned at the hub. An aircraft is **established**
+//! ([`AircraftTrack::established`]) once it has sent [`ESTABLISH_POSITIONS`]
+//! position updates over at least [`ESTABLISH_SPAN_MS`], each a plausible
+//! move from the last (at most [`MAX_SPEED_KT`] plus 2 km). Until then it
+//! is **unproven**: it is ranked below every established aircraft (its
+//! claimed distance counts for nothing, since it is the attacker's to
+//! choose), never makes the drone-near-aircraft check
+//! (`conflict`), and may only replace another unproven aircraft that has
+//! not been heard for [`UNPROVEN_QUIET_MS`] (a real one is heard every
+//! second). Unproven aircraft hold at most half the table
+//! ([`max_unproven`]); established ones at most three quarters
+//! ([`reserved_unproven`]), and when one more becomes established the
+//! farthest established one goes, as before.
 
 use adsb::{Callsign, Kind, Source};
 
@@ -46,6 +63,26 @@ pub const LOW_ABOVE_M: f64 = 610.0;
 /// An ADS-B "UAV" this close to a Remote ID drone is taken to be that drone
 /// ([`same_drone`]), so it is not sent to TAK twice.
 pub const SAME_AS_DRONE_M: f64 = 300.0;
+
+/// Position updates an aircraft needs to be established...
+pub const ESTABLISH_POSITIONS: u8 = 3;
+/// ...spread over at least this long from when it was first heard.
+pub const ESTABLISH_SPAN_MS: u64 = 2_000;
+/// A position implying more than this from the last one restarts the count.
+pub const MAX_SPEED_KT: f64 = 1_200.0;
+/// An unproven aircraft not heard for this long may make room for a new one.
+pub const UNPROVEN_QUIET_MS: u64 = 1_500;
+/// At most this share of the table (1/2) holds unproven aircraft.
+pub const fn max_unproven(a: usize) -> usize {
+    a.div_ceil(2)
+}
+/// [`max_unproven`] for the default table.
+pub const MAX_UNPROVEN: usize = max_unproven(MAX_AIRCRAFT);
+/// At least this share (1/4) is kept for unproven aircraft: established ones
+/// hold at most the rest, so a new aircraft always has room to prove itself.
+pub const fn reserved_unproven(a: usize) -> usize {
+    a.div_ceil(4)
+}
 
 const FT: f64 = 0.3048;
 const KT: f64 = 0.514_444;
@@ -99,6 +136,10 @@ pub struct AircraftTrack {
     /// so the hub's static RAM does not grow): low nibble NIC + 1, high
     /// nibble NACp, 0 = none. Read with [`Self::nic`] and [`Self::nacp`].
     integrity: u8,
+    /// Plausible position updates in a row (saturating), for
+    /// [`Self::established`] (WP-09; with padding the track grew from 120
+    /// to 128 bytes).
+    positions: u8,
 }
 
 impl AircraftTrack {
@@ -147,6 +188,19 @@ impl AircraftTrack {
         self.speed_kt.map(|k| f64::from(k) * KT)
     }
 
+    /// Sent [`ESTABLISH_POSITIONS`] plausible position updates over at
+    /// least [`ESTABLISH_SPAN_MS`] (see the module notes). Unproven
+    /// aircraft rank below established ones and never raise the
+    /// drone-near-aircraft warning.
+    pub fn established(&self) -> bool {
+        self.positions == u8::MAX
+            || self.positions >= ESTABLISH_POSITIONS
+            && self
+                .position
+                .as_ref()
+                .is_some_and(|p| p.rx_ms.saturating_sub(self.first_seen_ms) >= ESTABLISH_SPAN_MS)
+    }
+
     fn update(&mut self, a: &adsb::Aircraft, now_ms: u64) {
         self.address_qualifier = a.address_qualifier();
         if !a.callsign.is_empty() {
@@ -160,6 +214,14 @@ impl AircraftTrack {
             let p = Position { lat, lon };
             let moved = self.position.as_ref().is_none_or(|s| s.value != p);
             if a.position_updated() || moved {
+                // Count it towards standing only if the move is plausible.
+                let plausible = self.position.as_ref().is_none_or(|old| {
+                    let dt_s = now_ms.saturating_sub(old.rx_ms) as f64 / 1000.0;
+                    let d = geo::haversine(old.value.lat, old.value.lon, lat, lon).distance_m;
+                    d <= MAX_SPEED_KT * KT * dt_s + 2_000.0
+                });
+                // 255 is kept for tests (`Tracker::vouch_for_tests`).
+                self.positions = if plausible { self.positions.saturating_add(1).min(254) } else { 1 };
                 self.position = Some(Stamped {
                     value: p,
                     rx_ms: now_ms,
@@ -262,6 +324,8 @@ pub fn same_drone(a: &AircraftTrack, drones: &[Track], ctx: &crate::Context) -> 
 #[derive(Debug, Clone)]
 pub struct AircraftTable<const A: usize> {
     aircraft: heapless::Vec<AircraftTrack, A>,
+    refused: u32,
+    replaced: u32,
 }
 
 impl<const A: usize> Default for AircraftTable<A> {
@@ -274,6 +338,8 @@ impl<const A: usize> AircraftTable<A> {
     pub const fn new() -> Self {
         Self {
             aircraft: heapless::Vec::new(),
+            refused: 0,
+            replaced: 0,
         }
     }
 
@@ -300,8 +366,12 @@ impl<const A: usize> AircraftTable<A> {
             icao: r.icao24(),
             source: r.source,
         };
-        if let Some(a) = self.aircraft.iter_mut().find(|a| a.key == key) {
-            a.update(r, now_ms);
+        if let Some(i) = self.aircraft.iter().position(|a| a.key == key) {
+            let was = self.aircraft[i].established();
+            self.aircraft[i].update(r, now_ms);
+            if !was && self.aircraft[i].established() {
+                return self.cap_established(key, now_ms, own);
+            }
             return Some(key);
         }
         if !r.heard() {
@@ -326,19 +396,82 @@ impl<const A: usize> AircraftTable<A> {
             last_seen_ms: now_ms,
             reports: 0,
             integrity: 0,
+            positions: 0,
         };
         new.update(r, now_ms);
-        if self.aircraft.is_full() {
-            let rank = |a: &AircraftTrack| keep_rank(a, now_ms, own);
-            let worst = (0..self.aircraft.len())
-                .max_by(|&i, &j| rank(&self.aircraft[i]).total_cmp_key(&rank(&self.aircraft[j])))?;
-            if rank(&new).total_cmp_key(&rank(&self.aircraft[worst])) != core::cmp::Ordering::Less {
+        // A newcomer is unproven. It takes a free slot while unproven
+        // aircraft hold fewer than half the table; otherwise the place of a
+        // stale aircraft, or of an unproven one not heard for
+        // UNPROVEN_QUIET_MS (the quietest). Never an active established
+        // one's, and never on the strength of its claimed distance.
+        let unproven = self.aircraft.iter().filter(|a| !a.established()).count();
+        if self.aircraft.is_full() || unproven >= max_unproven(A) {
+            let quiet = |a: &AircraftTrack| now_ms.saturating_sub(a.last_seen_ms);
+            let victim = (0..self.aircraft.len())
+                .filter(|&i| aircraft_state(&self.aircraft[i], now_ms) == TrackState::Stale)
+                .max_by_key(|&i| quiet(&self.aircraft[i]))
+                .or_else(|| {
+                    (0..self.aircraft.len())
+                        .filter(|&i| !self.aircraft[i].established() && quiet(&self.aircraft[i]) >= UNPROVEN_QUIET_MS)
+                        .max_by_key(|&i| quiet(&self.aircraft[i]))
+                });
+            let Some(v) = victim else {
+                self.refused = self.refused.saturating_add(1);
                 return None;
+            };
+            if aircraft_state(&self.aircraft[v], now_ms) == TrackState::Active {
+                self.replaced = self.replaced.saturating_add(1);
             }
-            self.aircraft.swap_remove(worst);
+            self.aircraft.swap_remove(v);
         }
         self.aircraft.push(new).ok()?;
         Some(key)
+    }
+
+    /// Aircraft `key` just became established. Established aircraft hold at
+    /// most `A - reserved_unproven(A)` entries, so newcomers always have
+    /// somewhere to prove themselves; past that, the least useful
+    /// established one (farthest, by the old rule) goes, which may be `key`
+    /// itself.
+    fn cap_established(&mut self, key: AircraftKey, now_ms: u64, own: Option<&OwnFix>) -> Option<AircraftKey> {
+        let est = self.aircraft.iter().filter(|a| a.established()).count();
+        if est <= A.saturating_sub(reserved_unproven(A)) {
+            return Some(key);
+        }
+        // Ranks computed once each (a Vincenty solve apiece).
+        let mut worst: Option<(usize, KeepRank)> = None;
+        for (i, a) in self.aircraft.iter().enumerate().filter(|(_, a)| a.established()) {
+            let r = keep_rank(a, now_ms, own);
+            if worst.as_ref().is_none_or(|(_, w)| r.total_cmp_key(w) == core::cmp::Ordering::Greater) {
+                worst = Some((i, r));
+            }
+        }
+        let (i, _) = worst?;
+        let gone = self.aircraft.swap_remove(i).key;
+        (gone != key).then_some(key)
+    }
+
+    /// Reports of new aircraft refused for want of room, since boot. A
+    /// busy sky refuses the same aircraft every second, so this is not a
+    /// flood signal on its own.
+    pub fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    /// Unproven aircraft, still active, thrown out for a newer one since
+    /// boot: what a flood of forged addresses causes, and a busy real sky
+    /// does not (real newcomers are heard every second, so never quiet
+    /// enough to be replaced). The aircraft flood alarm counts these.
+    pub fn replaced(&self) -> u32 {
+        self.replaced
+    }
+
+    /// Tests: treat every aircraft held as established.
+    #[cfg(test)]
+    pub(crate) fn vouch_for_tests(&mut self) {
+        for a in self.aircraft.iter_mut() {
+            a.positions = u8::MAX;
+        }
     }
 
     /// Drop aircraft not heard for [`AIRCRAFT_REMOVE_MS`].
@@ -357,10 +490,14 @@ impl<const A: usize> AircraftTable<A> {
     }
 }
 
-/// How much an aircraft is worth keeping: lower is better.
+/// How much an aircraft is worth keeping: lower is better. Stale, then
+/// unproven, go first; among unproven ones the claimed distance counts for
+/// nothing (it is the cheapest thing to forge), only how long ago they were
+/// heard.
 #[derive(Clone, Copy)]
 struct KeepRank {
     stale: bool,
+    unproven: bool,
     no_position: bool,
     distance_m: f64,
     quiet_ms: u64,
@@ -368,19 +505,32 @@ struct KeepRank {
 
 impl KeepRank {
     fn total_cmp_key(&self, o: &Self) -> core::cmp::Ordering {
-        (self.stale, self.no_position)
-            .cmp(&(o.stale, o.no_position))
-            .then(self.distance_m.total_cmp(&o.distance_m))
-            .then(self.quiet_ms.cmp(&o.quiet_ms))
+        let k = (self.stale, self.unproven);
+        k.cmp(&(o.stale, o.unproven)).then_with(|| {
+            if self.unproven {
+                self.quiet_ms.cmp(&o.quiet_ms)
+            } else {
+                self.no_position
+                    .cmp(&o.no_position)
+                    .then(self.distance_m.total_cmp(&o.distance_m))
+                    .then(self.quiet_ms.cmp(&o.quiet_ms))
+            }
+        })
     }
 }
 
 fn keep_rank(a: &AircraftTrack, now_ms: u64, own: Option<&OwnFix>) -> KeepRank {
-    let g = AircraftGeometry::of(a, own);
+    let unproven = !a.established();
     KeepRank {
         stale: aircraft_state(a, now_ms) == TrackState::Stale,
+        unproven,
         no_position: a.position.is_none(),
-        distance_m: g.range.map_or(0.0, |r| r.distance_m),
+        // Only an established aircraft's distance matters (one solve).
+        distance_m: if unproven {
+            0.0
+        } else {
+            AircraftGeometry::of(a, own).range.map_or(0.0, |r| r.distance_m)
+        },
         quiet_ms: now_ms.saturating_sub(a.last_seen_ms),
     }
 }

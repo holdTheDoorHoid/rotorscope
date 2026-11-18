@@ -61,6 +61,11 @@ struct Line<'a> {
     /// The track this one probably continues under a new identity; null
     /// when none (see `crate::continuity`).
     cont: Option<ContJ>,
+    /// Heard again at least a second after it was first heard (see
+    /// `crate::probation`). False: not announced, quietly listed, possibly
+    /// forged. Added with WP-09; a reader without it treats every track as
+    /// confirmed.
+    confirmed: bool,
 }
 
 #[derive(Serialize)]
@@ -395,6 +400,7 @@ pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize,
             conf: track.continuity.link_confidence,
             id_changed: track.continuity.identity_changed,
         }),
+        confirmed: track.confirmed(),
     };
     let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
     let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
@@ -877,14 +883,20 @@ struct StateHead<'a> {
     rec: bool,
     nodes: &'a [NodeStatus],
     adsb: Option<AdsbStatus>,
+    /// A flood of forged drone identities while its alarm is raised
+    /// (`crate::probation`): `{new_per_s, refused, since_ms}`, else null.
+    /// Added with WP-09; `"v"` stays 1 (a new field, left out when null).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flood: Option<crate::probation::FloodStatus>,
 }
 
 /// Schema version of the state object (`"v"`). Bump on incompatible change.
 pub const STATE_VERSION: u8 = 1;
 
 /// Bytes the state object needs besides its nodes, open links, tracks and
-/// aircraft (worst case, with the empty arrays' brackets).
-pub const STATE_HEAD_MAX: usize = 576;
+/// aircraft (worst case, with the empty arrays' brackets). 672 since the
+/// `flood` object (WP-09); 576 before.
+pub const STATE_HEAD_MAX: usize = 672;
 /// Bytes one node entry needs (worst case, with its comma).
 pub const STATE_NODE_MAX: usize = 160;
 
@@ -1008,6 +1020,7 @@ pub fn state(
         rec: hub.recording,
         nodes: hub.nodes,
         adsb: hub.adsb,
+        flood: ctx.flood,
     };
     // `{...}` -> `{...,"open_links":[` : drop the closing brace and carry on.
     let mut n = serde_json_core::to_slice(&head, buf).map_err(|_| FormatError::BufferTooSmall)? - 1;

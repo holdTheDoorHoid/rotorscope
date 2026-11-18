@@ -36,7 +36,7 @@ use link::ThreatKind;
 use crate::threats::Mute;
 
 /// Every kind, in `ThreatKind` order, for reading names back.
-const KINDS: [ThreatKind; 22] = [
+const KINDS: [ThreatKind; 23] = [
     ThreatKind::Deauth,
     ThreatKind::Disassoc,
     ThreatKind::BeaconFlood,
@@ -59,6 +59,7 @@ const KINDS: [ThreatKind; 22] = [
     ThreatKind::ControlContested,
     ThreatKind::MavlinkAttack,
     ThreatKind::AreaGnss,
+    ThreatKind::IdFlood,
 ];
 
 /// A threat kind from its `name()` (`"evil_twin"`).

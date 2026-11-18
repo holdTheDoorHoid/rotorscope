@@ -9,6 +9,10 @@
 //!   drone is still checked. Once loaded, the pack stays in PSRAM even if
 //!   the card is pulled.
 //! - **Engine.** `faarules::Engine` runs once a second over the tracker.
+//!   It has one entry for every drone and aircraft the tracker can hold
+//!   ([`ENTRIES`], WP-09: with fewer, a flood of forged tracks used to
+//!   restart real drones' timers), ~84 KB, so it lives in PSRAM at
+//!   [`ENGINE_OFFSET`].
 //!   Its update time and the slowest one are printed every 5 s
 //!   (`hub-p4: faa ...`), and `b` on the console times single lookups.
 //! - **Outputs.** New or raised flags (Watch and up) are logged as full
@@ -29,8 +33,18 @@ use crate::app::HubTracker;
 pub const PACK_OFFSET: usize = 8 << 20;
 /// Largest pack accepted.
 pub const PACK_MAX: usize = 8 << 20;
-/// Tracks evaluated at once (drones with a fresh position, flagged aircraft).
-pub const ENTRIES: usize = 32;
+/// Tracks evaluated at once (drones with a fresh position, flagged
+/// aircraft): every drone and aircraft the tracker can hold, so no entry is
+/// ever dropped for another (WP-09).
+pub const ENTRIES: usize = crate::app::MAX_TRACKS + crate::app::MAX_AIRCRAFT;
+/// Where the engine lives in PSRAM: past the evidence queue (4 MB + 256 KB),
+/// below the aero store (6 MB).
+pub const ENGINE_OFFSET: usize = 5 << 20;
+const _: () = assert!(crate::evlog::QUEUE_OFFSET + crate::evlog::QUEUE <= ENGINE_OFFSET);
+const _: () = assert!(
+    ENGINE_OFFSET + core::mem::size_of::<Engine<ENTRIES>>() <= crate::aero::STORE_OFFSET,
+    "FAA engine overlaps the aero store"
+);
 /// Areas the in-RAM bounding-box index holds (a 100 km Philadelphia pack
 /// has 236). A pack with more still works, by scanning (slower).
 const INDEX_MAX: usize = 384;
@@ -71,7 +85,8 @@ pub enum PackState {
 }
 
 pub struct Faa {
-    pub engine: Engine<ENTRIES>,
+    /// In PSRAM at [`ENGINE_OFFSET`].
+    pub engine: &'static mut Engine<ENTRIES>,
     base: *mut u8,
     pub state: PackState,
     len: usize,
@@ -90,6 +105,20 @@ pub struct Faa {
 
 impl Faa {
     pub fn new(psram: Option<(*mut u32, usize)>) -> Self {
+        let Some((pbase, psize)) = psram else {
+            // The hub cannot run without PSRAM (the tracker lives there too).
+            panic!("hub-p4: no PSRAM: the FAA engine lives there; cannot start");
+        };
+        assert!(psize >= ENGINE_OFFSET + core::mem::size_of::<Engine<ENTRIES>>(), "PSRAM too small for the FAA engine");
+        // SAFETY: [ENGINE_OFFSET, + size_of) is inside PSRAM (checked
+        // above) and used by nothing else (the asserts at ENGINE_OFFSET:
+        // after the evidence queue, before the aero store); 5 MB is aligned
+        // for any type. Called once, from main.
+        let engine = unsafe {
+            let p = pbase.cast::<u8>().add(ENGINE_OFFSET).cast::<Engine<ENTRIES>>();
+            p.write(Engine::new(faarules::Settings::default()));
+            &mut *p
+        };
         let (base, state) = match psram {
             // SAFETY: PACK_OFFSET + PACK_MAX is inside the 32 MB PSRAM; only
             // this module uses that range.
@@ -100,7 +129,7 @@ impl Faa {
             _ => (core::ptr::null_mut(), PackState::NoPsram),
         };
         Self {
-            engine: Engine::default(),
+            engine,
             base,
             state,
             len: 0,

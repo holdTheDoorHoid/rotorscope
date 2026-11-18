@@ -172,6 +172,11 @@ pub struct DroneView {
     pub ua: UaKind,
     /// Not heard for a while (tracker: 60 s). Drawn dimmed and hollow.
     pub stale: bool,
+    /// Heard only once so far, or for under a second (tracker
+    /// `probation`): not announced yet, and the cheapest thing to forge.
+    /// Listed after every confirmed drone, its number shown as `?`, drawn
+    /// dim and hollow on the radar.
+    pub unconfirmed: bool,
     /// Hub uptime when first and last heard.
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
@@ -654,6 +659,9 @@ pub struct UiState {
     pub drones: Vec<DroneView, MAX_DRONES>,
     /// Drones the tracker holds, which may exceed `drones.len()`.
     pub total_drones: u16,
+    /// Of those, unconfirmed (tracker `probation`). The big drone count
+    /// leaves them out and says "+N unconfirmed" instead.
+    pub total_unconfirmed: u16,
     pub hub_uptime_s: u32,
     /// `None` when the hub has no ADS-B receiver built in (no line shown).
     pub aircraft: Option<AircraftSummary>,
@@ -724,6 +732,10 @@ pub struct Threats {
     pub jammed: bool,
     /// Alarms the operator muted (still logged).
     pub muted: u8,
+    /// A flood of forged drone identities (tracker `probation`): new IDs a
+    /// second while its alarm is raised, 0 otherwise. Unconfirmed drones in
+    /// the list are then mostly fakes.
+    pub flood_per_s: u16,
 }
 
 impl UiState {
@@ -737,9 +749,17 @@ impl UiState {
         self.drones.iter().filter(|d| !d.stale).count() + hidden
     }
 
-    /// Drone indices in screen order. With a position: active drones by
-    /// distance (those with no position yet after them), then stale ones.
-    /// Without: active drones newest first, then stale ones by last heard.
+    /// As [`Self::active_count`], confirmed drones only (unconfirmed ones
+    /// are never stale: the tracker drops them first).
+    pub fn confirmed_active_count(&self) -> usize {
+        self.active_count().saturating_sub(usize::from(self.total_unconfirmed))
+    }
+
+    /// Drone indices in screen order: confirmed before unconfirmed (WP-09:
+    /// a forged drone can claim any distance, so standing comes first), and
+    /// within each, with a position: active drones by distance (those with
+    /// no position yet after them), then stale ones. Without: active drones
+    /// newest first, then stale ones by last heard.
     ///
     /// "Newest first" rather than "last heard first" because every active
     /// drone is heard about once a second: ordering by last-heard would
@@ -759,7 +779,7 @@ impl UiState {
             } else {
                 d.first_seen_ms
             };
-            (d.stale, dist, u64::MAX - recency, d.key)
+            (d.stale, d.unconfirmed, dist, u64::MAX - recency, d.key)
         };
         idx.sort_unstable_by_key(key);
         idx
