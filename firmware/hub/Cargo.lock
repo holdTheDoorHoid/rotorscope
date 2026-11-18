@@ -1581,7 +1581,6 @@ dependencies = [
  "screen",
  "serde",
  "serde-json-core",
- "sha2",
  "static_cell",
  "toml",
  "tracker",

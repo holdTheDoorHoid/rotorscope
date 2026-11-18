@@ -10,7 +10,14 @@
 //!   `c` clear the manual own position
 //!   `m` toggle CoT multicast
 //!   `s` print the /api/state body as one line
-//!   `h` / `?` hotspot details and this help
+//!   `h` / `?` hotspot details and this help; the hotspot password too, but
+//!       only while the BOOT button is held (S3; Select on the C5 build)
+//!   `R` with BOOT held: make a new hotspot password and reboot
+//!
+//! The button is the point: USB is the only place the web head's password
+//! can be read (a P4 kit's screen is on the P4, which cannot know it), and
+//! anyone with a cable and a terminal could otherwise read it. Holding a
+//! button on the board means someone is at the box.
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -24,6 +31,41 @@ use serde::Serialize;
 
 use crate::hub::{Hub, now_ms};
 use crate::{api, cot, hotspot};
+
+/// The "someone is at the box" button for the password commands: the dev
+/// board's BOOT button (GPIO0) on the S3, the panel's Select button on the
+/// C5 build (whose BOOT pin drives the buzzer).
+pub struct Presence {
+    #[cfg(feature = "esp32s3")]
+    boot: esp_hal::gpio::Input<'static>,
+}
+
+impl Presence {
+    #[cfg(feature = "esp32s3")]
+    pub fn new(boot: esp_hal::gpio::AnyPin<'static>) -> Self {
+        use esp_hal::gpio::{Input, InputConfig, Pull};
+        // The DevKitC has its own pull-up on GPIO0; the internal one keeps
+        // a bare module from reading a floating pin as "held".
+        Self { boot: Input::new(boot, InputConfig::default().with_pull(Pull::Up)) }
+    }
+
+    #[cfg(not(feature = "esp32s3"))]
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Held right now (active low).
+    pub fn held(&self) -> bool {
+        #[cfg(feature = "esp32s3")]
+        {
+            self.boot.is_low()
+        }
+        #[cfg(not(feature = "esp32s3"))]
+        {
+            crate::screen::SELECT_HELD.load(Relaxed)
+        }
+    }
+}
 
 /// A couple of seconds of output with a handful of tracks.
 static OUT: Pipe<CriticalSectionRawMutex, 8192> = Pipe::new();
@@ -128,7 +170,7 @@ pub fn test_point() -> (f64, f64) {
 }
 
 #[embassy_executor::task]
-pub async fn commands(mut rx: UsbSerialJtagRx<'static, Async>, hub: &'static Hub) {
+pub async fn commands(mut rx: UsbSerialJtagRx<'static, Async>, hub: &'static Hub, presence: Presence) {
     let mut b = [0u8; 1];
     loop {
         if rx.read(&mut b).await.unwrap_or(0) == 0 {
@@ -154,8 +196,38 @@ pub async fn commands(mut rx: UsbSerialJtagRx<'static, Async>, hub: &'static Hub
                 state_check(hub, now);
             }
             b'h' | b'?' => {
-                hotspot::print_info();
-                msg("help", "p=set test own pos, c=clear own pos, m=toggle CoT, s=state JSON, h=help");
+                let held = presence.held();
+                hotspot::print_info(held);
+                if !held && !hotspot::OPEN {
+                    msg(
+                        "help",
+                        if cfg!(feature = "esp32s3") {
+                            "hotspot password: hold the BOOT button and press h (R = new password)"
+                        } else {
+                            "hotspot password: hold the Select button and press h (R = new password)"
+                        },
+                    );
+                }
+                msg("help", "p=set test own pos, c=clear own pos, m=toggle CoT, s=state JSON, h=help, R=new hotspot password (button held)");
+            }
+            b'R' => {
+                if hotspot::OPEN {
+                    msg("cmd", "open-hotspot build: there is no password");
+                } else if presence.held() {
+                    msg("warn", "new hotspot password: rebooting; every phone must join again (hold the button, press h)");
+                    // Let the line reach the host before the reset.
+                    Timer::after_millis(300).await;
+                    hotspot::regenerate_and_reset();
+                } else {
+                    msg(
+                        "cmd",
+                        if cfg!(feature = "esp32s3") {
+                            "to make a new hotspot password, hold the BOOT button and press R"
+                        } else {
+                            "to make a new hotspot password, hold the Select button and press R"
+                        },
+                    );
+                }
             }
             b'\r' | b'\n' | b' ' => {}
             _ => msg("cmd", "unknown command (h for help)"),
