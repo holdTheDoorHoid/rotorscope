@@ -527,3 +527,50 @@ Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench EL
    `table_full=`. A keyed gateway with 16 nodes: a 17th node's packets count as `table_full` on the
    `"t":"gw"` line and arrive on the P4 as `forged_link` detail 6.
 8. Finish by flashing the normal node build (no `forgetest`) and checking `"bench":[]`.
+
+## Bench results, 2026-11-18
+
+The first hardware pass of the crash-recovery, bench-fence and origin-check work.
+
+**Boards.** ESP32-P4 hub (chip rev v1.3), gateway on an ESP32-C5, two multi-image ESP32-C5 nodes.
+Firmware built from branch `sec/wp07-audio` at c11d91a (which contains `sec/phase1`). The S3 web
+head was not attached and its firmware does not link (static RAM over by about 18 KB), so nothing in
+`firmware/hub` has run on hardware.
+
+**P4 crash recovery.** Watchdog armed on every boot, timeout read back as 30.0 s, never left off.
+Normal running for 320 s with SD card, airspace pack, gateway and two nodes: no restart; worst SD
+step 381 ms.
+* `fault panic`: backtrace, reset 0.5 s later, next hello 1.9 s after the panic, reason `software`
+  (ROM SW_SYS_RESET).
+* `fault hang`: reset 30.0 s later, reason `watchdog` (ROM CHIP_LP_WDT_RESET, cause 0x10).
+* The evidence boot events carried the reset reason, the bench list and `audio clips off at boot`.
+
+**Gateway.** 330 s of relaying without a restart. Panic: reset 0.5 s, hello 1.3 s, `software`.
+Hang: reset about 9.5 s, `watchdog`.
+
+**node-wifi (C5).** 400 s hopping with no restart and no unexpected watchdog reset. Panic: reset
+0.5 s, hello 0.7 s, `software`. Hang: reset at 30.2 s and 30.1 s.
+**node-sdr (C5).** 480 s without a restart. Panic: reset 0.4 s, hello 0.7 s. Hang: reset at 10.0 s
+and 10.2 s. The reset reason after a watchdog reset could not be read on the nodes (see the known
+limit in "Crash recovery", checklist step 4).
+
+**Origin filtering** (keyed kit, node-wifi `forgetest`). Each of the seven forbidden frame kinds was
+refused at the gateway within about 1 s (`refused` 1 to 7, `"why":"origin"`). One forged-link threat
+with detail 5 reached the P4 and its count rose to 7; the P4's own `refused` stayed 0. The node's
+normal packets kept flowing with none lost.
+
+**Fail-closed tools.** `flash-node.sh` refused a keyless build, refused
+`ROTORSCOPE_LINK_KEY_FILE=none` without `--open`, and refused a bench image without
+`ROTORSCOPE_BENCH=1`. `dev-board.sh` refused a bench gateway image. The cargo build refuses bench
+features and bench switches by itself.
+
+**Normal builds restored** on all four boards. Runs of 345 s and a further 95 s: no restarts; hub
+and gateway `refused`, `corrupt` and `bad_tag` all 0; both nodes assigned roles. The hub's evidence
+file (10 records, 5 checkpoints) was replayed over the console. `evidence-verify` refused it by
+default because it is signed with the published test key; with `--allow-test-key` and the test key
+supplied it reported 10 records, 0 failures, 0 gaps, VERIFIED, which shows low-S signing works on
+the chip.
+
+**Not checked.** Anything on the P4's screen (nobody could see it); the S3 web head; audio clips
+switched on; a real sound through the microphone; the wired bus; an old gateway against the new hub;
+node-table eviction; node-ble and node-lr crash recovery.
