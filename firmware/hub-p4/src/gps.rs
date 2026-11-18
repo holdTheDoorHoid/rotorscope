@@ -85,6 +85,14 @@ static PPS_PIN: Mutex<RefCell<Option<Flex<'static>>>> = Mutex::new(RefCell::new(
 static PPS_LAST_US: Mutex<Cell<Option<u64>>> = Mutex::new(Cell::new(None));
 pub static PPS_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// Loop-back test only: the instant (us since boot) the emulated receiver
+/// meant its next PPS edge for, handed to [`on_gpio`] by [`pps_drive_at`].
+/// The emulator raises the pad from the main loop, which can be tens of ms
+/// late (SD writes); a real receiver's edge is on time, so the edge carries
+/// the scheduled instant, not the moment the loop got round to it.
+#[cfg(feature = "gpsloop")]
+static PPS_SCHEDULED_US: Mutex<Cell<Option<u64>>> = Mutex::new(Cell::new(None));
+
 #[handler]
 #[ram]
 fn on_gpio() {
@@ -94,6 +102,8 @@ fn on_gpio() {
             && pin.is_interrupt_set()
         {
             pin.clear_interrupt();
+            #[cfg(feature = "gpsloop")]
+            let t = PPS_SCHEDULED_US.borrow(cs).take().unwrap_or(t);
             PPS_LAST_US.borrow(cs).set(Some(t));
             PPS_COUNT.fetch_add(1, Relaxed);
         }
@@ -118,12 +128,31 @@ pub fn pps_last_us() -> Option<u64> {
 }
 
 /// Loop-back test only: drive the PPS pad from inside the chip (the input
-/// stays enabled, so the edge interrupt sees it).
+/// stays enabled, so the edge interrupt sees it). Low clears any edge time
+/// not yet taken.
 #[cfg(feature = "gpsloop")]
 pub fn pps_drive(high: bool) {
     critical_section::with(|cs| {
+        if !high {
+            PPS_SCHEDULED_US.borrow(cs).set(None);
+        }
         if let Some(pin) = PPS_PIN.borrow_ref_mut(cs).as_mut() {
             pin.set_level(high.into());
+            pin.set_output_enable(true);
+        }
+    });
+}
+
+/// Loop-back test only: raise the PPS pad for the edge the emulated receiver
+/// scheduled at `at` (see [`PPS_SCHEDULED_US`]). The time is stored before
+/// the pad goes high, inside one critical section, so the edge interrupt
+/// (held off until it ends) always finds it.
+#[cfg(feature = "gpsloop")]
+pub fn pps_drive_at(at: Instant) {
+    critical_section::with(|cs| {
+        PPS_SCHEDULED_US.borrow(cs).set(Some(at.duration_since_epoch().as_micros()));
+        if let Some(pin) = PPS_PIN.borrow_ref_mut(cs).as_mut() {
+            pin.set_level(true.into());
             pin.set_output_enable(true);
         }
     });
