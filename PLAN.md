@@ -101,7 +101,7 @@ never transmits anything that could interfere with a drone.
 ### Not doing
 
 - Taking drones down or interfering with them in any way.
-- Radar, acoustic or camera detection.
+- Radar or camera detection. (Acoustic detection was here until 2026-11-17; it is now Phase 15.)
 - Decoding DJI OcuSync.
 - 900 MHz control links. No ESP32 can tune there, so this needs a separate sub-GHz radio later.
 
@@ -742,6 +742,103 @@ board. Details: docs/AERO-NODE.md "Hub side".
 
 Outputs for all of 14: aircraft on the screen, SD log, USB JSON, phone page and CoT, with the source
 (ADS-B, Mode S, UAT, FLARM, OGN, FANET, ADS-L); Phase 12's low-flying check uses them too.
+
+### Phase 15: Hearing drones (acoustic detection, added 2026-11-17)
+
+**Why.** Every other detector here needs the drone to transmit. A drone flying a stored route, or
+an FPV on a fibre-optic cable, sends nothing. Rotors still make noise. Sound also tells us that a
+drone we already see by radio is close: a small drone is only audible within about 50–200 m.
+
+**What to expect (from published measurements, see RESEARCH.md "Acoustic").**
+- Range for small drones: about 99% caught at 0–50 m, about 80% at 50–100 m, about half at
+  100–150 m, almost none past 200 m. Wind of 5 m/s can cut that to a third.
+- Mowers, chainsaws, generators and motorbikes also make steady harmonic noise. Sound alone is
+  therefore a weaker claim than a decoded radio signal, and the outputs say so.
+
+**Owner decisions (2026-11-17).**
+- Microphones are wired **to the P4 hub**, not to nodes.
+- **Detection first** with one microphone (15a–15d). A **4-microphone bearing pod** follows (15e).
+- Use: a **fixed site**. Targets: **camera drones** (low pitch, quiet) and **large FPV drones**.
+- The hub **may store raw audio while it believes it hears a drone** (and a few seconds before).
+  It stores no audio at any other time.
+- The Al-Emadi drone audio set may be used for tuning and testing. It is fetched by script into
+  `testdata/` and never committed; so is every other recording.
+
+**How it works.**
+1. *Listen.* 16 kHz, one channel. Every 32 ms the hub takes a spectrum of the last 128 ms.
+2. *Learn the background.* A slow running estimate of the noise in each frequency bin, so a
+   steady hum (HVAC, a transformer) fades into the floor and each site calibrates itself.
+3. *Look for a rotor.* A rotor makes a tone at its blade-pass rate and at every whole multiple
+   of it. The detector scores every candidate pitch from 70 to 1,600 Hz by how many of its
+   multiples stand above the background, up to 6 kHz.
+4. *Follow it.* The pitch must stay on a smooth path for seconds. Speech and music jump about;
+   a rotor glides. A drone also has four rotors at slightly different speeds, which shows as
+   closely spaced tone families.
+5. *Decide.* "Heard" needs the rotor sound for most of a few seconds. The pitch gives a rough
+   size class: camera drone (below about 300 Hz) or FPV (above).
+6. *Fuse (hub tracker).* A sound contact while a radio track is live marks that track
+   **audible** (the drone is close). A sound contact with no radio track for several seconds
+   raises **"Possible drone heard, no radio"**, a lower-grade alert than any radio detection.
+
+**Steps.**
+- **15a. Detector library** (`crates/acoustic`, `no_std`, no heap): steps 1–5. Tested on a laptop
+  with made-up rotor sounds and with real recordings.
+- **15b. File tool** (`tools/acoustic-file`): runs recordings through the same code, prints a
+  timeline and a hit / false-alarm table. `tools/fetch-acoustic-samples.sh` fetches the
+  recordings.
+- **15c. Tracker** (`tracker::sound`): the sound-contact table, fusion with radio tracks, alert,
+  JSON / CSV / screen lines.
+- **15d. Hub firmware** (`firmware/hub-p4/src/ear.rs`): microphone capture, the detector, a
+  pre-roll ring in PSRAM, and a WAV clip on the SD card (`ROTORSCP/AUDIO/`) from 5 s before a
+  detection until it ends (capped). Each clip gets an evidence-log entry with its hash.
+  First on the board's own microphone, then an outdoor microphone with a windscreen.
+- **15e. Bearing pod** (after 15a–15d work outdoors): four microphones in a small pyramid,
+  about 6 cm apart, on one cable to the hub. Direction comes from the 1–6 kHz part of the sound
+  (the low tones carry no direction on an array this small). Expect about 10° at best, within
+  about 80–100 m. Two pods would give a position; one gives a bearing only.
+- **15f. Fly-past measurement from pitch (Doppler), added 2026-11-17.** A source passing in a
+  straight line drops in pitch as it goes by. The shape of that drop gives, from one
+  microphone: the source's true pitch, its speed, how close it came, and when. Speed and
+  distance trade off against each other when the pass is noisy, but the combination
+  speed² / distance is well measured, and that alone separates a drone at 15 m/s and 40 m from
+  an aeroplane at 60 m/s and 600 m. Method after `AlanBacker/audio-flyover-geolocation` (MIT):
+  the emission-time Doppler curve, a robust fit, sanity limits (pitch must fall; speed and
+  distance in range). Test data: 40 phone recordings of aircraft passes with flight-track
+  truth (Zenodo 23424278, CC BY 4.0).
+- **15g. Is it an aircraft we already know about?, added 2026-11-17.** The hub has ADS-B,
+  Mode S, UAT and FLARM tracks (Phase 14). For each sound contact:
+  1. *Could we hear it?* An aircraft within about 3 km slant range (propeller, helicopter) or
+     2.5 km (jet) is a candidate. Sound takes about 3 s per km to arrive; allow for it.
+  2. *Does the pitch curve match?* From the aircraft's track, predict the pitch drop we should
+     hear and compare it with the one we tracked (speed² / distance first, the full curve when
+     the pass is long enough).
+  3. *What kind is it?* An SD-card table from ICAO address to type and engine class (piston,
+     turboprop, jet, helicopter; number of engines), built for one region by a new
+     `tools/aircraft-pack` from tar1090-db (its licence terms need checking first), with the
+     ADS-B emitter category as the fallback.
+  A match labels the contact "aircraft: <callsign>, <type>" and it does not alert as a
+  possible drone. No match leaves it a possible drone. An aircraft with its transponder off
+  is not explained away, which is the point. Pitch-to-type tables (a Cessna 172's propeller
+  is 70–90 Hz, a Dash 8 about 100 Hz) are a hint only: a published test of sound-only
+  aircraft typing got 27% precision.
+- **Later:** a small trained classifier as a second opinion once we have our own outdoor
+  recordings; spread-out microphones with arrival-time positioning (research, no known-good
+  ESP32 example).
+
+**Privacy.** A microphone outdoors hears people. The detector keeps only numbers (pitch,
+loudness, score) unless it believes a drone is present. Clips are capped in length, stay on the
+SD card, and are never sent to nodes or the web head. `SITE.TXT` line `audio clips on|off`
+turns recording off entirely (detection continues). Pennsylvania requires all-party consent to
+record conversations: a site that uses clips should post a notice. This is in the README note.
+
+**Measured so far (recordings only, 2026-11-17; docs/ACOUSTIC.md).** Heard a DJI Mini 4 Pro
+and a Mavic Pro in every flying recording out to about 40 m, none past 50 m, on another
+project's field recordings with measured distances. No false "heard" in 23 minutes of rural and
+fireworks background. Sirens, vacuum cleaners, washing machines, car horns, helicopters and
+chainsaws do fool it, as expected.
+
+**Not claimed.** Range, false-alarm rate and wind behaviour on our own microphone are unknown
+until measured outdoors with a real drone. No open recording of a Shahed-type or fibre-optic drone exists to test on.
 
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.

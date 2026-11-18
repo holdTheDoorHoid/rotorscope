@@ -1,0 +1,10 @@
+[package]
+name = "acoustic-file"
+description = "Run WAV recordings through the rotor-sound detector (crates/acoustic): timeline, hit / false-alarm table"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+acoustic = { workspace = true }
+hound = "3.5"

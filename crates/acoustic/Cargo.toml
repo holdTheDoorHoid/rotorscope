@@ -1,0 +1,13 @@
+[package]
+name = "acoustic"
+description = "no_std, heap-free rotor-sound detector: harmonic comb over a self-calibrating noise floor, pitch tracking and a heard / not-heard decision (PLAN.md Phase 15)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+# Made-up rotor, hum, speech-like and noise sounds for tests and tools.
+synth = []
+
+[dependencies]
+libm = "0.2"
