@@ -16,6 +16,8 @@
 //! @F <offset hex> <base64>  HIL: write sample bytes into the staging buffer
 //! hil run <len> <crc32 hex> HIL: check the staged bytes and run them through
 //!                           the live capture path (Radio::hil_run)
+//! fault panic|hang          `faulttest` builds only: panic, or spin in the
+//!                           capture loop until the watchdog resets the chip
 //! ```
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering::Relaxed};
@@ -65,6 +67,9 @@ pub enum Local {
     Uplink(bool),
     Assign(Assignment),
     HilRun { len: usize, crc: u32 },
+    /// `faulttest` builds only: true = panic, false = hang.
+    #[cfg(feature = "faulttest")]
+    Fault(bool),
 }
 
 fn on_off(s: Option<&str>) -> Result<bool, &'static str> {
@@ -119,6 +124,12 @@ pub fn parse(line: &str) -> Result<Option<Cmd>, &'static str> {
                 Local::HilRun { len, crc }
             }
             _ => return Err("hil run <len> <crc32 hex>"),
+        },
+        #[cfg(feature = "faulttest")]
+        Some("fault") => match w.next() {
+            Some("panic") => Local::Fault(true),
+            Some("hang") => Local::Fault(false),
+            _ => return Err("fault panic|hang"),
         },
         _ => return cmd::parse(line).map(|c| c.map(Cmd::Raw)),
     };

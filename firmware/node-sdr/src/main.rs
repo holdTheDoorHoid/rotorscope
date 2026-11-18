@@ -15,6 +15,11 @@
 //! built-in plan. With the `espnow` feature, link frames go to the ESP-NOW
 //! gateway in short uplink windows between captures (`uplink`): the only
 //! time this firmware transmits.
+//!
+//! Crash recovery (docs/BENCH.md "Crash recovery"): a panic prints its
+//! backtrace and reboots (`custom_halt`); the capture loop feeds the RTC
+//! watchdog every time round ([`WATCHDOG`]); the `hello` line says why the
+//! chip last reset.
 #![no_std]
 #![no_main]
 #![deny(
@@ -61,6 +66,21 @@ use console::{Cmd, Local};
 extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Unattended node: after a panic (backtrace already printed to USB),
+/// reboot rather than sit halted until someone power-cycles the box.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    node_common::fault::reboot_after_panic()
+}
+
+/// Hang watchdog timeout. The capture loop feeds it every time round (at
+/// least every 50 ms when idle). The longest legitimate holds measured on
+/// the bench (BRINGUP-RESULTS.md) are a DroneID decode (~150 ms), an FPV
+/// analysis (~100 ms), a DC recalibration (~25 ms) and the first uplink
+/// window (~0.5 s, its discovery capped at 1.2 s); a typed `dump` feeds per
+/// line (`out::line`). 10 s is far above all of them.
+const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(10);
 
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Off;
 
@@ -147,10 +167,12 @@ async fn main(spawner: Spawner) -> ! {
     let (stack_lo, stack_hi, bank) = unsafe { (addr(&_stack_end), addr(&_stack_start), addr(&_sdr_bank_start)) };
     paint_stack(stack_lo);
     println!(
-        r#"{{"t":"hello","fw":"node-sdr","ver":"{}","chip":"esp32c5","decode":{},"bank":"{bank:#x}","heap_gap":{gap},"heap_reclaimed":{HEAP_RECLAIMED},"stack":{}}}"#,
+        r#"{{"t":"hello","fw":"node-sdr","ver":"{}","chip":"esp32c5","decode":{},"bank":"{bank:#x}","heap_gap":{gap},"heap_reclaimed":{HEAP_RECLAIMED},"stack":{},"reset":"{}","faulttest":{}}}"#,
         env!("CARGO_PKG_VERSION"),
         cfg!(feature = "decode"),
-        stack_hi - stack_lo
+        stack_hi - stack_lo,
+        node_common::fault::reset_reason(),
+        cfg!(feature = "faulttest")
     );
 
     // On the heap, not in main's future: the main stack also carries the
@@ -342,7 +364,10 @@ async fn capture_loop(mut radio: alloc::boxed::Box<radio::Radio>, mut hub: alloc
     let mut last_stats = Instant::now();
     let mut script = BOOT_SCRIPT.unwrap_or("").split(';').map(str::trim).filter(|c| !c.is_empty());
     let mut next_script = Instant::now() + Duration::from_secs(2);
+    node_common::fault::arm(WATCHDOG);
     loop {
+        // A few register writes: cheap and silent, as the ring needs.
+        node_common::fault::feed();
         let _ = with_timeout(Duration::from_millis(50), ring::NEW_DATA.wait()).await;
         while let Ok(c) = COMMANDS.try_receive() {
             match c {
@@ -559,6 +584,18 @@ fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
             }
         }
         Local::Assign(a) => apply_assignment(radio, hub, &a),
+        // Bench only (docs/BENCH.md "Crash recovery"). Runs in the capture
+        // loop, so a hang here stops the watchdog's feeder.
+        #[cfg(feature = "faulttest")]
+        Local::Fault(true) => panic!("faulttest: panic requested on the console"),
+        #[cfg(feature = "faulttest")]
+        Local::Fault(false) => {
+            println!(r#"{{"t":"faulttest","what":"hang","note":"spinning; the watchdog should reset the chip"}}"#);
+            #[allow(clippy::empty_loop)]
+            loop {
+                core::hint::spin_loop();
+            }
+        }
         Local::HilRun { len, crc } => {
             let Some(data) = console::stage(len) else {
                 return println!(r#"{{"t":"err","what":"hil","note":"no staging buffer or length too big"}}"#);
