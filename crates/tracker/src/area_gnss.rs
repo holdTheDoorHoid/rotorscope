@@ -662,7 +662,14 @@ impl AreaWatch {
     fn look_drones<const N: usize, const A: usize>(&mut self, tr: &Tracker<N, A>, now: u64) {
         let ctx = tr.context(now, None);
         self.drones.retain(|d| tr.get(d.id).is_some());
-        self.drone_jumps.retain(|j| now.saturating_sub(j.at_ms) <= JUMP_WINDOW_MS);
+        // A jump taken while the track was undisputed stops counting once
+        // the original reports again and the jump turns out to be a
+        // dispute (`claims`): an impersonator using the drone's own address
+        // while it was briefly silent.
+        self.drone_jumps.retain(|j| {
+            now.saturating_sub(j.at_ms) <= JUMP_WINDOW_MS
+                && tr.get(crate::TrackId(j.who)).is_none_or(|t| !t.claims.disputed(now))
+        });
         for t in tr.tracks() {
             // Only confirmed, undisputed tracks are receivers worth
             // believing (`probation`, `claims`).

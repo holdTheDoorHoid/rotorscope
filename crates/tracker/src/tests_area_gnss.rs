@@ -446,6 +446,38 @@ fn two_disputed_tracks_raise_nothing() {
 }
 
 #[test]
+fn a_jump_that_turns_into_a_dispute_stops_counting() {
+    // While drone 1 is briefly silent an impersonator sends its ID and
+    // address from 1.2 km away (a path jump once it has its own path),
+    // then drone 1 reports again from where it is, between the
+    // impersonator's frames: a dispute, not a jump. Then drones 2 and 3
+    // jump by the same vector. Two jumpers, not three: no alarm.
+    let (mut tr, mut w) = (hub(), AreaWatch::new());
+    fly(&mut tr, &mut w, &THREE, 1_000, 15_000, (0.0, 0.0));
+    let (d, rest) = (THREE[0], &THREE[1..]);
+    let shift = (800.0, 900.0);
+    let mut t = 15_000;
+    while t < 19_000 {
+        fly(&mut tr, &mut w, rest, t, t + 1_000, (0.0, 0.0));
+        drone_at(&mut tr, d.n, d.at.0 + shift.0, d.at.1 + shift.1, d.node, d.rssi, t + 500);
+        t += 1_000;
+    }
+    assert_eq!(tr.tracks()[0].claims.path_jumps(), 1);
+    assert_eq!(w.status().drone_jumpers, 1);
+    while t < 26_000 {
+        drone_at(&mut tr, d.n, d.at.0, d.at.1, d.node, d.rssi, t);
+        // Drones 2 and 3 jump from 22 s.
+        fly(&mut tr, &mut w, rest, t, t + 1_000, if t >= 22_000 { shift } else { (0.0, 0.0) });
+        drone_at(&mut tr, d.n, d.at.0 + shift.0, d.at.1 + shift.1, d.node, d.rssi, t + 500);
+        assert!(area_threats(&tr, t).is_empty(), "at {t}: {:?}", w.status());
+        t += 1_000;
+    }
+    assert!(tr.tracks()[0].claims.disputed(t));
+    assert!(tr.tracks()[1..].iter().all(|k| k.claims.path_jumps() == 1));
+    assert_eq!(w.status().drone_jumpers, 2);
+}
+
+#[test]
 fn three_drones_landing_on_the_same_spot_is_spoofing() {
     // A spoofer sending one fixed position: different vectors, same place.
     let (mut tr, mut w) = (hub(), AreaWatch::new());
