@@ -577,7 +577,9 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
             c.clock_event_since = false;
         }
     }
-    if h.utc_ms.is_none() && h.time_source != 0 {
+    // "untrusted" is the one source that comes with no UTC (EVIDENCE-FORMAT.md:
+    // GPS gave a time the hub withheld; the UTC field is 0).
+    if h.utc_ms.is_none() && h.time_source != 0 && h.time_source != format::TimeSource::Untrusted as u8 {
         rep.add(Level::Fail, w.clone(), "a time source is given but the UTC field is empty");
     }
     match h.pos_source {
