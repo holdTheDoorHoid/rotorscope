@@ -231,6 +231,17 @@ impl App {
                 crate::println!("hub-p4: THREAT {}", text);
                 continue;
             }
+            if t.kind == link::ThreatKind::IdFlood {
+                // Raised by the tracker itself (WP-09, `tracker::probation`):
+                // a flood of forged drone IDs, aircraft addresses or
+                // control links, with the rate seen.
+                let text = tracker::probation::describe(t);
+                let mut data = [0u8; 7];
+                data[0] = t.kind as u8;
+                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+                crate::println!("hub-p4: THREAT {}", text);
+                continue;
+            }
             let mut text: heapless::String<192> = heapless::String::new();
             let _ = write!(text, "{} (node {}", t.label(), t.node);
             if t.channel != 0 {
