@@ -213,6 +213,10 @@ pub struct HelloLine<'a> {
     pub can: u8,
     pub images: &'a [Option<&'static str>],
     pub plan_id: u16,
+    /// Why the chip last reset (`node_common::fault::name`), and whether
+    /// this is a `faulttest` bench build.
+    pub reset: &'static str,
+    pub faulttest: bool,
 }
 
 /// `assign`: a new plan id from the hub; `switch`: leaving for another image.
