@@ -381,6 +381,11 @@ fn qgc01_camera_information_over_open_wifi() {
 }
 
 #[test]
+fn suspicion_bit_is_the_links() {
+    assert_eq!(mavwatch::analyse::DETAIL_SUSPECT, link::MAVLINK_SUSPECT);
+}
+
+#[test]
 fn split_across_datagrams_and_tcp() {
     // The camera frame cut in two datagrams on a MAVLink port (a bridge
     // forwarding raw serial chunks) is joined by the flow's stream.
@@ -389,7 +394,9 @@ fn split_across_datagrams_and_tcp() {
     let (a, b) = evil.split_at(100);
     let got = run(&[(frame(&Opts::down(), a), 1_000), (frame(&Opts::down(), b), 1_010)], 149);
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].0.detail, mavwatch::Kind::UriTraversal.code());
+    // One frame from a system with no history: a suspicion (WP-11a).
+    assert_eq!(got[0].0.detail, mavwatch::Kind::UriTraversal.code() | mavwatch::analyse::DETAIL_SUSPECT);
+    assert_eq!(got[0].1.detail, mavwatch::Kind::UriTraversal.code(), "evidence carries the kind");
     assert_eq!(got[0].0.freq, 57_450);
     // Over TCP to 5760, in three segments.
     let o = Opts { proto: 6, sport: 5760, dport: 40000, ..Opts::down() };

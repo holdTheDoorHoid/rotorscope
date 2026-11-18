@@ -28,6 +28,16 @@
 //! ```
 //! Options: `--pre "trig 3"` console commands first, `--rms 200,100,60` burst levels (codes RMS; receiver noise is
 //! `--noise 48`, the board's measured noise at gain 83), `--dir` recordings.
+//!
+//! Hostile-signal scenarios (docs/BENCH.md "node-sdr under hostile signals"; firmware
+//! `radio/hilsim.rs`), instead of the replay:
+//!
+//! - `--train N,GAP_MS` with `--pulse burst|noise`: stage one pulse (the first recorded burst at
+//!   the first `--rms` level, or 600 µs of white noise at that level, which needs no recording)
+//!   and replay it on the chip as N pulses GAP_MS apart, once through the decode budget and once
+//!   without (`nobudget`, the loop as it was). Prints both `hil_train` results.
+//! - `--forge SECS`: run the forged-session scenario on the live follower (the node hops its
+//!   DroneID plan meanwhile) and print the board's `forge` report and `follow` lines.
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc;
@@ -130,6 +140,9 @@ fn main() {
     let mut rms_list = vec![200.0, 100.0, 60.0];
     let mut noise = 48.0;
     let mut pre: Vec<String> = vec![];
+    let mut train: Option<(u32, u32)> = None;
+    let mut pulse = String::from("burst");
+    let mut forge: Option<u32> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -138,11 +151,22 @@ fn main() {
             "--rms" => rms_list = args.next().expect("--rms").split(',').map(|v| v.parse().expect("rms")).collect(),
             "--pre" => pre.push(args.next().expect("--pre")),
             "--noise" => noise = args.next().expect("--noise").parse().expect("noise"),
+            "--train" => {
+                let v = args.next().expect("--train N,GAP_MS");
+                let (n, g) = v.split_once(',').expect("--train N,GAP_MS");
+                train = Some((n.parse().expect("N"), g.parse().expect("GAP_MS")));
+            }
+            "--pulse" => pulse = args.next().expect("--pulse burst|noise"),
+            "--forge" => forge = Some(args.next().expect("--forge SECS").parse().expect("SECS")),
             _ => panic!("unknown argument {a}"),
         }
     }
     let debug = std::env::var_os("HIL_DEBUG").is_some();
     let port = port.expect("--port or $BOARD_PORT (run under tools/dev-board.sh --run)");
+
+    if train.is_some() || forge.is_some() {
+        return scenarios(&port, &dir, train, &pulse, forge, noise, rms_list[0], &pre);
+    }
 
     let mut all = vec![];
     for name in ["mavic_air_2", "mini2_sm"] {
@@ -258,5 +282,104 @@ fn main() {
     send(&mut w, "hop on");
     for s in summary {
         println!("# {s}");
+    }
+}
+
+/// One ring grab holding a 600 µs pulse of white noise (the whole 40 MS/s
+/// capture: a 20-40 MHz wide pulse) at `rms` codes over receiver noise.
+fn noise_block(noise: f64, rms: f64, seed: u64) -> Vec<u8> {
+    let mut rng = Rng(seed);
+    let w = Window::CLIP;
+    let len = 24_000; // 600 µs at 40 MS/s
+    let g = rms / std::f64::consts::SQRT_2;
+    (0..BLOCK)
+        .map(|k| {
+            let on = (LEAD..LEAD + len).contains(&k);
+            let (si, sq) = if on { (g * rng.g(), g * rng.g()) } else { (0.0, 0.0) };
+            let i = (si + noise * rng.g()).floor().clamp(-512.0, 511.0) as i16;
+            let q = (sq + noise * rng.g()).floor().clamp(-512.0, 511.0) as i16;
+            pack(w.quantise(i), w.quantise(q))
+        })
+        .collect()
+}
+
+/// The hostile-signal scenarios (see the module docs).
+#[allow(clippy::too_many_arguments)]
+fn scenarios(port: &str, dir: &str, train: Option<(u32, u32)>, pulse: &str, forge: Option<u32>, noise: f64, rms: f64, pre: &[String]) {
+    let st = std::process::Command::new("stty").args(["-F", port, "raw", "-echo", "115200"]).status().expect("stty");
+    assert!(st.success(), "stty failed");
+    let mut w = std::fs::OpenOptions::new().write(true).open(port).expect("open port for writing");
+    let r = std::fs::File::open(port).expect("open port for reading");
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(r).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let send = |w: &mut std::fs::File, s: &str| {
+        w.write_all(s.as_bytes()).expect("write");
+        w.write_all(b"\n").expect("write");
+    };
+    // Wait for a line of type `t` (and, if given, containing `has`).
+    let wait = |t: &str, has: &str, secs: u64| -> Option<String> {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) else { continue };
+            if line.contains("\"t\":\"err\"") || line.contains("\"t\":\"follow\"") {
+                eprintln!("board: {line}");
+            }
+            if line.contains(&format!("\"t\":\"{t}\"")) && line.contains(has) {
+                return Some(line);
+            }
+        }
+        None
+    };
+    for c in pre {
+        std::thread::sleep(Duration::from_millis(100));
+        send(&mut w, c);
+    }
+    if let Some((n, gap)) = train {
+        send(&mut w, "hop off");
+        std::thread::sleep(Duration::from_millis(300));
+        let data = match pulse {
+            "noise" => noise_block(noise, rms, 7),
+            _ => {
+                let mut b = vec![];
+                for name in ["mavic_air_2", "mini2_sm"] {
+                    b.extend(bursts(&std::path::Path::new(dir).join(name)));
+                }
+                let (first, _) = b.first().expect("no burst in the recordings");
+                block(first, noise, rms, 1)
+            }
+        };
+        let crc32 = rawcap::crc32::crc32(&data);
+        for (j, chunk) in data.chunks(48).enumerate() {
+            send(&mut w, &format!("@F {:x} {}", j * 48, b64(chunk)));
+        }
+        for budget in [true, false] {
+            let flag = if budget { "" } else { " nobudget" };
+            send(&mut w, &format!("hil train {n} {gap}{flag} {} {crc32:08x}", data.len()));
+            // Up to ~160 ms a decode on the chip.
+            match wait("hil_train", "", 30 + n as u64 / 4) {
+                Some(l) => println!("{pulse} rms {rms} budget {budget}: {l}"),
+                None => eprintln!("no hil_train result (budget {budget})"),
+            }
+        }
+        send(&mut w, "hop on");
+    }
+    if let Some(secs) = forge {
+        send(&mut w, "role droneid");
+        std::thread::sleep(Duration::from_millis(300));
+        send(&mut w, "hop on");
+        std::thread::sleep(Duration::from_millis(300));
+        send(&mut w, &format!("hil forge {secs}"));
+        match wait("forge", "\"done\":true", secs as u64 + 20) {
+            Some(l) => println!("forge {secs} s: {l}"),
+            None => eprintln!("no forge report within {} s", secs + 20),
+        }
+        send(&mut w, "role auto");
     }
 }

@@ -19,6 +19,18 @@
 //!   [`LOCAL_SELF_MS`], or from the receiver's position. A new position that
 //!   implies more than [`MAX_SPEED_KT`] from the last one, or lies more than
 //!   [`Config::max_range_km`] from the receiver, is refused.
+//! - **Standing** (WP-09). A forger can send one well-formed DF17 for a new
+//!   address many times a second. An aircraft is **established**
+//!   ([`Plane::established`]) after [`ESTABLISH_POSITIONS`] accepted
+//!   positions over at least [`ESTABLISH_SPAN_MS`] (or, with no position,
+//!   [`ESTABLISH_VERIFIED`] verified messages over [`ESTABLISH_QUIET_SPAN_MS`]).
+//!   A new address is unproven: unproven aircraft hold at most half the
+//!   table, established ones at most three quarters, so neither can starve
+//!   the other. A new address takes a free slot within those limits, else
+//!   the place of an aircraft not heard for [`EVICT_QUIET_MS`], else of an
+//!   unproven one not heard for [`UNPROVEN_QUIET_MS`]; never of an
+//!   established aircraft still being heard. When one more becomes
+//!   established than its share, the established one heard longest ago goes.
 
 use libm::{asin, cos, sqrt};
 
@@ -45,6 +57,18 @@ pub const VALID_MS: u64 = 60_000;
 pub const REMOVE_MS: u64 = 60_000;
 /// Positions implying more than this from the previous one are refused.
 pub const MAX_SPEED_KT: f64 = 1_200.0;
+/// Accepted positions that establish an aircraft...
+pub const ESTABLISH_POSITIONS: u8 = 3;
+/// ...over at least this long since it was first heard.
+pub const ESTABLISH_SPAN_MS: u64 = 2_000;
+/// Without positions: verified messages that establish it...
+pub const ESTABLISH_VERIFIED: u16 = 10;
+/// ...over at least this long.
+pub const ESTABLISH_QUIET_SPAN_MS: u64 = 5_000;
+/// An aircraft not heard for this long may make room for a new one.
+pub const EVICT_QUIET_MS: u64 = 5_000;
+/// An unproven aircraft not heard for this long may make room.
+pub const UNPROVEN_QUIET_MS: u64 = 1_500;
 
 const NM_M: f64 = 1852.0;
 
@@ -107,6 +131,11 @@ pub struct Stats {
     pub bds: [u32; 7],
     /// New aircraft that found the table full.
     pub table_full: u32,
+    /// New aircraft refused a slot (no free slot within the unproven
+    /// share, and nothing quiet enough to replace).
+    pub refused_new: u32,
+    /// Unproven aircraft replaced by newer ones.
+    pub unproven_replaced: u32,
 }
 
 /// A value and when it was last set.
@@ -187,6 +216,10 @@ pub struct Plane {
     long_n: u16,
     /// adsb::flag::UPDATED_* bits set this interval.
     updated: u32,
+    /// Accepted positions (saturating) and verified messages, for
+    /// [`Plane::established`].
+    positions: u8,
+    verified_n: u16,
 }
 
 impl Plane {
@@ -224,7 +257,17 @@ impl Plane {
             short_n: 0,
             long_n: 0,
             updated: 0,
+            positions: 0,
+            verified_n: 0,
         }
+    }
+
+    /// Established (see the module notes): a history no single forged
+    /// frame gives.
+    pub fn established(&self) -> bool {
+        let span = self.last_ms.saturating_sub(self.first_ms);
+        (self.positions >= ESTABLISH_POSITIONS && span >= ESTABLISH_SPAN_MS)
+            || (self.verified_n >= ESTABLISH_VERIFIED && span >= ESTABLISH_QUIET_SPAN_MS)
     }
 
     pub fn position(&self) -> Option<(f64, f64)> {
@@ -441,30 +484,62 @@ impl<const N: usize> Table<N> {
         self.planes.iter().position(|p| p.is_some_and(|p| p.icao == icao))
     }
 
-    /// Find or add. When full, the aircraft heard longest ago makes room.
+    /// Find or add (see the module notes for who may make room).
     fn slot(&mut self, icao: u32, now: u64) -> Option<usize> {
         if let Some(i) = self.index(icao) {
             return Some(i);
         }
-        let i = match self.planes.iter().position(|p| p.is_none()) {
-            Some(i) => i,
-            None => {
-                self.stats.table_full += 1;
-                let (i, oldest) = self
-                    .planes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, p)| p.map(|p| (i, p.last_ms)))
-                    .min_by_key(|&(_, t)| t)?;
-                // Only evict an aircraft that has gone quiet.
-                if now.saturating_sub(oldest) < 5_000 {
+        let unproven = self.planes().filter(|p| !p.established()).count();
+        let free = self.planes.iter().position(|p| p.is_none());
+        let i = match free {
+            Some(i) if unproven < N.div_ceil(2) => i,
+            _ => {
+                if free.is_none() {
+                    self.stats.table_full += 1;
+                }
+                let quiet = |p: &Plane| now.saturating_sub(p.last_ms);
+                let oldest = |f: &dyn Fn(&Plane) -> bool| {
+                    self.planes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, p)| p.as_ref().filter(|p| f(p)).map(|p| (i, quiet(p))))
+                        .max_by_key(|&(_, q)| q)
+                        .map(|(i, _)| i)
+                };
+                let victim = oldest(&|p| quiet(p) >= EVICT_QUIET_MS)
+                    .or_else(|| oldest(&|p| !p.established() && quiet(p) >= UNPROVEN_QUIET_MS));
+                let Some(i) = victim else {
+                    self.stats.refused_new += 1;
                     return None;
+                };
+                if self.planes[i].is_some_and(|p| !p.established()) {
+                    self.stats.unproven_replaced += 1;
                 }
                 i
             }
         };
         self.planes[i] = Some(Plane::new(icao, now));
         Some(i)
+    }
+
+    /// Plane `i` just became established: if that is more than three
+    /// quarters of the table, the established one heard longest ago goes
+    /// (perhaps `i` itself), so new aircraft always have room to prove
+    /// themselves.
+    fn cap_established(&mut self, now: u64) {
+        let est = self.planes().filter(|p| p.established()).count();
+        if est <= N - N.div_ceil(4) {
+            return;
+        }
+        if let Some((i, _)) = self
+            .planes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.filter(|p| p.established()).map(|p| (i, now.saturating_sub(p.last_ms))))
+            .max_by_key(|&(_, q)| q)
+        {
+            self.planes[i] = None;
+        }
     }
 
     /// Take one received frame.
@@ -539,9 +614,11 @@ impl<const N: usize> Table<N> {
         let Some(p) = self.planes[idx].as_mut() else {
             return Ok(msg.address);
         };
+        let was = p.established();
         p.last_ms = now;
         if matches!(msg.check, AddressCheck::Verified(_) | AddressCheck::Interrogator(_)) {
             p.verified_ms = now;
+            p.verified_n = p.verified_n.saturating_add(1);
         }
         if let Some(d) = rx.signal_dbm {
             p.signal_dbm = d;
@@ -561,6 +638,9 @@ impl<const N: usize> Table<N> {
         self.stats.ads_r += st.ads_r;
         if let Some(b) = st.bds {
             self.stats.bds[b] += 1;
+        }
+        if !was && p.established() {
+            self.cap_established(now);
         }
         Ok(msg.address)
     }
@@ -883,6 +963,7 @@ fn position(
                 p.pos = None;
                 p.pos_global = false;
                 p.refused_in_row = 0;
+                p.positions = 0;
             }
             // The pair that produced this is suspect too.
             if global {
@@ -898,6 +979,7 @@ fn position(
         p.pos_global = false;
     }
     p.refused_in_row = 0;
+    p.positions = p.positions.saturating_add(1);
     set(&mut p.pos, new, now);
     p.updated |= 1 << adsb::flag::UPDATED_POSITION;
     if global {

@@ -160,6 +160,9 @@ pub struct Assess {
     pub wide: bool,
     pub pulsed: bool,
     pub oven: bool,
+    /// Decoder pressure ([`ProbeStats::pressure`]): the decoder's busy
+    /// percent on a dwell where it had to refuse windows.
+    pub pressure: Option<u8>,
 }
 
 impl Assess {
@@ -198,6 +201,10 @@ pub struct HopVerdict {
     pub raised: bool,
     pub pulsed: bool,
     pub oven: bool,
+    /// The DroneID decoder was flooded on this dwell (counts as pulsed
+    /// interference); `busy_pct`: its share of the dwell.
+    pub pressure: bool,
+    pub busy_pct: u8,
     /// A tone's absolute frequency (100 kHz units).
     pub tone: Option<u32>,
     /// A sweep: rate MHz/s and the centre it was seen at (100 kHz units).
@@ -209,6 +216,7 @@ impl HopVerdict {
     pub fn notable(&self) -> bool {
         self.raised
             || self.pulsed
+            || self.pressure
             || self.oven
             || self.tone.is_some()
             || self.sweep.is_some()
@@ -407,6 +415,7 @@ impl Watch {
             wide,
             pulsed,
             oven,
+            pressure: p.pressure(),
         })
     }
 
@@ -441,6 +450,8 @@ impl Watch {
             raised: a.wide && !is_link,
             pulsed: a.pulsed && link == Some(false),
             oven: a.oven,
+            pressure: a.pressure.is_some(),
+            busy_pct: a.pressure.unwrap_or(0),
             tone,
             sweep,
         };
@@ -522,7 +533,14 @@ impl Watch {
                     let (r, c) = v.sweep.unwrap_or((0, v.freq));
                     (v.sweep.is_some(), v.loud_rise_x10, r as i32, c)
                 }
-                Kind::Pulsed => (v.pulsed, v.loud_rise_x10, v.loud_pct as i32, v.freq),
+                // A pulse train that floods the decoder counts too; its
+                // detail is the decoder's busy percent.
+                Kind::Pulsed => (
+                    v.pulsed || v.pressure,
+                    v.loud_rise_x10,
+                    if v.pulsed { v.loud_pct as i32 } else { v.busy_pct as i32 },
+                    v.freq,
+                ),
                 Kind::Blinded => (v.blind_counts(), v.eff_rise_x10, 0, v.freq),
             };
             if !hit {

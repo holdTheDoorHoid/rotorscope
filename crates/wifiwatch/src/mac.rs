@@ -40,6 +40,21 @@ pub const fn drone_link(subtype: u8) -> bool {
     matches!(subtype, ASSOC_REQ | ASSOC_RESP | REASSOC_REQ | REASSOC_RESP | DISASSOC | AUTH | DEAUTH)
 }
 
+/// One Wi-Fi driver receive buffer (ESP-IDF Wi-Fi guide, "Wi-Fi Buffer
+/// Usage": each RX buffer is 1.6 KB). It holds the receive-control header
+/// and then the frame, so no frame the driver hands over can be longer
+/// than this minus that header.
+pub const RX_BUFFER: usize = 1600;
+
+/// The bytes of a received frame that may be read: `sig_len` as the driver
+/// reports it (the slice the sniffer builds), clamped to `max` (the most a
+/// receive buffer can hold after its header, see [`RX_BUFFER`]). A wrong
+/// `sig_len` (14 bits, up to 16 383 on the C5) then never reads past the
+/// buffer.
+pub fn rx_frame(data: &[u8], max: usize) -> &[u8] {
+    &data[..data.len().min(max)]
+}
+
 /// A management frame's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
@@ -53,6 +68,10 @@ pub struct Header {
     pub addr1: [u8; 6],
     pub addr2: [u8; 6],
     pub addr3: [u8; 6],
+    /// Sequence number (12 bits of the Sequence Control field; the
+    /// fragment number dropped). A retransmission repeats it; a new frame
+    /// from the same transmitter advances it.
+    pub seq: u16,
     /// Offset of the frame body (24, or 28 with an HT Control field).
     pub body_at: usize,
 }
@@ -77,6 +96,7 @@ pub fn header(f: &[u8]) -> Option<Header> {
         addr1: f[4..10].try_into().ok()?,
         addr2: f[10..16].try_into().ok()?,
         addr3: f[16..22].try_into().ok()?,
+        seq: u16::from_le_bytes([f[22], f[23]]) >> 4,
         body_at,
     })
 }
@@ -357,6 +377,17 @@ pub(crate) mod build {
         f
     }
 
+    /// Set a frame's sequence number (and the retry bit).
+    pub fn with_seq(mut f: Vec<u8>, seq: u16, retry: bool) -> Vec<u8> {
+        f[22..24].copy_from_slice(&(seq << 4).to_le_bytes());
+        if retry {
+            f[1] |= 0x08;
+        } else {
+            f[1] &= !0x08;
+        }
+        f
+    }
+
     /// Deauth / disassoc with a reason code.
     pub fn kill(subtype: u8, dst: [u8; 6], src: [u8; 6], bssid: [u8; 6], reason: u16) -> Vec<u8> {
         mgmt(subtype, dst, src, bssid, &reason.to_le_bytes())
@@ -376,6 +407,9 @@ mod tests {
         let h = header(&f).unwrap();
         assert_eq!((h.subtype, h.retry, h.protected, h.body_at), (DEAUTH, false, false, 24));
         assert_eq!((h.addr1, h.addr2, h.addr3), ([0xFF; 6], AP, AP));
+        assert_eq!(h.seq, 1, "the builders' Sequence Control is 0x0010");
+        f[22..24].copy_from_slice(&0xABC5u16.to_le_bytes());
+        assert_eq!(header(&f).unwrap().seq, 0xABC);
         f[1] = 0x08 | 0x40 | 0x80;
         f.extend_from_slice(&[0; 4]);
         let h = header(&f).unwrap();
@@ -513,5 +547,31 @@ mod tests {
                 let _ = action_csa(&h, &f);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rx_len_tests {
+    use super::*;
+
+    #[test]
+    fn rx_frame_never_exceeds_the_buffer() {
+        // The callback's slice is as long as sig_len says, whatever the
+        // buffer holds. 14 bits: up to 16 383.
+        let max = RX_BUFFER - 48;
+        let backing = std::vec![0u8; 16_383];
+        for sig_len in [0usize, 24, 512, max, max + 1, 4095, 16_383] {
+            let got = rx_frame(&backing[..sig_len], max);
+            assert_eq!(got.len(), sig_len.min(max), "sig_len {sig_len}");
+            assert!(got.len() <= max);
+        }
+    }
+
+    #[test]
+    fn rx_frame_keeps_every_real_frame_whole() {
+        // The longest 802.11 frames an ESP32 receives fit a buffer.
+        let max = RX_BUFFER - 48;
+        let f = std::vec![0x80u8; 1540];
+        assert_eq!(rx_frame(&f, max), &f[..]);
     }
 }

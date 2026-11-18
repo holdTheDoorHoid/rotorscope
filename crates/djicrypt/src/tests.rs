@@ -79,10 +79,15 @@ fn cryp_core(q: &AffinePoint, k: &[u8; 16], aux: &[u8; 32]) -> Vec<u8> {
 
 /// A plausible INFP-10 plaintext over City Hall, Philadelphia.
 fn infp10_plain(serial: &str) -> [u8; 109] {
+    infp10_at(serial, 7, 1_794_232_987_250)
+}
+
+/// The same, with sequence number `seq` and GPS time `gps_ms`.
+fn infp10_at(serial: &str, seq: u16, gps_ms: u64) -> [u8; 109] {
     let mut p = [0u8; 109];
     p[0] = 0x10;
     p[1] = 2;
-    p[2..4].copy_from_slice(&7u16.to_le_bytes());
+    p[2..4].copy_from_slice(&seq.to_le_bytes());
     let state = Infp10::STATE_MOTORS_ON | Infp10::STATE_IN_AIR | Infp10::STATE_POSITION_VALID;
     p[4..6].copy_from_slice(&state.to_le_bytes());
     p[6..6 + serial.len()].copy_from_slice(serial.as_bytes());
@@ -92,7 +97,7 @@ fn infp10_plain(serial: &str) -> [u8; 109] {
     p[32..34].copy_from_slice(&800i16.to_le_bytes());
     p[34..36].copy_from_slice(&250i16.to_le_bytes());
     p[40..42].copy_from_slice(&9000i16.to_le_bytes());
-    p[42..50].copy_from_slice(&1_794_232_987_250u64.to_le_bytes());
+    p[42..50].copy_from_slice(&gps_ms.to_le_bytes());
     p[50..54].copy_from_slice(&deg_to_rad_e7(39.9530).to_le_bytes());
     p[54..58].copy_from_slice(&deg_to_rad_e7(-75.1640).to_le_bytes());
     p[58..62].copy_from_slice(&o4plain::HOME_UNSET.to_le_bytes());
@@ -245,10 +250,15 @@ fn hand_supplied_session_key() {
     assert_eq!(dec.process(&obj, 0), Err(Error::NoSession));
     dec.add_session(SessionKey::from_bytes(K), 0);
     assert!(matches!(dec.process(&obj, 1), Ok(Plain::Infp11(_))));
-    // CRYP without a private key: detect-only.
+    // A CRYP of that (known) session decrypts with its key: no private
+    // key or curve operation needed.
     let d = test_key();
     let (_, cryp) = block_and_object(&cryp_core(&d.public(), &K, &cryp_aux("SN3", 1.0, 2.0)));
+    assert!(matches!(dec.process(&cryp, 2), Ok(Plain::Cryp(_))));
+    // A CRYP of an unknown session without a private key: detect-only.
+    let (_, cryp) = block_and_object(&cryp_core(&d.public(), &[7; 16], &cryp_aux("SN3", 1.0, 2.0)));
     assert_eq!(dec.process(&cryp, 2), Err(Error::NoKey));
+    assert_eq!(dec.stats.curve_ops, 0);
 }
 
 #[test]
@@ -317,4 +327,91 @@ fn errors_and_stats_carry_no_key_bytes() {
     let dbg = std::format!("{:?} {:?}", Error::C3Mismatch, Stats::default());
     assert!(!dbg.contains(&std::format!("{:02x}", K[1])));
     assert_ne!(fp, [0; 4]);
+}
+
+/// A CRYP repeated by the aircraft (or replayed, or sent again by a
+/// forger) costs one curve operation, not one each.
+#[test]
+fn a_repeated_cryp_costs_one_curve_operation() {
+    let d = test_key();
+    let q = d.public();
+    let cryp = checked_object(&cryp_core(&q, &K, &cryp_aux("1581F7TEST00001", 39.9526, -75.1652)));
+    let mut dec: Decryptor<4> = Decryptor::new(Some(d));
+    for t in 0..20u64 {
+        assert!(matches!(dec.process(&cryp, t * 100), Ok(Plain::Cryp(_))));
+    }
+    assert_eq!(dec.stats.curve_ops, 1);
+    assert_eq!(dec.stats.sessions_unwrapped, 1);
+    assert_eq!(dec.stats.records_decrypted, 20);
+}
+
+/// CRYPs for new sessions (as a forger with the public key sends them, one
+/// new key after another) are unwrapped at most UNWRAP_BURST at once and
+/// UNWRAP_PER_S a second.
+#[test]
+fn unwraps_are_rate_limited() {
+    let d = test_key();
+    let q = d.public();
+    let mut dec: Decryptor<8> = Decryptor::new(Some(d));
+    let mut ok = 0;
+    for i in 0..20u8 {
+        let k = [i; 16];
+        let cryp = checked_object(&cryp_core(&q, &k, &cryp_aux("SN1", 1.0, 2.0)));
+        match dec.process(&cryp, 10) {
+            Ok(_) => ok += 1,
+            Err(e) => assert_eq!(e, Error::RateLimited),
+        }
+    }
+    assert_eq!(ok, UNWRAP_BURST);
+    assert_eq!(dec.stats.curve_ops, UNWRAP_BURST);
+    assert_eq!(dec.stats.rate_limited, 20 - UNWRAP_BURST);
+    // One second later: UNWRAP_PER_S more.
+    let mut more = 0;
+    for i in 100..110u8 {
+        let cryp = checked_object(&cryp_core(&q, &[i; 16], &cryp_aux("SN1", 1.0, 2.0)));
+        if dec.process(&cryp, 1_010).is_ok() {
+            more += 1;
+        }
+    }
+    assert_eq!(more, UNWRAP_PER_S);
+}
+
+/// Within a session, an INFP-10 that does not move forward is refused:
+/// an old record replayed, an altered (bit-flipped) copy of the latest, GPS
+/// time going backwards. An identical repeat (two nodes) is fine. One
+/// forged far "ahead" is refused without locking the real records out.
+#[test]
+fn replayed_and_altered_infp10_records_are_refused() {
+    const SN: &str = "1581F7TEST00001";
+    let gps0 = 1_794_232_987_250u64;
+    let rec = |seq: u16, gps: u64| checked_object(&infp10_core(&K, &infp10_at(SN, seq, gps)));
+    let mut dec: Decryptor<4> = Decryptor::default();
+    dec.add_session(SessionKey::from_bytes(K), 0);
+    assert!(dec.process(&rec(10, gps0), 1_000).is_ok());
+    assert!(dec.process(&rec(10, gps0), 1_010).is_ok(), "the same record from a second node");
+    assert!(dec.process(&rec(11, gps0 + 200), 1_200).is_ok());
+    // Replays of older records.
+    assert_eq!(dec.process(&rec(10, gps0), 1_400), Err(Error::Replay));
+    assert_eq!(dec.process(&rec(12, gps0 - 1_000), 1_400), Err(Error::Replay), "GPS time backwards");
+    // The latest record, its position ciphertext bit-flipped: AES-CTR
+    // decrypts it to a moved position that passes the range checks, but it
+    // is an altered copy of a record already seen.
+    let mut flipped = infp10_core(&K, &infp10_at(SN, 11, gps0 + 200));
+    flipped[19 + 28] ^= 0x01;
+    let (_, flipped) = block_and_object(&flipped);
+    assert_eq!(dec.process(&flipped, 1_500), Err(Error::Replay));
+    // A record far "in the future" is refused, and the real next one
+    // still decrypts.
+    assert_eq!(dec.process(&rec(5_000, gps0 + 200), 1_600), Err(Error::TooFarAhead));
+    assert_eq!(dec.process(&rec(12, gps0 + 3_600_000), 1_600), Err(Error::TooFarAhead));
+    assert!(dec.process(&rec(12, gps0 + 400), 1_600).is_ok());
+    assert_eq!(dec.stats.replayed, 3);
+    assert_eq!(dec.stats.too_far_ahead, 2);
+    // A bit flip in a *new* record is not detectable here: it decrypts.
+    // The tracker judges its position as a claim (docs/SPOOFING.md).
+    let mut fresh = infp10_core(&K, &infp10_at(SN, 13, gps0 + 600));
+    fresh[19 + 28] ^= 0x01;
+    let (_, fresh) = block_and_object(&fresh);
+    let Ok(Plain::Infp10(r)) = dec.process(&fresh, 1_800) else { panic!() };
+    assert!((r.lat() - 39.9526).abs() > 0.3, "malleable: the latitude moved to {}", r.lat());
 }

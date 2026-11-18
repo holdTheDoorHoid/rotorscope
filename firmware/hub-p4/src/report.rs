@@ -137,16 +137,22 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     let mut b = LineBuf::new();
     let mut w = W(&mut b);
     let t = &app.tracker;
+    // WP-11b: alarms silenced, and the rules in force by type.
+    let mc = t.mute_counts(now);
     let _ = write!(w.0, "{{\"t\":\"hub\",\"up_ms\":{now},\"utc_ms\":");
     w.opt(utc);
     let src = gps.time.map(|a| if a.pps { "\"gps_pps\"" } else { "\"gps\"" });
     let _ = write!(
         w.0,
-        ",\"utc_src\":{},\"conflicts\":{},\"threats\":{},\"blind\":{},\"tracks\":{},\"active\":{},\"open_links\":{},\"open_active\":{},\"aircraft\":{},\"aircraft_active\":{},\"own\":",
+        ",\"utc_src\":{},\"conflicts\":{},\"threats\":{},\"blind\":{},\"silenced\":{},\"mutes\":{{\"muted\":{},\"snoozed\":{},\"site\":{}}},\"tracks\":{},\"active\":{},\"open_links\":{},\"open_active\":{},\"aircraft\":{},\"aircraft_active\":{},\"own\":",
         src.unwrap_or("null"),
         t.conflicts(now).len(),
         t.active_threats(now).count(),
         t.partly_blind(now),
+        t.threats().iter().filter(|x| x.muted && x.active(now)).count(),
+        mc.muted,
+        mc.snoozed,
+        mc.site,
         t.tracks().len(),
         t.active_count(now),
         t.open_links().len(),
@@ -200,6 +206,23 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     w.opt(gps::pps_last_us().map(|t| now_us.saturating_sub(t) / 1000));
     let _ = write!(w.0, ",\"fix_age_ms\":");
     w.opt(gps.fix.map(|f| now.saturating_sub(f.at_ms)));
+    // WP-12: what the hub trusts of its own GPS, and its home.
+    let ig = gps.integrity();
+    let _ = write!(
+        w.0,
+        ",\"trusted\":{},\"untrusted_pos\":{},\"untrusted_time\":{},\"time_held\":{},\"time_step_ms\":",
+        ig.trusted, gps.untrusted_pos, gps.untrusted_time, gps.time_held
+    );
+    w.opt(ig.metrics.time_step_ms);
+    let _ = write!(
+        w.0,
+        ",\"time_floor\":{},\"home\":{}{}{},\"home_pending\":{}",
+        ig.metrics.time_floor,
+        if gps.home_origin().is_some() { "\"" } else { "" },
+        gps.home_origin().map_or("null", |o| o.name()),
+        if gps.home_origin().is_some() { "\"" } else { "" },
+        gps.home_pending().is_some()
+    );
     let a = adsbee.status(now);
     let _ = write!(w.0, "}},\"adsb\":{{\"alive\":{},\"age_ms\":", a.alive);
     w.opt(a.age_ms);

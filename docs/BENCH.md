@@ -396,7 +396,7 @@ Now:
 | Firmware | Bench features | Bench build switches (environment at build time) |
 |---|---|---|
 | gateway | `faulttest` | |
-| node-wifi | `faulttest`, `forgetest` (send frames a node may not originate: "Origin checks" below) | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-wifi | `faulttest`, `forgetest` (send frames a node may not originate: "Origin checks" below), `floodtest` (synthetic frames into the node's own receive path: "Frame flood" below) | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-lr | `faulttest` | |
 | node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
@@ -527,6 +527,360 @@ Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench EL
    `table_full=`. A keyed gateway with 16 nodes: a 17th node's packets count as `table_full` on the
    `"t":"gw"` line and arrive on the P4 as `forged_link` detail 6.
 8. Finish by flashing the normal node build (no `forgetest`) and checking `"bench":[]`.
+
+## Frame flood (node-wifi, 2026-11-18, compile-checked only)
+
+Branch `sec/p2-a`. Nothing here has run on hardware yet: the firmware is compile-checked (C5
+release builds for the wired and ESP-NOW nodes, `cargo check` for the other feature sets and the
+S3), the decisions are host-tested (`cargo test -p wifiwatch -p openlink`).
+
+**What a flood used to do.** Anyone in radio range can forge cheap frames that each became one hub
+frame: a beacon named `ESP_RIDS` / `pwned` / `GhostNet` (an attack-tool `Threat`), a drone maker's
+address block plus a drone network name (`WifiDrone`), a DJI DroneID element (`DjiWifi`), wfb-ng
+frames with more than 16 link ids (up to 16 `OpenLink` frames every 250 ms), a Remote ID beacon from
+a new random address (`Detection`). Per-address limits do not help against fresh random addresses.
+All of it shared one 8-frame hub queue that dropped the newest frame when full, so a real drone's
+Remote ID was lost whenever it met a full queue (most of the time over ESP-NOW, which drains only
+while the radio is on the gateway's channel). The USB stream was written with interrupts masked,
+an attacker-sized Remote ID line at a time.
+
+**What the node does now** (`wifiwatch::shed`, `report.rs`, `usb.rs`, `detect.rs`, `rx.rs`):
+
+* **Reserved room.** Of the 8 hub-queue slots, Remote ID from a *known* source may use all 8, the
+  node's own `Hello` / `Status` / `Stats` 6, Remote ID from a *new* source 5, every alarm kind 4.
+  A source is known once heard twice within 2.5 s; a random-address flood is heard once per address
+  and never becomes known, and the source table (32 slots, salted hash) never gives up a slot a known
+  source still uses. A known source is limited to 20 frames a second (bursts of 10).
+* **Budgets.** Token buckets: `Threat`, `WifiDrone`, `DjiWifi` 8 a second (burst 8), `OpenLink`
+  16 (burst 16), new-source Remote ID 8 (burst 8). A frame over its budget is not printed on USB
+  either. `open_links` takes at most as many due streams as there is room for, longest-waiting
+  first, so a full table goes out in turns.
+* **It says so.** The USB stats line has `shed` (frames turned away per kind), `rid_src` (known
+  sources), `usb_drop`, `alt`, `clamp`; `hub_drop` includes everything shed; the hub's `Stats`
+  frame's `dropped` is now receive-queue drops plus hub frames not sent. **No link wire format
+  changed**: the per-kind split is only on USB, because `Stats` has no field for it.
+* **Spoofed address.** DJI DroneID and Wi-Fi drone reports are limited per (address, content), at
+  most 2 contents per address a second, so frames forged from a drone's own address with a false
+  position no longer win every second. An address alternating between contents (A, B, A) is flagged:
+  `"alt":true` on its `dji` / `wifidrone` lines for a minute, `alt` counts in the stats line.
+* **USB.** An async writer; lines are dropped and counted (`usb_drop`) when the host does not keep
+  up, never written with interrupts off. The Remote ID line is formatted straight into the writer's
+  one 6 KB buffer.
+* **Receive length.** Every received frame is clamped to what one driver receive buffer (1.6 KB)
+  holds after its header before anything reads it (`clamp` counts frames whose `sig_len` claimed
+  more).
+
+RAM (C5 wired build, static `.data` + `.bss`): +3 976 bytes (84 KB to 87.8 KB). USB pipe 2 048,
+hub admission (`Shed`) ~900, DJI and Wi-Fi drone limiters 2 x ~600 (were 2 x ~260); the drain task's
+6 KB JSON buffer became the USB writer's Remote ID buffer (no change).
+
+**Known limits.** A drone that first appears *during* a random-address Remote ID flood is reported
+through the new-source budget (8 a second, shared with the flood) until its slot in the source table
+frees: seconds at 200 forged frames a second, longer at higher rates (host test
+`a_drone_that_starts_during_a_flood_becomes_known_eventually`). Within one alarm kind, real and
+forged reports share the kind's budget (a `flood dji` sheds the real DJI drone's reports too; Remote
+ID is never affected). A forger sending many *different* contents from a drone's address still takes
+most of that address's places (the address is flagged). The 32-slot receive pool in front of all
+this drops whatever the drain task cannot parse in time (`drop`), real frames included, as before.
+
+### The `floodtest` build
+
+`export ROTORSCOPE_BENCH=1` first (bench fence). Not with `faulttest` or `forgetest` (all read the
+USB console). It **transmits nothing**: it pushes synthetic frames into the node's own receive path
+(`rx::receive`, where the radio callback puts real ones), on the channel the hopper is tuned to. From
+`firmware/node-wifi/c5/`:
+
+| Node | Build |
+|---|---|
+| Wired (point-to-point), 5 GHz plan | `cargo build --release --features esp32c5,floodtest` |
+| Wired, 2.4 GHz plan | `cargo build --release --features esp32c5,band24,floodtest` |
+| ESP-NOW through the gateway | `cargo build --release --features esp32c5,band24,espnow,floodtest --target-dir ../target-espnow` |
+| Wired bus | `cargo build --release --features esp32c5,band24,wirebus,floodtest --target-dir ../target-bus` |
+
+The `hello` has `"bench":["floodtest"]` and the `bench_build` warning, then
+`{"t":"flood","note":"FLOOD TEST BUILD: ...","packs_ok":true,"drone_ok":true}` (both must be true).
+Type a whole line and Enter (`tools/dev-board.sh --log 20 c5a --send $'flood rid 500\r'`):
+
+| Command | Injects |
+|---|---|
+| `flood rid <n>` | `n` Remote ID beacons a second, each from a new random address, id `FLOODFAKE0000000001` |
+| `flood tool <n>` | beacons named `ESP_RIDS`, `pwned`, `GhostNet` in turn, random addresses |
+| `flood drone <n>` | beacons from DJI's first address block with random low bytes, named `MavicAir-FLOOD` |
+| `flood dji <n>` | beacons with a DJI DroneID element (serial `FLOODDJI00000001`), random addresses |
+| `flood wfb <n>` | wfb-ng data frames, link ids `0x7E57C0`.. (64 in turn) |
+| `flood spoof <n>` | DJI DroneID elements from the real drone's address, one fixed false position |
+| `flood real on` / `off` | the "real" drone at `02:52:45:41:4c:01`: one Remote ID beacon a second (id `FLOODREAL0000000001`) and one DJI DroneID element a second (serial `FLOODREAL0000001`, sequence moving on) |
+| `flood off` / `flood` | everything off / print the state |
+
+Rates are per second, up to 5 000 per kind; kinds mix. Each command answers, and every second while
+anything runs the node prints `{"t":"flood","rate":{...},"sent":{...},"real":{"on":true,"sent":N,
+"seen":N,"admitted":N,"queued":N,"dji_sent":N}}`: frames injected per kind (totals), and for the
+real drone's Remote ID: injected, reached the drain task (not lost in the receive pool), admitted,
+queued for the hub.
+
+### To check on hardware (not yet run)
+
+One `floodtest` node, wired to the P4 (or behind the gateway for step 5). Record the `stats`,
+`flood` and hub lines. "Rises by about X a second" means between two `stats` lines a second apart.
+
+1. **Real drone alone, 60 s.** `flood real on`. Every second `real.sent`, `real.seen`,
+   `real.admitted` and `real.queued` rise by 1 and stay equal; `rid_src` is 1 from the second
+   second on; `dji` rises by 1 a second; every `shed` count stays 0; `alt` stays [0,0]. On the hub
+   the node's detections rise by 1 a second and a track `FLOODREAL0000000001` is shown.
+2. **One flood at a time, 60 s each, real drone on, 500 a second.** In every case `real.queued`
+   equals `real.sent` (none lost) and `shed.rid_known` and `shed.health` stay 0:
+   * `flood tool 500`: `shed.threat` rises by about 490 a second; the hub gets at most 8 threats a
+     second (attack tool, beacon flood).
+   * `flood drone 500`: `wdrone` rises by about 8 a second, `shed.wdrone` by about 490 (`threat`
+     and `shed.threat` rise too: one drone network name from many transmitters reads as clones).
+   * `flood dji 500`: `dji` rises by about 8 a second, `shed.dji` by about 490 (the real DJI
+     element is mostly shed here: it shares the DJI budget).
+   * `flood wfb 500`: `open` rises by about 500 a second, `open_ev` rises (64 ids, 16-entry table),
+     the hub gets at most 16 open-link frames a second, `shed.open` stays near 0.
+   * `flood rid 500`: `rid` rises by about 500 a second, `shed.rid_new` by about 490, `rid_src`
+     stays 1; the hub's detections for the node rise by about 9 a second (8 forged, 1 real) and the
+     `FLOODREAL0000000001` track keeps updating every second.
+   * `flood spoof 100`: `dji` rises by about 2 a second (the forger's content and the real one),
+     `alt[0]` rises, the `dji` lines from `02:52:45:41:4c:01` say `"alt":true`, and the hub keeps
+     getting the real element (serial `FLOODREAL0000001`, moving sequence) every second.
+     (Before this change: the forger's every second, the real one almost never.)
+3. **Everything at once, 120 s.** `flood real on`, then `flood rid 300`, `flood tool 300`,
+   `flood drone 300`, `flood dji 300`, `flood wfb 300`. Expect: no restart (`up_us` keeps growing,
+   no new `hello`, never `"reset":"watchdog"`); every channel's `per_ch` visit count (third number)
+   keeps rising each second and `scout` keeps rising (the hopper keeps hopping); `real.queued`
+   equals `real.sent`; `shed.rid_known` and `shed.health` 0; the hub's `Stats` for the node keep
+   arriving every second and its dropped count grows by about the `shed` total. If `drop` (the
+   receive pool) rises and `real.seen` falls behind `real.sent`, the drain task cannot parse that
+   many frames a second: lower all rates together until `drop` stays flat and record that total
+   (the node's parse capacity, a separate limit from this work).
+4. **Step 3 at 1 000 a second per kind**, 60 s: the same, except `drop` may rise (record it); the
+   watchdog must still not fire and `per_ch` visits must keep rising.
+5. **ESP-NOW (2.4 GHz node behind a keyed gateway, P4 hub).** Step 3 again: `real.queued` equals
+   `real.sent`, and the hub's detections from this node include one a second from
+   `FLOODREAL0000000001` throughout. A 5 GHz plan (40 ms a second on channel 6) should give the
+   same result; try it if time allows.
+6. **USB not read.** Start step 3, close the serial monitor for 30 s, reopen: no restart, `usb_drop`
+   has risen, and the hub kept getting the node's frames meanwhile (its frame count kept rising).
+7. Finish by flashing the normal build (no `floodtest`) and checking `"bench":[]`.
+
+## Alarm integrity on the nodes (WP-11a, 2026-11-18, compile-checked only)
+
+Branch `sec/p2-a`. Host-tested (`cargo test -p wifiwatch -p mavwatch -p ctrlwatch -p wifidrone
+-p tracker`); the firmware is compile-checked only (C5 `fw` and `fw24-now`, node-lr `fw`, S3
+`cargo check`, C5 `floodtest` `cargo check`). What changed is in docs/DRONE-ATTACKS.md and
+docs/WIFI-ATTACKS.md (marked WP-11a): Retry-bit deauths with new sequence numbers count; a drone
+restart is believed only from several beacons on the new clock, and two clocks on one address are
+a `DroneNetClone` (detail bits 3 and 5); 4 drone networks with displacement rules; MAVLink frames
+of any length; one MAVLink frame is a suspicion (`detail` bit 24); contested links need 5 s of
+history; small tables keep entries holding evidence.
+
+New stats: node-wifi `stats` gains `"mavp":[held back, evidence given up, turned away, streams
+turned away]` and `"dnet":[learned, displaced, made to wait]`; node-lr prints
+`{"t":"ctrl_pressure",...}` when its counters change (at most every 5 s), and its
+`mavlink_attack` line has `"suspect"`.
+
+RAM, static `.data` + `.bss` from the ELF: node-wifi C5 ESP-NOW 88 676 -> 89 844 bytes (+1 168),
+C5 wired 5 GHz 87 852 -> 89 020 (+1 168); node-lr (C3) 127 168 -> 127 848 (+680). Detector state:
+`wifiwatch::Watch` 6 104 -> 6 616 bytes (`DroneLinks` 440 -> 816, `Floods` 1 176 -> 1 312),
+`mavwatch::Watch` 8 216 -> 8 784, `ctrlwatch::contested::Watch<8>` 5 456 -> 5 616.
+
+### To check on hardware with `floodtest` (not yet run)
+
+A `floodtest` node-wifi (build as in "The `floodtest` build"; its first `flood` line must also say
+`"hijack_ok":true`), wired to the P4. Nothing is transmitted. Record the `stats`, `flood`, `threat`
+lines and the hub's threats.
+
+1. **Retry-bit flood.** `flood retry 60` for 10 s: `Deauth` threats at `02:52:45:54:52:59`
+   (target `02:50:48:4f:4e:45`) about once a second, `kill` rising by about 60 a second. Before
+   WP-11a: no threat. `flood off`.
+2. **Genuine retransmissions.** `flood dup 64` for 10 s (8 fresh frames a second, each retried
+   seven times): no `Deauth` threat while `kill` rises by about 64 a second (counting every frame
+   would be 64 a second, over the 30-a-second bar). `flood dup 400` (50 fresh a second): a
+   `Deauth` about once a second. `flood off`.
+3. **Forged restarts between deauths.** `flood hijack 1` for 15 s: the test drone `TELLO-7E5701`
+   (`60:60:1f:7e:57:01`) is learned (`dnet` first number rises), then a `drone_deauth` threat for
+   it within ~3 s and about once a second after, and `drone_net_clone` with `source` = `target` =
+   `60:60:1f:7e:57:01` and detail bits 3 and 5 (`detail & 0x3F` = 40). Before WP-11a: no
+   `drone_deauth` (each forged beacon emptied the count). `flood off`; both stop within ~10 s.
+4. **A real drone, if one is available (your own Tello, in a shielded box):** power-cycle it while
+   its phone app runs: no drone alarm (the restart is believed after about a second of beacons).
+5. Finish with the normal build and `"bench":[]`.
+
+The node-lr changes (contested-link history, the MAVLink suspicion and budgets, the tables) have no
+bench injector; they need a real SiK pair or ExpressLRS link and are host-tested only.
+
+## node-sdr under hostile signals (2026-11-18, compile-checked only)
+
+Anyone in radio range can make the DroneID node work for them. Two ways were found and closed in
+software; neither has run on a chip yet.
+
+* **Blind while decoding.** Any 450-800 µs energy run on the dwell channel passes the trigger's
+  length gate, the ring stops, and a DroneID-shaped burst takes ~150 ms to decode. One pulse every
+  ~150 ms kept the node blind almost all the time. Now (`crates/rawcap/src/budget.rs`): at most 3
+  full decodes per dwell and 4 a second, and a credit that earns 40 % of wall time (at most 450 ms)
+  pays for every decode, so the decoder holds the loop at most ~40 % of the time plus 0.75 s. A
+  window the budget refuses is dropped **before the ring is stopped**. Cheap gates come first
+  (`droneid::rx::Config::cfo_window` and `turbo_gate`, set for the tuned channel): a span whose
+  coarse frequency is more than 1 MHz from +500 kHz is refused before resampling, and the turbo
+  decoder runs only at reference SNR ≥ −5 dB within 300 kHz. The `stats` line has
+  `"dec":[decodes, full, skipped, busy_ms]`; a dwell where the budget refused windows and most full
+  decodes were not valid bursts counts towards `jam_pulsed` (`detail` = the decoder's busy
+  percent), which is how the hub hears of it (no new link field). A burst's `path` reads `gated`
+  when the turbo gate skipped it.
+* **The O4 follower could be steered.** One forged packet made a session that the node visited
+  from the next publication on; four forged key IDs kept the node on attacker-chosen channels, a
+  fifth evicted the real drone's session, and one packet with the real (cleartext) key ID wiped its
+  hypotheses. Now (`crates/droneid/src/follow.rs`): a session is only visited after 3 packets that
+  agree in channel and time; new key IDs only ever replace a one-packet tentative session; a packet
+  that contradicts a followed session is ignored and counted; visits are paid from a credit that
+  earns half of the plan's time (at most 1 s). `stats` `"follow"` is now `[followed, visits, hits,
+  misses, tentative, contradictions, refused, declined]`; `follow` lines say `confirmed`,
+  `restart` and (at most once a second) `contradicted`.
+
+**What an attacker can still do**: flood DroneID-shaped bursts so the budget is spent on them
+first-come (real bursts are then decoded only in proportion; the node keeps capturing and probing
+~60 % of the time and reports `jam_pulsed` when the flood is not valid bursts); replay real,
+CRC-valid bursts (decoded and reported as sightings, never flagged as pressure); create followed
+sessions by following the published schedule and spend the follower's half on them; keep a real
+drone's session unconfirmed by restarting it with forged packets carrying its key ID while it is
+still tentative.
+
+### The scenarios (bench `bringup` build, nothing transmits)
+
+`radio/hilsim.rs`, driven by `tools/droneid-hil`. Build and flash a bench image:
+
+```sh
+export ROTORSCOPE_BENCH=1
+(cd firmware/node-sdr/c5 && cargo fw --features bringup)
+```
+
+1. **No regression on the recordings** (needs `tools/fetch-droneid-samples.sh` run once). The
+   replay is outside the budget but goes through the new gates:
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --rms 200,150' 900 c5b
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --pre "trig 3" --rms 100,80' 900 c5b
+   ```
+   Expect what BRINGUP-RESULTS.md "HIL" measured: rms 200 and 150, 13/13 detected and CRC-valid
+   per pass; with `trig 3`, rms 100 13/13 and rms 80 about 9/13; decode times 144-158 ms. No burst
+   may report `"path":"gated"` or `{"err":"OffFrequency"}` when it decoded before. Every `hil`
+   line: `"intact":true`; record `stack_free` (it was ~6.9 KiB; expect at least 6.5 KiB).
+2. **Pulse train of white noise**, a 600 µs pulse covering the whole capture (no recording needed):
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 200,150 --pulse noise --rms 200' 300 c5b
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 400,20 --pulse noise --rms 200' 300 c5b
+   ```
+   Each prints two `hil_train` lines, `"budget":true` and `false`. Record `decode_ms` [min, max]:
+   this is what one noise pulse costs the decoder now (the coarse-frequency gate should refuse most
+   of them after 8 FFTs; nobody has measured it). Expect `full` 0 and `valid` 0. If `busy_pct`
+   without the budget is under ~40 %, the gates alone keep the node free and the budgeted line
+   matches it (`skipped` 0, `flagged` 0). Where the unbudgeted line is above 40 % (at 20 ms gaps it
+   should be), the budgeted one must stay at or below ~42 % with `skipped` > 0 and `flagged` close
+   to `dwells`.
+3. **Pulse train of a real burst** (the worst case: DroneID-shaped and expensive; a replayed
+   recording, so its CRC is valid):
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --train 200,150 --pulse burst --rms 200' 300 c5b
+   ```
+   Without the budget: `busy_pct` 95-100, about half the pulses `missed` (they arrive while the
+   previous one decodes), `skipped` 0. With it: `busy_pct` at most ~42, `skipped` > 0, `decoded`
+   about 75-80 of 200, `decode_ms` as in step 1. `flagged` 0 both ways: valid bursts are not
+   jamming (the hub would see them as sightings; HIL sightings are never sent).
+4. **Forged sessions on the live follower**, 3 minutes:
+   ```sh
+   tools/dev-board.sh --run 'cargo run --release -p droneid-hil -- --port "$BOARD_PORT" --forge 180' 400 c5b
+   ```
+   The node hops its built-in DroneID plan; a virtual drone (key ID `5ea10001`), four forged
+   schedule-perfect sessions, a new forged key ID every 0.7 s and (once the drone is followed)
+   a packet with its key ID every 1.3 s at a wrong time are "heard" whenever the node is tuned to
+   their channel. The `forge` line at the end: `real` = [followed, hits, contradictions];
+   `heard` per stream; `share_permille` = time the follower held the receiver.
+   Expect `real[0]` true (followed within about a minute, and still followed at the end),
+   `real[2]` about equal to both `contra` numbers and > 0 (every wrong-time packet was ignored,
+   none restarted it), `active` at most 4, `tentative` at most 4, `share_permille` at most ~550,
+   `declined` > 0 once two or more forged sessions are followed. `refused` counts new key IDs
+   turned away while every tentative slot held a session with a consistent match; it may grow.
+   If `real[0]` is false at the end, the drone's followed session ran 6 s without a granted
+   visit or a scanning hit and expired: record `heard[0]` and `declined` (the share is first
+   come, not per session).
+   In the `stats` lines during the run the `follow` array should move the same way, and
+   `dec`'s `skipped` should stay 0 (no real signal).
+5. Flash a normal build afterwards and check `"bench":[]`.
+
+### Restarting the ring before the decode: deferred, to try on the bench
+
+Not done. By reading alone it looks safe in memory terms but would buy nothing on its own, so it
+was left out rather than guessed:
+
+* **Memory.** The decoder reads the 16,384 decimated samples from the capture bank
+  (0x40830000), which the ring's DMA never writes (ring and descriptors end below 0x4082e0c0), so
+  no copy to PSRAM is needed. But `Radio::restart` also re-arms the dump engine
+  (`engine::free_run`), which hands SRAM block 1 to the engine for a few register writes and could
+  drop or land writes in the bank while it owns it: a ring-only restart (`ring::start` without
+  `engine::free_run`, which keeps running across `ring::stop`) is required.
+* **Interrupt timing.** With the ring running, the DMA interrupt fires every 3584 bytes (~90 µs)
+  for the whole ~150 ms decode and runs on the main stack on top of the decoder's deepest frame
+  (~6.9 KiB left). The `burst` line (up to 2 KiB, ~6 ms over USB inside esp-println's critical
+  section) would hold the interrupt off for several laps, the 2026-11-12 failure (a late interrupt
+  clobbers a length write-back): it would have to go out with `out::paced`.
+* **No gain without probing during the decode.** The ring holds 1.43 ms. After a 150 ms decode
+  `probe` finds itself ~100 laps behind and skips to the newest data, exactly as when the ring is
+  restarted afterwards: the node would still see nothing that arrived during the decode. The gain
+  needs the decoder to call back into `Radio::probe` at least every ~1 ms (inside the resampler,
+  the CP search and each turbo half-iteration), and a second capture buffer for a burst that rises
+  meanwhile.
+
+To try, in this order, each with `wb_lost`, `lapped`, `skipped`, `dma_err` and `stack_free` read
+before and after: (1) ring-only restart after `remove_dc`, `burst` line paced; HIL step 1 must
+still give `"intact":true` (compare the capture CRC) and identical decodes, and `wb_lost` must stay
+0 over a ten-minute soak with a 10 Hz beacon; (2) a `poll` hook in `decode_span` stages; measure
+the longest gap between hook calls (it must stay under 1 ms) and the decode-time cost.
+
+## GPS time and trust scenarios (WP-12, 2026-11-18, compile-checked only)
+
+No real GPS receiver has been on the P4 hub yet; its GPS path has only run
+against the on-chip emulation (`firmware/hub-p4/src/gpsloop.rs`). These
+scripted scenarios make the emulated receiver misbehave so the hub's reaction
+(docs/GNSS-INTEGRITY.md "Trust and holding", "Time", "Home") can be watched.
+**Not yet run.** Nothing transmits; leave the UART3-IN header, GPIO29 and
+GPIO30 unconnected, as for any `gpsloop` run. The scenario is chosen at
+build time:
+
+```sh
+cd firmware/hub-p4
+GPSLOOP_SCENARIO=step1s ROTORSCOPE_BENCH=1 cargo build --release --features gpsloop
+#   scenarios: honest (default), step1s, step500, drift, spoofboot, early
+#   gpsloop-m10 for the u-blox emulation (no satellite table: spoofboot does nothing there)
+```
+
+The emulated UTC starts one day after the firmware's build date. Loop builds
+keep their GPS memory in `ROTORSCP/GPSLOOP.TXT`, never `GPSMEM.TXT`, and do
+not remember the time (the emulation restarts its clock at every boot).
+Every run starts with `hub-p4: gpsloop scenario <name> (GPSLOOP_SCENARIO;
+emulated UTC starts <s> s)`. Watch the console and the `{"t":"hub"}` line's
+`gps` object: `trusted`, `untrusted_pos`, `untrusted_time`, `time_held`,
+`time_step_ms`, `time_floor`, `home`, `home_pending`.
+
+| Scenario | What the emulated receiver does | Expected |
+|---|---|---|
+| `honest` | as before | `trusted:true` from about 10 s after the first fix; `time_step_ms` within +-5 (PPS); no `gps integrity` line, no `gnss_*` evidence event for an hour |
+| `step1s` | from second 120 every epoch's UTC is 1 s early | `gpsloop scenario step1s begins now`, then within 2 s `gps integrity ok -> suspect_spoofing: possible GPS spoofing: GPS time jumped -1000 ms against the hub's clock; holding last trusted position and time`. `trusted:false`, `time_held:true` for as long as it runs (it never ends); evidence context goes `free_running` after 2.5 s; the aero `TimeSync` keeps the hub's held clock, not the stepped one |
+| `step500` | at second 120 the epochs and the PPS edge move 500 ms later | as `step1s` with about `-500 ms` |
+| `drift` | from second 120 each epoch 2 ms later than the last (2000 ppm) | with PPS (both emulations drive it) the alarm comes about 3-5 s after `begins now`, `time_step_ms` around -5 to -10; then held as above |
+| `spoofboot` | until second 600 every satellite at 46 dB-Hz | within 5 s of the first fix `gps integrity ok -> spoofing: GPS spoofing: ... satellites all near 46 dB-Hz ...`; from the start `untrusted_pos:true`, `untrusted_time:true`, `utc_ms:null`, `own:null`; health page `GPS no trusted position/time`; evidence records time source `untrusted`; no `TimeSync` sent (aero `syncs` does not grow); the SD log opens after 90 s numbered `LOGnnnnn.CSV`. After `spoofer off now` (second 600): back to `ok` 30 s later, `trusted:true` 10 s after that, then an evidence `UTC set from GPS` clock event |
+| `early` | honest; the hub is told at boot it last trusted a time one day later | `gpsloop early: the hub now remembers trusting UTC ...`; at the first fix `gps integrity ok -> suspect_spoofing: possible GPS spoofing: GPS time 86397 s before the build date or the last time the hub trusted` (about a day); `untrusted_time:true`, `time_floor:true`. Console `T`: `GPS time accepted by the operator (console)`, then `ok` after 30 s and `trusted:true` 10 s later |
+
+Home (any loop build, about 16 minutes): `GPS home learned: 39.9526000
+-75.1652000 (15 min of steady fixes); remembered on the card` and a
+`GPSLOOP.TXT` with a `home` line. Reboot: `GPS home loaded from the card`.
+A placed home far away (console `L`, `home 39.9 -75.2`) makes the next fixes
+alarm `off_home`; after 15 minutes `GPS: the hub seems to stand at ... NOT
+adopted`, the Settings row reads `New home / Accept here`; SEL (or console
+`H`) logs `GPS home confirmed` only if home is not placed (a placed home
+answers that the site file wins: `home clear` first).
+
+Link and node side (host-tested only): with a keyed kit an honest run keeps
+`"late":0` on every node's `link_auth` line and `"sync_refused":0` on an aero
+node's `stats` line.
 
 ## Bench results, 2026-11-18
 

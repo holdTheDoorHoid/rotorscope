@@ -4,6 +4,7 @@
 
 use std::vec::Vec;
 
+use crate::analyse::{DETAIL_SUSPECT, NEW_ALARM_BURST, NEW_ALARM_REFILL_MS};
 use crate::frame::encode::{Sign, v1, v2};
 use crate::msg::{self, ftp};
 use crate::*;
@@ -883,6 +884,169 @@ fn setup_signing_over_the_air_never_shows_the_key() {
     assert!(!got[0].excerpt.contains("KEY"));
 }
 
+// ------------------------------------------ lengths parsers accept --
+
+/// A frame of a known message with any payload length (the checksum, with
+/// the message's CRC_EXTRA, right), as a lenient parser accepts it.
+fn enc_len(version: u8, msgid: u32, payload: &[u8]) -> Vec<u8> {
+    let mut b = [0u8; 300];
+    let n = if version == 1 {
+        v1(&mut b, 0, 255, 190, msgid, payload)
+    } else {
+        crate::frame::encode::v2_raw(&mut b, 0, 255, 190, msgid, payload, None, false)
+    };
+    b[..n].to_vec()
+}
+
+fn found(bytes: &[u8]) -> Vec<Kind> {
+    let mut an = Analyser::new();
+    let mut k: Vec<Kind> = run(&mut an, LINK, &[(bytes.to_vec(), 1_000)]).iter().map(|f| f.kind).collect();
+    k.sort();
+    k
+}
+
+#[test]
+fn over_long_frames_are_analysed_truncated() {
+    // SERIAL_CONTROL is 81 bytes at most; this one carries 120 (the C
+    // library without strict length checks and pymavlink take the first
+    // 81). Until WP-11a: "Bad", never analysed.
+    let mut p = serial_control(msg::serial_control::DEV_SHELL, 8, b"reboot\n\0").to_vec();
+    p.extend_from_slice(&[0x5A; 39]);
+    assert_eq!(found(&enc_len(2, msg::SERIAL_CONTROL, &p)), [Kind::SerialControl, Kind::OddLength]);
+    // MAVLink 1 has one length per message: anything longer is odd too.
+    let mut st = statustext(6, b"[link;file:///c:/x.exe;Click]").to_vec();
+    st.truncate(51);
+    st.extend_from_slice(&[1; 9]);
+    assert_eq!(found(&enc_len(1, msg::STATUSTEXT, &st)), [Kind::StatusLink, Kind::OddLength]);
+    // FTP's 254-byte payload sent as 255.
+    let mut f = ftp_msg(ftp::ACK, ftp::LIST_DIRECTORY, 12, 0, b"F../../x\t1\0").to_vec();
+    f.push(0x77);
+    assert_eq!(found(&enc_len(2, msg::FILE_TRANSFER_PROTOCOL, &f)), [Kind::FtpTraversal, Kind::OddLength]);
+}
+
+#[test]
+fn short_frames_are_analysed_zero_padded() {
+    // SERIAL_CONTROL in MAVLink 1 with 30 of its 79 bytes: parsers pad it
+    // with zeros and act on it.
+    let short = &serial_control(msg::serial_control::DEV_SHELL, 5, b"ls /\n")[..30];
+    assert_eq!(found(&enc_len(1, msg::SERIAL_CONTROL, short)), [Kind::SerialControl, Kind::OddLength]);
+    // An empty MAVLink 2 payload (senders keep at least one byte).
+    assert_eq!(found(&enc_len(2, msg::SETUP_SIGNING, &[])), [Kind::SetupSigning, Kind::OddLength]);
+}
+
+#[test]
+fn strict_frames_behave_as_before_and_bad_checksums_stay_bad() {
+    // Exactly the base length (v1), trimmed (v2), full with extensions (v2):
+    // no length finding.
+    let p = serial_control(msg::serial_control::DEV_SHELL, 8, b"reboot\n\0");
+    assert_eq!(found(&enc_len(1, msg::SERIAL_CONTROL, &p[..79])), [Kind::SerialControl]);
+    assert_eq!(found(&enc(0, 255, 190, msg::SERIAL_CONTROL, &p, None)), [Kind::SerialControl]);
+    assert_eq!(found(&enc_len(2, msg::SERIAL_CONTROL, &p)), [Kind::SerialControl]);
+    assert!(found(&enc(0, 1, 1, msg::HEARTBEAT, &heartbeat(), None)).is_empty());
+    // Odd length and a wrong checksum: not a frame.
+    let mut long = serial_control(0, 8, b"x").to_vec();
+    long.extend_from_slice(&[1; 30]);
+    let mut b = enc_len(2, msg::SERIAL_CONTROL, &long);
+    let n = b.len();
+    b[n - 1] ^= 0x40;
+    assert!(found(&b).is_empty());
+    assert_eq!(crate::parse_at(&b), crate::Parse::Bad);
+    let mut b = enc_len(1, msg::STATUSTEXT, &[b'x'; 70]);
+    b[10] ^= 1;
+    assert_eq!(crate::parse_at(&b), crate::Parse::Bad);
+}
+
+// ------------------------------------------- one frame, one alarm --
+
+fn shell(sys: u8, cmd: &[u8]) -> Vec<u8> {
+    enc(0, sys, 190, msg::SERIAL_CONTROL, &serial_control(msg::serial_control::DEV_SHELL, cmd.len() as u8, cmd), None)
+}
+
+#[test]
+fn one_attack_frame_is_suspect_and_repetition_escalates() {
+    let mut an = Analyser::new();
+    let got = run(&mut an, LINK, &[(shell(255, b"ls\n"), 1_000)]);
+    assert_eq!(got.len(), 1);
+    assert!(got[0].suspect, "one frame from nowhere is a suspicion");
+    assert_eq!(got[0].detail(), Kind::SerialControl.code() | DETAIL_SUSPECT);
+    // The same again (a different frame, within REPORT_GAP_MS): escalated
+    // and reported at once.
+    let got = run(&mut an, LINK, &[(shell(255, b"reboot\n"), 1_500)]);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(!got[0].suspect);
+    assert_eq!(got[0].detail(), Kind::SerialControl.code());
+    assert_eq!(got[0].hits, 1);
+    // A byte-identical resend is one frame heard twice: no escalation.
+    let mut an = Analyser::new();
+    let f = shell(255, b"ls\n");
+    let got = run(&mut an, LINK, &[(f.clone(), 1_000), (f, 1_200)]);
+    assert_eq!(got.len(), 1);
+    assert!(got[0].suspect);
+}
+
+#[test]
+fn a_system_with_history_sending_the_bait_once_is_an_alarm() {
+    // Ten seconds of the vehicle's telemetry, then one CAMERA_INFORMATION
+    // with a file:// URI from its camera (QGC-01 is sent once).
+    let mut an = Analyser::new();
+    let mut frames: Vec<(Vec<u8>, u64)> = (0..10u64).map(|i| (enc(i as u8, 1, 1, msg::HEARTBEAT, &heartbeat(), None), i * 1_000)).collect();
+    frames.push((enc(0, 1, 100, msg::CAMERA_INFORMATION, &camera_info(b"v", b"m", b"file:///etc/passwd"), None), 10_500));
+    let got = run(&mut an, LINK, &frames);
+    assert_eq!(kinds(&got), [Kind::UriScheme]);
+    assert!(!got[0].suspect);
+}
+
+#[test]
+fn another_frame_on_the_link_corroborates_one_frame_does_not() {
+    // One over-long SERIAL_CONTROL: two findings, from one frame. Neither
+    // vouches for the other.
+    let mut an = Analyser::new();
+    let mut p = serial_control(msg::serial_control::DEV_SHELL, 3, b"ls\n").to_vec();
+    p.extend_from_slice(&[0; 20]);
+    let got = run(&mut an, LINK, &[(enc_len(2, msg::SERIAL_CONTROL, &p), 1_000)]);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|f| f.suspect));
+    // A second, different frame with another finding on the same link
+    // within SUSPECT_WINDOW_MS: that one is corroborated.
+    let mut k = [0u8; 42];
+    k[8] = 1;
+    let got = run(&mut an, LINK, &[(enc(0, 255, 190, msg::SETUP_SIGNING, &k, None), 20_000)]);
+    assert_eq!(got.len(), 1);
+    assert!(!got[0].suspect);
+}
+
+#[test]
+fn kinds_that_need_repeats_are_never_suspect() {
+    let mut an = Analyser::new();
+    let got = run(
+        &mut an,
+        LINK,
+        &[(enc(0, 1, 1, msg::STATUSTEXT, &statustext(4, b"a\x1b[2Jb"), None), 1_000), (enc(1, 1, 1, msg::STATUSTEXT, &statustext(4, b"c\x1b[0m"), None), 2_000)],
+    );
+    assert_eq!(kinds(&got), [Kind::StatusControl]);
+    assert!(!got[0].suspect);
+}
+
+#[test]
+fn forged_frames_cannot_storm_new_alarms() {
+    // One SETUP_SIGNING a second from a new made-up system ID each time,
+    // for a minute: every one is a new alarm (kind, sender).
+    let mut an = Analyser::new();
+    let mut n = 0;
+    for i in 0..60u64 {
+        let mut k = [0u8; 42];
+        k[8] = 1;
+        k[10] = i as u8;
+        let f = enc(0, 10 + i as u8, 1, msg::SETUP_SIGNING, &k, None);
+        n += run(&mut an, LINK, &[(f, 1_000 + i * 1_000)]).len();
+    }
+    // The link's burst, then one every NEW_ALARM_REFILL_MS.
+    let most = NEW_ALARM_BURST as usize + 60_000 / NEW_ALARM_REFILL_MS as usize + 1;
+    assert!(n <= most, "{n} alarms, at most {most}");
+    assert!(n >= NEW_ALARM_BURST as usize);
+    assert!(an.pressure().throttled > 0);
+}
+
 // --------------------------------------------------- link integrity --
 
 #[test]
@@ -962,6 +1126,79 @@ fn replayed_signed_frames() {
     assert_eq!(kinds(&got), [Kind::SignedReplay]);
 }
 
+// ------------------------------------------- tables under a spray --
+
+#[test]
+fn a_spray_of_system_ids_keeps_partial_evidence() {
+    // An injector interleaving its own count for system 1 / component 1
+    // with the vehicle's, and between every pair of frames a heartbeat from
+    // each of 20 made-up systems. Until WP-11a the least recently heard
+    // source made room (12 kept), which was system 1 every time.
+    let mut an = Analyser::new();
+    let mut frames = Vec::new();
+    let mut fake = 2u8;
+    for i in 0..40u64 {
+        let t = i * 200;
+        frames.push((enc(i as u8, 1, 1, msg::HEARTBEAT, &heartbeat(), None), t));
+        frames.push((enc(100 + i as u8, 1, 1, msg::HEARTBEAT, &heartbeat(), None), t + 50));
+        for j in 0..20u64 {
+            fake = if fake >= 250 { 2 } else { fake + 1 };
+            frames.push((enc(j as u8, fake, 1, msg::HEARTBEAT, &heartbeat(), None), t + 60 + j));
+        }
+    }
+    let got = run(&mut an, LINK, &frames);
+    assert_eq!(kinds(&got), [Kind::SeqInterleave]);
+    assert!(an.pressure().evicted > 100);
+    assert_eq!(an.pressure().evicted_evidence, 0);
+}
+
+#[test]
+fn a_spray_of_systems_keeps_a_parameter_name_count() {
+    // A parameter-name flood from system 7, with a PARAM_VALUE from each
+    // of two new made-up systems after every one of its frames (two name
+    // sets are kept).
+    let mut an = Analyser::new();
+    let mut got = Vec::new();
+    for i in 0..4_000u32 {
+        let id = std::format!("P{i:05}");
+        let t = 10 * u64::from(i);
+        let f = enc(i as u8, 7, 1, msg::PARAM_VALUE, &param_value(id.as_bytes(), 1.0, 9, 4_000, i as u16), None);
+        got.extend(run(&mut an, LINK, &[(f, t)]));
+        // The spray starts once the flood is under way (a set that is
+        // still on probation, under eight names, can be pushed out).
+        for k in 0..2u32 * u32::from(i >= 20) {
+            let sys = 20 + ((2 * i + k) % 200) as u8;
+            let g = enc(0, sys, 1, msg::PARAM_VALUE, &param_value(b"SYSID_THISMAV", 1.0, 9, 1, i as u16), None);
+            got.extend(run(&mut an, LINK, &[(g, t + 1 + u64::from(k))]));
+        }
+    }
+    assert!(got.iter().any(|f| f.kind == Kind::ParamFlood && f.sysid == 7), "{:?}", kinds(&got));
+}
+
+#[test]
+fn a_spray_of_streams_keeps_a_half_frame() {
+    // The first half of a hostile CAMERA_INFORMATION, then one packet on
+    // each of 30 other streams, then the second half.
+    let cam = enc(2, 1, 100, msg::CAMERA_INFORMATION, &camera_info(b"v", b"m", b"file:///etc/passwd"), None);
+    let (a, b) = cam.split_at(120);
+    let mut w = Watch::new();
+    let key = |id: u32| StreamKey {
+        system: 2,
+        id: Some(id),
+        dir: 0,
+    };
+    let mut got = Vec::new();
+    let mut on = |f: &Finding, _: &Frame<'_>| got.push(f.kind);
+    w.feed(key(25), &enc(0, 1, 1, msg::HEARTBEAT, &heartbeat(), None), 0, &mut on);
+    w.feed(key(25), a, 10, &mut on);
+    for k in 0..30u32 {
+        w.feed(key(1000 + k), &[0xFD, 0x40, 0, 0, 0, 1, 1, 0, 0, 0, 1, 2, 3], 20 + u64::from(k), &mut on);
+    }
+    w.feed(key(25), b, 60, &mut on);
+    assert_eq!(got, [Kind::UriScheme]);
+    assert!(w.pressure().streams_refused > 0);
+}
+
 // ----------------------------------------------------- reassembly --
 
 #[test]
@@ -1007,7 +1244,7 @@ fn kind_codes_are_stable() {
         assert!(!k.label().is_empty());
     }
     assert_eq!(Kind::from_code(0), None);
-    assert_eq!(Kind::from_code(19), None);
+    assert_eq!(Kind::from_code(20), None);
     assert!(
         core::mem::size_of::<Watch>() < 9 * 1024,
         "{}",
@@ -1036,4 +1273,14 @@ fn random_bytes_find_nothing() {
         w.feed(key, &pkt, p * 10, &mut |_, _| n += 1);
     }
     assert_eq!(n, 0);
+}
+
+#[test]
+fn state_size() {
+    std::println!(
+        "SIZE mavwatch Watch {} B, Analyser {} B, Stream {} B",
+        core::mem::size_of::<Watch>(),
+        core::mem::size_of::<Analyser>(),
+        core::mem::size_of::<Stream>()
+    );
 }

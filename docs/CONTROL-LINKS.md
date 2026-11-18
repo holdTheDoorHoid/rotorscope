@@ -89,7 +89,11 @@ one UID, a third SiK radio on one NET ID: what SiKW00F-style injection and
 ExpressLRS hijacking look like) and reports it as a `ControlContested`
 threat. How, its thresholds and its limits: docs/DRONE-ATTACKS.md, "Second
 transmitter on a control link". It uses identifiers inside the node only, and
-its MAVLink check only runs with content decoding on.
+its MAVLink check only runs with content decoding on. Since WP-11a a link
+must have been heard as one transmitter for 5 s before a second one counts
+(six forged syncs alternating two phases on a made-up UID used to raise it),
+and new contested links are reported at most two at once, then one every
+10 s.
 
 ## On the node and the hub (2026-11-17, branch `ctrl-node`)
 
@@ -146,7 +150,7 @@ never does).
 | Setting | Off (default) | On |
 |---|---|---|
 | `control ids` | which system, how sure, signal | also the link's identifier (ExpressLRS UID bytes, SiK NET ID, mLRS sync word, OpenLRSng magic); links with different IDs are told apart |
-| `control content` | no content, no raw packets; Wi-Fi nodes never look inside data frames | stick positions, telemetry, GPS positions, raw packets for evidence; ExpressLRS "follow" (stays with one link for 20 s to decode it); the hostile-MAVLink scan, on the LR2021 node's SiK / mLRS links **and on MAVLink over open Wi-Fi** (every Wi-Fi node) |
+| `control content` | no content, no raw packets; Wi-Fi nodes never look inside data frames | stick positions, telemetry, GPS positions, raw packets for evidence; ExpressLRS "follow" (stays with one link for up to 20 s to decode it; see "Follow mode under forged syncs"); the hostile-MAVLink scan, on the LR2021 node's SiK / mLRS links **and on MAVLink over open Wi-Fi** (every Wi-Fi node) |
 
 The owner stated on 2026-11-17 that they have permission for both. Turn them on per kit:
 
@@ -194,7 +198,7 @@ network's address, which every beacon already shows). Details: docs/DRONE-ATTACK
   frames, report splitting and rate limits, ExpressLRS follow mode.
 - `firmware/node-lr/src/control.rs`: runs those jobs on the chip.
 - `crates/coverage/src/plans.rs`: the time split above.
-- `crates/tracker/src/ctrllinks.rs`: the hub's table (4 links, 3 bands; kept apart from the
+- `crates/tracker/src/ctrllinks.rs`: the hub's table (8 links, 3 bands; kept apart from the
   tracker, in PSRAM on the P4 hub next to the aero frame queue),
   positions to drone tracks, JSON lines; `crates/tracker/src/site.rs`: the `control` lines.
 - Receive only: a test runs every scan, sweep and follow setting through the chip layer and
@@ -331,6 +335,26 @@ timing), `src/python/binary_configurator.py` (phrase -> UID).
   generator, so it never matters for the hop table (it does for the FLRC
   sync word). About 2 observations settle 3.x on FCC915, 4 settle 4.x.
   UID0 and UID1 are never needed.
+- **Follow mode under forged syncs** (2026-11-18, host-tested only). A sync
+  counts as Confirmed when its CRC matches the UID bytes it carries, so anyone
+  can send one, and while the node follows it scans nothing else (SiK, mLRS,
+  OpenLRSng, the energy sweeps). Before, one forged sync every 20 s (with
+  `control content` on) parked the scanner for good. Now
+  (`lr2021cfg::ctrl::Follow`, `FollowGate`):
+  - a follow ends when no packet other than a sync passes its CRC for 3
+    passes through the hop table when parked (FCC915 at 200 Hz: 2.4 s) or
+    16 packet intervals when hopping; repeated syncs do not keep it;
+  - the same link (UID bytes 4-5, kept on the node only) is followed again
+    only after 60 s, and at most 3 follows start a minute;
+  - following is paid from a credit that earns half of the time not spent
+    following (at most 10 s, i.e. one full 20 s follow) and stops at half of
+    any control turn of 5 s or more (the hub's 25/35 s turns: 12.5/17.5 s).
+  A refused start leaves the scan where it was (`follow_refused` line,
+  `ctrl_stats` `"follows":[started, refused, cut]`); `follow_end` says why
+  (`time`, `quiet`, `share`). A forger who also sends packets that check
+  (it chose the UID bytes, so it can) still gets the follower's half of the
+  control time, never more; a real link followed after a forged one may wait
+  for credit or its 60 s.
 - **Content**: RC: OTA4 Hybrid (switch index in the packet) and Wide
   (switch index from the nonce), OTA8 8/12/16 channels. Telemetry: the
   downlink's chunked stream (LINKSTATS + DATA packets, package index 1, 2, ...

@@ -14,7 +14,9 @@ use crate::model::*;
 
 /// Replace `state.drones` with the tracker's tracks, choosing the
 /// [`MAX_DRONES`] most relevant when there are more (active before stale,
-/// then nearest, then newest). Also sets `now_ms`, `utc_ms` and
+/// confirmed before unconfirmed, then nearest, then newest: a forged drone
+/// can claim to be at the hub, so standing comes before claimed distance).
+/// Also sets `now_ms`, `utc_ms`, `threats.flood_per_s` and
 /// `total_drones`, and downgrades a 2D/3D/manual `gps.fix` to `None` when
 /// the tracker considers the own position too old, so the layout and the
 /// numbers agree. (`Fix::Absent` is left alone: it says more.)
@@ -30,20 +32,25 @@ pub fn fill_from_tracker<const N: usize, const A: usize>(
     }
     let tracks = tracker.tracks();
     state.total_drones = tracks.len().min(usize::from(u16::MAX)) as u16;
+    state.threats.flood_per_s = ctx.flood.map_or(0, |f| f.new_per_s.min(u32::from(u16::MAX)) as u16);
+    state.total_unconfirmed = tracks.iter().filter(|t| !t.confirmed()).count().min(usize::from(u16::MAX)) as u16;
 
-    // Sort keys computed once per track: the distance is a Vincenty solve in
-    // f64, which is soft-float on the hub's Xtensa core. A sort that called
-    // it from its comparator would do ~n log n of them per frame.
-    let mut keyed: Vec<((bool, u64, u64), usize), N> = tracks
+    // Sort keys computed once per track: the distance is a range solve in
+    // f64, which is soft-float on the hub's cores. A sort that called it
+    // from its comparator would do ~n log n of them per frame. Only the
+    // drone's own distance (one bounded solve, `tracker::geo`), not the
+    // operator's.
+    let mut keyed: Vec<((bool, bool, u64, u64), usize), N> = tracks
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let dist = ctx
-                .geometry(t)
-                .drone
-                .map_or(u64::MAX, |g| g.distance_m.max(0.0) as u64);
+                .own
+                .zip(t.location.as_ref().and_then(|l| l.value.position))
+                .map_or(u64::MAX, |(o, p)| geo::range_bearing(o.lat, o.lon, p.lat, p.lon).distance_m.max(0.0) as u64);
             let key = (
                 ctx.state(t) == TrackState::Stale,
+                !t.confirmed(),
                 dist,
                 u64::MAX - t.last_seen_ms,
             );
@@ -298,14 +305,17 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
     let mut v = DroneView {
         key: t.id.0,
         stale: ctx.state(t) == TrackState::Stale,
+        unconfirmed: !t.confirmed(),
         first_seen_ms: t.first_seen_ms,
         last_seen_ms: t.last_seen_ms,
         drone: g.drone.map(polar),
         operator: g.operator.map(polar),
+        // For display only: the sphere (0.5 % off, a fixed cost) rather
+        // than Vincenty, since both ends come from the air (WP-09).
         drone_to_operator_m: loc
             .and_then(|l| l.position.as_ref())
             .zip(op_pos)
-            .map(|(d, o)| geo::range_bearing(d.lat, d.lon, o.lat, o.lon).distance_m as f32),
+            .map(|(d, o)| geo::haversine(d.lat, d.lon, o.lat, o.lon).distance_m as f32),
         height_m: loc.and_then(|l| l.height),
         height_ref: match loc.map(|l| l.height_type) {
             Some(HeightType::AboveGround) => HeightRef::Ground,
@@ -368,6 +378,14 @@ pub fn view(t: &Track, ctx: &Context) -> DroneView {
             }
         },
     }
+    // Claims: the dispute, and where the other claim is (one more range
+    // solve, for disputed drones only).
+    v.disputed = t.claims.disputed(ctx.now_ms);
+    if v.disputed && let Some(r) = t.claims.rival(ctx.now_ms) {
+        v.other_claim = ctx.own.map(|o| polar(geo::range_bearing(o.lat, o.lon, r.position.lat, r.position.lon)));
+        v.claims_apart_m = tracker::claims::apart_m(t, ctx.now_ms).map(|m| m as f32);
+    }
+    v.auth_seen = t.spoof.auth_pages != 0;
     if let Some(m) = t.dji.product_name() {
         let _ = v.model.push_str(m);
     } else if let Some(st) = t.dji.o4.state() {

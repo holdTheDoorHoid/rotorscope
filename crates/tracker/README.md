@@ -12,11 +12,14 @@ let mut tracker: Tracker = Tracker::new(Config::default()); // 64 tracks; Tracke
 tracker.set_own_position(lat, lon, Some(hae_m), now_ms);     // from GPS; omit/clear when no fix
 tracker.ingest(node, &detection, now_ms);                     // link::Detection, raw messages
 tracker.ingest_messages(&obs, &decoded, errors);            // already-decoded (laptop JSON)
-while let Some(id) = tracker.take_new_drone(now_ms) { beep(id) } // once per drone
+while let Some(id) = tracker.take_new_drone(now_ms) { beep(id) } // once per drone, when confirmed
 tracker.set_utc(utc_ms, now_ms);                              // when GPS time is known (clock check)
 tracker.set_node_position(node, lat, lon);                    // optional (signal-strength check)
 while let Some(ev) = tracker.take_spoof_flag(now_ms) {        // spoof flags, once each
     log(SpoofSuspect, &ev.data(), spoof::event_text(&ev, tracker.get(ev.track)));
+}
+while let Some(d) = tracker.take_dispute(now_ms) {            // two transmitters, one ID
+    log(IdDisputed, &d.data(), claims::event_text(&d, tracker.get(d.track)));
 }
 tracker.expire(now_ms);                                       // call ~1 Hz
 
@@ -60,13 +63,41 @@ beacon and NAN share one namespace, and the three BLE transports share another.
 When an ID turns up on a MAC-keyed track, or a frame links two tracks, they are
 merged. Two IDs of the same type with different values are never merged.
 
-**Expiry.** A track goes `stale` after 60 s without a frame and is removed after
-10 min. When the table is full, the oldest stale track is evicted, or else the
-least recently heard one.
+**Standing** (WP-09, module `probation`, docs/SPOOFING.md "Floods"). A track
+starts **unconfirmed** and is **confirmed** (`Track::confirmed`) when heard
+again at least 1 s after it was first heard. Unconfirmed tracks are shown
+(last, quietly) but never announced, never sent as CoT and never paired with
+aircraft, and they are the first to make room.
 
-**Alerts.** `take_new_drone` hands out each track once. A track that has an ID
-is due at once. A MAC-only track waits 1 s (`announce_grace_ms`), so that BLE
-adverts about to merge into a known drone do not beep twice.
+**Expiry.** A track goes `stale` after 60 s without a frame. A confirmed track
+is removed after 10 min, an unconfirmed one after 30 s. When the table is
+full, a new identity takes the place of a stale track, else (once it has been
+heard again, at most about 4 a second) of the weakest unconfirmed track, else
+of a confirmed track not heard for 15 s; never of a confirmed track still
+being heard. Until then it is only remembered (`Ingested::Ignored`).
+
+**Alerts.** `take_new_drone` hands out each track once, when it is confirmed:
+within 2 s of its first frame for a drone sending at least once a second. A
+MAC-only track also waits 1 s (`announce_grace_ms`), so that BLE adverts about
+to merge into a known drone do not beep twice. Far more new identities than a
+real sky makes (20 a second over 5 s) raise a hub threat `id_flood`; so does
+one node that discards frames (its `Stats.dropped`, 8 a second) while the new
+IDs it delivers do not confirm (4 a second): `id_flood` table `node`, naming
+the node (`probation::ShedWatch`, docs/SPOOFING.md "One node shedding a
+flood"). `ingest_node_stats` takes the drop total for it.
+
+**Mutes** (`threats`, WP-11b, docs/SITE.md). A rule names one thing
+(`threats::key_of`: node, source, target, name, centre or table, as the kind
+needs; no wildcards). `silence(id)`, `mute_seen(seen_ms, now)` and
+`snooze_seen(seen_ms, now)` make timed rules: operator mutes of nuisance kinds
+end after 2 h (`OPERATOR_MUTE_MS`), snoozes of the safety-critical kinds
+(`is_safety_kind`: jamming, Blinded, AreaGnss, IdFlood, ForgedLink) after
+5 min (`SNOOZE_MS`); an alarm still sounding when its rule ends is announced
+again. Rules for good come only from the site file and must pass
+`Mute::check_permanent`. `partly_blind` ignores every mute. Each
+`{"t":"threat"}` line gains `"mute"` (`"snooze"`, `"timed"` or `"site"`) and
+`"mute_until_ms"` while silenced, and `"claimed":true` when it shows an
+address or name taken from the attack frames (`MAX_THREAT_LINE` 640).
 
 ## JSON line schema (`json::track_line`)
 
@@ -95,6 +126,8 @@ the nodes' `{"t":"rid",...}` lines use.
 | `dji` | object \| null | What DJI's own broadcasts said; null when none was heard: `product` (DJI code \| null), `model` (name \| null), `ids_shown` (false with `hide_droneid_ids`), `key_id` (O4 session key ID, 8 hex digits; null when not O4 or hidden), `encrypted` (O4: presence only), `undecoded` (the shared track for bursts that did not decode), `ocusync` (`{n, rssi, snr, mhz, age_ms, node}` \| null), `wifi` (`{n, rssi, ch, band, mac, age_ms, node}` \| null). Added 2026-11-14 |
 | `spoof` | object \| null | Spoofing / consistency checks (`spoof` module, `docs/SPOOFING.md`); null when no check fired and no authentication page was heard: `score` (0-100 combined suspicion; below 30 when every flag is weak), `flags` (array of `{check, conf, detail}`: `check` a snake-case name such as `"position_jump"`, `conf` 0-100, `detail` a number whose unit depends on the check), `auth` (authentication pages heard; not verified). Added 2026-11-17 |
 | `cont` | object \| null | The track this one probably continues under a new identity (`continuity` module): `prev` (its id; it may since have expired), `conf` (0-100), `id_changed` (true when the ID changed mid-flight, which is suspicious; false for a new identity between flights). Added 2026-11-17 |
+| `confirmed` | bool | Heard again at least a second after it was first heard (`probation`). False: not announced, not sent to TAK, possibly forged; list it last and quietly. A reader that does not know the field treats every track as confirmed. Added with WP-09 (2026-11-18) |
+| `claims` | object \| null | Rival claims on this ID (`claims` module, docs/SPOOFING.md "Impersonation and disputes"); null when there is nothing to say, which is the usual case: `disputed` (bool: two transmitters claim this ID right now; not an accusation of either), `what` (array of `"position"`, `"self_id"`, `"op_id"`, `"id"`), `since_ms` (hub ms the dispute began \| null), `followed` (the track switched to the other claim after its original went quiet), `ever` (disputed at some time), `rival` (the other claimed position while it is heard, `{lat, lon, src, n, age_ms, apart_m}`: `src` one of `"RemoteId"`, `"DroneId"`, `"DjiWifi"`, `"ControlLink"`, `"DroneIdO4"` (decrypted, not authenticated); `n` reports along its path; `apart_m` from the shown position \| null), `rejected` (position reports not shown because they did not fit the track's path, saturating at 255), `contradictory` (frames that named this ID beside another ID of the same type, applied to nothing). `loc` and `op` are always the established claim, never the rival's. Added with WP-10 (2026-11-18) |
 
 Example:
 
@@ -102,7 +135,12 @@ Example:
 {"t":"track","id":1,"state":"active","ids":[{"type":"SerialNumber","id":"1581F5FKD229400D"}],"ua":"HelicopterOrMultirotor","first_ms":4000,"last_ms":4500,"age_ms":500,"rssi":-83,"links":[{"tr":"WifiBeacon","n":1,"rssi":-61,"ch":6,"band":"2.4","mac":"60:60:1f:00:00:01","ctr":7,"age_ms":1000,"node":0},{"tr":"BleLongRange","n":1,"rssi":-83,"ch":37,"band":"2.4","mac":"c0:11:22:33:44:55","ctr":7,"age_ms":500,"node":1}],"loc":{"lat":39.948889,"lon":-75.15,"alt_geo":140.0,"alt_baro":130.0,"height":50.0,"height_ref":"AboveTakeoff","speed":5.25,"vspeed":0.5,"dir":90.0,"status":"Airborne","hacc_m":3.0,"vacc_m":10.0,"age_ms":1000},"op":{"lat":39.952583,"lon":-75.165222,"alt":15.0,"src":"Takeoff","age_ms":1000},"self_id":"Bench <test> & co","op_id":"FIN87astrdge12k8","own":{"dist_m":1363.9,"brg":107.5,"op_dist_m":0.0,"op_brg":0.0,"above_m":100.0}}
 ```
 
-A typical line is about 900 bytes (about 1.1 KB with a `dji` object). The worst case is 2702 bytes, with all seven slots, two IDs, escaped text, both DJI sources, four spoof flags and a continuity link. Size buffers with `json::MAX_LINE` (2816; 2432 before the `spoof`/`cont` objects, 1792 before protocol 4). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512).
+A typical line is about 900 bytes (about 1.1 KB with a `dji` object). The worst case is 2897 bytes, with all seven slots, two IDs, escaped text, both DJI sources, four spoof flags, a continuity link and a dispute over everything with a rival claim. Size buffers with `json::MAX_LINE` (3008; 2816 before the `claims` object, 2432 before the `spoof`/`cont` objects, 1792 before protocol 4). The matching sizes for the other formats are `cot::MAX_EVENT` (2048) and `csv::MAX_ROW` (512). `"claims":null` adds 14 bytes to every line; a full `claims` object up to 195.
+
+Nothing in a line is verified: every field is what a transmitter claimed (a
+dispute is the only thing that says two transmitters disagree). `spoof.auth`
+counts authentication pages heard; the hub checks no signature, so the most a
+display may say about them is "auth message present, not checked".
 
 ## Bands (added 2026-11-09)
 
@@ -201,9 +239,14 @@ bytes each). A hub built without an ADSBee uses `A = 0` and pays nothing.
   report of an aircraft not currently heard never creates an entry.
 - **Expiry:** stale after 15 s, removed after 60 s (`AIRCRAFT_STALE_MS`,
   `AIRCRAFT_REMOVE_MS`): aircraft move fast.
-- **Full table:** the least useful entry makes room (stale, then no
-  position, then farthest); a newcomer that would itself be the least useful
-  is dropped.
+- **Standing** (WP-09): an aircraft is *established* (`AircraftTrack::established`)
+  after 3 plausible position updates over 2 s. New addresses are unproven:
+  at most half the table, ranked below every established aircraft whatever
+  distance they claim, and never in the drone-near-aircraft check.
+- **Full table:** a newcomer takes the place of a stale aircraft or of an
+  unproven one not heard for 1.5 s, never of an established aircraft still
+  heard. Established ones hold at most three quarters of the table; past
+  that the least useful (stale, then no position, then farthest) goes.
 - **Range and bearing:** the same Vincenty code as drones. `above_m` is the
   aircraft's geometric altitude (or, without one, pressure altitude, which is
   close to height above sea level) minus the own fix's height.
@@ -316,7 +359,7 @@ network name with `id_type` `Ssid`, `ua_type` the maker, `transports`
 
 `ctrllinks::ControlTable` (kept apart from `Tracker`; the P4 hub holds it in PSRAM) takes
 `Frame::Control` and `Frame::ControlEnergy` from LR2021 nodes (`table.ingest_frame(&mut
-tracker, node, &frame, now)`). Up to 4 links (keyed by system, region and, with the ID opt-in,
+tracker, node, &frame, now)`). Up to 8 links (keyed by system, region and, with the ID opt-in,
 the link ID) and 3 energy bands. A decoded aircraft position creates or updates a drone track
 with `location_src` `"ControlLink"`; `table.link_of(track_id)` names its link.
 docs/CONTROL-LINKS.md has the plain-language story and the two opt-ins.
@@ -408,6 +451,7 @@ Keep the manual position across reboots if you can; the page shows it as
 | `rec` | bool | The SD-card log is being written |
 | `nodes` | array | One per radio node: `role` (`"Wifi24"` \| `"Wifi5"` \| `"Ble"` \| `"Fpv"` \| `"DroneId"` \| `"Gateway"`), `can` (mask of `NodeRole::bit` from its Status frame, null before one; added 2026-11-14), `plan` (the hub plan it applied, 0 = built-in, null before a Status; added 2026-11-14), `alive` (heard recently), `age_ms` (since its last frame; null if never), `seen_per_s` (all frames it saw per second; null before its first Stats), `rid_per_s` (Remote ID detections the hub got per second), `drops` (total frames it dropped; null before its first Stats) |
 | `adsb` | object \| null | The ADS-B receiver (`json::AdsbStatus`): `alive`, `age_ms`, `frames_per_s`, `aircraft` (in the ADSBee's own table), `errors` (lines refused). `null` when the hub has none built in. Added 2026-11-09 |
+| `flood` | object, optional | Only while the drone flood alarm is raised (`probation`): `new_per_s` (new drone identities a second over 5 s), `refused` (new identities refused a track since boot), `since_ms`. Missing otherwise. Added with WP-09; `"v"` stays 1 |
 | `open_links` | array | Every open FPV link, each exactly the `json::link_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 (a new field) |
 | `tracks` | array | Every track, each exactly the `json::track_line` object above (in table order; the page sorts) |
 | `aircraft` | array | Every ADS-B aircraft, each exactly the `json::aircraft_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 |
@@ -426,15 +470,22 @@ Example (tracks shortened):
 {"t":"state","v":1,"now_ms":5000,"utc_ms":1794232987250,"own":{"lat":39.952583,"lon":-75.165222,"alt":40.0,"source":"gps","age_ms":100},"manual":null,"gps":{"state":"3d","sats":9},"rec":true,"nodes":[{"role":"Wifi24","alive":true,"age_ms":300,"seen_per_s":412,"rid_per_s":1,"drops":0},{"role":"Ble","alive":false,"age_ms":null,"seen_per_s":null,"rid_per_s":0,"drops":null}],"adsb":null,"open_links":[],"tracks":[{"t":"track","id":1,...}],"aircraft":[]}
 ```
 
-**New-drone alerts on the page** follow the hub's buzzer rule without extra
-fields: a track id the page has not seen before alerts once it has an ID, or
-1 s after `first_ms`. Tracks present when the page loads do not alert.
+**New-drone alerts on the page** follow the hub's buzzer rule: a track id the
+page has not seen before alerts once it is `confirmed` (a missing field counts
+as confirmed) and has an ID, or 1 s after `first_ms`. Confirmed tracks present
+when the page loads do not alert; unconfirmed ones alert when they are
+confirmed. While `flood` is present the page shows a banner with the rate.
 
 **Security.** Self-ID, operator ID and UAS ID text come from the air and can
 contain anything; the page HTML-escapes every one. Anyone on the hotspot can
 `POST /api/own-pos`, which only moves the distances shown.
 
 ## Cursor-on-Target
+
+Only confirmed drone tracks are sent: `drone_event` and `operator_event`
+return `FormatError::Unconfirmed` for the rest (WP-09), so a flood of forged
+drones does not reach the team's map. A real drone is sent from the moment
+it is confirmed.
 
 The events follow DragonSync's conventions (Apache-2.0, WarDragon's TAK
 bridge), so ATAK users see what they already know:
@@ -443,6 +494,15 @@ bridge), so ATAK users see what they already know:
 - **Operator:** `pilot-<UAS ID>`, type `b-m-p-s-m`, with the civilian Person icon.
 
 Before a Basic ID arrives, `<UAS ID>` is `mac-<hex>`.
+
+Every event's remarks end with what the position is (WP-10): `Claim:
+unverified broadcast`, or, when two transmitters claim the ID, `Claim:
+DISPUTED: two transmitters claim this ID; another <source> claim <n> m from
+the shown one` and `Other claim: <lat>,<lon>` (operator events: `Claim:
+DISPUTED, two transmitters claim this ID`). The uid stays `drone-<UAS ID>`, as
+other sensors and tools key the same drone on it; the event's position is the
+track's established claim, never the rival's. `Auth: message present, not
+checked` when an authentication message was heard.
 
 | UA type | CoT type |
 |---|---|
@@ -478,6 +538,17 @@ An empty field means unknown. `transports` is `|`-separated. A field is quoted
 - the `/api/state` object (golden, no fix, many tracks, every too-small buffer) and `own-pos` parsing
 - open FPV links (`tests_openlinks.rs`): kept apart from drones, merged per link, bounded, expired,
   golden JSON and CSV, and no identifier in any output unless `show_link_ids`
+- impersonation (`tests_claims.rs`, WP-10): a forged twin alternating with a real drone for 60 s
+  never moves it and gives it no spoof flag, only a dispute naming both claims; the track follows
+  a rival alone after 10 s; no merge, rename or fold on one frame; forged text fields; forged DJI
+  Wi-Fi, OcuSync and decrypted O4 positions; and the honest look-alikes (one drone on three
+  transmitters, Bluetooth address rotation, a new session ID, a GPS glitch, two nodes, a changed
+  Self-ID, an honest O4 drone, a quiet site)
+- floods (`tests_flood.rs`, WP-09): a real drone through 60 s of 200 fake IDs a second keeps
+  its track, history and single alert; a new drone during a flood is confirmed within 2 s;
+  repeating fakes; the flood alarm and its threshold (a 40-drone race does not raise it);
+  threat floods never evicting jamming; aircraft under 40 forged addresses a second; bounded
+  range solves for antipodal positions; sizes
 - protocol 4 (`tests_signals.rs`): DroneID scaling against `crates/droneid`, DroneID + Remote ID
   serial merge in both orders, Remote ID position preferred while fresh, O4 and undecoded presence
   tracks, `hide_droneid_ids`, DJI Wi-Fi elements built with `rid::encode::dji_flight_info`, RF

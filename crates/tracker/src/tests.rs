@@ -275,8 +275,10 @@ fn two_basic_ids_are_both_kept() {
     assert_eq!(t.uas_ids.len(), 2);
     assert_eq!(t.primary_id().unwrap().id_type, IdType::SerialNumber);
 
-    // And when the two IDs first arrive on separate tracks, a frame that
-    // links them (session on the serial track's MAC) merges the two.
+    // And when the two IDs first arrive on separate tracks, frames that
+    // link them (the serial from the session track's address) merge the
+    // two, but only once they have said so repeatedly (`claims`: one
+    // forged frame must not merge two drones).
     let mut tr: Tracker = Tracker::default();
     let s = tr.ingest(
         0,
@@ -285,11 +287,12 @@ fn two_basic_ids_are_both_kept() {
     );
     let x = tr.ingest(1, &det(Transport::BleLegacy, BLE_MAC, -70, &[session]), 10);
     assert_ne!(s, x);
-    let m = tr.ingest(
-        1,
-        &det(Transport::BleLegacy, BLE_MAC, -70, &[serial("SN-F")]),
-        20,
-    );
+    let link = det(Transport::BleLegacy, BLE_MAC, -70, &[serial("SN-F")]);
+    assert_eq!(tr.ingest(1, &link, 20), s);
+    assert_eq!(tr.len(), 2, "not on one frame");
+    tr.ingest(1, &link, 1_020);
+    assert_eq!(tr.len(), 2);
+    let m = tr.ingest(1, &link, claims::MERGE_SPAN_MS as u64 + 20);
     assert_eq!(m, s);
     assert_eq!(tr.len(), 1);
     assert_eq!(tr.tracks()[0].uas_ids.len(), 2);
@@ -356,79 +359,85 @@ fn undecodable_frames_never_start_a_track() {
 #[test]
 fn stale_then_removed() {
     let mut tr: Tracker = Tracker::default();
+    // Heard twice, a second apart: confirmed (see `probation`).
+    for t in [0, 1_000] {
+        tr.ingest(
+            0,
+            &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-H")]),
+            t,
+        );
+    }
+    assert!(tr.tracks()[0].confirmed());
+    let state = |tr: &Tracker, now| tr.context(now, None).state(&tr.tracks()[0]);
+    assert_eq!(state(&tr, 60_999), TrackState::Active);
+    assert_eq!(state(&tr, 61_000), TrackState::Stale);
+    assert_eq!(tr.active_count(61_000), 0);
+    assert_eq!(tr.expire(600_999), 0);
+    assert_eq!(tr.expire(601_000), 1);
+    assert!(tr.is_empty());
+    // Heard once: unconfirmed, and gone after 30 s instead of 10 min.
     tr.ingest(
         0,
-        &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-H")]),
-        0,
+        &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-H2")]),
+        700_000,
     );
-    let state = |tr: &Tracker, now| tr.context(now, None).state(&tr.tracks()[0]);
-    assert_eq!(state(&tr, 59_999), TrackState::Active);
-    assert_eq!(state(&tr, 60_000), TrackState::Stale);
-    assert_eq!(tr.active_count(60_000), 0);
-    assert_eq!(tr.expire(599_999), 0);
-    assert_eq!(tr.expire(600_000), 1);
-    assert!(tr.is_empty());
+    assert!(!tr.tracks()[0].confirmed());
+    assert_eq!(tr.expire(700_000 + probation::UNCONFIRMED_REMOVE_MS - 1), 0);
+    assert_eq!(tr.expire(700_000 + probation::UNCONFIRMED_REMOVE_MS), 1);
 }
 
 #[test]
 fn eviction_at_capacity() {
     let mut tr: Tracker<4> = Tracker::default();
+    let ingest = |tr: &mut Tracker<4>, i: u8, t: u64| {
+        let mac = [2, 0, 0, 0, 0, i];
+        let sn = std::format!("SN-{i}");
+        tr.ingest(0, &det(Transport::WifiBeacon, mac, -50, &[serial(&sn)]), t)
+            .track()
+    };
+    // Four drones, each heard twice a second apart: confirmed.
     let ids: std::vec::Vec<_> = (0..4u8)
         .map(|i| {
-            let mac = [2, 0, 0, 0, 0, i];
-            let sn = std::format!("SN-{i}");
-            tr.ingest(
-                0,
-                &det(Transport::WifiBeacon, mac, -50, &[serial(&sn)]),
-                u64::from(i) * 1_000,
-            )
-            .track()
-            .unwrap()
+            ingest(&mut tr, i, u64::from(i) * 100);
+            ingest(&mut tr, i, 1_000 + u64::from(i) * 100).unwrap()
         })
         .collect();
-    // All active: the least-recently-heard (SN-0) goes.
-    let mut t = 10_000;
-    tr.ingest(
-        0,
-        &det(Transport::WifiBeacon, [3; 6], -50, &[serial("SN-X")]),
-        t,
-    );
-    assert_eq!(tr.len(), 4);
+    assert!(tr.tracks().iter().all(|t| t.confirmed()));
+    // All active and confirmed: a new drone is remembered, not tracked,
+    // and never pushes one of them out (`probation`)...
+    assert_eq!(ingest(&mut tr, 9, 10_000), None);
+    assert_eq!(ingest(&mut tr, 9, 11_000), None, "heard again, but no room");
+    assert!(ids.iter().all(|&id| tr.get(id).is_some()));
+    // ...until one of them has been quiet for QUIET_EVICT_MS: the
+    // quietest (SN-0, last heard at 1 s) makes room.
+    for i in 1..4u8 {
+        ingest(&mut tr, i, 15_000);
+    }
+    let x = ingest(&mut tr, 9, 16_000).expect("admitted in place of a quiet one");
     assert!(tr.get(ids[0]).is_none());
+    assert_eq!(tr.len(), 4);
+    // The new track's history starts at its first sighting.
+    assert_eq!(tr.get(x).unwrap().first_seen_ms, 10_000);
+    assert!(tr.get(x).unwrap().confirmed(), "heard over 6 s");
 
-    // Refresh SN-1 and SN-X; SN-2 and SN-3 are now stale. A new drone
-    // evicts the oldest stale one (SN-2), not an active one.
-    t = 70_000;
-    tr.ingest(
-        0,
-        &det(
-            Transport::WifiBeacon,
-            [2, 0, 0, 0, 0, 1],
-            -50,
-            &[serial("SN-1")],
-        ),
-        t,
-    );
-    tr.ingest(
-        0,
-        &det(Transport::WifiBeacon, [3; 6], -50, &[serial("SN-X")]),
-        t,
-    );
-    tr.ingest(
-        0,
-        &det(Transport::WifiBeacon, [4; 6], -50, &[serial("SN-Y")]),
-        t + 1,
-    );
+    // A stale track (not heard for a minute) makes room at once, for a
+    // drone heard only once. SN-2 and SN-3 were last heard at 15 s.
+    let t = 80_000;
+    for i in [1u8, 9] {
+        ingest(&mut tr, i, t);
+    }
+    let y = ingest(&mut tr, 7, t + 1).expect("a stale track makes room");
     assert_eq!(tr.len(), 4);
     assert!(tr.get(ids[1]).is_some(), "fresh track kept");
-    assert!(tr.get(ids[2]).is_none(), "oldest stale track evicted");
-    assert!(tr.get(ids[3]).is_some());
+    assert!(tr.get(ids[2]).is_none() ^ tr.get(ids[3]).is_none(), "one stale track evicted");
+    assert!(!tr.get(y).unwrap().confirmed());
 }
 
 #[test]
 fn new_drone_alert_exactly_once() {
     let mut tr: Tracker = Tracker::default();
-    // With an ID: due at once, and only once.
+    // With an ID: due once confirmed (heard again a second later), and only
+    // once.
     let a = tr
         .ingest(
             0,
@@ -437,16 +446,22 @@ fn new_drone_alert_exactly_once() {
         )
         .track()
         .unwrap();
-    assert_eq!(tr.take_new_drone(0), Some(a));
-    assert_eq!(tr.take_new_drone(0), None);
+    assert_eq!(tr.take_new_drone(0), None, "one frame is not enough");
     tr.ingest(
         0,
         &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-I")]),
-        100,
+        1_000,
     );
-    assert_eq!(tr.take_new_drone(100), None);
+    assert_eq!(tr.take_new_drone(1_000), Some(a));
+    assert_eq!(tr.take_new_drone(1_000), None);
+    tr.ingest(
+        0,
+        &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-I")]),
+        1_100,
+    );
+    assert_eq!(tr.take_new_drone(1_100), None);
 
-    // Without an ID: held back for the grace period...
+    // Without an ID: held back...
     let m = tr
         .ingest(
             1,
@@ -456,21 +471,21 @@ fn new_drone_alert_exactly_once() {
                 -70,
                 &[location(1.0, 1.0, 1.0)],
             ),
-            200,
+            1_200,
         )
         .track()
         .unwrap();
-    assert_eq!(tr.take_new_drone(500), None);
+    assert_eq!(tr.take_new_drone(1_500), None);
     // ...and if its ID arrives in time and merges it, no second alert.
     tr.ingest(
         1,
         &det(Transport::BleLegacy, BLE_MAC, -70, &[serial("SN-I")]),
-        600,
+        1_600,
     );
     assert_eq!(tr.take_new_drone(5_000), None);
     assert!(tr.get(m).is_none());
 
-    // A drone that never sends an ID is still announced after the grace.
+    // A drone that never sends an ID is still announced once confirmed.
     let n = tr
         .ingest(
             1,
@@ -485,6 +500,12 @@ fn new_drone_alert_exactly_once() {
         .track()
         .unwrap();
     assert_eq!(tr.take_new_drone(10_999), None);
+    assert_eq!(tr.take_new_drone(11_000), None, "heard only once");
+    tr.ingest(
+        1,
+        &det(Transport::BleLegacy, BLE_MAC2, -70, &[location(1.0, 1.0, 1.0)]),
+        11_000,
+    );
     assert_eq!(tr.take_new_drone(11_000), Some(n));
     // Its later ID does not re-announce it.
     tr.ingest(
@@ -572,7 +593,7 @@ fn s(buf: &[u8], n: usize) -> String {
 #[test]
 fn json_golden() {
     let (tr, ctx) = golden();
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 1100];
     let n = json::track_line(&tr.tracks()[0], &ctx, &mut buf).unwrap();
     let got = s(&buf, n);
     let want = concat!(
@@ -588,7 +609,9 @@ fn json_golden() {
         r#""loc_src":"RemoteId","op_src":"RemoteId","home":null,"dji":null,"#,
         // The made-up serial's length character says 15, and 11 follow:
         // a weak flag, so the score stays below the report level.
-        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null}"#,
+        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null,"confirmed":false,"#,
+        // Nothing disputed, nothing held: no `claims` object.
+        r#""claims":null}"#,
         "\n"
     );
     assert_eq!(got, want);
@@ -610,9 +633,13 @@ fn json_golden() {
 
 #[test]
 fn cot_golden() {
-    let (tr, ctx) = golden();
-    let t = &tr.tracks()[0];
+    let (mut tr, ctx) = golden();
     let mut buf = [0u8; 2048];
+    // Not confirmed yet (heard over 0.5 s): not sent to TAK (`probation`).
+    assert_eq!(cot::drone_event(&tr.tracks()[0], &ctx, &mut buf), Err(FormatError::Unconfirmed));
+    assert_eq!(cot::operator_event(&tr.tracks()[0], &ctx, &mut buf), Err(FormatError::Unconfirmed));
+    tr.vouch_for_tests(5_000);
+    let t = &tr.tracks()[0];
     let n = cot::drone_event(t, &ctx, &mut buf).unwrap();
     let want = concat!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
@@ -624,7 +651,7 @@ fn cot_golden() {
         r#"<remarks>MAC: c0:11:22:33:44:55, RSSI: -83dBm; ID Type: SerialNumber; UA Type: HelicopterOrMultirotor (2); "#,
         r#"Operator ID: FIN87astrdge12k8; Speed: 5.25 m/s; Vert Speed: 0.5 m/s; Altitude: 140 m; Height: 50 m AboveTakeoff; "#,
         r#"Course: 90°; Status: Airborne; Description: Bench &lt;test&gt; &amp; co; Transport: WifiBeacon+BleLongRange; "#,
-        r#"Range: 1364 m; Bearing: 107°</remarks><color argb="-256"/></detail></event>"#,
+        r#"Range: 1364 m; Bearing: 107°; Claim: unverified broadcast</remarks><color argb="-256"/></detail></event>"#,
     );
     assert_eq!(s(&buf, n), want);
 
@@ -636,7 +663,7 @@ fn cot_golden() {
         r#"<point lat="39.9525830" lon="-75.1652220" hae="15.0" ce="9999999.0" le="9999999.0"/>"#,
         r#"<detail><contact callsign="pilot-1581F5FKD229400D"/><precisionlocation geopointsrc="gps" altsrc="gps"/>"#,
         r#"<usericon iconsetpath="com.atakmap.android.maps.public/Civilian/Person.png"/>"#,
-        r#"<remarks>Pilot location for drone drone-1581F5FKD229400D; Source: Takeoff</remarks></detail></event>"#,
+        r#"<remarks>Pilot location for drone drone-1581F5FKD229400D; Source: Takeoff; Claim: unverified broadcast</remarks></detail></event>"#,
     );
     assert_eq!(s(&buf, n), want);
 
@@ -657,6 +684,7 @@ fn cot_golden() {
         &det(Transport::BleLegacy, BLE_MAC, -50, &[self_id("x")]),
         0,
     );
+    bare.vouch_for_tests(0);
     let c = bare.context(0, Some(0));
     assert_eq!(
         cot::drone_event(&bare.tracks()[0], &c, &mut buf),
@@ -810,6 +838,8 @@ fn json_worst_case_fits() {
     t.continuity.previous = Some(TrackId(u32::MAX));
     t.continuity.link_confidence = 100;
     t.continuity.identity_changed = false;
+    // A dispute over everything, with a far rival claim.
+    t.claims = claims::Claims::worst_for_tests(u64::MAX / 2);
     tr.set_own_position(
         89.999_999_9,
         179.999_999_9,
@@ -822,6 +852,7 @@ fn json_worst_case_fits() {
     std::println!("worst-case JSON line: {n} bytes");
     assert!(n <= json::MAX_LINE, "{n}");
     // CoT and CSV for the same track fit the buffers rid-view uses.
+    tr.vouch_for_tests(0);
     let ctx = tr.context(u64::MAX / 2, Some(u64::MAX / 4));
     assert!(cot::drone_event(&tr.tracks()[0], &ctx, &mut big).unwrap() <= cot::MAX_EVENT);
     assert!(csv::row(&tr.tracks()[0], &ctx, &mut big).unwrap() <= csv::MAX_ROW);
@@ -880,7 +911,7 @@ fn state_golden() {
     )
     .unwrap();
     let got = s(&buf, n);
-    let mut line = [0u8; 1024];
+    let mut line = [0u8; 1100];
     let ln = json::track_line(&tr.tracks()[0], &ctx, &mut line).unwrap();
     let track = s(&line, ln - 1); // without its newline
     let want = std::format!(
@@ -1177,6 +1208,8 @@ fn wifi_on_both_bands_keeps_both_slots() {
         s(&buf, n)
     );
     let ctx = tr.context(2_000, Some(1_794_232_987_250));
+    tr.vouch_for_tests(2_000);
+    let t = &tr.tracks()[0];
     let n = cot::drone_event(t, &ctx, &mut buf).unwrap();
     assert!(
         s(&buf, n).contains("Transport: WifiBeacon+WifiBeacon5G"),

@@ -521,10 +521,13 @@ fn without_utc_or_fix_the_checks_that_need_them_are_silent() {
 
 // ------------------------------------------------- spoofers: flagged --
 
-/// A spoofer clones a real drone's serial 2 km away: the track's position
-/// bounces between the two, from two addresses.
+/// A spoofer clones a real drone's serial 2 km away, from another address.
+/// Before WP-10 the track's position bounced between the two and the real
+/// drone was flagged (position jump 90, address alternation 70). Now the
+/// first path holds, the other is a rival claim, and the track is disputed:
+/// two transmitters claim one ID. No spoof flag on either path.
 #[test]
-fn cloned_serial_two_places_is_flagged() {
+fn cloned_serial_two_places_is_a_dispute_not_a_flag() {
     let mut sim = Sim::new();
     let op = at(0.0, -50.0);
     let mut id = None;
@@ -556,13 +559,22 @@ fn cloned_serial_two_places_is_flagged() {
     }
     let id = id.unwrap();
     let t = sim.track(id);
-    let jump = t.spoof.flag(Check::PositionJump).unwrap();
-    assert_eq!(jump.confidence, 90);
-    assert!(jump.detail > 1_500, "{jump:?}");
-    assert!(t.spoof.flag(Check::AddressAlternation).unwrap().confidence >= 70);
-    assert!(t.spoof.score() >= 90);
-    let evs = sim.drain(30_000);
-    assert!(evs.iter().any(|e| e.check == Check::PositionJump));
+    assert!(t.spoof.flag(Check::PositionJump).is_none(), "{:?}", t.spoof.flags());
+    assert!(t.spoof.flag(Check::AddressAlternation).is_none(), "{:?}", t.spoof.flags());
+    assert!(t.spoof.score() < REPORT_MIN, "{:?}", t.spoof.flags());
+    let shown = t.location.as_ref().unwrap().value.position.unwrap();
+    assert!(spoof::dist_m(shown, at(200.0, 300.0)) < 10.0);
+    let d = t.claims.dispute(20_500).expect("disputed");
+    assert!(d.what & claims::what::POSITION != 0);
+    let r = d.rival.unwrap();
+    assert!(spoof::dist_m(r.position, at(2_000.0, 1_500.0)) < 10.0);
+    assert_eq!(r.src, ClaimSrc::RemoteId);
+    assert!(sim.drain(30_000).is_empty());
+    let ev = sim.tr.take_dispute(20_500).unwrap();
+    let text = claims::event_text(&ev, sim.tr.get(id));
+    assert!(text.contains("two transmitters claim this ID"), "{text}");
+    assert!(text.contains("another Remote ID claim 2163 m from the shown one"), "{text}");
+    assert_eq!(sim.tr.take_dispute(20_500), None, "once");
 }
 
 /// A drone that says it is 5 km away, heard at -35 dBm.
@@ -941,8 +953,13 @@ fn clock_far_from_gps_time_is_flagged() {
     );
 }
 
+/// DroneID puts the drone 1.2 km from where Remote ID does, both
+/// continuing. A DJI drone sends both from one flight controller, so one of
+/// them is forged; which one is not knowable. Before WP-10 the track got a
+/// `drone_id_disagrees` flag (75); now it is a dispute between the two
+/// sources, and Remote ID's position stays shown.
 #[test]
-fn droneid_disagreeing_with_remote_id_is_flagged() {
+fn droneid_disagreeing_with_remote_id_is_a_dispute() {
     let mut sim = Sim::new();
     let rad = |deg: f64| (deg.to_radians() * 1e7).round() as i32;
     let mut serial = [0u8; 16];
@@ -993,13 +1010,60 @@ fn droneid_disagreeing_with_remote_id_is_flagged() {
         };
         sim.tr.ingest_droneid(2, &s, ms + 200);
     }
-    let f = *sim
-        .track(id.unwrap())
-        .spoof
-        .flag(Check::DroneIdDisagrees)
-        .unwrap();
+    let t = sim.track(id.unwrap());
+    assert!(t.spoof.flag(Check::DroneIdDisagrees).is_none(), "{:?}", t.spoof.flags());
+    assert_eq!(t.location_src, Source::RemoteId);
+    let d = t.claims.dispute(10_300).expect("disputed");
+    let r = d.rival.unwrap();
+    assert_eq!(r.src, ClaimSrc::DroneId);
+    let apart = claims::apart_m(t, 10_300).unwrap();
+    assert!((1_100.0..=1_300.0).contains(&apart), "{apart}");
+}
+
+/// DroneID 150 m from Remote ID: inside the path limit, so not a rival
+/// claim, but further than one drone's two reports differ. The
+/// `drone_id_disagrees` check still covers that band.
+#[test]
+fn droneid_a_little_off_remote_id_is_still_flagged() {
+    let mut sim = Sim::new();
+    let rad = |deg: f64| (deg.to_radians() * 1e7).round() as i32;
+    let mut serial = [0u8; 16];
+    serial.copy_from_slice(DJI_SN.as_bytes());
+    let mut id = None;
+    for k in 0..10u64 {
+        let ms = 1_000 + k * 1000;
+        let f = Fix { p: at(300.0, 300.0), alt: 100.0, height: 50.0, speed: 0.0, dir: None, ms };
+        id = Some(sim.frame(0, Transport::WifiBeacon, DJI_MAC, -70, k as u8, &[basic(DJI_SN), loc(f)], ms));
+        let q = at(450.0, 300.0);
+        let s = DroneIdSighting {
+            freq: 24_445,
+            rssi: -70,
+            snr_db: 12,
+            uptime_us: 0,
+            record: DroneIdRecord::Flight {
+                serial,
+                lat_raw: rad(q.lat),
+                lon_raw: rad(q.lon),
+                altitude_raw: 328,
+                height_raw: 164,
+                v_north: 0,
+                v_east: 0,
+                v_up: 0,
+                yaw_raw: 0,
+                pilot_lat_raw: 0,
+                pilot_lon_raw: 0,
+                home_lat_raw: 0,
+                home_lon_raw: 0,
+                product_type: 68,
+            },
+        };
+        sim.tr.ingest_droneid(2, &s, ms + 200);
+    }
+    let t = sim.track(id.unwrap());
+    let f = *t.spoof.flag(Check::DroneIdDisagrees).unwrap();
     assert!(f.confidence >= 75, "{f:?}");
-    assert!((1_100..=1_300).contains(&f.detail), "{f:?}");
+    assert!((130..=170).contains(&f.detail), "{f:?}");
+    assert!(!t.claims.disputed(10_300));
 }
 
 #[test]
@@ -1438,6 +1502,7 @@ fn json_carries_flags_and_link() {
     // CoT remarks carry the same note.
     let ctx = sim.tr.context(1_500, Some(UTC0 + 1_500));
     let mut big = [0u8; 4096];
+    sim.tr.vouch_for_tests(1_500);
     let n = cot::drone_event(sim.track(id), &ctx, &mut big);
     // No position: no CoT event; the summary is still well-formed text.
     assert_eq!(n, Err(FormatError::NoPosition));

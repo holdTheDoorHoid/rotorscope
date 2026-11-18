@@ -192,6 +192,32 @@ pub struct Config {
     /// (a C5 parked on a DroneID channel knows it to within its crystal
     /// error); skips the spectral search. Must be within about +-100 kHz.
     pub cfo_hint_hz: Option<i32>,
+    /// Cheap rejection: a span whose coarse frequency estimate lies more
+    /// than `.1` Hz from `.0` (where a burst on the tuned channel must be)
+    /// is refused ([`SyncError::OffFrequency`]) before the costly stages
+    /// (resampling, timing, demodulation). `None`: any frequency.
+    pub cfo_window: Option<(i32, u32)>,
+    /// Run the turbo decoder (the costliest stage) only for a burst that
+    /// passes these gates; others keep the systematic attempt only and are
+    /// marked [`Burst::turbo_skipped`]. `None`: always.
+    pub turbo_gate: Option<TurboGate>,
+}
+
+/// What a burst must show before the turbo decoder runs on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TurboGate {
+    /// Reference-symbol SNR per carrier, dB ([`Burst::snr_db`]).
+    pub min_snr_db: f32,
+    /// The burst's total frequency offset must be within `cfo_tol_hz` of
+    /// `cfo_hz`.
+    pub cfo_hz: i32,
+    pub cfo_tol_hz: u32,
+}
+
+impl TurboGate {
+    pub fn passes(&self, snr_db: f32, cfo_hz: f64) -> bool {
+        snr_db >= self.min_snr_db && (cfo_hz - self.cfo_hz as f64).abs() <= self.cfo_tol_hz as f64
+    }
 }
 
 impl Default for Config {
@@ -204,6 +230,8 @@ impl Default for Config {
             cp_threshold: 100,
             spectrum_blocks: 8,
             cfo_hint_hz: None,
+            cfo_window: None,
+            turbo_gate: None,
         }
     }
 }
@@ -227,6 +255,8 @@ pub enum SyncError {
     NoCp,
     /// No root-600 reference symbol.
     NoZc,
+    /// Outside [`Config::cfo_window`].
+    OffFrequency,
 }
 
 /// Measurements and outcome for one burst.
@@ -251,6 +281,9 @@ pub struct Burst {
     pub crc24_ok: bool,
     /// Turbo half-iterations used (0 if the turbo decoder did not run).
     pub half_iterations: u8,
+    /// The systematic attempt failed and [`Config::turbo_gate`] kept the
+    /// turbo decoder from running.
+    pub turbo_skipped: bool,
     /// Systematic hard decisions that disagree with the final block (a
     /// raw channel bit-error count; meaningful when `crc24_ok`).
     pub systematic_errors: u16,
@@ -359,6 +392,11 @@ impl Receiver {
             None => coarse_cfo(x, span, self.rs.fs_in, self.config.spectrum_blocks, &mut self.fftbuf),
         };
         mark(Stage::CoarseCfo);
+        if let Some((c, tol)) = self.config.cfo_window
+            && (f_coarse - c as f64).abs() > tol as f64
+        {
+            return Err(SyncError::OffFrequency);
+        }
 
         // 3. Mix and resample.
         let margin = self.rs.fs_in as usize / 25_000;
@@ -463,7 +501,10 @@ impl Receiver {
             path = Some(Path::Systematic);
         }
         mark(Stage::Systematic);
-        if path.is_none() && self.config.max_iterations > 0 {
+        let cfo_hz = f_coarse + f_frac + f_int;
+        let turbo_skipped =
+            path.is_none() && self.config.turbo_gate.is_some_and(|g| !g.passes(model.snr_db, cfo_hz));
+        if path.is_none() && self.config.max_iterations > 0 && !turbo_skipped {
             let r = self.turbo.decode(&self.soft, self.config.max_iterations, &mut full);
             half_iterations = r.half_iterations;
             if r.crc_ok {
@@ -483,7 +524,7 @@ impl Receiver {
             span,
             layout,
             start: a as f64 + (t as f64) * in_per_out - self.rs.delay_in(),
-            cfo_hz: f_coarse + f_frac + f_int,
+            cfo_hz,
             snr_db: model.snr_db,
             cp_metric: cp.metric,
             zc_metric,
@@ -492,6 +533,7 @@ impl Receiver {
             path,
             crc24_ok,
             half_iterations,
+            turbo_skipped,
             systematic_errors,
             block,
             parsed,

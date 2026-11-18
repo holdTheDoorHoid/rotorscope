@@ -80,6 +80,7 @@ fn helicopter_beside_a_drone_warns_once() {
     let mut tr = tracker_with_drone();
     // 50 m north, GPS 500 ft (152 m): 32 m above the drone.
     tr.ingest_aircraft(&heli(0xA1B2C3, 50.0, 400, 500, 7, 270.0, 60), 0);
+    tr.vouch_for_tests(0);
     let c = tr.conflicts(100);
     assert_eq!(c.len(), 1);
     assert_eq!(c[0].level, Level::Warning);
@@ -114,10 +115,13 @@ fn aircraft_well_above_or_unmanned_or_far_is_ignored() {
     let mut tr = tracker_with_drone();
     // Overhead but 5,000 ft up.
     tr.ingest_aircraft(&heli(0x000001, 50.0, 5_000, 5_100, 7, 270.0, 60), 0);
+    tr.vouch_for_tests(0);
     // An ADS-B drone (category 14) right beside ours.
     tr.ingest_aircraft(&heli(0x000002, 30.0, 400, 500, 14, 270.0, 20), 0);
+    tr.vouch_for_tests(0);
     // A helicopter 10 km away at the same height.
     tr.ingest_aircraft(&heli(0x000003, 10_000.0, 400, 500, 7, 270.0, 60), 0);
+    tr.vouch_for_tests(0);
     assert!(tr.conflicts(100).is_empty(), "{:?}", tr.conflicts(100));
 }
 
@@ -125,6 +129,7 @@ fn aircraft_well_above_or_unmanned_or_far_is_ignored() {
 fn stale_tracks_do_not_conflict() {
     let mut tr = tracker_with_drone();
     tr.ingest_aircraft(&heli(0xA1B2C3, 50.0, 400, 500, 7, 270.0, 60), 0);
+    tr.vouch_for_tests(0);
     // Long after both were last heard.
     assert!(tr.conflicts(10 * 60 * 1000).is_empty());
 }
@@ -206,10 +211,12 @@ fn escalation_and_realert() {
     let mut tr = tracker_with_drone();
     // 2 km out at the same height: advisory.
     tr.ingest_aircraft(&heli(0xA1B2C3, 2_000.0, 400, 500, 7, 270.0, 0), 0);
+    tr.vouch_for_tests(0);
     assert_eq!(tr.take_new_conflict(100).unwrap().level, Level::Advisory);
     assert_eq!(tr.take_new_conflict(200), None);
     // Now 200 m away: warning, announced again.
     tr.ingest_aircraft(&heli(0xA1B2C3, 200.0, 400, 500, 7, 270.0, 0), 1_000);
+    tr.vouch_for_tests(0);
     tr.ingest(
         0,
         &det(
@@ -220,6 +227,7 @@ fn escalation_and_realert() {
         ),
         1_000,
     );
+    tr.vouch_for_tests(1_000);
     assert_eq!(tr.take_new_conflict(1_100).unwrap().level, Level::Warning);
     assert_eq!(tr.take_new_conflict(1_200), None);
 

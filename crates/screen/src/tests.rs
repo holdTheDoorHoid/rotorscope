@@ -207,17 +207,39 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     assert_eq!(ui.done_row(), Some(3));
     assert_eq!(ui.take_request(), Some(Request::HubMoved));
     assert_eq!(ui.take_request(), None, "taken once");
+    // WP-12: while the hub waits on a new place, the same row accepts it.
+    let mut waiting = s.clone();
+    waiting.gps.home_pending = true;
+    ui.button(Button::Select, &waiting);
+    assert_eq!(ui.take_request(), Some(Request::AcceptHome));
     ui.button(Button::Down, &s);
     ui.button(Button::Select, &s); // alarms: nothing sounding, nothing muted
     assert_eq!(ui.take_request(), None);
     let mut loud = s.clone();
     loud.threats.active = 2;
+    // Two alarms sound but neither has been announced yet: nothing to do.
     ui.button(Button::Select, &loud);
-    assert_eq!(ui.take_request(), Some(Request::MuteAlarms));
+    assert_eq!(ui.take_request(), None);
+    // A nuisance alarm and a jammer, both seen: Mute takes the nuisance
+    // only, carrying the frame the operator looked at.
+    loud.threats.mutable = 1;
+    loud.threats.snoozable = 1;
+    ui.button(Button::Select, &loud);
+    assert_eq!(ui.take_request(), Some(Request::MuteAlarms { seen_ms: s.now_ms }));
+    // Then only the jammer: Snooze, a separate press.
+    loud.threats.mutable = 0;
+    ui.button(Button::Select, &loud);
+    assert_eq!(ui.take_request(), Some(Request::SnoozeAlarms { seen_ms: s.now_ms }));
     let mut quiet = s.clone();
     quiet.threats.muted = 2;
+    quiet.caveats.silenced.muted = 1;
+    quiet.caveats.silenced.snoozed = 1;
     ui.button(Button::Select, &quiet);
     assert_eq!(ui.take_request(), Some(Request::UnmuteAlarms));
+    // Only the site file's mutes: the row cannot drop those.
+    quiet.caveats.silenced = Silenced { site: 3, ..Silenced::default() };
+    ui.button(Button::Select, &quiet);
+    assert_eq!(ui.take_request(), None);
     ui.button(Button::Down, &s);
     ui.button(Button::Select, &s); // nodes at hub
     assert_eq!(ui.take_request(), Some(Request::NodesAtHub));
@@ -447,21 +469,38 @@ fn ages() {
 
 #[test]
 fn caveat_lines() {
-    assert_eq!(Caveats::default().lines(), [None, None, None]);
+    assert_eq!(Caveats::default().lines(), [None, None, None, None, None]);
+    assert!(Caveats::default().shown().is_empty());
     let mut c = Caveats { key: EvidenceKey::Test, ..Caveats::default() };
     let l = c.lines();
-    assert!(l[0].is_none() && l[1].is_none());
-    assert_eq!(l[2].as_deref(), Some("TEST KEY: log not evidence"));
+    assert!(l[0].is_none() && l[1].is_none() && l[2].is_none() && l[3].is_none());
+    assert_eq!(l[4].as_deref(), Some("TEST KEY: log not evidence"));
     c.bench = true;
     c.link_open = true;
-    assert_eq!(c.lines()[2].as_deref(), Some("TEST KEY: log not evidence  BENCH BUILD  OPEN LINK"));
+    assert_eq!(c.lines()[4].as_deref(), Some("TEST KEY: log not evidence  BENCH BUILD  OPEN LINK"));
     c.key = EvidenceKey::Development;
-    assert_eq!(c.lines()[2].as_deref(), Some("DEV KEY: not evidence-grade  BENCH BUILD  OPEN LINK"));
+    assert_eq!(c.lines()[4].as_deref(), Some("DEV KEY: not evidence-grade  BENCH BUILD  OPEN LINK"));
     c = Caveats { evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 12, dropped: 0 }), ..Caveats::default() };
     assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (no SD): 12 waiting"));
-    assert!(c.lines()[1].is_none() && c.lines()[2].is_none());
+    assert!(c.lines()[1..].iter().all(Option::is_none));
     c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 3, dropped: 9 });
     assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (file error): 3 waiting, 9 dropped"));
+    // Silenced alarms and the collection switches stay on screen.
+    c = Caveats {
+        silenced: Silenced { muted: 2, mute_left_s: 7_140, snoozed: 1, snooze_left_s: 245, site: 3 },
+        switches: Switches { control_ids: true, control_content: false, audio_clips: true },
+        audio: AudioClips { on: true, recording: false, not_saved: 0 },
+        ..Caveats::default()
+    };
+    let l = c.lines();
+    assert_eq!(l[1].as_deref(), Some("MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES 3"));
+    assert_eq!(l[3].as_deref(), Some("ON: control IDs, audio clips"));
+    // The longest of each still fits the panel's 52 columns.
+    c.silenced = Silenced { muted: 255, mute_left_s: 7_200, snoozed: 255, snooze_left_s: 300, site: 255 };
+    c.switches = Switches { control_ids: true, control_content: true, audio_clips: true };
+    let l = c.lines();
+    assert!(l[1].as_ref().unwrap().len() <= CAVEAT_COLUMNS, "{:?}", l[1]);
+    assert!(l[3].as_ref().unwrap().len() <= CAVEAT_COLUMNS, "{:?}", l[3]);
 }
 
 /// Audio clips: nothing while off (the default), a standing marker while
@@ -472,25 +511,75 @@ fn caveats_audio_markers() {
     let mut c = Caveats::default();
     assert!(c.audio.line().is_none(), "off: no marker");
     c.audio.not_saved = 3;
-    assert!(c.lines()[1].is_none(), "off: refusals alone show nothing");
+    assert!(c.lines()[2].is_none(), "off: refusals alone show nothing");
     c.audio = AudioClips { on: true, recording: false, not_saved: 0 };
-    assert_eq!(c.lines()[1].as_deref(), Some("AUDIO CLIPS ON: sound may be recorded"));
+    assert_eq!(c.lines()[2].as_deref(), Some("AUDIO CLIPS ON: sound may be recorded"));
     c.audio.recording = true;
-    assert_eq!(c.lines()[1].as_deref(), Some("RECORDING SOUND to SD card"));
+    assert_eq!(c.lines()[2].as_deref(), Some("RECORDING SOUND to SD card"));
     c.audio.not_saved = 4;
-    assert_eq!(c.lines()[1].as_deref(), Some("RECORDING SOUND to SD card; 4 not saved"));
+    assert_eq!(c.lines()[2].as_deref(), Some("RECORDING SOUND to SD card; 4 not saved"));
     c.audio.recording = false;
-    assert_eq!(c.lines()[1].as_deref(), Some("AUDIO CLIPS ON: may record; 4 not saved"));
+    assert_eq!(c.lines()[2].as_deref(), Some("AUDIO CLIPS ON: may record; 4 not saved"));
     // The marker sits between the evidence line and the build marks.
     c.key = EvidenceKey::Test;
     c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 1, dropped: 0 });
-    let l = c.lines();
-    assert!(l[0].as_deref().unwrap().starts_with("NO EVIDENCE"));
-    assert!(l[1].as_deref().unwrap().starts_with("AUDIO CLIPS ON"));
-    assert_eq!(l[2].as_deref(), Some("TEST KEY: log not evidence"));
+    let l = c.shown();
+    assert_eq!(l.len(), 3);
+    assert!(l[0].starts_with("NO EVIDENCE"));
+    assert!(l[1].starts_with("AUDIO CLIPS ON"));
+    assert_eq!(l[2].as_str(), "TEST KEY: log not evidence");
     // The longest form still fits the panel (52 characters of 6x10 font).
     c.audio = AudioClips { on: true, recording: true, not_saved: u32::MAX };
-    assert!(c.audio.line().unwrap().len() <= 52);
+    assert!(c.audio.line().unwrap().len() <= CAVEAT_COLUMNS);
     c.audio.recording = false;
-    assert!(c.audio.line().unwrap().len() <= 52);
+    assert!(c.audio.line().unwrap().len() <= CAVEAT_COLUMNS);
+}
+
+/// The merged strip: order, the cap of four lines, and what gives way.
+#[test]
+fn caveats_strip_cap() {
+    let ev = Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 2, dropped: 0 });
+    let quiet = Silenced { muted: 1, mute_left_s: 600, ..Silenced::default() };
+    let on = AudioClips { on: true, recording: false, not_saved: 0 };
+    // Everything that fits is drawn in slot order.
+    let mut c = Caveats {
+        evidence: ev,
+        silenced: quiet,
+        audio: on,
+        switches: Switches { audio_clips: true, ..Switches::default() },
+        ..Caveats::default()
+    };
+    let l = c.shown();
+    assert_eq!(l.len(), 4);
+    assert_eq!(l[0].as_str(), "NO EVIDENCE (no SD): 2 waiting");
+    assert_eq!(l[1].as_str(), "MUTED 1 10m00");
+    assert_eq!(l[2].as_str(), "AUDIO CLIPS ON: sound may be recorded");
+    assert_eq!(l[3].as_str(), "ON: audio clips");
+    // A fifth line (build marks): the switches line stops repeating the
+    // audio line, and with nothing else on it, goes. Nothing is hidden.
+    c.key = EvidenceKey::Test;
+    c.bench = true;
+    let l = c.shown();
+    assert_eq!(l.len(), MAX_CAVEAT_LINES);
+    assert_eq!(l[2].as_str(), "AUDIO CLIPS ON: sound may be recorded");
+    assert_eq!(l[3].as_str(), "TEST KEY: log not evidence  BENCH BUILD");
+    // Another switch keeps the switches line: it is dropped, and the last
+    // line says one line is not drawn.
+    c.switches.control_ids = true;
+    let l = c.shown();
+    assert_eq!(l.len(), MAX_CAVEAT_LINES);
+    assert_eq!(l[3].as_str(), "TEST KEY: log not evidence  BENCH BUILD  +1");
+    // A long last line is cut to keep the tag on the panel.
+    c.link_open = true;
+    c.key = EvidenceKey::Development;
+    let l = c.shown();
+    assert!(l[3].len() <= CAVEAT_COLUMNS && l[3].ends_with("  +1"), "{:?}", l[3]);
+    // The evidence state and silenced alarms are never the ones dropped.
+    assert!(l[0].starts_with("NO EVIDENCE") && l[1].starts_with("MUTED"));
+    // With room (no alarm silenced), the switches line is back, whole.
+    c.silenced = Silenced::default();
+    let l = c.shown();
+    assert_eq!(l.len(), 4);
+    assert_eq!(l[2].as_str(), "ON: control IDs, audio clips");
+    assert!(l[3].starts_with("DEV KEY") && !l[3].contains('+'));
 }

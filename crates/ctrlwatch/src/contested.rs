@@ -55,6 +55,34 @@
 //! phase, so the signature change is required; reported as its own rule
 //! because it is the weakest one.
 //!
+//! # History first, and few new alarms (WP-11a)
+//!
+//! These protocols are unauthenticated: a sync packet or a SiK trailer is
+//! whatever its sender wrote. Until WP-11a about six ExpressLRS syncs from
+//! **one** radio, alternating between two nonce phases on a made-up UID,
+//! raised "link hijack" with no drone anywhere. Two rules now stand between
+//! a forger and the alarm:
+//!
+//! - **History.** A link's contradictions only count once the link has
+//!   been heard as **one** consistent transmitter for [`HISTORY_US`] before
+//!   a second one appeared ([`Link`] is then *seasoned*, for good): for the
+//!   phase systems, an established group spanning [`HISTORY_US`] with no
+//!   other established group of its class starting within that time; for
+//!   SiK, window ends agreeing for [`HISTORY_US`]. A real hijack happens to
+//!   a link that was flying before; a link that was contested from its first
+//!   packet is counted ([`Watch::unseasoned`]) but not reported. The
+//!   handover rule needs the same history of the old transmitter.
+//! - **New alarms are budgeted.** A link's first report costs a token
+//!   ([`NEW_FINDING_BURST`], then one per [`NEW_FINDING_REFILL_US`], for the
+//!   whole node); a finding waiting for one is counted
+//!   ([`Watch::throttled`]) and goes out when a token comes, unless it has
+//!   lapsed ([`HOLD_US`]) by then. Reports of a link already reported are
+//!   not limited beyond [`REPORT_GAP_US`].
+//!
+//! A forger who first plays a made-up link alone for [`HISTORY_US`] and
+//! then alternates still gets the alarm; it costs seconds instead of six
+//! packets, and at most a handful of such alarms a minute.
+//!
 //! # What cannot be separated
 //!
 //! - An injector that copies the victim's timing exactly (follows the ELRS
@@ -118,6 +146,16 @@ pub const HANDOVER_RSSI_DB: i16 = 15;
 pub const OBS_MAX_AGE_US: u64 = 600_000_000;
 /// A link not heard for this long is forgotten.
 pub const LINK_MAX_AGE_US: u64 = 600_000_000;
+/// A link holding evidence (two or more observations, SiK trailer counts,
+/// a finding) is not given up for a newcomer until it has been quiet this
+/// long. Until WP-11a the least recently heard link without a finding made
+/// room, so a spray of syncs on made-up UIDs between the victim's packets
+/// emptied the victim's phase ring before the alternation added up. A new
+/// link is on probation (one observation) and goes first; a newcomer that
+/// finds every link holding evidence is turned away
+/// ([`Watch::refused`]); dropping a quiet link holding evidence is counted
+/// in [`Watch::pressure_evicted`].
+pub const QUIET_EVICT_US: u64 = 120_000_000;
 /// SiK: 16 µs TDM ticks.
 pub const SIK_TICK_US: u64 = 16;
 /// SiK: two packets in one window may claim ends this far apart and still
@@ -149,6 +187,13 @@ pub const REFRESH_US: u64 = 5_000_000;
 pub const HOLD_US: u64 = 60_000_000;
 /// New evidence goes out at most this often.
 pub const REPORT_GAP_US: u64 = 1_000_000;
+/// A link must have been heard as one transmitter this long before a
+/// second one counts (see "History first").
+pub const HISTORY_US: u64 = 5_000_000;
+/// New contested links reported in a burst...
+pub const NEW_FINDING_BURST: u32 = 2;
+/// ...then one every this long.
+pub const NEW_FINDING_REFILL_US: u64 = 10_000_000;
 
 /// Rule bits in [`Report::rules`] (and in the threat's `detail`).
 pub const RULE_PHASE: u8 = 1;
@@ -293,6 +338,8 @@ struct Sik {
     mav: [Option<MavHead>; 4],
     mav_stamp: u32,
     mav_last_event_us: u64,
+    /// First agreeing pair of window ends (either layout).
+    agree_since: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +351,10 @@ struct Finding {
     last_ev_us: u64,
     reported_us: Option<u64>,
     reported_events: u32,
+    /// Has had its token (first report allowed).
+    admitted: bool,
+    /// Counted in [`Watch::throttled`] already.
+    held: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -320,10 +371,28 @@ struct Link {
     handover_done: Option<u64>,
     sik: Sik,
     finding: Option<Finding>,
+    /// Heard as one transmitter for [`HISTORY_US`] (see "History first").
+    seasoned: bool,
+    /// Contradictions seen before the link was seasoned (not reported).
+    unseasoned: u32,
 }
 
 impl Link {
+    /// Holds something a newcomer must not wipe.
+    fn holds_evidence(&self) -> bool {
+        self.ring.len() >= 2
+            || self.finding.is_some()
+            || self.seasoned
+            || self.sik.agree != [0; 2]
+            || self.sik.contra != [0; 2]
+            || self.sik.mav.iter().any(Option::is_some)
+    }
+
     fn evidence(&mut self, rule: u8, transmitters: u8, t_us: u64) {
+        if !self.seasoned {
+            self.unseasoned = self.unseasoned.saturating_add(1);
+            return;
+        }
         let f = self.finding.get_or_insert(Finding {
             rules: 0,
             transmitters: 0,
@@ -332,6 +401,8 @@ impl Link {
             last_ev_us: t_us,
             reported_us: None,
             reported_events: 0,
+            admitted: false,
+            held: false,
         });
         f.rules |= rule;
         f.transmitters = f.transmitters.max(transmitters);
@@ -347,6 +418,16 @@ pub struct Watch<const L: usize> {
     next_handle: u8,
     /// Links dropped to make room.
     pub evicted: u32,
+    /// ...of which held evidence (quiet for [`QUIET_EVICT_US`]).
+    pub pressure_evicted: u32,
+    /// New links turned away: every link held evidence.
+    pub refused: u32,
+    /// Contradictions on links without history (not reported).
+    pub unseasoned: u32,
+    /// New findings that had to wait for a token.
+    pub throttled: u32,
+    tokens: u32,
+    token_at_us: u64,
 }
 
 impl<const L: usize> Default for Watch<L> {
@@ -370,7 +451,30 @@ impl<const L: usize> Watch<L> {
             links: heapless::Vec::new(),
             next_handle: 1,
             evicted: 0,
+            pressure_evicted: 0,
+            refused: 0,
+            unseasoned: 0,
+            throttled: 0,
+            tokens: NEW_FINDING_BURST,
+            token_at_us: 0,
         }
+    }
+
+    fn take_token(&mut self, now_us: u64) -> bool {
+        if self.tokens >= NEW_FINDING_BURST {
+            self.token_at_us = now_us;
+        } else {
+            let add = now_us.saturating_sub(self.token_at_us) / NEW_FINDING_REFILL_US;
+            if add > 0 {
+                self.tokens = (u64::from(self.tokens) + add).min(u64::from(NEW_FINDING_BURST)) as u32;
+                self.token_at_us += add * NEW_FINDING_REFILL_US;
+            }
+        }
+        if self.tokens == 0 {
+            return false;
+        }
+        self.tokens -= 1;
+        true
     }
 
     /// One packet `crate::recognise` accepted on `rx` (pass every one; the
@@ -389,15 +493,23 @@ impl<const L: usize> Watch<L> {
             Some(i) => i,
             None => {
                 if self.links.is_full() {
-                    // Drop the least recently heard link without a finding,
-                    // else the least recently heard.
+                    // A link on probation first (least recently heard),
+                    // else one holding evidence but quiet, else none.
+                    let held = |k: usize| self.links[k].holds_evidence();
+                    let quiet = |k: usize| t.saturating_sub(self.links[k].last_us) >= QUIET_EVICT_US;
                     let victim = (0..self.links.len())
-                        .filter(|&k| self.links[k].finding.is_none())
+                        .filter(|&k| !held(k))
                         .min_by_key(|&k| self.links[k].last_us)
-                        .or_else(|| (0..self.links.len()).min_by_key(|&k| self.links[k].last_us));
-                    if let Some(k) = victim {
-                        self.links.swap_remove(k);
-                        self.evicted = self.evicted.saturating_add(1);
+                        .map(|k| (k, false))
+                        .or_else(|| (0..self.links.len()).filter(|&k| quiet(k)).min_by_key(|&k| self.links[k].last_us).map(|k| (k, true)));
+                    let Some((k, was_held)) = victim else {
+                        self.refused = self.refused.saturating_add(1);
+                        return;
+                    };
+                    self.links.swap_remove(k);
+                    self.evicted = self.evicted.saturating_add(1);
+                    if was_held {
+                        self.pressure_evicted = self.pressure_evicted.saturating_add(1);
                     }
                 }
                 let handle = self.next_handle;
@@ -414,6 +526,8 @@ impl<const L: usize> Watch<L> {
                     handover_done: None,
                     sik: Sik::default(),
                     finding: None,
+                    seasoned: false,
+                    unseasoned: 0,
                 });
                 self.links.len() - 1
             }
@@ -422,26 +536,48 @@ impl<const L: usize> Watch<L> {
         link.last_us = link.last_us.max(t);
         link.freq_hz = rx.freq_hz;
         link.peak_rssi = link.peak_rssi.max(meta.rssi_dbm);
+        let before = link.unseasoned;
         match seen {
             Seen::Phase(o) => phase_observe(link, o),
             Seen::Sik { end, serial } => sik_observe(link, t, end, serial, cfg.decode_content),
         }
+        let more = link.unseasoned - before;
+        self.unseasoned = self.unseasoned.saturating_add(more);
     }
 
     /// Hand every link with a finding due a report to `out`: new evidence
     /// at most every [`REPORT_GAP_US`], and a standing finding every
     /// [`REFRESH_US`] for [`HOLD_US`] after its last evidence.
     pub fn take_due(&mut self, now_us: u64, cfg: &Config, mut out: impl FnMut(&Report)) {
-        for l in self.links.iter_mut() {
-            let Some(f) = l.finding.as_mut() else {
+        for k in 0..self.links.len() {
+            let Some(f) = self.links[k].finding else {
                 continue;
             };
             let since = |t: Option<u64>| t.map_or(u64::MAX, |t| now_us.saturating_sub(t));
             let fresh = f.events != f.reported_events && since(f.reported_us) >= REPORT_GAP_US;
-            let standing = now_us.saturating_sub(f.last_ev_us) < HOLD_US && since(f.reported_us) >= REFRESH_US;
+            let live = now_us.saturating_sub(f.last_ev_us) < HOLD_US;
+            let standing = live && since(f.reported_us) >= REFRESH_US;
             if !(fresh || standing) {
                 continue;
             }
+            if !f.admitted {
+                // A new contested link: it needs a token, and a finding
+                // that lapsed while waiting is not sent late.
+                if !live || !self.take_token(now_us) {
+                    if !f.held {
+                        self.throttled = self.throttled.saturating_add(1);
+                    }
+                    if let Some(f) = self.links[k].finding.as_mut() {
+                        f.held = true;
+                    }
+                    continue;
+                }
+            }
+            let l = &mut self.links[k];
+            let Some(f) = l.finding.as_mut() else {
+                continue;
+            };
+            f.admitted = true;
             f.reported_us = Some(now_us);
             f.reported_events = f.events;
             out(&Report {
@@ -662,6 +798,20 @@ fn phase_observe(link: &mut Link, o: Obs) {
     let me = lab[ring.len() - 1];
     let class = o.class;
 
+    // History: one established transmitter heard for HISTORY_US with no
+    // other established one of its class starting within that time.
+    if !link.seasoned {
+        link.seasoned = (0..RING).any(|g| {
+            let a = &groups[g];
+            est(a)
+                && a.last - a.first >= HISTORY_US
+                && !(0..RING).any(|h| {
+                    let b = &groups[h];
+                    h != g && est(b) && b.class == a.class && b.first < a.first + HISTORY_US
+                })
+        });
+    }
+
     // Interleaving: the established groups of this class, in time order.
     // A change of group counts only between two packets close enough in
     // time to tell apart: one transmitter heard on scan visits minutes
@@ -754,6 +904,7 @@ fn sik_observe(link: &mut Link, t: u64, end: [Option<u64>; 2], serial: [&[u8]; 2
             }
             if a.abs_diff(b) <= SIK_END_TOL_US {
                 s.agree[k] = s.agree[k].saturating_add(1);
+                s.agree_since.get_or_insert(t);
             } else {
                 s.contra[k] = s.contra[k].saturating_add(1);
                 if s.last_event[k].is_none_or(|l| t.saturating_sub(l) > SIK_EVENT_SEP_US) {
@@ -769,6 +920,12 @@ fn sik_observe(link: &mut Link, t: u64, end: [Option<u64>; 2], serial: [&[u8]; 2
         }
     }
     s.prev = Some(SikPrev { t_us: t, end });
+    if !link.seasoned {
+        let s = &link.sik;
+        link.seasoned = s.agree_since.is_some_and(|a| t.saturating_sub(a) >= HISTORY_US)
+            && s.agree[sik_layout(s)] >= SIK_MIN_AGREE;
+    }
+    let s = &mut link.sik;
     let k = sik_layout(s);
     let trusted = s.agree[k] >= SIK_MIN_AGREE && s.agree[k].saturating_mul(SIK_AGREE_RATIO) >= s.contra[k];
     let recent = s.events[k]

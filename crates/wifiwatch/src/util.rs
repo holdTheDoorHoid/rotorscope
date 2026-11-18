@@ -210,6 +210,53 @@ impl<const N: usize> RateLimit<N> {
     }
 }
 
+/// "Is this retry a copy of a frame already heard?" The receiver's own
+/// duplicate filter (IEEE 802.11-2020 10.3.2.14): a frame with the Retry bit
+/// whose (transmitter, sequence number) equals the last one heard from that
+/// transmitter is a retransmission and is discarded; any other frame,
+/// Retry bit or not, is acted on. So a retry only counts as "nothing new"
+/// when it really repeats the previous frame.
+///
+/// `N` transmitters are remembered, one 4-byte entry each (20 bits of a
+/// hash of the address, the 12-bit sequence number); a new transmitter
+/// takes the slots in turn. An address that falls out simply makes its next retry count, the
+/// safe direction (a flood is never hidden; a genuine retransmission storm
+/// from more than `N` transmitters at one target may be counted once more).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dups<const N: usize> {
+    last: [u32; N],
+    next: u8,
+}
+
+impl<const N: usize> Default for Dups<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Dups<N> {
+    pub const fn new() -> Self {
+        Self { last: [0; N], next: 0 }
+    }
+
+    /// Record a frame from `tx` with sequence number `seq`; true when it
+    /// is a retry of the frame last heard from `tx` (a real duplicate).
+    pub fn duplicate(&mut self, tx: &[u8; 6], seq: u16, retry: bool) -> bool {
+        // Bit 27 always set, so an empty slot (0) matches nothing.
+        let me = (hash(tx) & 0xFFFF_F000) | 0x0800_0000;
+        let key = me | u32::from(seq & 0x0FFF);
+        let slot = self.last.iter().position(|&e| e & 0xFFFF_F000 == me);
+        let dup = retry && slot.is_some_and(|i| self.last[i] == key);
+        let i = slot.unwrap_or_else(|| {
+            let i = usize::from(self.next) % N;
+            self.next = ((i + 1) % N) as u8;
+            i
+        });
+        self.last[i] = key;
+        dup
+    }
+}
+
 /// Locally administered (bit 1 of the first octet): random and virtual
 /// addresses. Beacon spam tools almost always use them, but so do many
 /// real access points for their second and third networks.
@@ -323,6 +370,22 @@ mod tests {
         assert!(r.allow(1, [1; 6], 1000));
         assert!(r.allow(1, [2; 6], 1000), "full: stalest replaced");
         assert!(!r.allow(1, [1; 6], 1500), "the fresh entry was kept");
+    }
+
+    #[test]
+    fn dups_only_repeat_the_last_frame() {
+        let (a, b, c) = ([2, 0, 0, 0, 0, 1], [2, 0, 0, 0, 0, 2], [2, 0, 0, 0, 0, 3]);
+        let mut d = Dups::<2>::new();
+        assert!(!d.duplicate(&a, 7, false));
+        assert!(d.duplicate(&a, 7, true), "a retransmission");
+        assert!(d.duplicate(&a, 7, true), "and another");
+        assert!(!d.duplicate(&a, 8, true), "Retry bit with a new number: a new frame");
+        assert!(!d.duplicate(&a, 8, false), "same number without the Retry bit: acted on");
+        assert!(!d.duplicate(&b, 8, true), "another transmitter's");
+        assert!(d.duplicate(&a, 8, true));
+        // A third transmitter takes a's slot; a's next retry then counts.
+        assert!(!d.duplicate(&c, 1, false));
+        assert!(!d.duplicate(&a, 8, true));
     }
 
     #[test]

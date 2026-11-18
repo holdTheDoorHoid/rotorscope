@@ -25,6 +25,7 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 pub mod cmd;
+pub mod budget;
 pub mod crc32;
 pub mod dsp;
 pub mod dump;

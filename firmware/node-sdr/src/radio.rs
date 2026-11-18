@@ -9,6 +9,7 @@ use core::fmt::Write as _;
 
 use droneid::math::{C16, remove_dc};
 use esp_println::println;
+use rawcap::budget::{self, Budget};
 use rawcap::cmd::{Command, Dcal, Mode};
 use rawcap::crc32::Crc32;
 use rawcap::dsp::{HB_REACH, decimate_nibbles};
@@ -24,6 +25,8 @@ use link::{DroneIdRecord, DroneIdSighting, NodeRole, RfKind, RfSighting};
 use crate::{engine, phy, ring, route};
 
 mod dji;
+#[cfg(feature = "bringup")]
+mod hilsim;
 mod jam;
 
 /// Something for the hub, drained by `main` after every call into the radio.
@@ -80,10 +83,37 @@ fn droneid_freq_ok(f: u32) -> bool {
 
 /// O4 follower: arrive this long before a predicted window opens (a retune
 /// with a DC calibration costs about 22 ms on 5 GHz).
-const FOLLOW_LEAD_US: u64 = 30_000;
+pub const FOLLOW_LEAD_US: u64 = 30_000;
 /// A plan dwell cut shorter than this by an upcoming prediction is not
 /// worth the retune: go to the predicted channel early instead.
-const FOLLOW_MIN_DWELL_US: u64 = 120_000;
+pub const FOLLOW_MIN_DWELL_US: u64 = 120_000;
+
+/// Decoder gates for the tuned channel (`droneid::rx::Config`): a span
+/// whose coarse frequency estimate is further than this from where a burst
+/// must be (+500 kHz) is refused before resampling. Generous: crystal error
+/// is at most ~230 kHz at 5.8 GHz and the coarse estimate is good to a few
+/// tens of kHz; Wi-Fi frames that reached the decoder on the bench sat
+/// 3-6 MHz off (BRINGUP-RESULTS.md, 2026-11-14).
+#[cfg(feature = "decode")]
+const CFO_WINDOW_HZ: u32 = 1_000_000;
+/// The turbo decoder runs only for a burst with at least this reference
+/// SNR (and within `DETECT_CFO_HZ` of the expected offset). Host tests
+/// (`droneid` synth, `cheap_gates_...`): the lowest estimate the turbo
+/// decoder succeeded at was -3.0 dB; the bench's Wi-Fi false syncs were
+/// below -6 dB.
+#[cfg(feature = "decode")]
+const TURBO_MIN_SNR_DB: f32 = -5.0;
+
+/// One decode's cost and outcome, for the decode budget.
+#[derive(Clone, Copy, Debug)]
+struct Decoded {
+    t0: u64,
+    t1: u64,
+    /// Bursts demodulated (passed the decoder's sync checks), and those
+    /// with a valid CRC.
+    full: u32,
+    valid: u32,
+}
 
 /// What the O4 follower did, for the stats line.
 #[derive(Clone, Copy, Debug, Default)]
@@ -265,6 +295,13 @@ pub struct Radio {
     pub follow_stats: FollowStats,
     pub follow_on: bool,
     burst_us: u64,
+    /// How much of the loop the decoder may take (`rawcap::budget`).
+    pub budget: Budget,
+    /// Only one `follow` contradiction line per this many µs.
+    follow_quiet_until: u64,
+    /// Bench: the forged-session scenario running on the live radio.
+    #[cfg(feature = "bringup")]
+    forge: Option<hilsim::Forge>,
 }
 
 fn now_us() -> u64 {
@@ -341,6 +378,10 @@ impl Radio {
             follow_stats: FollowStats::default(),
             follow_on: true,
             burst_us: 0,
+            budget: Budget::new(budget::Config::default()),
+            follow_quiet_until: 0,
+            #[cfg(feature = "bringup")]
+            forge: None,
         };
         r.jam.set_plan(&DRONEID_PLAN, false);
         r
@@ -525,11 +566,22 @@ impl Radio {
             return;
         }
         self.probe();
+        #[cfg(feature = "bringup")]
+        if self.forge.is_some() {
+            self.forge_tick();
+        }
         let (produced, _) = ring::produced();
         let Some(r) = self.pending else { return };
         let start = r.pos.saturating_sub(PRE_BYTES);
         let end = start + WINDOW_BYTES as u64;
         if produced < end {
+            return;
+        }
+        // The decode budget (`rawcap::budget`): a window it refuses is
+        // dropped without even stopping the ring. Not in hold mode (a bench
+        // capture) or on the FPV job (one look per dwell, no decoder).
+        if self.role == NodeRole::DroneId && self.s.mode != Mode::Hold && !self.budget.allow(now_us()) {
+            self.pending = None;
             return;
         }
         ring::stop();
@@ -547,7 +599,10 @@ impl Radio {
             self.restart_keep_floor();
             return;
         }
-        let keep = self.window(start, r);
+        let (keep, dec) = self.window(start, r);
+        if let Some(d) = dec {
+            self.budget.done(d.t0, d.t1, d.full > 0, d.valid);
+        }
         if keep && self.s.mode == Mode::Hold {
             self.held = Held::Ring { start, len: WINDOW_BYTES };
             println!(r#"{{"t":"held","kind":"nib8","pos":{start},"bytes":{WINDOW_BYTES},"note":"dump, then resume"}}"#);
@@ -557,8 +612,8 @@ impl Radio {
     }
 
     /// Measure, gate, convert and decode one frozen Path B window. Returns
-    /// whether it passed the duration gate.
-    fn window(&mut self, start: u64, r: Rise) -> bool {
+    /// whether it passed the duration gate, and what decoding it cost.
+    fn window(&mut self, start: u64, r: Rise) -> (bool, Option<Decoded>) {
         let get = reader(start);
         let cfg = self.s.trig;
         // Every SUB-th sample of a segment, scaled back up: the length and level
@@ -603,9 +658,10 @@ impl Radio {
                     Dec1(snr)
                 );
             }
-            return false;
+            return (false, None);
         }
         self.n.accepted += 1;
+        let t0 = now_us();
         let cap = capture();
         decimate_nibbles(&get, cap);
         remove_dc(cap);
@@ -624,7 +680,8 @@ impl Radio {
             self.s.window.name()
         );
         let mut found = HVec::<DroneIdSighting, 4>::new();
-        self.decode_into(&mut line, CAPTURE_LEN, Some((&mut found, lvl, snr)));
+        let (full, valid) = self.decode_into(&mut line, CAPTURE_LEN, Some((&mut found, lvl, snr)));
+        let t1 = now_us();
         println!("{}}}", line.as_str());
         for s in found {
             if let DroneIdRecord::O4 { key_id, .. } = &s.record
@@ -634,18 +691,20 @@ impl Radio {
             }
             let _ = self.events.push(Event::DroneId { s, hil: self.hil });
         }
-        true
+        (true, Some(Decoded { t0, t1, full, valid }))
     }
 
     /// Decode the first `n` capture samples, appending `,"dec":[...]`. With
-    /// `out`, also build a hub sighting for every burst that matched the
-    /// reference pattern (`lvl`, `snr`: the energy measurement, tenths of a dB).
-    fn decode_into(&mut self, line: &mut Line, n: usize, out: Option<(&mut HVec<DroneIdSighting, 4>, i32, i32)>) {
+    /// `out` (the live path), the cheap gates for the tuned channel apply
+    /// and a hub sighting is built for every burst that matched the
+    /// reference pattern (`lvl`, `snr`: the energy measurement, tenths of a
+    /// dB). Returns (bursts demodulated, bursts with a valid CRC).
+    fn decode_into(&mut self, line: &mut Line, n: usize, out: Option<(&mut HVec<DroneIdSighting, 4>, i32, i32)>) -> (u32, u32) {
         #[cfg(feature = "decode")]
         {
             let Some(rx) = self.rx.as_deref_mut() else {
                 let _ = write!(line, r#","dec":null"#);
-                return;
+                return (0, 0);
             };
             let t0 = now_us();
             let reveal = self.s.reveal;
@@ -653,10 +712,21 @@ impl Radio {
             let mut first = true;
             let mut n_ok = 0;
             let mut n_all = 0;
+            let mut n_full = 0;
             let freq = self.cur_freq;
             // Where a burst on `freq` must appear in the capture (the LO is
             // the whole MHz below it: +500 kHz).
             let expect_hz = freq as i64 * 100_000 - self.s.mhz as i64 * 1_000_000;
+            // The console's `decode` looks at anything; the live path only at
+            // bursts where one on this channel must be.
+            let live = out.is_some();
+            let e = expect_hz.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            rx.config.cfo_window = live.then_some((e, CFO_WINDOW_HZ));
+            rx.config.turbo_gate = live.then_some(droneid::rx::TurboGate {
+                min_snr_db: TURBO_MIN_SNR_DB,
+                cfo_hz: e,
+                cfo_tol_hz: DETECT_CFO_HZ as u32,
+            });
             let mut out = out;
             rx.decode_all(&capture()[..n], &mut |res| {
                 if let (Some((v, lvl, snr)), Ok(b)) = (out.as_mut(), &res)
@@ -665,6 +735,7 @@ impl Radio {
                     let _ = v.push(s);
                 }
                 n_all += 1;
+                n_full += res.is_ok() as u32;
                 if !first {
                     let _ = write!(line, ",");
                 }
@@ -684,11 +755,13 @@ impl Radio {
             self.n.bursts += n_all;
             self.n.crc_ok += n_ok;
             self.n.last_decode_ms = ms;
+            (n_full, n_ok)
         }
         #[cfg(not(feature = "decode"))]
         {
             let _ = (n, out);
             let _ = write!(line, r#","dec":null"#);
+            (0, 0)
         }
     }
 
@@ -696,7 +769,7 @@ impl Radio {
         let (produced, overrun) = ring::produced();
         let _ = write!(
             line,
-            r#"{{"t":"stats","up_us":{},"role":"{}","plan":{},"hop":{},"f":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"gain_lost":{},"held":{},"follow":[{},{},{},{}],"heap_free":{}}}"#,
+            r#"{{"t":"stats","up_us":{},"role":"{}","plan":{},"hop":{},"f":{},"mode":"{}","mhz":{},"gain":{},"win":"{}","produced":{produced},"overrun":{overrun},"isrs":{},"dma_err":{},"wb_lost":{},"probes":{},"rises":{},"gated":{},"floor":{},"accepted":{},"rejected":{},"lapped":{},"skipped":{},"bursts":{},"crc_ok":{},"decode_ms":{},"dec":[{},{},{},{}],"gain_lost":{},"held":{},"follow":[{},{},{},{},{},{},{},{}],"heap_free":{}}}"#,
             now_us(),
             crate::hub::role_name(self.role),
             self.plan_id,
@@ -720,12 +793,20 @@ impl Radio {
             self.n.bursts,
             self.n.crc_ok,
             self.n.last_decode_ms,
+            self.budget.decodes,
+            self.budget.full,
+            self.budget.skipped,
+            self.budget.busy_us / 1000,
             self.n.gain_lost,
             self.held != Held::Nothing,
             self.follow.active(),
             self.follow_stats.visits,
             self.follow_stats.hits,
             self.follow_stats.misses,
+            self.follow.tentative(),
+            self.follow.contradictions,
+            self.follow.refused,
+            self.follow.share.declined,
             esp_alloc::HEAP.free()
         );
     }
@@ -1171,6 +1252,7 @@ fn rf_kind(k: fpvscan::Kind) -> Option<RfKind> {
 /// Largest distance (Hz) of an undecoded burst from where a DroneID burst on
 /// the tuned frequency must appear, for it to count as `Detected`: two
 /// crystals of +-20 ppm at 5.8 GHz, plus margin.
+#[cfg(feature = "decode")]
 const DETECT_CFO_HZ: f64 = 300_000.0;
 
 /// The hub sighting for one burst that passed the reference-pattern check.
@@ -1326,24 +1408,50 @@ impl Radio {
             return;
         }
         let link = if self.role == NodeRole::Fpv { self.fpv_judge() } else { None };
+        if self.role == NodeRole::DroneId {
+            // The decoder's pressure on this dwell (a pulse train that kept
+            // it busy shows here, not in the probe levels).
+            let p = self.budget.dwell(now_us());
+            self.jam.probes.decode_pressure(p.skipped, p.full, p.valid, p.busy_pct());
+        }
         self.jam_judge(link);
     }
 
     /// A valid O4 record of session `key_id` was decoded from the burst at
     /// `burst_us` on the current frequency.
     fn follow_observe(&mut self, key_id: [u8; 4]) {
-        let id = u32::from_be_bytes(key_id);
-        let r = self.follow.observe(id, self.burst_us, self.cur_freq);
+        self.follow_observe_at(u32::from_be_bytes(key_id), self.burst_us);
+    }
+
+    /// Session `id` heard at `t_us` on the current frequency. Only a packet
+    /// the session accepted counts as heard in the window being visited.
+    fn follow_observe_at(&mut self, id: u32, t_us: u64) {
+        use droneid::follow::Observed;
+        let r = self.follow.observe(id, t_us, self.cur_freq);
         if let Some(v) = self.visit.as_mut()
             && v.a.id == id
+            && matches!(r, Some(Observed::Matched { .. } | Observed::Confirmed { .. } | Observed::Duplicate))
         {
             v.heard = true;
         }
-        if r == Some(droneid::follow::Observed::Restarted) {
+        let ev = match r {
             // The packet fits no hypothesis (another schedule, or lost
-            // timing): the follower started over from it.
-            println!(r#"{{"t":"follow","ev":"restart","f":{}}}"#, self.cur_freq);
-        }
+            // timing): the tentative session started over from it.
+            Some(Observed::Restarted) => "restart",
+            Some(Observed::Confirmed { .. }) => "confirmed",
+            // A packet against a followed session: ignored (counted). Could
+            // be forged; at most one line a second.
+            Some(Observed::Contradicted) => {
+                let t = now_us();
+                if t < self.follow_quiet_until {
+                    return;
+                }
+                self.follow_quiet_until = t + 1_000_000;
+                "contradicted"
+            }
+            _ => return,
+        };
+        println!(r#"{{"t":"follow","ev":"{ev}","f":{}}}"#, self.cur_freq);
     }
 
     /// Close the predicted window just visited: a settled, uninterrupted
@@ -1371,7 +1479,14 @@ impl Radio {
         let Some(a) = self.follow.next(now) else { return Err(None) };
         let until_lead = a.start_us.saturating_sub(now + FOLLOW_LEAD_US);
         if until_lead >= FOLLOW_MIN_DWELL_US {
-            return Err(Some(until_lead));
+            // Cut the plan dwell short only for a window the follower's
+            // share of time can pay for (`droneid::follow::Share`).
+            let depart = now + until_lead;
+            return Err(self.follow.affordable(&a, depart).then_some(until_lead));
+        }
+        if !self.follow.grant(now, a.end_us.max(now + 5_000)) {
+            // Over the share: the plan keeps the receiver (counted).
+            return Err(None);
         }
         self.cur_freq = a.freq;
         self.tune_quiet((a.freq / 10) as u16, 0);
@@ -1440,6 +1555,7 @@ impl Radio {
         self.trig.reset();
         self.meter.reset();
         self.jam.begin(self.cur_freq);
+        self.budget.begin_dwell(now_us());
         self.fpv_cap = false;
         self.restart();
     }
@@ -1612,6 +1728,7 @@ impl Radio {
             if let Some(r) = trig.feed(pos as u64, p) {
                 rises += 1;
                 let start = r.pos.saturating_sub(PRE_BYTES);
+                // Outside the decode budget: a replay checks the decoder.
                 if start as usize + WINDOW_BYTES <= n {
                     self.window(start, r);
                 }
@@ -1732,6 +1849,7 @@ fn help() {
         "dump [raw|c16] [b64|hex] | resend <first> [last] | resume",
         "role droneid|fpv | hop on|off | plan | assign droneid|fpv <id> [<f100k>:<ms> ...]",
         "fpv verbose on|off | uplink [now] | hil run <len> <crc32> (after @F lines)",
+        "hil train <n> <gap_ms> [nobudget] <len> <crc32> | hil forge [<secs>] (docs/BENCH.md)",
         "jam (jamming watch state) | edge on|off (FPV off-plan channel each round)",
     ] {
         println!(r#"{{"t":"help","l":"{l}"}}"#);

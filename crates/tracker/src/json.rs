@@ -61,6 +61,89 @@ struct Line<'a> {
     /// The track this one probably continues under a new identity; null
     /// when none (see `crate::continuity`).
     cont: Option<ContJ>,
+    /// Heard again at least a second after it was first heard (see
+    /// `crate::probation`). False: not announced, quietly listed, possibly
+    /// forged. Added with WP-09; a reader without it treats every track as
+    /// confirmed.
+    confirmed: bool,
+    /// Rival claims on this track's ID and disputes (see `crate::claims`);
+    /// null when there is nothing to say (the usual case). Added with
+    /// WP-10.
+    claims: Option<ClaimsJ>,
+}
+
+#[derive(Serialize)]
+struct ClaimsJ {
+    /// Two transmitters claim this ID right now. Not an accusation of
+    /// either: nothing here is verified.
+    disputed: bool,
+    /// What is disputed: `"position"`, `"self_id"`, `"op_id"`, `"id"`.
+    what: What,
+    /// Hub ms the dispute began; null when not disputed.
+    since_ms: Option<u64>,
+    /// The track switched to the other claim after its original went
+    /// quiet during the dispute.
+    followed: bool,
+    /// Disputed at some time in the life of the track.
+    ever: bool,
+    /// The other claimed position while it is heard (shown position is
+    /// `loc`); null when none.
+    rival: Option<RivalJ>,
+    /// Position reports not shown because they did not fit the track's
+    /// path (saturates at 255).
+    rejected: u8,
+    /// Frames that named this ID beside another ID of the same type
+    /// (applied to nothing; saturates at 255).
+    contradictory: u8,
+}
+
+#[derive(Serialize)]
+struct RivalJ {
+    lat: f64,
+    lon: f64,
+    /// `"RemoteId"`, `"DroneId"`, `"DjiWifi"`, `"ControlLink"`,
+    /// `"DroneIdO4"` (decrypted O4: decrypted, not authenticated).
+    src: crate::ClaimSrc,
+    /// Reports along its path.
+    n: u8,
+    age_ms: u64,
+    /// Metres from the shown position.
+    apart_m: Option<f64>,
+}
+
+struct What(u8);
+
+impl Serialize for What {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use crate::claims::what::*;
+        let names = [(POSITION, "position"), (SELF_ID, "self_id"), (OPERATOR_ID, "op_id"), (ID, "id")];
+        s.collect_seq(names.into_iter().filter(|(b, _)| self.0 & b != 0).map(|(_, n)| n))
+    }
+}
+
+fn claims_json(t: &Track, now: u64) -> Option<ClaimsJ> {
+    let c = &t.claims;
+    if !c.any(now) {
+        return None;
+    }
+    let d = c.dispute(now);
+    Some(ClaimsJ {
+        disputed: d.is_some(),
+        what: What(d.map_or(0, |d| d.what)),
+        since_ms: d.map(|d| d.since_ms),
+        followed: d.is_some_and(|d| d.followed),
+        ever: c.ever_disputed(),
+        rival: c.rival(now).map(|r| RivalJ {
+            lat: r.position.lat,
+            lon: r.position.lon,
+            src: r.src,
+            n: r.frames,
+            age_ms: now.saturating_sub(r.last_ms),
+            apart_m: crate::claims::apart_m(t, now).map(round1),
+        }),
+        rejected: c.rejected(),
+        contradictory: c.contradictory(),
+    })
 }
 
 #[derive(Serialize)]
@@ -319,8 +402,9 @@ struct Own {
 /// because the hub holds several of these in static task state without
 /// PSRAM. (1792 before protocol 4 added the `dji` object; 2304 before
 /// protocol 8 added `dji.o4`; 2432 before the `spoof` and `cont` objects,
-/// which add up to 373 bytes; worst case now 2702 bytes.)
-pub const MAX_LINE: usize = 2816;
+/// which add up to 373 bytes; 2816 before WP-10's `claims` object, which
+/// adds up to 195; worst case now 2897 bytes.)
+pub const MAX_LINE: usize = 3008;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.
 pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
@@ -395,6 +479,8 @@ pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize,
             conf: track.continuity.link_confidence,
             id_changed: track.continuity.identity_changed,
         }),
+        confirmed: track.confirmed(),
+        claims: claims_json(track, now),
     };
     let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
     let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
@@ -877,14 +963,20 @@ struct StateHead<'a> {
     rec: bool,
     nodes: &'a [NodeStatus],
     adsb: Option<AdsbStatus>,
+    /// A flood of forged drone identities while its alarm is raised
+    /// (`crate::probation`): `{new_per_s, refused, since_ms}`, else null.
+    /// Added with WP-09; `"v"` stays 1 (a new field, left out when null).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flood: Option<crate::probation::FloodStatus>,
 }
 
 /// Schema version of the state object (`"v"`). Bump on incompatible change.
 pub const STATE_VERSION: u8 = 1;
 
 /// Bytes the state object needs besides its nodes, open links, tracks and
-/// aircraft (worst case, with the empty arrays' brackets).
-pub const STATE_HEAD_MAX: usize = 576;
+/// aircraft (worst case, with the empty arrays' brackets). 672 since the
+/// `flood` object (WP-09); 576 before.
+pub const STATE_HEAD_MAX: usize = 672;
 /// Bytes one node entry needs (worst case, with its comma).
 pub const STATE_NODE_MAX: usize = 160;
 
@@ -1008,6 +1100,7 @@ pub fn state(
         rec: hub.recording,
         nodes: hub.nodes,
         adsb: hub.adsb,
+        flood: ctx.flood,
     };
     // `{...}` -> `{...,"open_links":[` : drop the closing brace and carry on.
     let mut n = serde_json_core::to_slice(&head, buf).map_err(|_| FormatError::BufferTooSmall)? - 1;

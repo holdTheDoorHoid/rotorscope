@@ -628,6 +628,41 @@ fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
                 stack_free()
             );
         }
+        #[cfg(feature = "bringup")]
+        Local::HilTrain { n, gap_ms, budget, len, crc } => {
+            let Some(data) = console::stage(len) else {
+                return println!(r#"{{"t":"err","what":"hil","note":"no staging buffer or length too big"}}"#);
+            };
+            let got = rawcap::crc32::crc32(data);
+            if got != crc {
+                return println!(r#"{{"t":"hil_train","ok":false,"crc":"{got:08x}","want":"{crc:08x}","note":"staging corrupt: resend"}}"#);
+            }
+            let r = radio.hil_train(data, n, gap_ms as u64 * 1000, budget);
+            drain_events(radio, hub);
+            let line = alloc::format!(
+                r#"{{"t":"hil_train","ok":true,"budget":{budget},"found":{},"pulses":{},"gap_ms":{gap_ms},"decoded":{},"full":{},"valid":{},"skipped":{},"missed":{},"busy_ms":{},"span_ms":{},"busy_pct":{},"dwells":{},"flagged":{},"decode_ms":[{},{}],"stack_free":{}}}"#,
+                r.found,
+                r.pulses,
+                r.decoded,
+                r.full,
+                r.valid,
+                r.skipped,
+                r.missed,
+                r.busy_ms,
+                r.span_ms,
+                (r.busy_ms as u64 * 100).checked_div(r.span_ms as u64).unwrap_or(0),
+                r.dwells,
+                r.flagged,
+                r.ms_min,
+                r.ms_max,
+                stack_free()
+            );
+            out::paced(&line, 128, || radio.probe());
+        }
+        #[cfg(feature = "bringup")]
+        Local::HilForge(Some(secs)) => radio.forge_start(secs),
+        #[cfg(feature = "bringup")]
+        Local::HilForge(None) => radio.forge_status(),
     }
 }
 

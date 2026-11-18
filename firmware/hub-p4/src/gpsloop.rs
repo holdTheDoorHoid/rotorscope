@@ -22,6 +22,24 @@
 //!
 //! The emulated fix is a fixed test point; the aircraft is callsign
 //! `TESTLOOP`, address DE0002, obviously made up.
+//!
+//! **Scenarios** (WP-12, docs/BENCH.md "GPS time and trust scenarios"):
+//! `GPSLOOP_SCENARIO=<name>` at build time makes the emulated receiver
+//! misbehave on a script, so the hub's reaction can be watched:
+//! - `honest` (default): as above.
+//! - `step1s`: from emulated second 120, every epoch's UTC is 1 s late
+//!   (a whole-second step).
+//! - `step500`: at second 120 the epochs (and the PPS edge) move 500 ms
+//!   later, for good (a half-second step).
+//! - `drift`: from second 120 each epoch comes 2 ms later than the last
+//!   (a walk of 2000 ppm).
+//! - `spoofboot`: from power-up until second 600, every L1 satellite at
+//!   46 dB-Hz (one transmitter); honest after.
+//! - `early`: honest, but the hub is told at boot that it last trusted a
+//!   time one day after the emulated one (as if read from its card).
+//!
+//! The emulated UTC starts one day after this firmware's build date (earlier
+//! would be before the build-date floor).
 
 use esp_hal::Blocking;
 use esp_hal::time::Instant;
@@ -37,7 +55,31 @@ const LON: f64 = -75.165_2;
 const HAE: f64 = 12.5;
 /// Seconds of "searching" before the emulated module reports a fix.
 const FIX_AFTER: u32 = 3;
-const START_UTC_S: u64 = 1_794_787_200; // 2026-11-16T00:00:00Z
+/// One day after the build date (build.rs), so the emulated time is never
+/// before the hub's build-date floor.
+fn start_utc_s() -> u64 {
+    gps::build_floor_ms().max(0) as u64 / 1000 / 86_400 * 86_400 + 86_400
+}
+
+/// The scripted scenario (see the module docs).
+const SCENARIO: &str = match option_env!("GPSLOOP_SCENARIO") {
+    Some(s) => s,
+    None => "honest",
+};
+/// When the step / drift scenarios begin, emulated seconds.
+const SCRIPT_AT: u32 = 120;
+/// When `spoofboot` stops spoofing.
+const SPOOF_UNTIL: u32 = 600;
+
+/// At boot, before the main loop: the `early` scenario's remembered time.
+pub fn boot_scenario(g: &mut gps::Gps) {
+    crate::println!("hub-p4: gpsloop scenario {SCENARIO} (GPSLOOP_SCENARIO; emulated UTC starts {} s)", start_utc_s());
+    if SCENARIO == "early" {
+        let t = (start_utc_s() + 86_400) * 1000;
+        g.set_remembered_time(Some(t));
+        crate::println!("hub-p4: gpsloop early: the hub now remembers trusting UTC {t} ms, a day after the emulated time");
+    }
+}
 
 pub struct Loop {
     uart: Uart<'static, Blocking>,
@@ -126,6 +168,20 @@ impl Loop {
         }
         self.next_epoch += esp_hal::time::Duration::from_millis(1000);
         self.second += 1;
+        if self.second == SCRIPT_AT && matches!(SCENARIO, "step1s" | "step500" | "drift") {
+            crate::println!("hub-p4: gpsloop scenario {SCENARIO} begins now (second {})", self.second);
+        }
+        if SCENARIO == "spoofboot" && self.second == SPOOF_UNTIL {
+            crate::println!("hub-p4: gpsloop scenario spoofboot: spoofer off now (second {})", self.second);
+        }
+        // Scripted timing faults: epochs (and their PPS edge) later.
+        match SCENARIO {
+            "step500" if self.second == SCRIPT_AT => self.next_epoch += esp_hal::time::Duration::from_millis(500),
+            "drift" if self.second >= SCRIPT_AT => {
+                self.next_epoch += esp_hal::time::Duration::from_millis(2)
+            }
+            _ => {}
+        }
         let fixed = self.second > FIX_AFTER;
         if fixed && self.pps_configured {
             gps::pps_drive(true);
@@ -274,7 +330,8 @@ impl Loop {
     }
 
     fn utc_s(&self) -> u64 {
-        START_UTC_S + u64::from(self.second)
+        let late = u64::from(SCENARIO == "step1s" && self.second >= SCRIPT_AT);
+        start_utc_s() + u64::from(self.second) - late
     }
 
     fn nmea_epoch(&mut self, fixed: bool) {
@@ -301,14 +358,16 @@ impl Loop {
         } else {
             self.sentence("GNGSA,A,1,,,,,,,,,,,,,,,,1");
         }
-        self.sentence("GPGSV,2,1,07,05,60,045,44,13,40,120,41,15,30,200,38,18,25,300,36,1");
-        self.sentence("GPGSV,2,2,07,23,15,080,33,24,10,330,30,195,55,190,40,1");
-        self.sentence("GPGSV,1,1,03,05,60,045,38,13,40,120,35,195,55,190,36,8");
-        self.sentence("GLGSV,1,1,03,74,50,100,39,75,35,160,37,84,20,250,31,1");
-        self.sentence("GAGSV,1,1,02,04,45,070,40,11,30,310,37,7");
-        self.sentence("GAGSV,1,1,02,04,45,070,36,11,30,310,33,1");
-        self.sentence("GBGSV,1,1,02,19,70,010,42,20,40,140,39,1");
-        self.sentence("GBGSV,1,1,02,19,70,010,38,20,40,140,35,5");
+        if SCENARIO == "spoofboot" && self.second < SPOOF_UNTIL {
+            // One transmitter: every satellite equally strong.
+            self.sentence("GPGSV,2,1,07,05,60,045,46,13,40,120,46,15,30,200,47,18,25,300,46,1");
+            self.sentence("GPGSV,2,2,07,23,15,080,45,24,10,330,46,195,55,190,46,1");
+            self.sentence("GLGSV,1,1,03,74,50,100,46,75,35,160,47,84,20,250,46,1");
+            self.sentence("GAGSV,1,1,02,04,45,070,46,11,30,310,45,7");
+            self.sentence("GBGSV,1,1,02,19,70,010,46,20,40,140,46,1");
+        } else {
+            self.honest_gsv();
+        }
         b.clear();
         if fixed {
             let _ = write!(b, "GNRMC,{t},A,{lat},{ns},{lon},{ew},0.00,0.00,{d},,,A,V");
@@ -319,6 +378,17 @@ impl Loop {
         if self.jam_detect {
             self.sentence("PAIRSPF,1");
         }
+    }
+
+    fn honest_gsv(&mut self) {
+        self.sentence("GPGSV,2,1,07,05,60,045,44,13,40,120,41,15,30,200,38,18,25,300,36,1");
+        self.sentence("GPGSV,2,2,07,23,15,080,33,24,10,330,30,195,55,190,40,1");
+        self.sentence("GPGSV,1,1,03,05,60,045,38,13,40,120,35,195,55,190,36,8");
+        self.sentence("GLGSV,1,1,03,74,50,100,39,75,35,160,37,84,20,250,31,1");
+        self.sentence("GAGSV,1,1,02,04,45,070,40,11,30,310,37,7");
+        self.sentence("GAGSV,1,1,02,04,45,070,36,11,30,310,33,1");
+        self.sentence("GBGSV,1,1,02,19,70,010,42,20,40,140,39,1");
+        self.sentence("GBGSV,1,1,02,19,70,010,38,20,40,140,35,5");
     }
 
     fn nav_pvt(&mut self, fixed: bool) {

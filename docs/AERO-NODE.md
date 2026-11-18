@@ -258,6 +258,22 @@ UTC comes from `Command::TimeSync`; `aerohop::clock` measures the node crystal's
 the hub over 20 s-10 min baselines (bridging gaps to ~1 ms) and declares the time unknown
 after 10 s without a sync.
 
+**A TimeSync is not believed on its own** (WP-12, 2026-11-18). A 1 s error puts the node on
+another second's channels (FLARM: another second's key too) and a 0.5 s error lands it in the
+silent gaps; either way reception collapses with no alarm. So a sync more than **100 ms** from
+the node's running estimate is not adopted; only **three in a row**, each within **50 ms** of
+the first (as offsets against the node's own uptime), move the clock (`sync_jumps` on the
+node's `stats` line; each one not adopted counts in `sync_refused`). Within 100 ms a sync is
+taken as before: the hub's UTC jitters by up to about +-40 ms per epoch without PPS (sub-ms
+with PPS) and the radio hop adds a few ms. The first sync after a node boot is taken as it
+comes (nothing to compare). Why 100 ms: under the 200 ms silent gap, so an attacker can never
+move a node into the wrong slot with single messages; the link's age check (docs/ESPNOW.md,
+"Age") bounds how old a replayed series can be. **Not done:** comparing the clock with the slot
+timing of the FLARM/OGN packets the node receives. A whole-second error means nothing is
+received to compare; a sub-200 ms error would show as packets arriving outside 400-800 /
+800-1200 ms, but that needs the radio's packet timestamp carried through; left for later. On
+the bench, `sync_refused` should stay 0 with an honest hub.
+
 ### Assumptions about the LR2021 not confirmed here
 
 1. **OOK detection threshold encoding.** SoftRF calls RadioLib's `setOokDetectionThreshold(-80)`;

@@ -3,8 +3,19 @@
 //!
 //! The USB stream is machine-read, so only whole JSON objects go on it, one
 //! per line, each with a `"t"` type tag. The only exception is a panic
-//! backtrace, which a reader should treat as a crash marker.
+//! backtrace, which a reader should treat as a crash marker. Lines go
+//! through `usb` (an async writer; dropped, never blocking, when the host is
+//! not keeping up).
+//!
+//! Hub frames go through [`to_hub`], which asks `wifiwatch::shed` first
+//! (docs/BENCH.md "Frame flood"): the queue keeps room for Remote ID from
+//! known sources and for the node's own health, each alarm kind has a
+//! budget, and what is turned away is counted per kind ([`ShedLine`] in the
+//! stats line; the total in the hub's `Stats::dropped`). A frame refused by
+//! its budget is not printed on USB either, so a flood cannot fill that
+//! stream instead.
 
+use core::cell::RefCell;
 use core::fmt::{self, Write as _};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -18,29 +29,95 @@ use heapless::Vec;
 use rid::{MAX_PACK, RawMessage, Transport};
 use serde::ser::{SerializeSeq, Serializer};
 use serde::Serialize;
+use wifiwatch::shed::{Kind, Shed};
 
 use crate::chip;
 use crate::role::{self, Plan};
+use crate::usb::{self, usb_line};
 
 pub type Messages = Vec<RawMessage, MAX_PACK>;
 
-/// Large enough for a full Message Pack decoded to JSON (9 Location-sized
-/// messages are ~4.2 KB) plus their raw hex (~0.5 KB). Lives in the drain task's state, not on a stack.
-pub const JSON_BYTES: usize = 6 * 1024;
-
-/// Hub frames waiting for the UART. Kept short: if the hub link stalls we would
-/// rather lose stats than block the drain task.
-pub(crate) static HUB_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8, { link::MAX_FRAME }>, 8> = Channel::new();
-/// Hub frames that could not be queued or encoded.
+/// Hub frames waiting for the link (UART, wired bus or ESP-NOW batches).
+/// Kept short: if the hub link stalls we would rather lose frames than block
+/// the drain task. Who may use which slot: `wifiwatch::shed::Kind::room`.
+pub const HUB_SLOTS: usize = 8;
+pub(crate) static HUB_QUEUE: Channel<CriticalSectionRawMutex, Vec<u8, { link::MAX_FRAME }>, HUB_SLOTS> = Channel::new();
+/// Hub frames lost after admission: encode errors, UART write errors.
+/// (Frames turned away by [`SHED`] are counted there, per kind.)
 pub static HUB_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// Hub-queue admission (~900 bytes). The salt is set at boot ([`init_shed`]).
+static SHED: critical_section::Mutex<RefCell<Shed>> = critical_section::Mutex::new(RefCell::new(Shed::new(0)));
+
+/// Give the Remote ID source table its random salt. Call once, with the
+/// radio on (the hardware RNG is then truly random).
+pub fn init_shed(salt: u32) {
+    critical_section::with(|cs| *SHED.borrow_ref_mut(cs) = Shed::new(salt));
+}
+
+fn now_ms() -> wifiwatch::util::Ms {
+    wifiwatch::util::ms(embassy_time::Instant::now().as_micros())
+}
+
+/// Budget check before reporting a frame of `kind` (both outputs). A
+/// refusal is counted.
+pub fn admit(kind: Kind) -> bool {
+    critical_section::with(|cs| SHED.borrow_ref_mut(cs).admit(kind, now_ms()))
+}
+
+/// A Remote ID frame from `mac`: how to queue it, or `None` (counted) when
+/// it is shed: a new source over the new-source budget, or a known one over
+/// its own rate.
+pub fn rid_admit(mac: [u8; 6]) -> Option<Kind> {
+    critical_section::with(|cs| SHED.borrow_ref_mut(cs).rid(mac, now_ms()))
+}
+
+/// Hub frames turned away, per kind, totals (the stats line's `shed`).
+#[derive(Serialize, Clone, Copy, Default)]
+pub struct ShedLine {
+    pub rid_known: u32,
+    pub rid_new: u32,
+    pub health: u32,
+    pub threat: u32,
+    pub wdrone: u32,
+    pub dji: u32,
+    pub open: u32,
+    pub other: u32,
+}
+
+/// The shed counts, Remote ID sources known now, and the total.
+pub fn shed_counts() -> (ShedLine, u32, u32) {
+    critical_section::with(|cs| {
+        let s = SHED.borrow_ref(cs);
+        let d = |k: Kind| s.dropped[k as usize];
+        let line = ShedLine {
+            rid_known: d(Kind::RidKnown),
+            rid_new: d(Kind::RidNew),
+            health: d(Kind::Health),
+            threat: d(Kind::Threat),
+            wdrone: d(Kind::WifiDrone),
+            dji: d(Kind::DjiWifi),
+            open: d(Kind::OpenLink),
+            other: d(Kind::Other),
+        };
+        (line, s.rid.known(now_ms()) as u32, s.total())
+    })
+}
+
+/// Free hub-queue slots a frame of `kind` could use now (for a task about
+/// to send several, e.g. `open_links`).
+pub fn hub_room(kind: Kind) -> usize {
+    kind.room(HUB_SLOTS).saturating_sub(HUB_QUEUE.len())
+}
 
 /// Write a serialized object as one line. Serialization failures are reported
 /// as their own line rather than silently skipped.
 fn emit<T: Serialize>(value: &T, buf: &mut [u8], what: &'static str) {
     match serde_json_core::to_slice(value, buf) {
-        // serde-json-core only writes UTF-8.
-        Ok(n) => esp_println::println!("{}", core::str::from_utf8(&buf[..n]).unwrap_or("")),
-        Err(_) => esp_println::println!(r#"{{"t":"err","what":"json","of":"{what}"}}"#),
+        Ok(n) => {
+            usb::line(&buf[..n]);
+        }
+        Err(_) => usb_line!(r#"{{"t":"err","what":"json","of":"{what}"}}"#),
     }
 }
 
@@ -93,7 +170,7 @@ pub fn hello_json(images: &[Option<&'static str>]) {
     // Bench features compiled in (build.rs): say so, with the tag
     // tools/flash-node.sh looks for in the ELF.
     if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
-        esp_println::println!(
+        usb_line!(
             r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: never leave it on a fielded unit"}}"#,
             env!("ROTORSCOPE_BENCH_TAG")
         );
@@ -129,7 +206,7 @@ pub fn assign_json(job: &role::Job) {
 
 /// About to switch image for `a`.
 pub fn switch_json(a: &link::Assignment) {
-    esp_println::println!(r#"{{"t":"switch","role":"{:?}","plan_id":{},"hops":{}}}"#, a.role, a.id, a.plan.len());
+    usb_line!(r#"{{"t":"switch","role":"{:?}","plan_id":{},"hops":{}}}"#, a.role, a.id, a.plan.len());
 }
 
 // ------------------------------------------------------------------- stats --
@@ -166,8 +243,27 @@ pub struct StatsLine {
     pub trunc: u32,
     /// Failed channel changes, total.
     pub ch_err: u32,
-    /// Hub frames lost (queue full / encode error), total.
+    /// Hub frames not sent, total: everything in `shed`, plus encode and
+    /// UART write errors.
     pub hub_drop: u32,
+    /// Hub frames turned away by kind (`wifiwatch::shed`): over the kind's
+    /// budget, over a known Remote ID source's rate, or no room left for
+    /// that kind in the queue. Totals. A frame shed by its budget is not
+    /// printed on USB either.
+    pub shed: ShedLine,
+    /// Remote ID sources known now (heard twice; their frames get the
+    /// queue's reserved room).
+    pub rid_src: u32,
+    /// USB lines dropped (host slow or absent; Remote ID line still going
+    /// out), total.
+    pub usb_drop: u32,
+    /// Report alternations (one address going back to an earlier content
+    /// after a different one: two transmitters on one address), totals,
+    /// [DJI DroneID, Wi-Fi drone] (`wifiwatch::contentlimit`).
+    pub alt: [u32; 2],
+    /// Received frames whose `sig_len` claimed more than one receive buffer
+    /// holds (`rx::RX_MAX`), clamped before reading, total.
+    pub clamp: u32,
     /// Beacon element walks: [end at sig_len-4, end at sig_len, neither or both].
     /// The first should dominate; if the second does, `chip::FCS_LEN` is wrong.
     pub iefit: [u32; 3],
@@ -195,10 +291,18 @@ pub struct StatsLine {
     /// past the filter, turned away by the rate limit, turned away with
     /// every slot in use, analysed, findings], totals.
     pub mav: [u32; 6],
+    /// Hostile-MAVLink pressure (`mavwatch::Pressure`, WP-11a): [new alarms
+    /// held back by the budget, sources / parameter sets holding evidence
+    /// given up, newcomers turned away by a full table, streams turned
+    /// away], totals.
+    pub mavp: [u32; 4],
+    /// Drone networks (`wifiwatch::drones::Totals`): [learned, displaced
+    /// while holding evidence, newcomers that had to wait], totals.
+    pub dnet: [u32; 3],
 }
 
 pub fn stats_json(line: &StatsLine) {
-    emit(line, &mut [0u8; 1280], "stats");
+    emit(line, &mut [0u8; 1536], "stats");
 }
 
 pub fn stats_hub(line: &StatsLine) {
@@ -206,7 +310,10 @@ pub fn stats_hub(line: &StatsLine) {
         uptime_us: line.up_us,
         frames_seen: line.seen,
         rid_found: line.rid,
-        dropped: line.drop,
+        // Everything lost: receive slots full, plus hub frames not sent
+        // (shed by kind, or failed). Per kind only on USB (`shed`): the
+        // Stats frame has no field for it.
+        dropped: line.drop.wrapping_add(line.hub_drop),
         // Beacons and NAN are told apart only after decoding, so no split here.
         by_transport: heapless::Vec::new(),
     });
@@ -242,7 +349,7 @@ struct RidLine<'a> {
     err: Option<rid::Error>,
 }
 
-pub fn detection_json(hit: &Hit<'_>, buf: &mut [u8]) {
+pub fn detection_json(hit: &Hit<'_>) {
     let line = RidLine {
         t: "rid",
         tr: hit.transport,
@@ -255,14 +362,18 @@ pub fn detection_json(hit: &Hit<'_>, buf: &mut [u8]) {
         raw: RawList(hit.messages),
         err: hit.error,
     };
-    emit(&line, buf, "rid");
+    // Formatted straight into the USB writer's buffer.
+    if !usb::rid_line(|buf| serde_json_core::to_slice(&line, buf).ok()) {
+        usb_line!(r#"{{"t":"err","what":"json","of":"rid"}}"#);
+    }
 }
 
-pub fn detection_hub(hit: &Hit<'_>) {
+/// `kind`: from [`rid_admit`]. True if queued.
+pub fn detection_hub(hit: &Hit<'_>, kind: Kind) -> bool {
     if hit.messages.is_empty() {
-        return;
+        return false;
     }
-    to_hub(&link::Frame::Detection(link::Detection {
+    to_hub_as(kind, &link::Frame::Detection(link::Detection {
         transport: hit.transport,
         channel: hit.channel,
         rssi: hit.rssi,
@@ -270,7 +381,7 @@ pub fn detection_hub(hit: &Hit<'_>) {
         counter: hit.counter,
         uptime_us: hit.up_us,
         messages: hit.messages.clone(),
-    }));
+    }))
 }
 
 /// `aa:bb:cc:dd:ee:ff`
@@ -381,9 +492,11 @@ pub fn open_hub(s: &openlink::Sighting) {
 
 /// `{"t":"dji",...}`: a DJI DroneID element was heard. Only its subcommand
 /// and length: the node never decodes it (no serials on the USB line).
-pub fn dji_json(f: &crate::rx::RxFrame, src: [u8; 6], body: &[u8]) {
-    esp_println::println!(
-        r#"{{"t":"dji","ch":{},"rssi":{},"mac":"{}","sub":{},"len":{},"up_us":{}}}"#,
+/// `alt`: this address has alternated between element contents within the
+/// last minute (`wifiwatch::contentlimit`): two transmitters, one a spoof.
+pub fn dji_json(f: &crate::rx::RxFrame, src: [u8; 6], body: &[u8], alt: bool) {
+    usb_line!(
+        r#"{{"t":"dji","ch":{},"rssi":{},"mac":"{}","sub":{},"len":{},"up_us":{},"alt":{alt}}}"#,
         f.channel,
         f.rssi,
         Mac(src),
@@ -407,9 +520,10 @@ fn ssid_str(ssid: &[u8]) -> heapless::String<32> {
     s
 }
 
-pub fn wifi_drone_json(f: &crate::rx::RxFrame, maker: u8, src: [u8; 6], ssid: &[u8]) {
-    esp_println::println!(
-        r#"{{"t":"wifidrone","maker":{maker},"ch":{},"rssi":{},"mac":"{}","ssid":"{}","up_us":{}}}"#,
+/// `alt`: as for [`dji_json`] (here the content is the network name).
+pub fn wifi_drone_json(f: &crate::rx::RxFrame, maker: u8, src: [u8; 6], ssid: &[u8], alt: bool) {
+    usb_line!(
+        r#"{{"t":"wifidrone","maker":{maker},"ch":{},"rssi":{},"mac":"{}","ssid":"{}","up_us":{},"alt":{alt}}}"#,
         f.channel,
         f.rssi,
         Mac(src),
@@ -452,7 +566,12 @@ struct ThreatLine<'a> {
     up_us: u64,
 }
 
-pub fn threat(s: &link::ThreatSighting) {
+/// Report a threat on both outputs, if the threat budget allows (true if
+/// it did).
+pub fn threat(s: &link::ThreatSighting) -> bool {
+    if !admit(Kind::Threat) {
+        return false;
+    }
     let tool = (s.kind == link::ThreatKind::AttackTool)
         .then(|| wifiwatch::TOOLS.get(s.detail as usize).copied())
         .flatten();
@@ -472,6 +591,7 @@ pub fn threat(s: &link::ThreatSighting) {
     };
     emit(&line, &mut [0u8; 384], "threat");
     to_hub(&link::Frame::Threat(s.clone()));
+    true
 }
 
 // --------------------------------------------------------------------- hub --
@@ -479,7 +599,7 @@ pub fn threat(s: &link::ThreatSighting) {
 /// Protocol 13: the MAVLink frame behind a `MavlinkAttack` threat sent
 /// just before, for the hub's evidence log; and a line on USB.
 pub fn mavlink_evidence(e: &link::MavlinkEvidence) {
-    esp_println::println!(
+    usb_line!(
         r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"bytes":{}}}"#,
         e.detail,
         e.sysid,
@@ -490,14 +610,36 @@ pub fn mavlink_evidence(e: &link::MavlinkEvidence) {
     to_hub(&link::Frame::MavlinkEvidence(e.clone()));
 }
 
-pub(crate) fn to_hub(frame: &link::Frame) {
+/// Queue a frame for the hub if there is room for its kind
+/// (`wifiwatch::shed::Kind::of`). True if queued.
+pub(crate) fn to_hub(frame: &link::Frame) -> bool {
+    to_hub_as(Kind::of(frame), frame)
+}
+
+/// [`to_hub`] with the kind given (Remote ID: known or new source).
+pub(crate) fn to_hub_as(kind: Kind, frame: &link::Frame) -> bool {
     let mut buf = [0u8; link::MAX_FRAME];
-    let queued = link::encode(frame, &mut buf)
-        .ok()
-        .and_then(|enc| Vec::from_slice(enc).ok())
-        .is_some_and(|v| HUB_QUEUE.try_send(v).is_ok());
-    if !queued {
+    let Some(v) = link::encode(frame, &mut buf).ok().and_then(|enc| Vec::from_slice(enc).ok()) else {
         HUB_DROPPED.fetch_add(1, Relaxed);
+        return false;
+    };
+    // One critical section: the room check and the send see the same queue
+    // (the wired bus drains it from an interrupt executor).
+    let queued = critical_section::with(|cs| {
+        if !SHED.borrow_ref_mut(cs).room(kind, HUB_QUEUE.len(), HUB_SLOTS) {
+            return None;
+        }
+        Some(HUB_QUEUE.try_send(v).is_ok())
+    });
+    match queued {
+        Some(true) => true,
+        // Counted by `room`.
+        None => false,
+        // Cannot happen (room <= HUB_SLOTS); counted if it does.
+        Some(false) => {
+            HUB_DROPPED.fetch_add(1, Relaxed);
+            false
+        }
     }
 }
 

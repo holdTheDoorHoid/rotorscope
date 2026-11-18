@@ -60,6 +60,12 @@ From those, per dwell (`Watch::assess`):
   2.7e3-2.3e5 MHz/s (spread frames) and 3.7e4-3.1e6 MHz/s (contiguous frames).
 - **Pulsed**: floor not raised, 2-90 % of probes loud in ≥ 3 runs, and the loud frames' own spectrum
   ≥ 60 % occupied (or the whole window inside one clipping pulse).
+- **Decoder pressure** (DroneID job, 2026-11-18): short DroneID-length pulses spaced to keep the
+  decoder busy hardly show in the probes (nothing is probed while it decodes). The node's decode
+  budget (`rawcap::budget`) hands each dwell's counts to `ProbeStats::decode_pressure`; a dwell
+  where the budget had to refuse windows and fewer than half of the full decodes were valid bursts
+  counts as pulsed (`detail` = the decoder's busy percent). Several real drones on one channel
+  (valid bursts) do not count. docs/BENCH.md "node-sdr under hostile signals".
 
 **Link or noise?** When a dwell is suspicious (raised, tone, sweep, pulse, or blinding), the node
 asks `fpvscan` (reused, not duplicated): cyclic-prefix autocorrelation at the Wi-Fi (3.2/12.8 µs),

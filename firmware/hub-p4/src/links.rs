@@ -128,6 +128,29 @@ pub struct NodeStats {
 /// index in `nodes` for relayed nodes, 0 for a node wired to the link.
 pub type Out = heapless::Deque<(u8, Frame), 8>;
 
+/// A node's latest `Status` and `Stats` for the tracker: its role and
+/// plan (a change resets what the deaf-node check thinks normal), and its
+/// health for the deaf-node and node-shed checks. Kept apart from `out` so a
+/// flood that fills `out` cannot cost the very report that shows it, and
+/// never logged as evidence. One per node (the latest of each wins).
+/// Packed (20 bytes): `GatewayLink` lives in the main loop's frame.
+#[derive(Clone, Copy)]
+pub struct NodeDue {
+    pub node: u8,
+    /// From a Status: role (`None`: no Status pending), roles it can take,
+    /// plan.
+    pub role: Option<link::NodeRole>,
+    pub can: u8,
+    pub plan: u16,
+    /// From a Stats: node uptime ms (low 32 bits; a wrap reads as a reboot,
+    /// which only restarts the checks), frames seen, drop total.
+    pub has_stats: bool,
+    pub up_ms: u32,
+    pub seen: u32,
+    pub dropped: u32,
+}
+pub type StatsDue = heapless::Vec<NodeDue, { MAX_RELAYED + 1 }>;
+
 #[derive(Default)]
 pub struct LinkStats {
     pub bytes: u32,
@@ -176,6 +199,8 @@ pub struct GatewayLink<'d> {
     pub out: Out,
     /// Frames dropped because `out` was full.
     pub out_full: u32,
+    /// Nodes' Stats waiting for the tracker.
+    pub stats_due: StatsDue,
     /// Aero nodes' raw aircraft frames (protocol 11), in their own queue in
     /// PSRAM (`aero::Store`): they come up to 200 a second and `out` is
     /// sized for drone detections. `None` (no PSRAM): they share `out`.
@@ -220,6 +245,7 @@ impl<'d> GatewayLink<'d> {
             nodes: heapless::Vec::new(),
             out: Out::new(),
             out_full: 0,
+            stats_due: StatsDue::new(),
             air: None,
             air_full: 0,
             tx_bytes: 0,
@@ -291,7 +317,13 @@ impl<'d> GatewayLink<'d> {
             self.stats.bytes += n as u32;
             let (stats, nodes, sorter, refusals, feed) =
                 (&mut self.stats, &mut self.nodes, &mut self.sorter, &mut self.refusals, &mut self.feed);
-            let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
+            let mut q = Queues {
+                out: &mut self.out,
+                out_full: &mut self.out_full,
+                air: &mut self.air,
+                air_full: &mut self.air_full,
+                stats: &mut self.stats_due,
+            };
             self.dec.feed(&buf[..n], |r| {
                 handled += 1;
                 match r {
@@ -346,7 +378,13 @@ impl<'d> GatewayLink<'d> {
             if let Some(feed) = self.feed.as_mut() {
                 feed.fwd.send(&f);
             }
-            let mut q = Queues { out: &mut self.out, out_full: &mut self.out_full, air: &mut self.air, air_full: &mut self.air_full };
+            let mut q = Queues {
+                out: &mut self.out,
+                out_full: &mut self.out_full,
+                air: &mut self.air,
+                air_full: &mut self.air_full,
+                stats: &mut self.stats_due,
+            };
             q.push(0, f);
             self.stats.refusal_threats += 1;
         }
@@ -377,6 +415,7 @@ impl<'d> GatewayLink<'d> {
                 if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
                     stats.gw_hello = firmware.clone();
                 }
+                q.health(0, &f);
                 if is_data(&f) {
                     q.push(0, f);
                 }
@@ -427,6 +466,7 @@ impl<'d> GatewayLink<'d> {
             }
             _ => {}
         }
+        q.health(i as u8 + 1, &f);
         if is_data(&f) {
             q.push(i as u8 + 1, f);
         }
@@ -439,9 +479,42 @@ struct Queues<'a> {
     out_full: &'a mut u32,
     air: &'a mut Option<&'static mut crate::aero::AirQueue>,
     air_full: &'a mut u32,
+    stats: &'a mut StatsDue,
 }
 
 impl Queues<'_> {
+    /// Keep `node`'s latest Status or Stats for the tracker. Out of line:
+    /// `poll` inlines into the main loop, whose frame is the P4's tightest
+    /// stack budget.
+    #[inline(never)]
+    fn health(&mut self, node: u8, f: &Frame) {
+        if !matches!(f, Frame::Status { .. } | Frame::Stats { .. }) {
+            return;
+        }
+        let i = match self.stats.iter().position(|x| x.node == node) {
+            Some(i) => i,
+            None => {
+                let empty = NodeDue { node, role: None, can: 0, plan: 0, has_stats: false, up_ms: 0, seen: 0, dropped: 0 };
+                if self.stats.push(empty).is_err() {
+                    return;
+                }
+                self.stats.len() - 1
+            }
+        };
+        let d = &mut self.stats[i];
+        match f {
+            Frame::Status { role, can, plan } => {
+                (d.role, d.can, d.plan) = (Some(*role), *can, *plan);
+            }
+            Frame::Stats { uptime_us, frames_seen, dropped, .. } => {
+                d.has_stats = true;
+                d.up_ms = (*uptime_us / 1000) as u32;
+                (d.seen, d.dropped) = (*frames_seen, *dropped);
+            }
+            _ => {}
+        }
+    }
+
     fn push(&mut self, node: u8, f: Frame) {
         match (f, self.air.as_deref_mut()) {
             (Frame::Air(a), Some(q)) => {

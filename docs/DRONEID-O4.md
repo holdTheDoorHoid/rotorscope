@@ -121,21 +121,53 @@ average. The follower uses the schedule:
 - The first valid O4 packet of a session starts 256 counter hypotheses and keeps the ~37 that
   put it on the channel it was heard on.
 - Because the counter steps by one, those hypotheses almost always agree on the next channel,
-  so the node can be on the right frequency for the very next publication. They disagree only at
+  so the node can be on the right frequency for the very next publication (once the session is
+  confirmed: see "The follower under forged packets"). They disagree only at
   the counter wrap; a later packet, or a missed window the node sat through completely, settles
   it.
 - Before each predicted publication (window ±25 ms, growing with distance) the DroneID job
   retunes there, 30 ms early to allow for the DC calibration; between windows it keeps scanning
   its plan, so other drones and other frequencies (2459.5, 2399.5 MHz) are still covered.
 - Up to four sessions are followed at once; if two windows overlap the earlier one wins.
-- **Fallback:** a packet that fits no hypothesis restarts the session from that packet; four
-  silent windows in a row, or 6 s without a packet, drop it and the node is back to plain
-  scanning. Plaintext (OcuSync 2) bursts never feed the follower, since those drones use a
-  different hopping pattern.
+- **Fallback:** four silent windows in a row, or 6 s without a packet, drop a followed session
+  and the node is back to plain scanning. Plaintext (OcuSync 2) bursts never feed the follower,
+  since those drones use a different hopping pattern.
 
-Gain, if the schedule holds: after the first packet, nearly every publication instead of one
-in seven, i.e. a position update every 0.64 s instead of every ~4.5 s. The node's stats line
-reports `"follow":[sessions, visits, hits, misses]` so the gain can be measured on a real drone.
+### The follower under forged packets (2026-11-18)
+
+The key ID is in clear and the CRCs are public, so anyone with a transmitter can send valid-looking
+O4 bursts with any key ID, on any channel, at any time. Before this change one such packet made the
+node visit the predicted channel from the next publication on, four forged key IDs kept it on
+attacker-chosen channels, a fifth evicted the real drone's session, and one packet with the real
+drone's key ID on another channel restarted (wiped) its hypotheses. Now:
+
+- **Confirmation.** A new key ID starts a *tentative* session that is never visited. It is
+  followed once it holds three packets that agree in channel and in time (each inside the window
+  the earlier ones predict, ±25 ms growing to ±75 ms). Until then only the plan's scanning feeds
+  it, so a real drone is followed after roughly 15-30 s instead of after its first packet.
+  Tentative sessions have four slots of their own; a tentative session is restarted by a packet
+  that fits no hypothesis (the old fallback) and dropped after 30 s without one.
+- **No eviction, no restart.** A new key ID only replaces a tentative session holding a single
+  packet; otherwise it is refused (counted). A packet that contradicts a followed session (a
+  channel no hypothesis predicts, or outside the predicted window) is ignored and counted; the
+  session keeps its hypotheses and timing.
+- **Time share.** Each visit is paid from a credit that earns half of the time spent on the plan
+  and holds at most 1 s; a visit it cannot pay for is declined (the plan dwell is not cut short
+  for it either). So the follower takes at most about half the receiver, however many sessions.
+
+Still possible: a forger who follows the published schedule creates followed sessions and spends
+the follower's half on them (the share is first come, so a real session's visits are declined in
+proportion); one who sends packets with a real drone's key ID while that session is still
+tentative keeps restarting it, so it is never followed (it is still detected by the plan); and
+consistent packets with a real key ID can narrow a followed session's hypotheses to a wrong one
+near the counter wrap, after which its own misses drop it. Plan scanning, and so detection, is
+not affected by any of this. Host tests: `crates/droneid/src/follow.rs`; bench scenario: BENCH.md
+"node-sdr under hostile signals" step 4.
+
+Gain, if the schedule holds: once a session is confirmed, nearly every publication instead of
+one in seven, i.e. a position update every 0.64 s instead of every ~4.5 s. The node's stats line
+reports `"follow":[followed, visits, hits, misses, tentative, contradictions, refused, declined]`
+so the gain can be measured on a real drone.
 
 ## What we will not do
 

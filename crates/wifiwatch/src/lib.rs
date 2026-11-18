@@ -38,8 +38,8 @@
 //!
 //! Each kind reports at most about once a second per target while it lasts
 //! (`count` and `window_ms` say how much was seen). Every table is fixed
-//! size; all of it together is about 6 KB ([`Watch`]; [`drones::DroneLinks`]
-//! ~440 bytes of it), plus ~360 bytes for [`ble::BleWatch`].
+//! size; all of it together is about 6.5 KB ([`Watch`]; [`drones::DroneLinks`]
+//! ~820 bytes of it), plus ~360 bytes for [`ble::BleWatch`].
 //!
 //! # What the numbers mean (beyond `link::ThreatKind`'s doc)
 //!
@@ -68,10 +68,12 @@
 
 pub mod beacons;
 pub mod ble;
+pub mod contentlimit;
 pub mod drones;
 pub mod floods;
 pub mod mac;
 pub mod mavwifi;
+pub mod shed;
 pub mod tools;
 pub mod util;
 
@@ -170,9 +172,9 @@ mod size {
         let f = core::mem::size_of::<super::floods::Floods>();
         let b = core::mem::size_of::<super::ble::BleWatch>();
         let d = core::mem::size_of::<super::drones::DroneLinks>();
-        std::println!("Watch {w} B (Floods {f} B, DroneLinks {d} B), BleWatch {b} B");
-        assert!(d <= 512, "DroneLinks is {d} bytes");
-        assert!(w <= 6 * 1024, "Watch is {w} bytes");
+        std::println!("SIZE Watch {w} B (Floods {f} B, DroneLinks {d} B), BleWatch {b} B");
+        assert!(d <= 896, "DroneLinks is {d} bytes");
+        assert!(w <= 7 * 1024, "Watch is {w} bytes");
         assert!(f <= 1536, "Floods is {f} bytes");
         assert!(b <= 512, "BleWatch is {b} bytes");
     }

@@ -36,6 +36,8 @@ pub fn burst_json(w: &mut impl Write, b: &Burst, reveal: bool) {
     let path = match b.path {
         Some(Path::Systematic) => "systematic",
         Some(Path::Turbo) => "turbo",
+        // The turbo decoder was not tried (`radio::TURBO_MIN_SNR_DB`).
+        None if b.turbo_skipped => "gated",
         None => "none",
     };
     let _ = write!(

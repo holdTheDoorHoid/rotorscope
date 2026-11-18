@@ -40,14 +40,21 @@ fn location(lat: f64, lon: f64) -> Message {
     decode(&raw).unwrap()
 }
 
-fn rid_line(tr: Transport, mac: &str, rssi: i8, msgs: &[Message]) -> String {
-    json!({"t":"rid","tr":tr,"ch":6,"rssi":rssi,"mac":mac,"ctr":1,"up_us":1000,"msgs":msgs,"new_fw_field":true})
+fn rid_line(tr: Transport, mac: &str, rssi: i8, up_us: u64, msgs: &[Message]) -> String {
+    json!({"t":"rid","tr":tr,"ch":6,"rssi":rssi,"mac":mac,"ctr":1,"up_us":up_us,"msgs":msgs,"new_fw_field":true})
         .to_string()
 }
 
 /// A Wi-Fi node and a BLE node hearing the same drone (different MACs),
-/// plus the line types a node prints that are not detections.
+/// plus the line types a node prints that are not detections. The node's
+/// clock (`up_us`) spans 1.4 s of detections, as a real capture does: the
+/// tracker confirms a drone only once it is heard again a second later.
 fn recording() -> String {
+    recording_at(&[1_000_000, 1_200_000, 2_400_000])
+}
+
+/// The same lines with the three detections at the given node times.
+fn recording_at(up: &[u64; 3]) -> String {
     [
         r#"{"t":"hello","node":"wifi24","fw":"0.1.0","chip":"esp32s3","proto":1}"#.to_string(),
         "garbage from a reset \u{fffd}".to_string(),
@@ -56,18 +63,21 @@ fn recording() -> String {
             Transport::BleLegacy,
             "c0:11:22:33:44:55",
             -80,
+            up[0],
             &[location(INDEPENDENCE.0, INDEPENDENCE.1)],
         ),
         rid_line(
             Transport::WifiBeacon,
             "60:60:1f:00:00:01",
             -60,
+            up[1],
             &[basic("SN-CLI-1"), location(INDEPENDENCE.0, INDEPENDENCE.1)],
         ),
         rid_line(
             Transport::BleLegacy,
             "c0:11:22:33:44:55",
             -79,
+            up[2],
             &[basic("SN-CLI-1")],
         ),
         r#"{"t":"stats","up_us":5000000,"seen":120,"rid":3,"drop":0}"#.to_string(),
@@ -109,6 +119,7 @@ fn file_input_merges_and_emits_hub_json() {
     let t = tracks(&out.stdout);
     assert_eq!(t.len(), 1, "one drone across two transports: {t:?}");
     assert_eq!(t[0]["ids"][0]["id"], "SN-CLI-1");
+    assert_eq!(t[0]["confirmed"], true, "replayed by its own clock");
     assert_eq!(t[0]["links"].as_array().unwrap().len(), 2);
     assert_eq!(t[0]["own"]["dist_m"], 1363.9);
     assert_eq!(t[0]["loc"]["alt_geo"], 100.0);
@@ -148,6 +159,38 @@ fn stdin_table() {
     assert!(text.contains("unparsed: 1"), "{text}");
     assert!(text.contains("new drone: SN-CLI-1"), "{text}");
     assert!(!text.contains('\x1b'), "no ANSI when piped");
+}
+
+/// A recording whose detections all carry the same node time is one
+/// instant: the drone was heard only once, so it is listed as unconfirmed
+/// and never announced (replay follows the recording's clock, not how fast
+/// the file was read).
+#[test]
+fn same_instant_recording_is_unconfirmed_and_not_announced() {
+    let run = |args: &[&str]| {
+        let mut child = Command::new(BIN)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(recording_at(&[1_000_000; 3]).as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let text = run(&["--once", "-"]);
+    assert!(text.contains("SN-CLI-1"), "still listed: {text}");
+    assert!(!text.contains("new drone"), "not announced: {text}");
+    assert!(text.contains("? unconfirmed"), "{text}");
+    let t = tracks(run(&["--once", "--json", "-"]).as_bytes());
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert_eq!(t[0]["confirmed"], false);
 }
 
 #[test]

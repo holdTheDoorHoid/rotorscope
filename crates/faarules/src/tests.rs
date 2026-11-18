@@ -506,3 +506,92 @@ fn compact_item_text() {
     let t = text::item_text(Rule::Area as u8, AreaKind::NationalSecurity as u8, 3, 0.0);
     assert!(t.starts_with("Alert AREA inside Natl security UAS"), "{t}");
 }
+
+/// One frame from drone `mac`/`sn` with a fresh location at `agl` m.
+fn heard<const T: usize, const A: usize>(tr: &mut Tracker<T, A>, mac: u32, sn: &str, agl: f32, now: u64) {
+    let mut o = obs(Transport::WifiBeacon, now);
+    o.mac = [0x02, 0, (mac >> 24) as u8, (mac >> 16) as u8, (mac >> 8) as u8, mac as u8];
+    let msgs = [basic(sn), Message::Location(loc(C.0 + 0.001, C.1, agl))];
+    tr.ingest_messages(&o, &msgs, 0);
+}
+
+/// 64 drones with fresh positions against the P4's old 32-entry engine:
+/// 63 forged ones (a new identity every second, so never confirmed) and one
+/// real drone flying too high. Its sustained Height flag still reaches
+/// Warning on time: the churn of forged tracks never restarts its timer.
+#[test]
+fn sustained_flag_survives_64_drones_in_a_small_engine() {
+    let bytes = pack_bytes();
+    let pack = Pack::parse(&bytes).unwrap();
+    let mut tr: Tracker<64, 32> = Tracker::default();
+    let mut eng: Engine<32> = Engine::default();
+    let real = flight(160.0, 0.001, OperatorLocationType::LiveGnss);
+    let mut now = 1_000;
+    let mut fake = 0u32;
+    let mut warned_at = None;
+    for step in 0..45 {
+        now += 1000;
+        tr.ingest_messages(&obs(Transport::WifiBeacon, now), &real, 0);
+        if step >= 3 {
+            for _ in 0..63 {
+                heard(&mut tr, 0x100 + fake, &std::format!("FAKE{fake:08}"), 50.0, now);
+                fake += 1;
+            }
+        }
+        eng.update(&tr, Some(&pack), now, Some(DAY_MS + now));
+        let id = tr.tracks().iter().find(|t| t.uas_ids.iter().any(|u| u.id.as_str() == Some("SN-TEST-1"))).unwrap().id;
+        let level = eng.drone(id).and_then(|e| e.flags.iter().filter(|f| f.rule == Rule::Height).map(|f| f.level).max());
+        if level == Some(2) {
+            warned_at.get_or_insert(step);
+        }
+    }
+    // Same as alone (`height_levels_rise_with_time_and_margin`): Warning
+    // after about 30 s of the condition.
+    let at = warned_at.expect("the sustained level was reached");
+    assert!(at <= 36, "warning at step {at}");
+    assert!(tr.len() > 32, "the engine really was outnumbered");
+}
+
+/// The P4's engine is sized for every drone and aircraft the tracker can
+/// hold (64 + 32): with 63 confirmed drones already flagged-or-not, a real
+/// drone arriving last still gets its entry and its Warning on time.
+#[test]
+fn engine_sized_for_every_track_never_refuses() {
+    let bytes = pack_bytes();
+    let pack = Pack::parse(&bytes).unwrap();
+    let mut tr: Tracker<64, 32> = Tracker::default();
+    let mut eng: Engine<96> = Engine::default();
+    let real = flight(160.0, 0.001, OperatorLocationType::LiveGnss);
+    let mut now = 1_000;
+    let mut warned_at = None;
+    for step in 0..45 {
+        now += 1000;
+        for k in 0..63u32 {
+            heard(&mut tr, 0x10 + k, &std::format!("OTHER{k:03}"), 50.0, now);
+        }
+        if step >= 3 {
+            tr.ingest_messages(&obs(Transport::WifiBeacon, now), &real, 0);
+        }
+        eng.update(&tr, Some(&pack), now, Some(DAY_MS + now));
+        if let Some(t) = tr.tracks().iter().find(|t| t.uas_ids.iter().any(|u| u.id.as_str() == Some("SN-TEST-1"))) {
+            let level = eng.drone(t.id).and_then(|e| e.flags.iter().filter(|f| f.rule == Rule::Height).map(|f| f.level).max());
+            if level == Some(2) {
+                warned_at.get_or_insert(step);
+            }
+        }
+    }
+    assert_eq!(tr.len(), 64);
+    assert_eq!(eng.refused, 0);
+    assert!(warned_at.expect("reached") <= 3 + 36);
+}
+
+/// `size_of` of the engine, for the report (the P4 keeps it in PSRAM).
+#[test]
+fn engine_sizes() {
+    std::println!(
+        "Entry {} B, Engine<32> {} B, Engine<96> {} B",
+        core::mem::size_of::<Entry>(),
+        core::mem::size_of::<Engine<32>>(),
+        core::mem::size_of::<Engine<96>>()
+    );
+}

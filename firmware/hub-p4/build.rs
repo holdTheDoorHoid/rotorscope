@@ -37,6 +37,17 @@ fn main() {
         ],
         &[],
     );
+    // WP-12: GPS time before this firmware's build date is impossible. The date
+    // build.rs last ran (or SOURCE_DATE_EPOCH, for a reproducible build): never
+    // later than the real build, so a valid floor.
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    let built = std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+    println!("cargo:rustc-env=ROTORSCOPE_BUILD_UNIX_S={built}");
+    // Bench (`gpsloop`): which scripted GPS scenario the emulated receiver plays.
+    println!("cargo:rerun-if-env-changed=GPSLOOP_SCENARIO");
     println!("cargo:rerun-if-env-changed=ROTORSCOPE_DEV_KEY");
     // Set but not UTF-8 counts as malformed (empty), not as unset.
     let key = std::env::var_os("ROTORSCOPE_DEV_KEY").map(|v| v.into_string().unwrap_or_default());

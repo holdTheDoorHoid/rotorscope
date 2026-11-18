@@ -147,10 +147,28 @@ impl App {
             };
             self.take(gw, ev, actx, node, f, now);
         }
+        self.node_health(gw, now);
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
+        self.announce_disputes(ev, now);
         self.announce_conflicts(ev, now);
+    }
+
+    /// Nodes' Status and Stats: role and plan, then the deaf-node and
+    /// node-shed checks (not evidence). Out of line: the main loop's frame
+    /// is the P4's tightest stack budget.
+    #[inline(never)]
+    fn node_health(&mut self, gw: &mut GatewayLink<'_>, now: u64) {
+        while let Some(d) = gw.stats_due.pop() {
+            if let Some(role) = d.role {
+                self.tracker.ingest_status(d.node, role, d.can, d.plan, now);
+            }
+            if d.has_stats {
+                let up_us = u64::from(d.up_ms) * 1000;
+                let _ = self.tracker.ingest_node_stats(d.node, up_us, d.seen, d.dropped, now);
+            }
+        }
     }
 
     /// One frame: the evidence log first (raw bytes, always), then whoever
@@ -215,6 +233,18 @@ impl App {
         }
     }
 
+    /// Drone IDs claimed by two transmitters (tracker `claims`): one
+    /// evidence event and one console line per dispute, and again when it
+    /// grows. Worded as a dispute over the ID, never as the drone spoofing.
+    fn announce_disputes(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
+        while let Some(d) = self.tracker.take_dispute(now) {
+            // The track's ID arrived over the air.
+            let text: heapless::String<192> = clean(&tracker::claims::event_text(&d, self.tracker.get(d.track)));
+            ev.event(evidence::format::EventCode::IdDisputed, text.as_bytes(), &d.data());
+            crate::println!("hub-p4: DISPUTED {}", text);
+        }
+    }
+
     /// New attacks and jamming (protocol 9, and the hub's own deaf-node
     /// check): one evidence event and one console line each, once.
     fn announce_threats(&mut self, gw: &GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
@@ -227,6 +257,19 @@ impl App {
                 let text = tracker::area_gnss::describe(t);
                 let mut data = [0u8; 7];
                 data[0] = t.kind as u8;
+                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+                crate::println!("hub-p4: THREAT {}", text);
+                continue;
+            }
+            if t.kind == link::ThreatKind::IdFlood {
+                // Raised by the tracker itself (WP-09, `tracker::probation`):
+                // a flood of forged drone IDs, aircraft addresses or
+                // control links, with the rate seen; or one node shedding
+                // a flood (its address; zero for the hub-wide tables).
+                let text = tracker::probation::describe(t);
+                let mut data = [0u8; 7];
+                data[0] = t.kind as u8;
+                data[1..7].copy_from_slice(&mac);
                 ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
                 crate::println!("hub-p4: THREAT {}", text);
                 continue;
@@ -256,8 +299,9 @@ impl App {
                 write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
             };
             if !t.ssid.is_empty() {
-                // From a link frame: never printed or logged as received.
-                let _ = write!(text, " \"{}\"", link::printable::Printable(&t.ssid));
+                // From a link frame: never printed or logged as received,
+                // and only what the frame claimed (WP-11b).
+                let _ = write!(text, " claimed \"{}\"", link::printable::Printable(&t.ssid));
             }
             if let Some(maker) = tracker::threats::drone_maker(t) {
                 let _ = write!(text, " ({maker})");
@@ -279,7 +323,15 @@ impl App {
         use tracker::O4Decrypted;
         let plain = match self.o4.process(object, now) {
             Ok(p) => p,
-            Err(djicrypt::Error::NoSession | djicrypt::Error::NoKey) => return,
+            // Counted in the decryptor's stats; not worth a console line
+            // each (a replay or a flood of forged CRYPs would fill it).
+            Err(
+                djicrypt::Error::NoSession
+                | djicrypt::Error::NoKey
+                | djicrypt::Error::Replay
+                | djicrypt::Error::TooFarAhead
+                | djicrypt::Error::RateLimited,
+            ) => return,
             Err(e) => {
                 crate::println!("hub-p4: O4 {:02x}{:02x}{:02x}{:02x} not decrypted: {e:?}", key_id[0], key_id[1], key_id[2], key_id[3]);
                 return;
@@ -353,7 +405,11 @@ impl App {
     pub fn housekeeping(&mut self, gps: &crate::gps::Gps, now: u64) {
         match self.own_pos(gps, now) {
             Some(p) => {
-                let stamp = if p.source == OwnSource::Manual { now } else { p.at_ms };
+                // A held GPS fix (docs/GNSS-INTEGRITY.md: counted as fresh,
+                // the hub does not move) keeps its old `at_ms` for the
+                // evidence log's fix age; the tracker must not age it out.
+                let held = p.source == OwnSource::Gps && gps.fix.is_some_and(|f| f.held);
+                let stamp = if p.source == OwnSource::Manual || held { now } else { p.at_ms };
                 self.tracker.set_own_position(p.lat, p.lon, p.alt, stamp);
             }
             None => self.tracker.clear_own_position(),
@@ -491,11 +547,35 @@ impl App {
         }
         self.state.sd = ext.sd;
         self.state.caveats = ext.caveats;
+        // WP-11b: what is silenced, and the site file's collection switches,
+        // stay on screen (the caveats strip).
+        let mc = self.tracker.mute_counts(now);
+        let secs = |ms: u64| ms.div_ceil(1000).min(u64::from(u32::MAX)) as u32;
+        self.state.caveats.silenced = screen::Silenced {
+            muted: mc.muted,
+            mute_left_s: secs(mc.mute_left_ms),
+            snoozed: mc.snoozed,
+            snooze_left_s: secs(mc.snooze_left_ms),
+            site: mc.site,
+        };
+        self.state.caveats.switches = screen::Switches {
+            control_ids: self.control_flags.0,
+            control_content: self.control_flags.1,
+            // In force on the ear (`audio clips on` applied, a microphone
+            // present): the same flag as the audio line, `ear::Ear::ui`.
+            audio_clips: ext.caveats.audio.on,
+        };
         self.state.flags = ext.flags.clone();
+        // The "Alarms" row acts on what this frame shows (`seen` = now).
+        let (mutable, snoozable) = self.tracker.alarm_counts(now, now);
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
+            // WP-09: a flood of forged drone IDs, shown as FLOOD in the bar.
+            flood_per_s: self.tracker.flood_status(now).map_or(0, |f| f.new_per_s.min(u32::from(u16::MAX)) as u16),
             muted: self.tracker.threats().iter().filter(|t| t.muted && t.active(now)).count().min(255) as u8,
+            mutable,
+            snoozable,
         };
         // No battery sense on this board (the BAT connector's voltage is not
         // wired to a GPIO): report USB power, as a bench S3 does.

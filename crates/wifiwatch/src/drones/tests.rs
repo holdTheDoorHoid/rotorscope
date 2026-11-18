@@ -193,6 +193,36 @@ fn a_handful_of_deauths_is_enough() {
 }
 
 #[test]
+fn retry_bit_deauths_with_new_numbers_count() {
+    // An injector sets the Retry bit and advances the sequence number: the
+    // phone acts on every one. Old rule: any retry was skipped.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    for i in 0..4u16 {
+        s.mgmt(&with_seq(kill(DEAUTH, PILOT, TELLO, TELLO, 7), 200 + i, true));
+        s.tick(100);
+    }
+    s.tick(300);
+    let d = s.of(ThreatKind::DroneDeauth);
+    assert!(!d.is_empty(), "{:?}", s.out);
+    assert_eq!(d[0].count, 3, "reported at the third");
+}
+
+#[test]
+fn drone_retransmissions_count_once() {
+    // The drone kicking an idle phone: one deauth, retried six times (same
+    // number) because the phone is gone and never acknowledges.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    s.mgmt(&with_seq(kill(DEAUTH, PILOT, TELLO, TELLO, 4), 77, false));
+    for _ in 0..6 {
+        s.mgmt(&with_seq(kill(DEAUTH, PILOT, TELLO, TELLO, 4), 77, true));
+    }
+    s.fly(6000, &[TELLO_NET], &[]);
+    assert!(s.of(ThreatKind::DroneDeauth).is_empty(), "{:?}", s.out);
+}
+
+#[test]
 fn deauth_to_broadcast_and_disassoc_count() {
     let mut s = Sim::new();
     s.fly(2000, &[TELLO_NET], &[(PILOT, TELLO)]);
@@ -396,6 +426,93 @@ fn ordinary_networks_are_not_followed() {
     assert!(s.drone_kinds().is_empty(), "{:?}", s.out);
 }
 
+/// The drone's beacon with a forged timestamp field (µs).
+fn forged_beacon(d: &Drone, tsf_us: u64) -> Vec<u8> {
+    let mut f = drone_beacon(d, 0);
+    f[24..32].copy_from_slice(&tsf_us.to_le_bytes());
+    f
+}
+
+#[test]
+fn forged_low_timestamp_beacons_do_not_wipe_the_deauth_count() {
+    // Same address, name, channel and security as the drone, timestamp 1:
+    // until WP-11a each one "rebooted" the drone and emptied its deauth
+    // ring, so three deauths in five seconds never added up.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    for _ in 0..3 {
+        s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+        s.mgmt(&forged_beacon(&TELLO_NET, 1));
+        s.fly(400, &[TELLO_NET], &[]);
+    }
+    s.tick(300);
+    assert!(!s.of(ThreatKind::DroneDeauth).is_empty(), "{:?}", s.out);
+}
+
+#[test]
+fn forged_reboot_does_not_hand_the_drone_to_the_attacker() {
+    let mut s = Sim::new();
+    s.fly(5000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    // One forged beacon, then the attacker's frames, then the pilot's.
+    s.mgmt(&forged_beacon(&TELLO_NET, 1));
+    s.data(&data(ATTACKER, TELLO, true));
+    s.data(&data(ATTACKER, TELLO, true));
+    s.fly(2000, &[TELLO_NET], &[(PILOT, TELLO), (ATTACKER, TELLO)]);
+    assert_eq!(s.w.drones.nets[0].ctrl, PILOT, "the controller is still the pilot");
+    let t = s.of(ThreatKind::DroneTakeover);
+    assert!(!t.is_empty(), "{:?}", s.out);
+    assert!(t.iter().all(|x| x.source == ATTACKER), "the alarm names the attacker, never the pilot: {t:?}");
+}
+
+#[test]
+fn two_timelines_on_one_address_are_a_clone() {
+    // A copy with the drone's own address, name and channel, keeping a
+    // clock of its own (airbase-ng's beacons start at its own uptime).
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[]);
+    let copy = Drone { boot_ms: 590_000, ..TELLO_NET };
+    for _ in 0..4 {
+        let b = drone_beacon(&copy, s.t + 30);
+        s.mgmt(&b);
+        s.fly(300, &[TELLO_NET], &[]);
+    }
+    let c = s.of(ThreatKind::DroneNetClone);
+    assert!(!c.is_empty(), "{:?}", s.out);
+    assert_eq!((c[0].source, c[0].target), (TELLO, TELLO));
+    assert_ne!(c[0].detail & CLONE_SAME_ADDRESS, 0);
+    assert_ne!(c[0].detail & CLONE_TWO_CLOCKS, 0);
+    assert_eq!(c[0].detail & CLONE_OTHER_CHANNEL, 0);
+    assert_eq!(c[0].ssid.as_str(), "TELLO-5A1B2C");
+    // Stops when the copy does.
+    s.fly(15_000, &[TELLO_NET], &[]);
+    s.out.clear();
+    s.fly(3000, &[TELLO_NET], &[]);
+    assert!(s.drone_kinds().is_empty(), "{:?}", s.out);
+}
+
+#[test]
+fn a_real_reboot_is_believed_after_its_beacons() {
+    let mut s = Sim::new();
+    s.fly(5000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    let old_boot = s.w.drones.nets[0].boot;
+    s.tick(4000);
+    let rebooted = Drone { boot_ms: s.t, ..TELLO_NET };
+    // Fewer than REBOOT_BEACONS, or not yet REBOOT_CONFIRM_MS: not yet.
+    s.fly(300, &[rebooted], &[]);
+    assert_eq!(s.w.drones.nets[0].boot, old_boot);
+    assert_eq!(s.w.drones.nets[0].ctrl, PILOT);
+    s.fly(REBOOT_CONFIRM_MS as u64, &[rebooted], &[]);
+    assert_ne!(s.w.drones.nets[0].boot, old_boot, "the new timeline is the drone's now");
+    assert_eq!(s.w.drones.nets[0].ctrl, NONE, "a restart forgets the controller");
+    assert!(s.drone_kinds().is_empty(), "{:?}", s.out);
+}
+
+/// node-wifi's `floodtest` (`flood hijack`) uses this address and name.
+#[test]
+fn floodtest_hijack_drone_is_a_drone() {
+    assert!(wifidrone::classify(&[0x60, 0x60, 0x1F, 0x7E, 0x57, 0x01], b"TELLO-7E5701").is_some());
+}
+
 #[test]
 fn table_is_bounded() {
     let mut s = Sim::new();
@@ -408,6 +525,74 @@ fn table_is_bounded() {
         s.mgmt(&f);
     }
     assert_eq!(s.w.drones.len(), NETS);
+}
+
+/// `NETS` forged drone networks (DJI addresses, Tello names), each kept
+/// "taken" the cheapest way: a data frame from one station, then
+/// authentication requests from another, refreshed every two seconds.
+fn fakes() -> Vec<Drone> {
+    (0..NETS as u8)
+        .map(|i| {
+            let ssid: &'static [u8] = std::boxed::Box::leak(std::format!("TELLO-9900{i:02X}").into_bytes().into_boxed_slice());
+            Drone { bssid: [0x60, 0x60, 0x1F, 0x99, 0x00, i], ssid, boot_ms: 0, ch: 6, privacy: false }
+        })
+        .collect()
+}
+
+fn keep_fakes_busy(s: &mut Sim, fakes: &[Drone]) {
+    for (k, f) in fakes.iter().enumerate() {
+        let a = [0x02, 0xAA, 0, 0, 0, k as u8];
+        let b = [0x02, 0xBB, 0, 0, 0, k as u8];
+        s.data(&data(a, f.bssid, true));
+        s.mgmt(&mgmt(AUTH, f.bssid, b, f.bssid, &[0, 0, 1, 0, 0, 0]));
+        s.mgmt(&mgmt(AUTH, f.bssid, b, f.bssid, &[0, 0, 1, 0, 0, 0]));
+    }
+}
+
+#[test]
+fn busy_forged_networks_do_not_lock_a_real_drone_out() {
+    let mut s = Sim::new();
+    let fakes = fakes();
+    // The fakes take every slot and stay "taken".
+    for _ in 0..10 {
+        s.fly(1000, &fakes, &[]);
+        keep_fakes_busy(&mut s, &fakes);
+    }
+    // The real drone arrives and flies; the fakes keep going.
+    let mut all = fakes.clone();
+    all.push(TELLO_NET);
+    for _ in 0..90 {
+        s.fly(1000, &all, &[(PILOT, TELLO)]);
+        keep_fakes_busy(&mut s, &fakes);
+    }
+    assert!(s.w.drones.nets.iter().any(|n| n.bssid == TELLO), "the real drone is followed");
+    assert!(s.w.drones.totals.evicted >= 1);
+    // Its deauth is seen.
+    s.out.clear();
+    aireplay(&mut s, 2, TELLO, PILOT);
+    s.tick(300);
+    let d = s.of(ThreatKind::DroneDeauth);
+    assert!(d.iter().any(|x| x.target == TELLO), "{:?}", s.out);
+}
+
+#[test]
+fn a_spray_of_drone_beacons_keeps_partial_evidence() {
+    // Two deauths of three at the real drone, then one beacon from each of
+    // forty made-up drone networks, then the third deauth.
+    let mut s = Sim::new();
+    s.fly(3000, &[TELLO_NET], &[(PILOT, TELLO)]);
+    s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+    s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+    for i in 0..40u8 {
+        let b = [0x60, 0x60, 0x1F, 0x55, 0x00, i];
+        let name = std::format!("TELLO-5500{i:02X}");
+        let mut f = beacon(b, name.as_bytes(), false, &ie(3, &[6]));
+        f[24] = 1;
+        s.mgmt(&f);
+    }
+    s.mgmt(&kill(DEAUTH, PILOT, TELLO, TELLO, 7));
+    s.tick(300);
+    assert!(!s.of(ThreatKind::DroneDeauth).is_empty(), "{:?}", s.out);
 }
 
 // ------------------------------------------------------------- clones --

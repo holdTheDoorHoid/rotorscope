@@ -117,6 +117,10 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         Some("AREA FAKE")
     } else if s.area_gnss.is_some_and(|g| g.jamming) {
         Some("AREA JAM")
+    } else if s.threats.flood_per_s > 0 {
+        // Forged drone IDs by the hundred: unconfirmed rows are mostly
+        // fakes (tracker `probation`).
+        Some("ID FLOOD")
     } else if s.threats.active > 0 {
         Some("ATTACK")
     } else {
@@ -215,16 +219,16 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
 /// Height of one caveat line at the bottom edge.
 const CAVEAT_H: i32 = 11;
 
-/// The caveats strip (`Caveats::lines`): inverse lines along the bottom
+/// The caveats strip (`Caveats::shown`): inverse lines along the bottom
 /// edge, on every page, for as long as they hold.
 fn caveats<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
-    let lines = s.caveats.lines();
-    let n = lines.iter().flatten().count() as i32;
+    let lines = s.caveats.shown();
+    let n = lines.len() as i32;
     let mut y = HEIGHT - n * CAVEAT_H;
     // Whole characters that fit (the lines are ASCII).
     let (cw, sp) = (F_SMALL.character_size.width as i32, F_SMALL.character_spacing as i32);
     let fits = ((WIDTH - 6 + sp) / (cw + sp)) as usize;
-    for l in lines.iter().flatten() {
+    for l in lines.iter() {
         fill(d, 0, y, WIDTH, CAVEAT_H, p.accent)?;
         text(d, &l[..l.len().min(fits)], 3, y + 1, F_SMALL, p.accent_ink)?;
         y += CAVEAT_H;
@@ -343,6 +347,18 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
         text_boxed(d, "P", b.x + 6, b.y - 13, F_SMALL, p.operator, p.bg, 1)?;
     }
 
+    // The other claimed position of a disputed, focused drone: a hollow
+    // diamond marked "?", joined to the shown one.
+    if let Some((_, f, _)) = foc
+        && let (Some(dp), Some(other)) = (f.drone, f.other_claim)
+    {
+        let a = plot(c, dp);
+        let b = plot(c, other);
+        line(d, a, b, p.dim, 1)?;
+        diamond(d, b, 6, p.fg, false)?;
+        text_boxed(d, "?", b.x + 7, b.y - 13, F_SMALL, p.fg, p.bg, 1)?;
+    }
+
     // Stale first, then active, focused last so it is on top.
     let mut unplaced = 0u32;
     for pass in 0..3 {
@@ -357,7 +373,7 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
             let is_focus = Some(dv.key) == focus_key;
             let want = if is_focus {
                 2
-            } else if dv.stale {
+            } else if dv.stale || dv.unconfirmed {
                 0
             } else {
                 1
@@ -366,7 +382,9 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
                 continue;
             }
             let pt = plot(c, pos);
-            let col = if dv.stale { p.stale } else { p.accent };
+            // Unconfirmed drones are drawn like stale ones: dim and hollow.
+            let faint = dv.stale || dv.unconfirmed;
+            let col = if faint { p.stale } else { p.accent };
             if pos.distance_m > RINGS[RINGS.len() - 1].0 {
                 // Beyond the outer ring: a pointer on the edge, facing out.
                 let tip = draw::offset(c, pos.bearing_deg, RADAR_R as f32 + 2.0);
@@ -375,15 +393,15 @@ fn radar<D: DrawTarget<Color = Rgb565>>(
                 let base = draw::offset(c, pos.bearing_deg, RADAR_R as f32 - 8.0);
                 let l = l + (base - pt);
                 let r = r + (base - pt);
-                triangle(d, tip, l, r, col, !dv.stale)?;
+                triangle(d, tip, l, r, col, !faint)?;
             } else {
                 let r = if is_focus { 7 } else { 5 };
-                diamond(d, pt, r, col, !dv.stale)?;
+                diamond(d, pt, r, col, !faint)?;
             }
             if is_focus {
                 circle(d, pt, 11, p.fg, false, 2)?;
             }
-            if rank < 9 {
+            if rank < 9 && !dv.unconfirmed {
                 let mut n: String<4> = String::new();
                 let _ = write!(n, "{}", rank + 1);
                 let lc = if dv.stale { p.stale } else { p.fg };
@@ -454,7 +472,12 @@ fn readout<D: DrawTarget<Color = Rgb565>>(
             let _ = write!(b, "{} up", metres(dv.height_m));
             text(d, "HEIGHT", x0, 152, F_SMALL, p.dim)?;
             text(d, &b, x0, 163, F_BODY, col)?;
-            text(d, &short_id(dv, 11), x0, 180, F_LABEL, p.dim)?;
+            if dv.disputed {
+                // Two transmitters claim it: say so where the ID would be.
+                text_boxed(d, "DISPUTED", x0, 179, F_SMALL, p.accent_ink, p.accent, 2)?;
+            } else {
+                text(d, &short_id(dv, 11), x0, 180, F_LABEL, p.dim)?;
+            }
         }
         None => {
             let msg: &[&str] = if s.drones.is_empty() {
@@ -473,7 +496,9 @@ fn readout<D: DrawTarget<Color = Rgb565>>(
     count_block(s, p, d, x0, HEIGHT - 40)
 }
 
-/// "5 DRONES / 2 stale" with the number in big digits.
+/// "5 DRONES / 2 stale" with the number in big digits. Unconfirmed drones
+/// (tracker `probation`) are left out of the number and said instead:
+/// "+58 unconfirmed".
 fn count_block<D: DrawTarget<Color = Rgb565>>(
     s: &UiState,
     p: &Palette,
@@ -481,8 +506,9 @@ fn count_block<D: DrawTarget<Color = Rgb565>>(
     x: i32,
     y: i32,
 ) -> Res<D::Error> {
-    let active = s.active_count();
-    let total = usize::from(s.total_drones).max(s.drones.len());
+    let active = s.confirmed_active_count();
+    let unconfirmed = usize::from(s.total_unconfirmed);
+    let total = usize::from(s.total_drones).max(s.drones.len()).saturating_sub(unconfirmed);
     let mut b: String<24> = String::new();
     let _ = write!(b, "{active}");
     let after = big(
@@ -502,8 +528,10 @@ fn count_block<D: DrawTarget<Color = Rgb565>>(
         p.fg,
     )?;
     b.clear();
-    let stale = total - active;
-    if stale > 0 {
+    let stale = total.saturating_sub(active);
+    if unconfirmed > 0 {
+        let _ = write!(b, "+{unconfirmed} unconf.");
+    } else if stale > 0 {
         let _ = write!(b, "+{stale} stale");
     } else {
         let _ = write!(b, "{}", if active == 0 { "none heard" } else { "active" });
@@ -573,7 +601,10 @@ fn list_page<D: DrawTarget<Color = Rgb565>>(
         y += 19;
     }
     let mut b: String<24> = String::new();
-    let _ = write!(b, "DRONES {}", s.active_count());
+    let _ = write!(b, "DRONES {}", s.confirmed_active_count());
+    if s.total_unconfirmed > 0 {
+        let _ = write!(b, " +{}?", s.total_unconfirmed);
+    }
     text(d, &b, 4, y + 3, F_BAR, p.fg)?;
     let sort = if s.gps.has_position() {
         "nearest first"
@@ -661,6 +692,9 @@ fn rows<D: DrawTarget<Color = Rgb565>>(
             (p.bg, p.fg)
         } else if dv.stale {
             (p.stale, p.bg)
+        } else if dv.unconfirmed {
+            // Quiet: not yet heard long enough to be announced.
+            (p.dim, p.bg)
         } else {
             (p.fg, p.bg)
         };
@@ -695,9 +729,20 @@ fn row<D: DrawTarget<Color = Rgb565>>(
     y: i32,
 ) -> Res<D::Error> {
     let mut b: String<8> = String::new();
-    let _ = write!(b, "{}", rank + 1);
+    if dv.unconfirmed {
+        // No number of its own until it is confirmed: "?".
+        let _ = b.push('?');
+    } else {
+        let _ = write!(b, "{}", rank + 1);
+    }
     text_right(d, &b, 16, y, F_BODY, fg)?;
-    text(d, &short_id(dv, 8), C_ID, y, F_BODY, fg)?;
+    if dv.disputed {
+        // Two transmitters claim this ID: "!" and the ID one shorter.
+        let x = text(d, "!", C_ID, y, F_BODY, fg)?;
+        text(d, &short_id(dv, 7), x, y, F_BODY, fg)?;
+    } else {
+        text(d, &short_id(dv, 8), C_ID, y, F_BODY, fg)?;
+    }
     if fix {
         match dv.drone {
             Some(pos) => {
@@ -979,6 +1024,30 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
         );
     }
     text(d, &b, vx, y, F_BODY, col)?;
+    y += rh;
+
+    // What the data is: a claim. Quiet unless two transmitters disagree.
+    label(d, "CLAIM", y)?;
+    if dv.disputed {
+        let x = text_boxed(d, "DISPUTED", vx, y - 1, F_SMALL, p.accent_ink, p.accent, 2)?;
+        b.clear();
+        match (dv.other_claim, dv.claims_apart_m) {
+            (Some(o), _) => {
+                let _ = write!(b, "other at {} {}", distance_short(o.distance_m), compass(o.bearing_deg));
+            }
+            (None, Some(m)) => {
+                let _ = write!(b, "other {} away", distance_short(m));
+            }
+            (None, None) => {
+                let _ = b.push_str("2 transmitters, 1 ID");
+            }
+        }
+        text(d, &b, x + 6, y, F_BODY, col)?;
+    } else if dv.auth_seen {
+        text(d, "not verified; auth msg not checked", vx, y + 2, F_SMALL, p.dim)?;
+    } else {
+        text(d, "broadcast, not verified", vx, y + 2, F_SMALL, p.dim)?;
+    }
 
     text(
         d,
@@ -1333,6 +1402,15 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         ("GPS", {
             let mut b = String::new();
             let _ = match s.gps.fix {
+                _ if s.gps.untrusted_pos || s.gps.untrusted_time => write!(
+                    b,
+                    "no trusted {}",
+                    match (s.gps.untrusted_pos, s.gps.untrusted_time) {
+                        (true, true) => "position/time",
+                        (true, false) => "position",
+                        _ => "time",
+                    }
+                ),
                 Fix::None => write!(b, "no fix, {} satellites", s.gps.sats),
                 Fix::Fix2D => write!(b, "2D fix, {} satellites", s.gps.sats),
                 Fix::Fix3D => write!(b, "3D fix, {} satellites", s.gps.sats),
@@ -1450,6 +1528,20 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         text(d, &b, 70, y, F_BODY, p.accent)?;
         hint = false;
     }
+    // Attack and jamming alarms, sounding and silenced (WP-11b): the strip
+    // says what is muted and until when; this says what it is hiding.
+    let (t, q) = (s.threats, s.caveats.silenced);
+    if (t.active > 0 || t.muted > 0) && y + 17 + 14 <= HEIGHT {
+        y += 17;
+        text(d, "ALARMS", 4, y + 2, F_SMALL, p.dim)?;
+        let mut b: String<40> = String::new();
+        let _ = write!(b, "{} sounding, {} silenced", t.active, t.muted);
+        if q.snoozed > 0 {
+            let _ = b.push_str(" (snooze)");
+        }
+        text(d, &b, 70, y, F_BODY, if t.active > 0 { p.accent } else { p.fg })?;
+        hint = false;
+    }
     if hint {
         text(d, "UP/DN: pages", 4, HEIGHT - 12, F_SMALL, p.dim)?;
     }
@@ -1468,12 +1560,17 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
     let done = |row: usize| ui.done_row() == Some(row);
     let mut alarms: String<20> = String::new();
     let t = s.threats;
+    // Nuisance alarms first (muted for 2 h); safety-critical ones only when
+    // nothing else sounds, and only snoozed (5 min): one press never
+    // silences a jammer along with a nuisance.
     let _ = if done(4) {
         write!(alarms, "Done")
-    } else if t.active > 0 {
-        write!(alarms, "Mute {} now", t.active)
-    } else if t.muted > 0 {
-        write!(alarms, "Unmute {}", t.muted)
+    } else if t.mutable > 0 {
+        write!(alarms, "Mute {} (2h)", t.mutable)
+    } else if t.snoozable > 0 {
+        write!(alarms, "Snooze {} (5m)", t.snoozable)
+    } else if s.caveats.silenced.operator() > 0 {
+        write!(alarms, "Unmute {}", s.caveats.silenced.operator())
     } else {
         write!(alarms, "None sounding")
     };
@@ -1489,8 +1586,14 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
         ("Buzzer", if st.buzzer { "On" } else { "Off (muted)" }),
         // The hub learns where it stands and treats a GPS position far from
         // there as faked: after moving it on purpose, reset that.
-        ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" }),
-        // Known false alarms (a venue's real open network...): mute them.
+        // While the hub waits for a decision on a new place: accept it.
+        if s.gps.home_pending {
+            ("New home", if done(3) { "Accepted" } else { "Accept here" })
+        } else {
+            ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" })
+        },
+        // Nuisance alarms: mute them for a while (a venue's known false
+        // alarm goes in the site file). Jamming and the like: snooze only.
         ("Alarms", alarms.as_str()),
         // A wired or bench kit: every node stands at the hub.
         ("Nodes at hub", if done(5) { "Placed" } else { "Place all here" }),

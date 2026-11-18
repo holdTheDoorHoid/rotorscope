@@ -495,7 +495,11 @@ pub enum ThreatKind {
     JamSweep,
     /// Strong pulsed or reactive interference (on only part of the time).
     /// Raw-capture nodes: `detail` = median percent of probes loud (the
-    /// duty cycle), `level` = the pulses' rise over the floor, dB.
+    /// duty cycle), `level` = the pulses' rise over the floor, dB. node-sdr
+    /// also counts dwells on which a train of DroneID-length pulses flooded
+    /// its decoder (the decode budget refused windows and what it decoded
+    /// was mostly not valid); for those `detail` is the decoder's busy
+    /// percent of the dwell.
     JamPulsed,
     /// The node can hear almost nothing it normally hears while the band is
     /// loud: it is effectively blind. `detail` = percent of the usual
@@ -577,7 +581,10 @@ pub enum ThreatKind {
     /// Protocol 13. Hostile content on a drone's MAVLink telemetry
     /// (`crates/mavwatch`): ground-station exploit payloads, shell access
     /// commands, signing downgrade, injected frames. `detail` =
-    /// `mavwatch::Kind` code, `source` / `target` = claimed sender and
+    /// `mavwatch::Kind` code in the low byte, plus bit 24
+    /// ([`MAVLINK_SUSPECT`]) while it is one uncorroborated frame (a
+    /// suspicion; the node reports it again without the bit once backed),
+    /// `source` / `target` = claimed sender and
     /// target system/component in the last two bytes, `ssid` = excerpt.
     /// From an LR2021 node (SiK, mLRS) `channel` is 0; from a Wi-Fi node
     /// (MAVLink over open Wi-Fi, `wifiwatch::mavwifi`) `channel` is the
@@ -587,6 +594,16 @@ pub enum ThreatKind {
     /// the area, seen through other receivers: aircraft reporting degraded
     /// position integrity, or drones' positions jumping together.
     AreaGnss,
+    /// Raised by the hub (never sent on the node link, so no protocol
+    /// change: every existing frame encodes as before, and a node or
+    /// gateway claiming it is refused as a forged origin). Far more new
+    /// drone IDs (or aircraft addresses, or control links) a second than a
+    /// real sky produces: a flood of forged identities meant to bury real
+    /// ones (`tracker::probation`, docs/SPOOFING.md "Floods"). `detail`:
+    /// bits 24-31 which table (0 drones, 1 aircraft, 2 control links), bits
+    /// 0-15 new identities a second over the window; `count` = new
+    /// identities in the window, `window_ms` = the window.
+    IdFlood,
 }
 
 impl ThreatKind {
@@ -615,6 +632,7 @@ impl ThreatKind {
             ControlContested => "control_contested",
             MavlinkAttack => "mavlink_attack",
             AreaGnss => "area_gnss",
+            IdFlood => "id_flood",
         }
     }
 
@@ -1030,6 +1048,12 @@ pub enum Frame {
 /// 237 payload bytes) fit whole unless signed and full. Longer frames are
 /// cut here (`truncated`).
 pub const MAX_MAVLINK_EVIDENCE: usize = 255;
+
+/// `detail` bit of a [`ThreatKind::MavlinkAttack`]: a suspicion (one
+/// checksum-valid frame of a one-frame kind, nothing yet to back it), not an
+/// alarm. Equal to `mavwatch::analyse::DETAIL_SUSPECT`. A `detail` bit, not a
+/// new field: the frame encodes exactly as before.
+pub const MAVLINK_SUSPECT: u32 = 1 << 24;
 
 /// Protocol 13. See [`Frame::MavlinkEvidence`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1638,7 +1662,7 @@ mod tests {
     fn protocol_9_threat_appended() {
         let mut buf = [0u8; MAX_FRAME];
         let mut dec = Decoder::new();
-        for k in 0..=21u8 {
+        for k in 0..=22u8 {
             let kind: ThreatKind = postcard::from_bytes(&[k]).unwrap();
             let f = Frame::Threat(ThreatSighting {
                 kind,
@@ -1661,7 +1685,7 @@ mod tests {
             dec.feed(wire, |r| got = Some(r));
             assert_eq!(got, Some(Ok(f)));
         }
-        assert!(postcard::from_bytes::<ThreatKind>(&[22]).is_err());
+        assert!(postcard::from_bytes::<ThreatKind>(&[23]).is_err());
         assert!(ThreatKind::Blinded.is_jamming() && !ThreatKind::Deauth.is_jamming());
     }
 

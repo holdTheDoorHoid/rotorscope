@@ -204,19 +204,72 @@ fn tis_b_and_ads_r_are_counted() {
 
 #[test]
 fn table_full_evicts_only_quiet_aircraft() {
-    let mut t: Table<2> = Table::default();
+    // Four slots: at most two unproven aircraft, at most three established.
+    let mut t: Table<4> = Table::default();
     t.ingest(&rx(ident(0xA00001, "A")), 0).unwrap();
     t.ingest(&rx(ident(0xA00002, "B")), 0).unwrap();
     t.ingest(&rx(ident(0xA00003, "C")), 1000).unwrap();
-    assert!(t.get(0xA00003).is_none(), "both others heard in the last 5 s");
-    t.ingest(&rx(ident(0xA00002, "B")), 5500).unwrap();
-    t.ingest(&rx(ident(0xA00003, "C")), 6000).unwrap();
+    assert!(t.get(0xA00003).is_none(), "two unproven, both heard in the last 1.5 s");
+    assert_eq!(t.stats.refused_new, 1);
+    t.ingest(&rx(ident(0xA00002, "B")), 1600).unwrap();
+    t.ingest(&rx(ident(0xA00003, "C")), 2000).unwrap();
     assert!(t.get(0xA00003).is_some());
-    assert!(t.get(0xA00001).is_none());
+    assert!(t.get(0xA00001).is_none(), "the quiet unproven one made room");
+    assert_eq!(t.stats.unproven_replaced, 1);
     // Expiry.
-    let out = report(&mut t, 6000 + 61_000);
+    let out = report(&mut t, 2000 + 61_000);
     assert!(out.is_empty());
     assert!(t.is_empty());
+}
+
+/// Two real aircraft with a history, then 40 forged new addresses a second
+/// (one airborne position each, at the receiver, which local CPR accepts):
+/// the real ones keep their entries throughout, and a new real aircraft
+/// that appears during the flood still gets in and establishes itself.
+#[test]
+fn forged_address_flood_never_displaces_established_aircraft() {
+    let mut t: Table<32> = Table::default();
+    t.set_reference(Some(PHL));
+    let real = [(0xA11111u32, 40.05, -75.01), (0xA22222, 39.85, -75.30)];
+    let mut now = 0u64;
+    let step = |t: &mut Table<32>, icao: u32, lat: f64, lon: f64, now: u64| {
+        let odd = (now / 500) % 2 == 1;
+        // About 250 kt north: 0.0002 deg a second.
+        let lat = lat + now as f64 / 1000.0 * 0.0002;
+        t.ingest(&rx(pos(icao, lat, lon, 3000, odd)), now)
+    };
+    while now < 5_000 {
+        for &(icao, lat, lon) in &real {
+            step(&mut t, icao, lat, lon, now).unwrap();
+        }
+        now += 500;
+    }
+    assert!(real.iter().all(|r| t.get(r.0).is_some_and(|p| p.established())));
+    let mut fake = 0u32;
+    let late = 0xA33333u32;
+    while now < 65_000 {
+        for &(icao, lat, lon) in &real {
+            step(&mut t, icao, lat, lon, now).unwrap();
+        }
+        if now >= 30_000 {
+            step(&mut t, late, 40.10, -75.10, now).unwrap();
+        }
+        // 40 new addresses a second: 20 every half second, at the receiver.
+        for _ in 0..20 {
+            let icao = 0xC00000 | (fake.wrapping_mul(7919) & 0xFFFF);
+            let _ = t.ingest(&rx(pos(icao, PHL.0, PHL.1, 1000, fake % 2 == 1)), now);
+            fake += 1;
+        }
+        for &(icao, _, _) in &real {
+            let p = t.get(icao).expect("a real aircraft is never displaced");
+            assert_eq!(p.first_ms, 0, "same entry, history kept");
+        }
+        now += 500;
+    }
+    let p = t.get(late).expect("a new real aircraft still gets in");
+    assert!(p.established(), "and establishes itself");
+    assert!(t.planes().filter(|p| p.established()).count() >= 3);
+    assert!(t.stats.refused_new + t.stats.unproven_replaced > 1_000);
 }
 
 #[test]

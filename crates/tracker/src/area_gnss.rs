@@ -15,7 +15,14 @@
 //!   range to a false position, so several drones' reported positions jump
 //!   at the same moment by about the same amount, or to the same place. A
 //!   single drone jumping is that drone's problem ([`crate::spoof`]
-//!   already flags it); two or more together is the area's.
+//!   already flags it); several together is the area's. But a drone's
+//!   position is only its broadcast's claim, so (WP-11b) only **path
+//!   jumps** count: a confirmed track whose own transmitter moved off its
+//!   path and stayed there, never a rival claim, a dispute or an
+//!   unconfirmed track ([`crate::claims::Claims::path_jumps`]); the
+//!   jumpers must be **independent** ([`independent`]); and without
+//!   corroboration (the hub's own GPS, or aircraft jumping) it takes
+//!   [`DRONE_MIN_JUMPERS_ALONE`] (3) of them, not 2.
 //! - **Aircraft positions** jumping together in the same way (needs three).
 //! - **The hub's own receiver** ([`OwnGnss`], set by the hub): agreement
 //!   raises the confidence and lets one independent receiver suffice;
@@ -94,11 +101,26 @@ pub const AIR_MIN_JUMPERS: usize = 3;
 pub const AIR_ALIKE_M: f64 = 1_000.0;
 /// ... or they landed within this distance of each other.
 pub const AIR_SAME_PLACE_M: f64 = 3_000.0;
-/// A drone track's position move counts only if [`crate::spoof`] counted
-/// a jump and it moved at least this far between two looks.
+/// A drone track's move counts only if [`crate::claims`] counted a path
+/// jump and it moved at least this far.
 pub const DRONE_MIN_JUMP_M: f64 = 60.0;
-/// Drones jumping alike within [`JUMP_WINDOW_MS`] needed for spoofing.
+/// Independent drones jumping alike within [`JUMP_WINDOW_MS`] needed for
+/// spoofing when aircraft corroborate (at least one aircraft jumped in the
+/// window).
 pub const DRONE_MIN_JUMPERS: usize = 2;
+/// ... and with nothing to corroborate them. Two fakes, or two impersonated
+/// drones, used to be enough for an area-wide alarm; three independent
+/// transmitters (different addresses, heard differently, first heard at
+/// different times) cost an attacker three radios or careful per-identity
+/// power control, and a real spoofer moving a crowd of drones still
+/// passes.
+pub const DRONE_MIN_JUMPERS_ALONE: usize = 3;
+/// Two jumpers are heard "clearly differently" when their latest signal
+/// strengths differ by at least this much (or different nodes heard them).
+pub const DRONE_RSSI_APART_DB: i16 = 6;
+/// ... and they were first heard at least this far apart (fakes made in
+/// one burst are born together; drones arrive one by one).
+pub const DRONE_FIRST_SEEN_APART_MS: u64 = 2_000;
 /// Two drone jumps are alike if their displacements differ by at most this
 /// much, or [`JUMP_ALIKE_FRAC`] of the larger, ...
 pub const DRONE_ALIKE_M: f64 = 75.0;
@@ -215,6 +237,30 @@ struct Jump {
     to: Pt,
     /// East, north metres: the unexplained part of the move.
     d: (f64, f64),
+    /// Drones: how the transmitter was heard ([`independent`]).
+    phy: Phy,
+}
+
+/// How a drone's transmitter was heard when it jumped: its address
+/// (folded), the nodes that ever heard it, its latest RSSI, when it was
+/// first heard (hub seconds). Aircraft leave it empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Phy {
+    addr: u32,
+    nodes: u8,
+    rssi: i8,
+    first_s: u32,
+}
+
+/// Two drone jumpers are independent transmitters: both have an address
+/// and they differ, they were heard differently (different nodes, or RSSI
+/// [`DRONE_RSSI_APART_DB`] apart), and first heard
+/// [`DRONE_FIRST_SEEN_APART_MS`] apart. Every part can be forged by a
+/// careful attacker; together they cost one radio sending many identities.
+fn independent(a: &Phy, b: &Phy) -> bool {
+    let heard_apart = a.nodes != b.nodes || (i16::from(a.rssi) - i16::from(b.rssi)).abs() >= DRONE_RSSI_APART_DB;
+    let born_apart = u64::from(a.first_s.abs_diff(b.first_s)) * 1000 >= DRONE_FIRST_SEEN_APART_MS;
+    a.addr != 0 && b.addr != 0 && a.addr != b.addr && heard_apart && born_apart
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -234,7 +280,9 @@ struct Air {
 struct Drone {
     id: TrackId,
     seen_ms: u64,
+    /// Its shown position (on its path) at the last look.
     pos: Option<Pt>,
+    /// [`crate::claims::Claims::path_jumps`] at the last look.
     jumps: u8,
 }
 
@@ -307,22 +355,27 @@ fn push_jump(v: &mut Vec<Jump, MAX_JUMPS>, j: Jump) {
 }
 
 /// Largest set of jumps from distinct receivers that are all alike the
-/// same seed jump, and their mean displacement (metres).
-fn alike_group(jumps: &[Jump], now: u64, alike_m: f64, same_place_m: f64) -> (usize, f64) {
+/// same seed jump, and their mean displacement (metres). With `indep`,
+/// every member must also be [`independent`] of every other (taken
+/// greedily, seed first).
+fn alike_group(jumps: &[Jump], now: u64, alike_m: f64, same_place_m: f64, indep: bool) -> (usize, f64) {
     let recent = |j: &&Jump| now.saturating_sub(j.at_ms) <= JUMP_WINDOW_MS;
     let mut best = (0usize, 0.0f64);
     for seed in jumps.iter().filter(recent) {
-        let mut who: Vec<u32, MAX_JUMPS> = Vec::new();
+        let mut who: Vec<(u32, Phy), MAX_JUMPS> = Vec::new();
         let mut sum = 0.0;
-        for j in jumps.iter().filter(recent) {
-            if who.contains(&j.who) {
+        for j in core::iter::once(seed).chain(jumps.iter().filter(recent)) {
+            if who.iter().any(|w| w.0 == j.who) {
+                continue;
+            }
+            if indep && who.iter().any(|w| !independent(&w.1, &j.phy)) {
                 continue;
             }
             let diff = norm((j.d.0 - seed.d.0, j.d.1 - seed.d.1));
             let tol = alike_m.max(JUMP_ALIKE_FRAC * norm(j.d).max(norm(seed.d)));
             let same_place = norm(en(j.to, seed.to)) <= same_place_m;
             if diff <= tol || same_place {
-                let _ = who.push(j.who);
+                let _ = who.push((j.who, j.phy));
                 sum += norm(j.d);
             }
         }
@@ -392,8 +445,12 @@ impl AreaWatch {
         let own_pos = tr.own_position(now_ms);
         let (counted, degraded, dropped) = self.look_aircraft(tr.aircraft(), own_pos.map(|o| Pt { lat: o.lat, lon: o.lon }), now_ms);
         self.look_drones(tr, now_ms);
-        let (air_n, air_d) = alike_group(&self.air_jumps, now_ms, AIR_ALIKE_M, AIR_SAME_PLACE_M);
-        let (dr_n, dr_d) = alike_group(&self.drone_jumps, now_ms, DRONE_ALIKE_M, DRONE_SAME_PLACE_M);
+        let (air_n, air_d) = alike_group(&self.air_jumps, now_ms, AIR_ALIKE_M, AIR_SAME_PLACE_M, false);
+        // Independent drone jumpers (the count that raises spoofing on its
+        // own or with aircraft), and any path jumpers at all (enough when
+        // the hub's own GPS says spoofing).
+        let (dr_n, dr_d) = alike_group(&self.drone_jumps, now_ms, DRONE_ALIKE_M, DRONE_SAME_PLACE_M, true);
+        let (dr_any, dr_any_d) = alike_group(&self.drone_jumps, now_ms, DRONE_ALIKE_M, DRONE_SAME_PLACE_M, false);
         let own_fresh = now_ms.saturating_sub(self.own_ms) <= OWN_FRESH_MS;
         let own_jam = own_fresh && self.own.jamming();
         let own_spoof = self.own_spoof_ms.is_some_and(|t| now_ms.saturating_sub(t) <= JUMP_WINDOW_MS);
@@ -414,17 +471,23 @@ impl AreaWatch {
         }
 
         // ---- spoofing
-        let drone_spoof = dr_n >= DRONE_MIN_JUMPERS;
+        // Drones alone need three independent jumpers; with aircraft
+        // jumping too, two; with the hub's own GPS saying spoofing, one
+        // path jump (the hub is a receiver the attacker cannot forge over
+        // the air from far away).
+        let need = if air_n >= 1 { DRONE_MIN_JUMPERS } else { DRONE_MIN_JUMPERS_ALONE };
+        let drone_spoof = dr_n >= need;
         let air_spoof = air_n >= AIR_MIN_JUMPERS;
-        let own_drone = own_spoof && dr_n >= 1;
+        let own_drone = own_spoof && dr_any >= 1;
         if drone_spoof || air_spoof || own_drone {
             let mut d = detail::SPOOFING;
             let mut level: u8 = 0;
             let mut count = 0;
             let mut jump_m: f64 = 0.0;
+            let (dr_n, dr_d) = if drone_spoof { (dr_n, dr_d) } else { (dr_any, dr_any_d) };
             if drone_spoof || own_drone {
                 d |= detail::DRONE_JUMPS;
-                level = level.max(if drone_spoof { 60 + 10 * (dr_n - DRONE_MIN_JUMPERS).min(3) as u8 } else { 50 });
+                level = level.max(if drone_spoof { 60 + 10 * (dr_n - need).min(3) as u8 } else { 50 });
                 count += dr_n;
                 jump_m = jump_m.max(dr_d);
             }
@@ -494,7 +557,7 @@ impl AreaWatch {
             ssid: String::new(),
             uptime_us: now_ms.saturating_mul(1000),
         };
-        Some(tr.ingest_hub_threat(&s, now_ms))
+        tr.ingest_hub_threat(&s, now_ms)
     }
 
     /// Update the per-aircraft state; returns (counted, degraded, dropped).
@@ -548,7 +611,7 @@ impl AreaWatch {
                         };
                         let d = en(predicted, here);
                         if norm(d) > AIR_JUMP_M {
-                            push_jump(&mut self.air_jumps, Jump { at_ms: now, who: a.key.icao, to: here, d });
+                            push_jump(&mut self.air_jumps, Jump { at_ms: now, who: a.key.icao, to: here, d, phy: Phy::default() });
                         }
                     }
                 }
@@ -593,18 +656,33 @@ impl AreaWatch {
         (counted, degraded, dropped)
     }
 
-    /// Notice drone tracks whose jump count rose since the last look.
+    /// Notice confirmed drone tracks whose path-jump count rose since the
+    /// last look (`claims`: one transmitter that moved, not a rival claim
+    /// or a dispute), and how each was heard.
     fn look_drones<const N: usize, const A: usize>(&mut self, tr: &Tracker<N, A>, now: u64) {
         let ctx = tr.context(now, None);
         self.drones.retain(|d| tr.get(d.id).is_some());
-        self.drone_jumps.retain(|j| now.saturating_sub(j.at_ms) <= JUMP_WINDOW_MS);
+        // A jump taken while the track was undisputed stops counting once
+        // the original reports again and the jump turns out to be a
+        // dispute (`claims`): an impersonator using the drone's own address
+        // while it was briefly silent.
+        self.drone_jumps.retain(|j| {
+            now.saturating_sub(j.at_ms) <= JUMP_WINDOW_MS
+                && tr.get(crate::TrackId(j.who)).is_none_or(|t| !t.claims.disputed(now))
+        });
         for t in tr.tracks() {
-            if ctx.state(t) != TrackState::Active {
+            // Only confirmed, undisputed tracks are receivers worth
+            // believing (`probation`, `claims`).
+            if ctx.state(t) != TrackState::Active || !t.confirmed() || t.claims.disputed(now) {
                 continue;
             }
-            let Some(p) = t.location.as_ref().and_then(|l| l.value.position) else { continue };
+            // Where its own transmitter now says it is (a path jump is
+            // held as a rival claim until the track follows it), and its
+            // shown position, on the path it came from.
+            let Some(p) = t.claimed_position(now) else { continue };
             let here = Pt { lat: p.lat, lon: p.lon };
-            let jumps = t.spoof.jumps();
+            let shown = t.location.as_ref().and_then(|l| l.value.position).map(|p| Pt { lat: p.lat, lon: p.lon });
+            let jumps = t.claims.path_jumps();
             match self.drones.iter_mut().find(|d| d.id == t.id) {
                 Some(d) => {
                     if jumps > d.jumps
@@ -612,11 +690,17 @@ impl AreaWatch {
                     {
                         let v = en(prev, here);
                         if norm(v) >= DRONE_MIN_JUMP_M {
-                            push_jump(&mut self.drone_jumps, Jump { at_ms: now, who: t.id.0, to: here, d: v });
+                            let phy = Phy {
+                                addr: t.latest_slot().map_or(0, |(_, l)| addr32(&l.mac)),
+                                nodes: t.nodes,
+                                rssi: t.latest_rssi().unwrap_or(0),
+                                first_s: (t.first_seen_ms / 1000).min(u64::from(u32::MAX)) as u32,
+                            };
+                            push_jump(&mut self.drone_jumps, Jump { at_ms: now, who: t.id.0, to: here, d: v, phy });
                         }
                     }
                     d.jumps = jumps;
-                    d.pos = Some(here);
+                    d.pos = shown.or(Some(here));
                     d.seen_ms = now;
                 }
                 None => {
@@ -625,7 +709,7 @@ impl AreaWatch {
                     {
                         self.drones.swap_remove(j);
                     }
-                    let _ = self.drones.push(Drone { id: t.id, seen_ms: now, pos: Some(here), jumps });
+                    let _ = self.drones.push(Drone { id: t.id, seen_ms: now, pos: shown.or(Some(here)), jumps });
                 }
             }
         }
@@ -634,6 +718,11 @@ impl AreaWatch {
 
 fn clamp8(n: usize) -> u8 {
     n.min(255) as u8
+}
+
+/// A transmitter address folded to 32 bits; 0 for none.
+fn addr32(mac: &[u8; 6]) -> u32 {
+    if *mac == [0; 6] { 0 } else { crate::probation::hash(&[mac]) }
 }
 
 /// A plain-English sentence for an [`ThreatKind::AreaGnss`] threat (the

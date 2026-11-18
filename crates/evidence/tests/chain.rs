@@ -302,6 +302,12 @@ fn cold_start_without_gps_is_marked() {
     let mut b = [0u8; 1024];
     let n = c.event(&Context { time_source: TimeSource::GpsPps, ..Context::default() }, EventCode::Boot, b"", &[], &mut b).unwrap();
     assert_eq!(format::parse(&b[..n]).unwrap().header.time_source, 0);
+    // ... except "untrusted" (WP-12): GPS gave a time the hub withholds.
+    let n = c.event(&Context { time_source: TimeSource::Untrusted, ..Context::default() }, EventCode::Boot, b"", &[], &mut b).unwrap();
+    let u = format::parse(&b[..n]).unwrap();
+    assert_eq!((u.header.time_source, u.header.utc_ms), (TimeSource::Untrusted as u8, None));
+    assert_eq!(TimeSource::from_u8(4), Some(TimeSource::Untrusted));
+    assert!(verify::describe(&u).contains("NO-UTC                   [untrusted]"));
 
     let rep = check(&l.bytes);
     assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);

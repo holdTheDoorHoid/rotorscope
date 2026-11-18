@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use crate::parse::{self, Line};
 
 /// Something a source produced, stamped with the time (ms since program
-/// start, or simulated time for `--demo --once`) the tracker should use.
+/// start; for a recording read without `--realtime`, the recording's own
+/// time from [`ReplayClock`]; simulated time for `--demo --once`) the
+/// tracker should use.
 pub enum Event {
     Line {
         node: u8,
@@ -117,9 +119,76 @@ fn read_line_bounded<R: BufRead>(r: &mut R, out: &mut Vec<u8>, max: usize) -> io
     })
 }
 
+/// Time for a recording replayed as fast as it can be read: the node's own
+/// clock (`up_us`) drives the tracker, not the moment a line was read.
+///
+/// A whole recording is read in milliseconds, so stamping its lines with
+/// arrival time squeezes minutes of flight into one instant, and the
+/// tracker (which confirms a drone only when it is heard again at least a
+/// second after it was first heard) sees every drone as a one-frame fake.
+/// The replay clock starts at the wall time of the first line and advances
+/// by the gaps between the lines' `up_us`; a line without one keeps the
+/// current time; a node clock that goes backwards (the node rebooted in the
+/// middle of the recording) adds nothing. Nothing sleeps: `--realtime`
+/// is the mode that waits.
+#[derive(Debug, Default, Clone)]
+pub struct ReplayClock {
+    base_ms: Option<u64>,
+    last_up: Option<u64>,
+    elapsed_us: u64,
+}
+
+impl ReplayClock {
+    /// The time for a line read at `wall_ms` carrying node time `up_us`.
+    pub fn at(&mut self, wall_ms: u64, up_us: Option<u64>) -> u64 {
+        let base = *self.base_ms.get_or_insert(wall_ms);
+        if let Some(up) = up_us {
+            if let Some(prev) = self.last_up
+                && up > prev
+            {
+                self.elapsed_us = self.elapsed_us.saturating_add(up - prev);
+            }
+            self.last_up = Some(up);
+        }
+        base.saturating_add(self.elapsed_us / 1000)
+    }
+
+    /// Move on by `ms` (an ADSBee recording: one report a second).
+    pub fn advance_ms(&mut self, ms: u64) {
+        self.elapsed_us = self.elapsed_us.saturating_add(ms.saturating_mul(1000));
+    }
+}
+
+/// The node time a line carries, if any: detections, open-link sightings
+/// and stats lines all print the node's `up_us`. (Frame lines carry it per
+/// frame kind, and test fixtures fill it with placeholders; they keep the
+/// current time.)
+pub fn line_up_us(line: &Line) -> Option<u64> {
+    match line {
+        Line::Rid(r) => r.up_us,
+        Line::Open(s) => Some(s.uptime_us).filter(|&u| u > 0),
+        Line::Stats(v) => v.get("up_us").and_then(serde_json::Value::as_u64),
+        _ => None,
+    }
+}
+
+/// Whether a source is a live device (a serial port, or a terminal on
+/// stdin): those keep wall-clock time. Files and pipes are recordings.
+fn is_live(path: &str) -> bool {
+    use std::io::IsTerminal;
+    use std::os::unix::fs::FileTypeExt;
+    if path == "-" {
+        return io::stdin().is_terminal();
+    }
+    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_char_device())
+}
+
 /// Open `path` ("-" = stdin) and read JSON lines from it on a new thread.
 /// With `realtime`, sleep between detections by the gaps in their `up_us`,
-/// so a recording plays back at the speed it was captured.
+/// so a recording plays back at the speed it was captured. Without it, a
+/// recording (a file, or stdin from a pipe) is stamped by its own `up_us`
+/// ([`ReplayClock`]) so it behaves as the original run did; a live device
+/// keeps the wall clock.
 pub fn spawn_reader(
     node: u8,
     path: String,
@@ -127,6 +196,7 @@ pub fn spawn_reader(
     start: Instant,
     tx: Sender<Event>,
 ) -> io::Result<()> {
+    let replay = !realtime && !is_live(&path);
     let reader: Box<dyn Read + Send> = if path == "-" {
         Box::new(io::stdin())
     } else {
@@ -134,6 +204,7 @@ pub fn spawn_reader(
     };
     std::thread::spawn(move || {
         let clock = Clock(start);
+        let mut virt = ReplayClock::default();
         let mut last_up: Option<u64> = None;
         let mut buf = BufReader::new(reader);
         let mut raw = Vec::new();
@@ -162,14 +233,12 @@ pub fn spawn_reader(
                 }
                 last_up = Some(up);
             }
-            if tx
-                .send(Event::Line {
-                    node,
-                    line,
-                    at_ms: clock.ms(),
-                })
-                .is_err()
-            {
+            let at_ms = if replay {
+                virt.at(clock.ms(), line_up_us(&line))
+            } else {
+                clock.ms()
+            };
+            if tx.send(Event::Line { node, line, at_ms }).is_err() {
                 return;
             }
         };
@@ -181,16 +250,21 @@ pub fn spawn_reader(
 /// Read an ADSBee's CSBee output (`--adsbee`): its USB console or a
 /// USB-UART on its COMMS_UART pins, or a recorded file of the same text.
 /// With `realtime`, a recording plays back at one report per second (the
-/// ADSBee ends each once-a-second report with its `#S:` line).
+/// ADSBee ends each once-a-second report with its `#S:` line); without it a
+/// recorded file is stamped one second per report ([`ReplayClock`]), so
+/// aircraft age and become established as they did; a live device keeps
+/// the wall clock.
 pub fn spawn_adsbee(
     path: String,
     realtime: bool,
     start: Instant,
     tx: Sender<Event>,
 ) -> io::Result<()> {
+    let replay = !realtime && !is_live(&path);
     let mut reader = open(Path::new(&path))?;
     std::thread::spawn(move || {
         let clock = Clock(start);
+        let mut virt = ReplayClock::default();
         let mut split = adsb::LineSplitter::new();
         let mut buf = [0u8; 512];
         let why = loop {
@@ -205,12 +279,15 @@ pub fn spawn_adsbee(
                     return;
                 }
                 let end_of_report = matches!(result, Ok(adsb::Report::Stats(_)));
-                gone = tx
-                    .send(Event::Adsb {
-                        result,
-                        at_ms: clock.ms(),
-                    })
-                    .is_err();
+                let at_ms = if replay {
+                    virt.at(clock.ms(), None)
+                } else {
+                    clock.ms()
+                };
+                gone = tx.send(Event::Adsb { result, at_ms }).is_err();
+                if replay && end_of_report {
+                    virt.advance_ms(1_000);
+                }
                 if realtime && end_of_report {
                     std::thread::sleep(Duration::from_secs(1));
                 }
@@ -269,6 +346,23 @@ fn raw_mode(file: &File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_clock_follows_the_node_clock() {
+        let mut c = ReplayClock::default();
+        // Starts at the first line's wall time.
+        assert_eq!(c.at(500, None), 500);
+        assert_eq!(c.at(501, Some(10_000_000)), 500);
+        // 1.5 s of node time, read in a millisecond.
+        assert_eq!(c.at(502, Some(11_500_000)), 2_000);
+        // No up_us: the current time.
+        assert_eq!(c.at(503, None), 2_000);
+        // The node rebooted: nothing added, then it counts from there.
+        assert_eq!(c.at(504, Some(1_000)), 2_000);
+        assert_eq!(c.at(505, Some(2_001_000)), 4_000);
+        c.advance_ms(1_000);
+        assert_eq!(c.at(506, None), 5_000);
+    }
 
     #[test]
     fn a_line_without_a_newline_cannot_grow_memory() {

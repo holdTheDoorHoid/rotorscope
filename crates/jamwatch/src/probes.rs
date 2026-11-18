@@ -6,6 +6,12 @@
 //! the start of the dwell from the hop's learnt floor: a pulsed jammer, a
 //! microwave oven (on for half of every mains cycle) and Wi-Fi traffic all
 //! show as runs, of very different lengths.
+//!
+//! The node also hands over its DroneID decoder's pressure on the dwell
+//! ([`ProbeStats::decode_pressure`], from node-sdr's `rawcap::budget`): a
+//! train of short DroneID-length pulses costs the node its decode time
+//! rather than probe levels, which are hardly touched while the loop
+//! decodes (nothing is probed then).
 
 use fpvscan::{Meter, db_x10};
 
@@ -22,6 +28,12 @@ pub struct ProbeStats {
     max: u32,
     /// Spacing of the probes, ns (the trigger's block: 51,200).
     block_ns: u32,
+    /// The decoder on this dwell: windows the budget refused, full decodes,
+    /// CRC-valid bursts, percent of the dwell spent decoding.
+    dec_skipped: u32,
+    dec_full: u32,
+    dec_valid: u32,
+    dec_busy_pct: u8,
 }
 
 /// The smallest probe power whose `db_x10` is at least `x10`.
@@ -39,7 +51,20 @@ fn pow_at(x10: i32) -> u32 {
 
 impl ProbeStats {
     pub const fn new(block_ns: u32) -> Self {
-        ProbeStats { meter: Meter::new(), loud_pow: u32::MAX, loud_x10: i32::MAX, loud: 0, runs: 0, on: false, max: 0, block_ns }
+        ProbeStats {
+            meter: Meter::new(),
+            loud_pow: u32::MAX,
+            loud_x10: i32::MAX,
+            loud: 0,
+            runs: 0,
+            on: false,
+            max: 0,
+            block_ns,
+            dec_skipped: 0,
+            dec_full: 0,
+            dec_valid: 0,
+            dec_busy_pct: 0,
+        }
     }
 
     /// Start a dwell; probes at or above `loud_x10` (tenths of a dB, probe
@@ -108,6 +133,23 @@ impl ProbeStats {
     pub fn mean_off_us(&self) -> u32 {
         let off = self.count().saturating_sub(self.loud);
         if self.runs == 0 { 0 } else { (off as u64 * self.block_ns as u64 / 1000 / self.runs as u64) as u32 }
+    }
+
+    /// The DroneID decoder's load on this dwell (node-sdr: the decode
+    /// budget's per-dwell counts, fed once at the end of the dwell).
+    pub fn decode_pressure(&mut self, skipped: u32, full: u32, valid: u32, busy_pct: u8) {
+        self.dec_skipped = skipped;
+        self.dec_full = full;
+        self.dec_valid = valid;
+        self.dec_busy_pct = busy_pct;
+    }
+
+    /// Decoder pressure that counts as interference: the budget had to
+    /// refuse windows, and most of what the decoder worked on was not a
+    /// valid burst (a drone's bursts decode; several drones on one channel
+    /// fill the budget with valid ones). The decoder's busy percent.
+    pub fn pressure(&self) -> Option<u8> {
+        (self.dec_skipped > 0 && 2 * self.dec_valid < self.dec_full.max(1)).then_some(self.dec_busy_pct)
     }
 
     /// Length of the dwell's probe record, µs.

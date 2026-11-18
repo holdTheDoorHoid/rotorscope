@@ -784,7 +784,7 @@ fn reject(src: [u8; 6], r: Reject, rssi: i8) {
     critical_section::with(|cs| {
         let mut log = REJECTS.borrow_ref_mut(cs);
         if quiet {
-            let i = r.code() as usize - 1;
+            let i = r.index();
             log.totals[i] = log.totals[i].saturating_add(1);
         } else {
             log.record(src, r, rssi);

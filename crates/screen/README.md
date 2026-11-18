@@ -84,6 +84,8 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 | `health` | Per node: frames/s, RID frames found, drops, uptime. A dead node shows NOT RESPONDING. Below that: GPS, tracks, SD log and power. |
 | `health_aircraft` | A hub with an ADSBee: the ADS node in the list and status bar (four nodes pack closer), and an AIRCRAFT line: active count, how many are LOW (accent colour), the nearest by callsign with distance and altitude. Never an alert. |
 | `settings` | The settings page, mid-edit. |
+| `settings_actions`, `settings_snooze` | The Alarms row: "Mute 2 (2h)" for nuisance alarms; "Snooze 1 (5m)" when only a jammer (or another safety-critical alarm) sounds. |
+| `caveats_alarms`, `caveats_alarms_health` | The strip with alarms silenced (`MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES 1`) and the collection switches on (`ON: control IDs, control content`); the health page's ALARMS line. |
 | `status_warnings` | Status bar under stress: a 2D fix, every node dead, an SD error, 9% battery and no UTC. |
 | `status_gps_absent` | No GPS receiver ("NO GPS"), no SD card ("no SD"), on USB: the bench hub today. |
 | `status_manual_pos` | A typed position in use ("POS MAN"): distances work without a GPS fix. |

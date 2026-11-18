@@ -119,14 +119,13 @@ pub const SUSTAIN_ALT: u16 = 10;
 pub const JUMP_M: f32 = 300.0;
 /// ... and faster than this (m/s): a jump (one-shot, suspect).
 pub const JUMP_MPS: f32 = 150.0;
-/// GPS UTC moving against the hub's own clock by more than this (ms) plus [`TIME_DRIFT_PPM`]
-/// of the time since the reference: a time jump (one-shot, suspect). NMEA arrival jitter and
-/// a leap second stay well inside it.
-pub const TIME_JUMP_MS: i64 = 2_000;
-/// Allowed drift of the hub's crystal against GPS, parts per million.
-pub const TIME_DRIFT_PPM: i64 = 100;
-/// The long time reference is re-taken this often (ms) while all is well.
-pub const TIME_REBASE_MS: u64 = 3_600_000;
+/// GPS UTC off the hub's own clock (see [`crate::timeguard`]: 150 ms on the message, 5 ms on
+/// the PPS edge, plus the crystal's drift budget) for this many epochs in a row: a time jump
+/// (suspect). Two, so one late epoch (a main-loop stall) is not one.
+pub const SUSTAIN_TIME: u16 = 2;
+/// Epochs in a row with no spoofing check firing at all before GPS position and time are
+/// trusted (published, and anchor the hub's clock), at boot and after any doubt.
+pub const TRUST_EPOCHS: u16 = 10;
 /// u-blox NAV-CLOCK: drift changing by more than this (ns/s) between two 1 s epochs with a
 /// fix (corroborating only). A TCXO drifts by a few ns/s per second with temperature.
 pub const CLK_DRIFT_STEP_NS_S: i32 = 100;
@@ -243,9 +242,12 @@ pub enum Cause {
     ClockDriftStep,
     /// Spoofing 10: satellites with impossible numbers or positions. Level: count.
     ImpossibleSat,
+    /// Spoofing 11: GPS time before this firmware's build date, or before the latest time the
+    /// hub remembers trusting. Level: seconds before it (negative).
+    TimeFloor,
 }
 
-const N_CAUSES: usize = 14;
+const N_CAUSES: usize = 15;
 
 impl Cause {
     const ALL: [Cause; N_CAUSES] = [
@@ -263,6 +265,7 @@ impl Cause {
         Cause::ClockBiasStep,
         Cause::ClockDriftStep,
         Cause::ImpossibleSat,
+        Cause::TimeFloor,
     ];
 
     /// A spoofing check (else jamming).
@@ -292,6 +295,7 @@ impl Cause {
             Cause::ClockBiasStep => "clock_bias_step",
             Cause::ClockDriftStep => "clock_drift_step",
             Cause::ImpossibleSat => "impossible_sat",
+            Cause::TimeFloor => "time_floor",
         }
     }
 
@@ -308,6 +312,7 @@ impl Cause {
             Cause::ClockBiasStep => "ns",
             Cause::ClockDriftStep => "ns/s",
             Cause::ImpossibleSat => "satellites",
+            Cause::TimeFloor => "s",
         }
     }
 
@@ -318,7 +323,7 @@ impl Cause {
 
     /// Fires once and stays counted for [`LATCH_EPOCHS`].
     fn one_shot(self) -> bool {
-        matches!(self, Cause::PositionJump | Cause::TimeJump | Cause::ClockBiasStep | Cause::ClockDriftStep)
+        matches!(self, Cause::PositionJump | Cause::ClockBiasStep | Cause::ClockDriftStep)
     }
 
     fn sustain(self) -> u16 {
@@ -333,7 +338,8 @@ impl Cause {
             Cause::OffHome => SUSTAIN_HOME,
             Cause::AltitudeOffHome => SUSTAIN_ALT,
             Cause::ImpossibleSat => SUSTAIN_IMPOSSIBLE,
-            Cause::PositionJump | Cause::TimeJump | Cause::ClockBiasStep | Cause::ClockDriftStep => 1,
+            Cause::TimeJump => SUSTAIN_TIME,
+            Cause::PositionJump | Cause::ClockBiasStep | Cause::ClockDriftStep | Cause::TimeFloor => 1,
         }
     }
 }
@@ -384,6 +390,61 @@ pub struct Metrics {
     pub home_dalt_m: Option<f32>,
     /// Last GPS-UTC minus hub-clock change against the reference, ms.
     pub time_step_ms: Option<i64>,
+    /// Where home came from, when there is one.
+    pub home_origin: Option<HomeOrigin>,
+    /// A new home has been learned that disagrees with the current one: waiting for the
+    /// operator ([`Monitor::confirm_home`]).
+    pub home_pending: bool,
+    /// The hub's clock is disciplined by trusted GPS time (else it has none of its own yet).
+    pub time_disciplined: bool,
+    /// GPS time is before the build date or the remembered time ([`Cause::TimeFloor`]).
+    pub time_floor: bool,
+}
+
+/// Where the home the position checks use came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HomeOrigin {
+    /// Learned this boot (15 minutes of steady fixes).
+    Learned,
+    /// Learned on an earlier boot and kept on the card.
+    Remembered,
+    /// Placed by the operator (`home` line in the site file): the strongest prior.
+    Placed,
+}
+
+impl HomeOrigin {
+    /// Short name for logs and JSON.
+    pub fn name(self) -> &'static str {
+        match self {
+            HomeOrigin::Learned => "learned",
+            HomeOrigin::Remembered => "remembered",
+            HomeOrigin::Placed => "placed",
+        }
+    }
+}
+
+/// Something about home the hub should store or log ([`Monitor::take_home_event`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HomeEvent {
+    /// Home learned (there was none): store it.
+    Learned {
+        /// Latitude, degrees.
+        lat: f64,
+        /// Longitude, degrees.
+        lon: f64,
+        /// Height above the ellipsoid, m.
+        alt: Option<f64>,
+    },
+    /// A new place was learned that disagrees with home by `dist_m`: not adopted; the operator
+    /// must confirm it.
+    Pending {
+        /// Latitude, degrees.
+        lat: f64,
+        /// Longitude, degrees.
+        lon: f64,
+        /// Distance from the current home, m.
+        dist_m: f32,
+    },
 }
 
 /// The monitor's answer. Cheap to copy.
@@ -402,6 +463,9 @@ pub struct Status {
     /// No spoofing check fired at all in the last epoch, not even an unconfirmed one: this
     /// epoch's position and time are as trustworthy as GPS gets.
     pub clean: bool,
+    /// Clean, not in a spoofing state, and clean for [`TRUST_EPOCHS`] in a row: this epoch's
+    /// position and time may be published and anchor the hub's clock.
+    pub trusted: bool,
     /// The figures.
     pub metrics: Metrics,
 }
@@ -415,6 +479,7 @@ impl Status {
             cause: None,
             checks: 0,
             clean: true,
+            trusted: false,
             metrics: Metrics {
                 listed: 0,
                 tracked: 0,
@@ -432,6 +497,10 @@ impl Status {
                 home_dist_m: None,
                 home_dalt_m: None,
                 time_step_ms: None,
+                home_origin: None,
+                home_pending: false,
+                time_disciplined: false,
+                time_floor: false,
             },
         }
     }
@@ -482,6 +551,7 @@ impl Status {
             Cause::ClockBiasStep => write!(w, "receiver clock stepped {v} ns"),
             Cause::ClockDriftStep => write!(w, "receiver clock rate stepped {v} ns/s"),
             Cause::ImpossibleSat => write!(w, "{v} satellites with impossible numbers or positions"),
+            Cause::TimeFloor => write!(w, "GPS time {} s before the build date or the last time the hub trusted", -i64::from(v)),
         }?;
         if self.checks > 1 {
             write!(w, " (+{} more check{})", self.checks - 1, if self.checks > 2 { "s" } else { "" })?;
@@ -538,6 +608,7 @@ struct Home {
     lat: f64,
     lon: f64,
     alt: Option<f64>,
+    origin: HomeOrigin,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -549,7 +620,8 @@ struct Learn {
     alt_n: u32,
 }
 
-/// The integrity monitor. About 400 bytes; no allocation.
+/// The integrity monitor. About 820 bytes (WP-12 added about 200: the time guard, a waiting
+/// home, the trust run); no allocation.
 pub struct Monitor {
     inds: [Ind; N_CAUSES],
     status: Status,
@@ -566,9 +638,15 @@ pub struct Monitor {
     agc_base: Ema,
     home: Option<Home>,
     learn: Learn,
+    /// A learned place that disagrees with home, waiting for the operator.
+    pending: Option<Home>,
+    home_event: Option<HomeEvent>,
     last_fix: Option<(f64, f64, u64)>,
-    time_ref: Option<(i64, u64)>,
-    time_long: Option<(i64, u64)>,
+    time: crate::timeguard::TimeGuard,
+    /// Latest PPS edge, hub microseconds.
+    pps_us: Option<u64>,
+    /// Clean epochs in a row (not in a spoofing state).
+    clean_run: u16,
     last_sats_seq: u32,
     was_usable: bool,
 }
@@ -597,9 +675,12 @@ impl Monitor {
             agc_base: Ema { v: 0.0, n: 0 },
             home: None,
             learn: Learn { n: 0, lat: 0.0, lon: 0.0, alt: 0.0, alt_n: 0 },
+            pending: None,
+            home_event: None,
             last_fix: None,
-            time_ref: None,
-            time_long: None,
+            time: crate::timeguard::TimeGuard::new(0),
+            pps_us: None,
+            clean_run: 0,
             last_sats_seq: 0,
             was_usable: false,
         }
@@ -615,15 +696,91 @@ impl Monitor {
         self.home.map(|h| (h.lat, h.lon, h.alt))
     }
 
+    /// Where home came from, if there is one.
+    pub fn home_origin(&self) -> Option<HomeOrigin> {
+        self.home.map(|h| h.origin)
+    }
+
+    /// The learned place waiting for the operator, `(lat, lon, alt)`.
+    pub fn home_pending(&self) -> Option<(f64, f64, Option<f64>)> {
+        self.pending.map(|h| (h.lat, h.lon, h.alt))
+    }
+
     /// Forget home (the hub was moved on purpose) and learn it again. Clears the position
     /// and altitude checks at once.
     pub fn forget_home(&mut self) {
         self.home = None;
+        self.pending = None;
         self.learn = Learn::default();
+        self.clear_home_checks();
+    }
+
+    fn clear_home_checks(&mut self) {
         for c in [Cause::OffHome, Cause::AltitudeOffHome, Cause::PositionJump] {
             self.inds[c as usize] = Ind::default();
         }
         self.last_fix = None;
+    }
+
+    /// Use this home (remembered on the card, or placed in the site file). A placed home
+    /// replaces anything; a remembered one only fills an empty home (one learned this boot
+    /// wins: it is the more recent). Returns whether it was taken.
+    pub fn set_home(&mut self, lat: f64, lon: f64, alt: Option<f64>, origin: HomeOrigin) -> bool {
+        if origin != HomeOrigin::Placed && self.home.is_some() {
+            return false;
+        }
+        self.home = Some(Home { lat, lon, alt, origin });
+        self.pending = None;
+        self.learn = Learn::default();
+        self.clear_home_checks();
+        true
+    }
+
+    /// The operator confirms the learned place waiting since a [`HomeEvent::Pending`]: it
+    /// becomes home. Returns it, or `None` (nothing waiting, or home is placed: the site file
+    /// wins and must be edited).
+    pub fn confirm_home(&mut self) -> Option<(f64, f64, Option<f64>)> {
+        if self.home.is_some_and(|h| h.origin == HomeOrigin::Placed) {
+            return None;
+        }
+        let p = self.pending.take()?;
+        self.home = Some(Home { origin: HomeOrigin::Learned, ..p });
+        self.learn = Learn::default();
+        self.clear_home_checks();
+        Some((p.lat, p.lon, p.alt))
+    }
+
+    /// A home learned, or a new place waiting for the operator, since the last call.
+    pub fn take_home_event(&mut self) -> Option<HomeEvent> {
+        self.home_event.take()
+    }
+
+    /// The build-date floor for GPS time, Unix ms.
+    pub fn set_time_floor(&mut self, floor_ms: i64) {
+        self.time.set_floor(floor_ms);
+    }
+
+    /// The latest time the hub remembers trusting (from its card), Unix ms.
+    pub fn set_remembered_time(&mut self, utc_ms: Option<i64>) {
+        self.time.set_remembered(utc_ms);
+    }
+
+    /// The time guard (references, floor, remembered time).
+    pub fn time_guard(&self) -> &crate::timeguard::TimeGuard {
+        &self.time
+    }
+
+    /// The operator accepts GPS time as it now is: the hub's clock references and the
+    /// remembered time are dropped and re-learned (the build-date floor stays).
+    pub fn accept_time(&mut self) {
+        self.time.reset();
+        self.inds[Cause::TimeJump as usize] = Ind::default();
+        self.inds[Cause::TimeFloor as usize] = Ind::default();
+    }
+
+    /// The latest PPS edge, hub microseconds (call before feeding each epoch's bytes).
+    pub fn set_pps(&mut self, edge_us: Option<u64>) {
+        self.pps_us = edge_us;
     }
 
     /// Feed every parser event. Receiver indicators are kept for the next epoch; a
@@ -806,17 +963,20 @@ impl Monitor {
 
         // ---- time ----
         let utc_trusted = fix.utc.filter(|_| fix.source == Source::Nmea || fix.utc_fully_resolved);
-        let offset = utc_trusted.map(|u| u.unix_ms() - now_ms as i64);
-        if let Some(off) = offset {
-            for r in [self.time_ref, self.time_long].into_iter().flatten() {
-                let (ref_off, at) = r;
-                let step = off - ref_off;
-                let allowed = TIME_JUMP_MS + now_ms.saturating_sub(at) as i64 * TIME_DRIFT_PPM / 1_000_000;
-                m.time_step_ms = Some(m.time_step_ms.map_or(step, |s: i64| if s.abs() >= step.abs() { s } else { step }));
-                if step.abs() > allowed {
-                    let v = step.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-                    raw[Cause::TimeJump as usize] = (Level::Suspect, v);
-                }
+        let at_us = now_ms.saturating_mul(1000);
+        // The PPS edge of this epoch's second: under a second before the epoch was read.
+        let pps_us = self.pps_us.filter(|&e| e <= at_us && at_us - e < 1_000_000);
+        let sample = utc_trusted.map(|u| crate::timeguard::Sample { utc_ms: u.unix_ms(), at_us, pps_us });
+        if let Some(s) = sample {
+            let c = self.time.check(&s);
+            m.time_step_ms = Some(c.step_ms);
+            if c.jump {
+                let v = c.step_ms.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                raw[Cause::TimeJump as usize] = (Level::Suspect, v);
+            }
+            if let Some(before_s) = self.time.floor_check(s.utc_ms) {
+                m.time_floor = true;
+                raw[Cause::TimeFloor as usize] = (Level::Suspect, before_s.max(i64::from(i32::MIN)) as i32);
             }
         }
 
@@ -887,6 +1047,17 @@ impl Monitor {
             (None, 0)
         };
 
+        // ---- trust ----
+        if clean && !state.is_spoofing() {
+            self.clean_run = self.clean_run.saturating_add(1);
+        } else {
+            self.clean_run = 0;
+        }
+        let trusted = self.clean_run >= TRUST_EPOCHS;
+        if trusted && let Some(s) = sample {
+            self.time.commit(&s);
+        }
+
         // ---- learn (only when all is well) ----
         if state == State::Ok && clean {
             if let Some(st) = st
@@ -902,21 +1073,28 @@ impl Monitor {
             {
                 self.agc_base.add(f32::from(b.agc_cnt));
             }
-            if usable {
+            if usable && self.home.is_none() {
                 self.learn_home(fix, h_acc, alt);
             }
-            if let Some(off) = offset {
-                self.time_ref = Some((off, now_ms));
-                if self.time_long.is_none_or(|(_, at)| now_ms.saturating_sub(at) >= TIME_REBASE_MS) {
-                    self.time_long = Some((off, now_ms));
-                }
-            }
+        }
+        // With a home: keep learning where the hub stands while the only complaint is the
+        // position itself, so a real move can be confirmed by the operator (never adopted
+        // on its own).
+        let only_position = Cause::ALL
+            .iter()
+            .filter(|c| c.is_spoofing() && !matches!(c, Cause::OffHome | Cause::AltitudeOffHome | Cause::PositionJump))
+            .all(|&c| raw[c as usize].0 == Level::None && self.inds[c as usize].level == Level::None);
+        if usable && self.home.is_some() && only_position {
+            self.learn_home(fix, h_acc, alt);
         }
         if usable && (clean || self.last_fix.is_none()) {
             self.last_fix = Some((fix.lat, fix.lon, now_ms));
         }
         m.home = self.home.is_some();
         m.home_progress = self.learn.n;
+        m.home_origin = self.home.map(|h| h.origin);
+        m.home_pending = self.pending.is_some();
+        m.time_disciplined = self.time.disciplined();
 
         self.status = Status {
             state,
@@ -925,6 +1103,7 @@ impl Monitor {
             cause,
             checks,
             clean,
+            trusted,
             metrics: m,
         };
         (state != from).then_some(Change { from, status: self.status })
@@ -959,9 +1138,6 @@ impl Monitor {
     }
 
     fn learn_home(&mut self, fix: &Fix, h_acc: Option<f32>, alt: Option<f32>) {
-        if self.home.is_some() {
-            return;
-        }
         let acc = h_acc.unwrap_or(10.0);
         if acc > HOME_MAX_ACC_M {
             return;
@@ -985,7 +1161,28 @@ impl Monitor {
         if l.n >= HOME_LEARN_EPOCHS {
             let n = l.n as f64;
             let alt = (l.alt_n * 2 >= l.n).then(|| l.alt / f64::from(l.alt_n));
-            self.home = Some(Home { lat: l.lat / n, lon: l.lon / n, alt });
+            let new = Home { lat: l.lat / n, lon: l.lon / n, alt, origin: HomeOrigin::Learned };
+            match self.home {
+                None => {
+                    self.home = Some(new);
+                    self.home_event = Some(HomeEvent::Learned { lat: new.lat, lon: new.lon, alt });
+                }
+                Some(h) => {
+                    // A second opinion on where the hub stands. Agreeing with home: nothing
+                    // to do. Disagreeing by as much as the off-home check's suspect level:
+                    // never adopted silently; the operator decides.
+                    let d = dist_m(h.lat, h.lon, new.lat, new.lon);
+                    if d > HOME_SUSPECT_M.max(4.0 * acc) {
+                        if self.pending.is_none() {
+                            self.home_event = Some(HomeEvent::Pending { lat: new.lat, lon: new.lon, dist_m: d });
+                        }
+                        self.pending = Some(new);
+                    } else {
+                        self.pending = None;
+                    }
+                    self.learn = Learn::default();
+                }
+            }
         }
     }
 }

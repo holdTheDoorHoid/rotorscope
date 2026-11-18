@@ -104,6 +104,10 @@ pub enum TimeSource {
     Gps = 2,
     /// GPS time anchored to the PPS edge (sub-millisecond at the edge).
     GpsPps = 3,
+    /// No UTC: the receiver gives a time but the hub does not trust it (GPS
+    /// spoofing suspected with no earlier trusted time to hold, or a time
+    /// before the build date or the remembered time, WP-12). UTC field is 0.
+    Untrusted = 4,
 }
 
 impl TimeSource {
@@ -113,6 +117,7 @@ impl TimeSource {
             1 => Self::FreeRunning,
             2 => Self::Gps,
             3 => Self::GpsPps,
+            4 => Self::Untrusted,
             _ => return None,
         })
     }
@@ -122,6 +127,7 @@ impl TimeSource {
             Self::FreeRunning => "free_running",
             Self::Gps => "gps",
             Self::GpsPps => "gps_pps",
+            Self::Untrusted => "untrusted",
         }
     }
 }
@@ -248,6 +254,14 @@ pub enum EventCode {
     /// Text: the file name, then ` (cut short: <why>)` if it was ended
     /// early.
     SoundClip = 24,
+    /// Two transmitters claim one drone ID (tracker `claims`): a rival
+    /// claim formed its own path while the original continued, or a text
+    /// field alternated. Not an accusation of either. Data: drone track id
+    /// (u32 LE), what is disputed (1: bit 0 position, 1 Self-ID, 2 operator
+    /// ID, 3 a second ID), the other claim's source (1: 0 Remote ID, 1
+    /// DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none).
+    /// Text: the ID, how far apart, and that neither is verified.
+    IdDisputed = 25,
 }
 
 impl EventCode {
@@ -278,6 +292,7 @@ impl EventCode {
             22 => AircraftConflict,
             23 => Sound,
             24 => SoundClip,
+            25 => IdDisputed,
             _ => return None,
         })
     }
@@ -308,6 +323,7 @@ impl EventCode {
             AircraftConflict => "aircraft_conflict",
             Sound => "sound",
             SoundClip => "sound_clip",
+            IdDisputed => "id_disputed",
         }
     }
 }

@@ -5,7 +5,7 @@ detector: `DroneDeauth`, `DroneTakeover`, `DroneNetClone`, `ControlContested`,
 `MavlinkAttack` and `AreaGnss` (`crates/link`, `ThreatKind`). Each has its own
 section here. They are threats like the Wi-Fi attacks and jamming the hub already
 lists: kept in the hub's threat table, logged as evidence, shown on screen (the
-"ATTACK" box in the status bar, muteable from Settings > Alarms) and in the JSON
+"ATTACK" box in the status bar, muteable for two hours from Settings > Alarms, one alarm at a time, see docs/SITE.md) and in the JSON
 feed as `{"t":"threat",...}` lines. Area GPS interference also has its own
 AREA box and health-page line.
 
@@ -180,6 +180,41 @@ visits: up to 8 links, 12 observations each, kept 10 minutes.
 finding is repeated every 5 s for 60 s after its last evidence (so the hub keeps it
 "active" between scan visits), then stops.
 
+**History first (WP-11a).** These protocols carry no authentication, so a
+forger can send syncs and SiK trailers that say anything. Before WP-11a
+about six ExpressLRS syncs from **one** radio, alternating between two nonce
+phases on a made-up UID, raised "link hijack" with no drone anywhere. Now a
+link's contradictions count only once the link has been heard as **one**
+consistent transmitter for `HISTORY_US` = 5 s before a second appeared (the
+link is then *seasoned*, for as long as it is kept): ExpressLRS and mLRS, an
+established group spanning 5 s with no other established group of its class
+starting within those 5 s; SiK, window ends agreeing (8 pairs or more) for
+5 s. The forced re-sync rule needs the same history of the old transmitter.
+A real hijack happens to a link that was already flying; a link contested
+from its first packet is counted (`unseasoned` on the `ctrl_pressure` line)
+and not reported.
+
+**New alarms are budgeted.** The first report of each contested link costs
+a token: two at once, then one every 10 s for the whole node
+(`NEW_FINDING_BURST`, `NEW_FINDING_REFILL_US`). A finding that waits is
+counted (`held`) and goes out when a token comes, unless it lapsed (60 s
+without new evidence) by then. Further reports of a link already reported
+are not limited beyond the usual once a second.
+
+**A full table.** 8 links are kept. A link with one observation is on
+probation and makes room first; a link holding evidence (two or more
+observations, SiK window counts, a finding) only after 120 s without a
+packet (`QUIET_EVICT_US`); otherwise the newcomer is turned away (counted).
+Before, the least recently heard link without a finding made room, so a
+spray of syncs on made-up UIDs between the victim's packets emptied its
+phase ring. A link's very first packet can still be pushed out by a spray
+of 7 or more new UIDs before its second packet.
+
+node-lr prints these counters on USB when they change (at most every 5 s):
+`{"t":"ctrl_pressure","links":[dropped, dropped holding evidence, turned
+away],"unseasoned":N,"held":N,"mav":[...]}` (the `mav` part is under
+"Hostile MAVLink telemetry").
+
 ### What the hub receives
 
 A `Frame::Threat` (`ThreatSighting`) with `kind = ControlContested`:
@@ -197,8 +232,11 @@ A `Frame::Threat` (`ThreatSighting`) with `kind = ControlContested`:
 
 On the hub: one table entry per node, link handle, identifier and system
 (`Threat::same`). A mute rule made from it (`Mute::for_threat`) keys on the
-identifier and the band (900 MHz or 2.4 GHz), not the handle; with ids off that
-silences contested-link alarms in that band from any link. The JSON threat line
+identifier and the band (900 MHz or 2.4 GHz), not the handle; with ids off
+(identifier all zero) it also keys on the node, the handle and the system, so
+it silences that one link, for two hours (WP-11b; before, it silenced every
+contested link in the band). A site-file mute for good must name the
+identifier, so needs ids on (docs/SITE.md). The JSON threat line
 adds `"ctrl_system"`, `"transmitters"` and `"rule"`; `src`/`target` appear only
 with `show_link_ids`. The console and evidence text read, for example,
 `Second controller on a link (node 3, 915.5 MHz, ExpressLRS, 2 transmitters,
@@ -208,7 +246,8 @@ interleaved timing, 4 events, -61 dBm)`.
 
 - **Same binding phrase / default NET ID.** Two pilots sharing an ExpressLRS
   phrase with Model Match off, or two SiK pairs left on NET ID 25 near each other.
-  Real second transmitters; reported. Mute (by band, or by identifier with ids on).
+  Real second transmitters; reported. Mute that link on the hub (2 h), or for good
+  in the site file by identifier and band (needs ids on).
 - **One GCS radio carrying two ground-station programs with the same system and
   component id** (MAVProxy forwarding QGroundControl and Mission Planner both as
   255/190): two sequence counts on one radio. Rare; mute.
@@ -218,6 +257,9 @@ interleaved timing, 4 events, -61 dBm)`.
 - **Forced re-sync** fires on a power cycle combined with a settings change, or a
   restart at a very different signal level. It does not use jamming evidence (the
   hub has jamming threats from other nodes; tying the two together is not done).
+- **Missed (WP-11a)**: a hijack of a link the node first hears during the
+  attack (no 5 s of history: counted as `unseasoned`, not reported); more new
+  contested links than the budget lets out (they wait, and lapse after 60 s).
 - **Missed**: an intruder in perfect timing step with nothing contradictory to
   say (see "What it cannot do"); a lucky mLRS phase; anything on a channel or rate
   the node is not listening to at that moment (it is a scanner); SiK links whose
@@ -337,15 +379,46 @@ Code: `crates/wifiwatch/src/drones.rs` (`DroneLinks`, `Clones`), tests in
   way, an accepted association, or the station a deauth is about) is its
   controller. Data frames keep it fresh: a phone flying a drone exchanges
   commands and video many times a second.
-- **Restarts.** A beacon's timestamp is the drone's radio uptime. When it
-  says the drone started more than 2 s later than before, the drone has
-  restarted: its controller and any newcomer are forgotten, so the phone
-  rejoining (even with a new random address) is not a takeover.
+- **Restarts.** A beacon's timestamp is the drone's radio uptime. A beacon
+  that puts the drone's start more than 2 s away from its clock is a
+  **second timeline**. It is believed (the drone restarted: its controller
+  and any newcomer are forgotten, so the phone rejoining, even with a new
+  random address, is not a takeover) only after 3 beacons on it over at
+  least 1 s, none on the old clock since, and the old clock silent for 1 s
+  before it appeared (a restart takes seconds) or for 10 s since
+  (`REBOOT_BEACONS`, `REBOOT_CONFIRM_MS`, `REBOOT_SILENCE_MS`,
+  `REBOOT_ALONE_MS`). Before WP-11a one beacon with the drone's address and
+  a timestamp of 1 was enough, and wiped the deauth count and the learned
+  controller: interleaved between deauths it hid `DroneDeauth`, and the
+  attacker's first frame after it became "the controller", so the pilot's
+  phone reconnecting was reported as the takeover's newcomer. Both clocks
+  heard in turn is a `DroneNetClone` (rule 4 below). A beacon with
+  timestamp 0 is ignored once the drone's clock is known.
+- **A full table.** 4 drone networks are followed (3 before WP-11a; each
+  slot is about 190 bytes). A newcomer heard once may only take the slot of
+  a network holding no evidence (no controller heard in the last 30 s, no
+  recent deauths, no newcomer, no second clock) or not heard for 15 s.
+  Otherwise it waits (4 remembered); once heard 3 times over 1 s it may
+  displace a network holding evidence: one that has been "busy" (a deauth
+  attack or takeover being reported) for more than 60 s first, then one not
+  busy; a locally administered address first, then the network heard least
+  since it was learned. A network busy for less than 60 s is never
+  displaced, and displacing one holding evidence costs a token (one per
+  30 s). Before, forged drone networks kept "taken" (a data frame from one
+  made-up station and two authentication requests from another, every few
+  seconds) held every slot for as long as they were refreshed, and the real
+  drone was never followed; a spray of single beacons from made-up drone
+  networks threw out a real one holding two deauths of three. The stats
+  line's `dnet` is `[learned, displaced, made to wait]`.
 
 ### `DroneDeauth`
 
-**Rule:** 3 fresh (not retried) deauth or disassoc frames that involve a
-drone's network (its address as BSSID, sender or receiver) within 5 s.
+**Rule:** 3 deauth or disassoc frames that involve a drone's network (its
+address as BSSID, sender or receiver) within 5 s, a retransmission (Retry
+bit **and** the transmitter's previous sequence number) counted once. Until
+WP-11a every Retry-bit frame was skipped; a receiver only discards a retry
+that repeats the last frame it took, so an injector setting the bit on
+frames with new numbers still disconnected the phone, unseen.
 Reported at most once a second per drone while frames keep coming; over
 when none has come for 5 s.
 
@@ -360,7 +433,8 @@ visits the drone's channel 12% of the time hears dozens.
 
 **Ignored:** deauths with reason 6 or 7 ("frame from a station that is not
 joined") sent by a drone whose beacon timestamp says it started less than a
-minute ago. That is a drone back from a battery swap telling the phone it
+minute ago (or whose restart is pending: a new clock after the old one fell
+silent, not interrupted by it). That is a drone back from a battery swap telling the phone it
 does not know it any more. Protected (802.11w) frames are counted (an
 attempt, even if a protected client would ignore it) and flagged.
 
@@ -418,12 +492,21 @@ phone that only started joining) is not enough.
    (a fixed number of hex digits, for example DJI's `Spark-` plus 6) from an
    address outside that maker's registered blocks, 3 frames. No original
    needs to be heard (the drone may be out of the node's range).
+4. **Same address, two clocks** (WP-11a, from the drone-link watch). The
+   drone's own address, name and channel, but beacons whose timestamps put
+   the drone's start somewhere else (more than 2 s away), heard in turn with
+   the drone's own beacons (2 on the second clock, the drone's own clock
+   heard between them, within 10 s). A copy made with the drone's address
+   on its own channel keeps a clock of its own; so does a forged
+   "restart" beacon. `source` = `target` = the drone's address, `count` =
+   beacons on the second clock, detail bits 3 and 5.
 
 `source` = the copy, `target` = the original (all zero if never heard),
 `count` = frames from the copy, `ssid` = the name. `detail`: bit 0 the copy
 is open; bit 1 its security differs from the original's; bit 2 its address
 is not the maker's; bit 3 it uses the original's own address; bit 4 it says
-it is on another channel; bits 24-31 the maker. Reported at most once a
+it is on another channel; bit 5 (`CLONE_TWO_CLOCKS`, WP-11a) it keeps a
+beacon clock of its own on the original's address; bits 24-31 the maker. Reported at most once a
 second per copy.
 
 **Not flagged:**
@@ -475,7 +558,7 @@ random 16-character name and random addresses; the Remote ID side
 ### False alarms to expect
 
 - **Testing your own drone** with a deauther: it is a real `DroneDeauth`.
-  Mute it at the hub (the mute is per drone).
+  Mute it at the hub (the mute is per drone, for two hours).
 - **Two phones** joined to one drone on purpose (a second viewer): reported
   as `DroneTakeover` with bit 6. Toy drones normally accept one phone.
 - **A pilot's phone that changes its random address** while flying (rare;
@@ -505,8 +588,9 @@ random 16-character name and random addresses; the Remote ID side
 - A drone on a channel outside the node's plan is heard only on scouting
   visits (105 ms every 3 s per channel): beacons will be learned, but a
   short attack can be missed.
-- A copy using the drone's own address on the drone's own channel cannot be
-  told apart over the air without timing analysis (not done).
+- A copy using the drone's own address on the drone's own channel is caught
+  only by its beacon clock (rule 4): one that copies the drone's timestamps
+  (adding the right offset to each) cannot be told apart.
 
 ### Sources
 
@@ -543,6 +627,44 @@ random 16-character name and random addresses; the Remote ID side
 5. **Cost:** with a drone known, `drop` and `qmax` must stay low during a
    video stream (the callback takes a lock per data frame then).
 
+## What a forged frame can make these alarms say
+
+Like the Wi-Fi alarms (docs/WIFI-ATTACKS.md, same heading), every address
+in these alarms is what a frame claimed (WP-11b):
+
+- **Drone Wi-Fi hijacking** (`drone_deauth`, `drone_takeover`,
+  `drone_net_clone`): the "attacker" address and the drone network's name
+  are whatever the frames carry. An owner's own phone reconnecting can be
+  made to look like a takeover by someone who sends a deauth in its name.
+- **Contested control link** (`control_contested`): two transmitters were
+  heard; which one is the owner is not known, and the link identifier (with
+  `control ids on`) is copied from the air.
+- **Hostile MAVLink** (`mavlink_attack`): the system and component IDs are
+  set by the sender; "from the ground station 255/190" means the frame
+  said so.
+- **GPS interference in the area** (`area_gnss`): built from drones'
+  broadcast positions and aircraft ADS-B, both unauthenticated. The rules
+  below make an attacker need several independent transmitters, but the
+  alarm still says what receivers *claim*.
+
+The threat JSON line marks shown addresses and names with `"claimed":true`;
+evidence and mute texts say `claimed`. A mute names one source or victim
+and ends (docs/SITE.md), so framing an innocent address costs the attacker
+that address, not every alarm of the kind.
+
+### Cheapest forgery, and what still gets past (after WP-11a)
+
+Raising an alarm on purpose (left) and hiding a real attack (right), per
+kind, for someone in radio range who has read this source.
+
+| Alarm | Cheapest forgery that raises it | Known evasions that remain |
+|---|---|---|
+| `drone_deauth` | Beacons of a made-up drone network (a maker's address block and name pattern, 10 a second) plus 3 deauths at it within 5 s. With a real drone in range: 3 deauths naming it. | Deauths on a channel the node is not on (it hops; a short burst on a visited channel can be missed). Protected (802.11w) deauths are counted but a protected phone ignores them anyway. A drone the node never learned (out of range of its beacons, or turned away from a full table: see the next row's evasions). |
+| `drone_takeover` | A made-up drone network as above, a data frame from one made-up station, then two authentication requests from another within 10 s. The alarm names whatever addresses were used. | Kick the pilot with one deauth and join more than 5 s later, with no data frames heard (`chip::OPEN_LINKS` off). Make the node learn the attacker as the controller first: join before the pilot ever sends a frame the node hears, then the pilot's reconnect is the "newcomer". Keep the table full: 4 forged drone networks kept "busy" stop a newly arriving drone from being followed for up to a minute, and then cost one displacement per 30 s; forged networks with long history (beaconing for minutes, controller traffic) rank like a real drone. Forge a restart (beacons on a new, later clock) while the real drone's own beacons are not heard: it is believed after 3 beacons over 1 s if the drone was unheard for 1 s before (jamming it, or the node off its channel), or after 10 s of the forged clock alone; that wipes the deauth count and the controller as before. |
+| `drone_net_clone` | Two beacons of a drone's name from a second address while the drone is heard; or 3 beacons of a precise maker name (`Spark-` + 6 hex) from a non-maker address with no drone around; or (WP-11a) 2 beacons with a drone's own address and a timestamp off its clock, between its own. | A copy on the drone's own address and channel that also copies its beacon timestamps. A copy heard before the original swaps the roles in the alarm. |
+| `control_contested` | A made-up ExpressLRS UID: syncs from one transmitter for 5 s (history), then a second nonce phase alternating with the first, three syncs each (about a dozen CRC-valid syncs over 6 s). At most 2 such new alarms at once, then one per 10 s, per node. | Attack a link the node first hears during the attack (no history: counted, not reported). Follow the victim's nonce and timing exactly (no contradiction to see). Attack while the node scans other bands. Keep the node's 8 link slots full of links holding evidence (two packets each, refreshed every 2 minutes) so the victim's link is never admitted; its first packet can also be pushed out by 7 new UIDs before its second. |
+| `mavlink_attack` | One checksum-valid frame of a one-message kind raises a **suspicion** (no alert); two different frames (or one frame with a claimed system ID that has 5 s of history, e.g. the real vehicle's ID 1) raise the alarm, with any system and component IDs the forger chooses. New alarms per link: 3 at once, then one per 10 s. | Encrypted links and signatures are not readable. A payload no check covers (see the kinds table). An attack sent while the new-alarm budget is spent by forgeries is reported late (it waits for a token) or, if it is one frame, may never be. A frame split across packets on a new stream while every stream slot holds half a frame for 5 s is seen only if whole in one packet. A ground station stricter than the C library about lengths is not modelled (kind 19 still flags the frame). |
+
 ## GPS interference in the area
 
 Status 2026-11-17: built and host-tested (`crates/tracker/src/area_gnss.rs`,
@@ -570,8 +692,13 @@ not its own:
 - **Drones.** When a spoofer is on, every drone in range is pulled the same
   way at the same moment, so their reported positions all jump together.
   One drone jumping on its own is a broken or lying drone (the spoofing
-  checks in docs/SPOOFING.md already flag it); two jumping together is the
-  area.
+  checks in docs/SPOOFING.md already flag it); several jumping together is
+  the area. But a drone's position is only what its broadcast claims, and
+  anyone can broadcast (WP-11b): only drones the hub has confirmed, whose
+  own transmitter moved and stayed moved, count; and they must be
+  separate transmitters, heard differently. On their own it takes three
+  of them; two are enough when aircraft jump too; one when the hub's own
+  GPS agrees.
 - **The hub's own GPS.** It has its own jamming and spoofing checks
   (docs/GNSS-INTEGRITY.md). When it agrees with the aircraft or the drones,
   the alarm is more certain. It is never needed: the other receivers are
@@ -635,15 +762,37 @@ counted (they show in the JSON) but never raise the alarm on their own.
 
 **Spoofing** is raised when, within **10 s**:
 
-1. **2 or more drones** jumped "alike"; or
-2. **3 or more aircraft** jumped alike; or
-3. **1 drone** jumped while the hub's own GPS says spoofing (two
-   independent receivers moved at once).
+1. **3 or more independent drones** made path jumps "alike"
+   (`DRONE_MIN_JUMPERS_ALONE`); or
+2. **2 or more independent drones** did, and at least one aircraft jumped
+   in the same window (`DRONE_MIN_JUMPERS`); or
+3. **3 or more aircraft** jumped alike; or
+4. **1 drone** made a path jump while the hub's own GPS says spoofing (two
+   receivers moved at once, and the attacker cannot reach the hub's own
+   receiver with forged Remote ID frames).
 
-A **drone jump** is the drone spoofing check's own position-jump test
-(`spoof.rs`, `Check::PositionJump`: further than any drone flies between
-two reports) firing on that track, with the position at least 60 m from
-where it was a second earlier. An **aircraft jump** is a position more than
+A **drone path jump** (WP-11b, `claims.rs` `Claims::path_jumps`) is a
+jump by *one consistent transmitter*: on a **confirmed** track (heard again
+a second after it was first heard, docs/SPOOFING.md "Floods"), a report
+further off the track's path than any drone flies is held as a rival claim
+(docs/SPOOFING.md "Impersonation and disputes"); it becomes a path jump
+when the moved claim comes from the track's own transmitter address, forms
+its own path (3 reports over 2 s), the old path has not reported since,
+and nothing about the track is disputed (or, for a DJI record with no
+address, when the track follows the moved claim after 10 s). The position
+must be at least 60 m from where the track was shown. Not counted, ever:
+jumps of **unconfirmed** tracks (one cheap transmitter can make those by
+the hundred), **rival claims** while the old path is still reported (an
+impersonator), and **disputed** tracks.
+
+Two drone jumpers are **independent** when they have different
+transmitter addresses, were heard differently (different sets of
+receiving nodes, or latest signal strengths at least **6 dB** apart), and
+were first heard at least **2 s** apart. One radio sending several
+identities fails at least one of these unless its operator varies the
+power per identity and staggers their start, and then still needs three
+identities, all confirmed and kept alive, to raise the alarm with nothing
+to back it. An **aircraft jump** is a position more than
 **2 km** off where the aircraft's previous position, speed and track put it
 (positions at most 30 s apart). Two jumps are **alike** when their
 displacements differ by at most 25 % of the larger one or a floor (75 m
@@ -654,9 +803,10 @@ puts them all on the same spot.
 
 **Confidence** (the alarm's `level`, 0-100): jamming from aircraft 50,
 +10 per dropped aircraft beyond 2 (to 80); from one aircraft plus the hub
-45; +20 when the hub's own GPS agrees. Spoofing from 2 drones 60 (+10 each
-beyond, to 90), 3 aircraft 60, one drone plus the hub 50; +15 when drones
-and aircraft both moved; +20 when the hub agrees. Capped at 95.
+45; +20 when the hub's own GPS agrees. Spoofing from 3 independent drones
+(or 2 with aircraft) 60 (+10 each beyond, to 90), 3 aircraft 60, one drone
+plus the hub 50; +15 when drones and aircraft both moved; +20 when the hub
+agrees. Capped at 95.
 
 **How long.** An alarm stays raised for **60 s** after its evidence was
 last seen, so a short episode stays on the screen and in the log.
@@ -720,9 +870,21 @@ through its NIC or its lost position).
 - **Busy airport, few drops**: with many aircraft, two drops may stay under
   the 10 % share; real jamming hits every aircraft in range, so this
   mostly costs sensitivity for a very small, low-power jammer.
-- **Drone track merges** can raise a drone's jump counter without a real
-  jump; the 60 m minimum and the need for a second drone keep that from
-  becoming an alarm.
+- **Drone track merges** add up the path-jump counts; the 60 m minimum and
+  the need for independent drones keep that from becoming an alarm.
+- **A hub that just booted** first hears every drone already flying within
+  the same second or two, so they are not "first heard apart" and a real
+  spoof in the first minutes after boot needs the hub's own GPS or aircraft
+  to agree.
+- **Fewer than three drones and no aircraft**: a real spoofer moving one
+  or two drones is not raised as area spoofing unless the hub's own GPS
+  sees it too (each drone still gets its own position-jump flag).
+- **What an attacker can still do** (WP-11b): with three radios (or one
+  radio, per-identity power control and patience: three identities first
+  heard seconds apart, each confirmed, each heard 6 dB apart, then moved
+  together and kept moving), raise AREA FAKE at confidence 60. The alarm
+  says drones *claim* to have jumped together; nothing in Remote ID can
+  prove it.
 - **A single aircraft whose ADS-B position is wrong** (spoofed alone, or
   broadcasting a false position) cannot be seen: that needs
   multilateration (timing one message at several receivers), which one
@@ -853,6 +1015,62 @@ is transmitted; the nodes stay receive-only.
 | 16 | signing downgrade | unsigned commands from a system that sent signed frames on the same link in the last 10 s | 2 within 30 s | CVE-2020-10283 |
 | 17 | injected frames | two interleaved sequence-number streams for one system/component | 10 switches between two live streams within 10 s, 5+ frames each | injection (SiKW00F) |
 | 18 | replayed signatures | a signed frame whose timestamp is not newer than one already seen on the same signing stream | 2 within 60 s | MAVLink signing spec |
+| 19 | odd length (WP-11a) | a checksum-valid frame of a known message with a payload length no conforming sender uses: longer than the message (either version), a MAVLink 1 frame not exactly its length, an empty MAVLink 2 payload. The frame is also analysed as a lenient parser decodes it (below) | one message | defensive |
+
+**Lengths (WP-11a).** The MAVLink C library built without
+`MAVLINK_CHECK_MESSAGE_LENGTH` (its default) and pymavlink accept a frame of
+any payload length whose checksum (with the message's CRC_EXTRA) is right,
+and decode it by copying at most the message's length and zero-filling the
+rest. mavwatch rejected such frames as not frames at all, so an attack
+payload in an over-long or short frame reached the ground station unseen.
+Now every length parses, the payload is analysed cut or zero-filled the way
+those parsers do, and the odd length is itself kind 19. **Not verified per
+ground station**: QGroundControl, Mission Planner, MAVSDK and MAVROS were
+not tested; some may be stricter (then kind 19 flags a frame they drop, which
+is still a hostile frame). A message that gains extension fields after the
+table was built (mavlink/mavlink commit 2a8f8cf) would make a newer
+autopilot's frames read as over-long: update the table.
+
+**One frame is a suspicion (WP-11a).** Every field of a MAVLink frame is
+the sender's claim and a checksum is not a signature, so one checksum-valid
+frame used to raise a full alarm with whatever system and component the
+forger wrote. Now the one-message kinds (all but 6, 11, 16-18) are reported
+with `detail` bit 24 set (`mavwatch::analyse::DETAIL_SUSPECT`,
+`link::MAVLINK_SUSPECT`; the kind stays in the low byte) unless backed:
+
+- the same finding from the same claimed sender again, in another frame,
+  within 60 s (`CONFIRM_HITS` = 2; a byte-identical resend is one frame);
+- another finding on the same link, from another frame, within 60 s;
+- or the claimed system has a history on the link: 5 frames over 5 s
+  before (`HISTORY_FRAMES`, `HISTORY_MS`). A real vehicle or ground station
+  sends the bait once, after its telemetry; that is a full alarm at once.
+
+A suspicion that becomes backed is reported again at once, without the bit.
+The hub lists a suspicion ("Possible hostile drone telemetry (one frame)"),
+keeps it in the same table entry as the backed alarm, and does not alert on
+it; a backed alarm is never demoted.
+
+**New alarms are budgeted (WP-11a).** A new alarm (a kind from a claimed
+sender not reported before) costs a token: per link 3 at once then one every
+10 s, and for the whole scan 6 at once then one every 5 s
+(`NEW_ALARM_BURST`, `NEW_ALARM_REFILL_MS`, `NEW_ALARM_BURST_ALL`,
+`NEW_ALARM_REFILL_ALL_MS`). Before, a forger inventing system IDs got one
+alarm per frame. Held-back alarms are counted.
+
+**Full tables (WP-11a).** The scan's tables are small (12 senders, 2
+parameter-name sets, 16 reports, 4 reassembly streams). A new entry is on
+probation until it holds evidence (a sender heard twice, a name set of 8
+names, a stream holding half a frame); a newcomer takes a probation slot,
+else one holding evidence that has been quiet (30 s senders, 60 s name sets,
+5 s streams), else none: the frame is still analysed without that table's
+state (a stream's packet as whole frames only) and the refusal counted.
+Report entries are made only for an alarm that got a token. Before, a spray
+of made-up system IDs or stream keys between the victim's frames reset the
+victim's sequence tracks, name count or half frame before any threshold.
+Counters: node-wifi's stats `mavp` = `[alarms held back, entries holding
+evidence given up, newcomers turned away, streams turned away]`; node-lr's
+`ctrl_pressure` line `mav` = `[alarms held back, entries holding evidence
+given up, newcomers turned away, streams turned away, streams replaced]`.
 
 "Commands" for kind 16: SET_MODE, PARAM_SET, MISSION_COUNT, MANUAL_CONTROL,
 RC_CHANNELS_OVERRIDE, MISSION_ITEM_INT, COMMAND_INT, COMMAND_LONG, FILE_TRANSFER_PROTOCOL,
@@ -904,7 +1122,8 @@ Every number is a constant in `crates/mavwatch/src/analyse.rs`, documented there
 - **Link IDs.** With `control ids on`, each SiK NET ID / mLRS sync word gets its own stream and
   the integrity kinds run. The ID stays in the node as a stream key; it is not sent with the
   alarm.
-- **What reaches the hub**: a `Frame::Threat` (`MavlinkAttack`, `detail` = kind, `source` =
+- **What reaches the hub**: a `Frame::Threat` (`MavlinkAttack`, `detail` = kind, plus bit 24
+  for a suspicion (see "One frame is a suspicion"), `source` =
   `00:00:00:00:<sysid>:<compid>` of the sender, `target` the same for the addressee when the
   message names one, `ssid` = the excerpt, `freq`/`level` = the packet's frequency and signal),
   then a `Frame::MavlinkEvidence` with the MAVLink frame itself (up to 255 bytes), which the hub

@@ -517,6 +517,43 @@ fn sightings_count_and_rate_limit() {
 }
 
 #[test]
+fn sightings_report_a_full_table_in_turns() {
+    // Injected wfb-ng frames with many link ids fill the table. A node with
+    // room for 4 hub frames must not be handed 16 at once (the old
+    // `take_due` did, every 250 ms); taken 4 at a time, every link is still
+    // reported, the longest-waiting first.
+    let mut s: Sightings<16> = Sightings::new();
+    for id in 0..16u32 {
+        let l = classify(&wfb(0x08, 0x10_0000 + id, 0, 1, 100)).unwrap();
+        s.record(&l, 161, -60, 1);
+    }
+    let mut first = Vec::new();
+    assert_eq!(s.take_due_max(10, 1_000_000, 4, |x| first.push(x.link.id)), 4);
+    let mut rest = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(s.take_due_max(10, 1_000_000, 4, |x| rest.push(x.link.id)), 4);
+    }
+    assert_eq!(s.take_due_max(10, 1_000_000, 4, |_| panic!("all reported")), 0);
+    let mut all: Vec<_> = first.iter().chain(&rest).copied().collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 16);
+    // A second later, new frames on every link: those reported first are
+    // due first again, so nobody waits more than its turn.
+    for id in 0..16u32 {
+        let l = classify(&wfb(0x08, 0x10_0000 + id, 0, 1, 100)).unwrap();
+        s.record(&l, 161, -60, 1_000_100);
+    }
+    let mut again = Vec::new();
+    s.take_due_max(1_000_100, 1_000_000, 4, |x| again.push(x.link.id));
+    assert_eq!(again, first);
+    // Unbounded, the old call: everything due at once.
+    let mut n = 0;
+    s.take_due(1_000_100, 1_000_000, |_| n += 1);
+    assert_eq!(n, 12);
+}
+
+#[test]
 fn sightings_keep_streams_apart_and_evict_the_quietest() {
     let mut s: Sightings<2> = Sightings::new();
     s.record(&link(0), 161, -60, 0);

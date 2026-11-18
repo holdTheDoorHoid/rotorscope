@@ -258,7 +258,13 @@ pub struct Logger {
     /// none / loaded / bad / error, for the status line.
     pub flarm_key_state: &'static str,
     /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
-    site: Option<tracker::site::SiteState>,
+    site: Option<(tracker::site::SiteState, crate::site::FileFacts)>,
+    /// `ROTORSCP/GPSMEM.TXT` (remembered home and time) as read at mount,
+    /// until the main loop takes it; `Some(None)`: no file.
+    gps_mem: Option<Option<crate::gps::Memory>>,
+    /// Its next contents, written by `record` when the card is free (WP-12).
+    gps_mem_pending: Option<heapless::String<128>>,
+    pub gps_mem_writes: u32,
 }
 
 /// Audio clips of sound contacts, under the log folder.
@@ -270,6 +276,15 @@ const CLIP_GAP_MS: u64 = 20;
 /// Node positions and muted alarms (`tracker::site`). The hub only ever
 /// appends to it, so hand edits are never lost.
 const SITE_NAME: &str = "SITE.TXT";
+
+/// The GPS memory (WP-12): home and the latest trusted time, rewritten whole
+/// (a few lines) when home changes and at most once an hour for the time.
+/// Loop-back bench builds keep their own, so a bench run never moves the
+/// real one.
+#[cfg(not(feature = "gpsloop"))]
+const GPS_MEM_NAME: &str = "GPSMEM.TXT";
+#[cfg(feature = "gpsloop")]
+const GPS_MEM_NAME: &str = "GPSLOOP.TXT";
 
 
 /// The owner's O4 DroneID private key (64 hex digits) in the log folder.
@@ -331,6 +346,9 @@ impl Logger {
             flarm_keys: None,
             flarm_key_state: "none",
             site: None,
+            gps_mem: None,
+            gps_mem_pending: None,
+            gps_mem_writes: 0,
         }
     }
 
@@ -345,15 +363,61 @@ impl Logger {
         self.flarm_keys.take()
     }
 
+    /// The GPS memory read at mount, once (`Some(None)`: none on the card).
+    pub fn take_gps_mem(&mut self) -> Option<Option<crate::gps::Memory>> {
+        self.gps_mem.take()
+    }
+
+    /// Replace the GPS memory file with `text` when the card is next free.
+    pub fn write_gps_mem(&mut self, text: heapless::String<128>) {
+        self.gps_mem_pending = Some(text);
+    }
+
+    fn load_gps_mem(&mut self) {
+        let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
+        let f = match vm.open_file_in_dir(dir, GPS_MEM_NAME, Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(e) => {
+                if !matches!(e, embedded_sdmmc::Error::NotFound) {
+                    println!("hub-p4: {DIR}/{GPS_MEM_NAME} open failed: {e:?}");
+                }
+                self.gps_mem = Some(None);
+                return;
+            }
+        };
+        let mut buf = [0u8; 256];
+        let n = vm.read(f, &mut buf).unwrap_or(0);
+        let _ = vm.close_file(f);
+        self.gps_mem = Some(Some(crate::gps::Memory::parse(&buf[..n])));
+    }
+
+    fn save_gps_mem(&mut self) -> bool {
+        let Some(text) = self.gps_mem_pending.take() else { return false };
+        let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return false };
+        let ok = match vm.open_file_in_dir(dir, GPS_MEM_NAME, Mode::ReadWriteCreateOrTruncate) {
+            Ok(f) => {
+                let w = vm.write(f, text.as_bytes()).is_ok();
+                vm.close_file(f).is_ok() && w
+            }
+            Err(_) => false,
+        };
+        if ok {
+            self.gps_mem_writes += 1;
+        } else {
+            println!("hub-p4: {DIR}/{GPS_MEM_NAME} write failed; home and time not remembered this time");
+        }
+        true
+    }
+
     /// The site file read at mount, once.
-    pub fn take_site(&mut self) -> Option<tracker::site::SiteState> {
+    pub fn take_site(&mut self) -> Option<(tracker::site::SiteState, crate::site::FileFacts)> {
         self.site.take()
     }
 
     /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (it only
     /// grows, so it can be any length; later lines win).
     fn load_site(&mut self) {
-        use tracker::site::{Lines, SiteState, parse_line, read_into};
+        use tracker::site::{Lines, SiteState, finish_into, read_into};
         let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
         let f = match vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadOnly) {
             Ok(f) => f,
@@ -370,25 +434,27 @@ impl Logger {
         let refused = |n: u32, e: &str| println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
         let mut buf = [0u8; 256];
         let mut total = 0usize;
+        // The whole file is hashed as read, for the evidence log (WP-11b).
+        let mut sha = evidence::Sha256Stream::new();
         loop {
             match vm.read(f, &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(k) => {
                     total += k;
+                    sha.update(&buf[..k]);
                     read_into(&mut st, &mut lines, &buf[..k], refused);
                 }
             }
         }
         let _ = vm.close_file(f);
-        lines.finish(|n, r| match r.and_then(parse_line) {
-            Ok(l) => st.apply(l),
-            Err(e) => {
-                st.ignored += 1;
-                refused(n, e);
-            }
-        });
+        finish_into(&mut st, &mut lines, refused);
         println!("hub-p4: {DIR}/{SITE_NAME} read ({total} bytes, {} lines)", lines.number);
-        self.site = Some(st);
+        let facts = crate::site::FileFacts {
+            sha256: sha.finish(),
+            bytes: total.min(u32::MAX as usize) as u32,
+            lines: lines.number,
+        };
+        self.site = Some((st, facts));
     }
 
     /// Append `text` (whole lines) to `ROTORSCP/SITE.TXT`, creating it.
@@ -771,6 +837,7 @@ impl Logger {
                 self.load_o4_key();
                 self.load_flarm_keys();
                 self.load_site();
+                self.load_gps_mem();
             }
             Err(e) => {
                 if let embedded_sdmmc::Error::FormatError(_) = e {
@@ -1166,6 +1233,11 @@ impl Logger {
         if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
             self.busy_skips += 1;
             return "busy";
+        }
+        // The GPS memory (rare: home changes, the time hourly), one small
+        // file write in place of this pass's other work.
+        if self.save_gps_mem() {
+            return "gps_mem";
         }
         // Recording without an evidence file (its folder or file failed at
         // mount): try again now and then rather than leave it stopped.

@@ -172,6 +172,11 @@ pub struct DroneView {
     pub ua: UaKind,
     /// Not heard for a while (tracker: 60 s). Drawn dimmed and hollow.
     pub stale: bool,
+    /// Heard only once so far, or for under a second (tracker
+    /// `probation`): not announced yet, and the cheapest thing to forge.
+    /// Listed after every confirmed drone, its number shown as `?`, drawn
+    /// dim and hollow on the radar.
+    pub unconfirmed: bool,
     /// Hub uptime when first and last heard.
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
@@ -199,6 +204,19 @@ pub struct DroneView {
     pub radios: Radios,
     /// Latest RSSI per radio, dBm, indexed by [`Radio::index`].
     pub rssi: [Option<i8>; 6],
+    /// Two transmitters claim this ID (tracker `claims`): "!" before its
+    /// ID in the list, DISPUTED on its detail page, both positions on the
+    /// radar when it is focused. Never a verdict on which is real.
+    pub disputed: bool,
+    /// The other claimed position, from the unit, while it is heard (the
+    /// shown one, `drone`, is the established claim). `None` without an
+    /// own fix or when the dispute is over text only.
+    pub other_claim: Option<Polar>,
+    /// Metres between the two claimed positions (needs no own fix).
+    pub claims_apart_m: Option<f32>,
+    /// An authentication message was heard. The hub checks no signature:
+    /// shown as "auth msg, not checked", never as verified.
+    pub auth_seen: bool,
     /// Model name from DJI DroneID ("Mavic 3"); empty when unknown.
     pub model: String<20>,
     /// Self-ID description (free text from the operator).
@@ -237,6 +255,13 @@ pub struct Gps {
     pub sats: u8,
     /// Signs that the hub's own GPS is being jammed or faked.
     pub integrity: GpsIntegrity,
+    /// GPS is not believed and nothing trusted is held: the hub has no
+    /// trusted position (`untrusted_pos`) / time (`untrusted_time`) (WP-12).
+    pub untrusted_pos: bool,
+    pub untrusted_time: bool,
+    /// The hub found a new place to stand that disagrees with its home and
+    /// waits for the operator to confirm it (Settings, "New home").
+    pub home_pending: bool,
 }
 
 /// The hub's verdict on its own GPS (`gnss::integrity` on the P4). While
@@ -395,6 +420,10 @@ pub struct Caveats {
     /// The microphone's audio clips (P4 hub): people nearby must be able
     /// to see that sound may be, or is being, recorded.
     pub audio: AudioClips,
+    /// Alarms silenced right now (WP-11b): shown for as long as they are.
+    pub silenced: Silenced,
+    /// The legal / privacy switches the site file turned on.
+    pub switches: Switches,
 }
 
 /// Audio clips, as far as the screen is concerned (docs/ACOUSTIC.md).
@@ -427,6 +456,52 @@ impl AudioClips {
         }
         Some(s)
     }
+}
+
+/// Mute rules in force (tracker `threats::MuteCounts`), for the strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Silenced {
+    /// The operator's timed mutes, and seconds until the first one ends.
+    pub muted: u8,
+    pub mute_left_s: u32,
+    /// Snoozes of safety-critical alarms, and seconds until the first ends.
+    pub snoozed: u8,
+    pub snooze_left_s: u32,
+    /// The site file's mutes for good.
+    pub site: u8,
+}
+
+impl Silenced {
+    /// Rules the "Unmute" action drops (the operator's; not the site file's).
+    pub fn operator(&self) -> u8 {
+        self.muted.saturating_add(self.snoozed)
+    }
+}
+
+/// Switches that change what the unit collects (site file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Switches {
+    /// `control ids on`: control-link identifiers are read.
+    pub control_ids: bool,
+    /// `control content on`: control content is decoded and kept.
+    pub control_content: bool,
+    /// `audio clips on`: raw sound is kept and clips may be saved (WP-07);
+    /// the same setting as [`AudioClips::on`].
+    pub audio_clips: bool,
+}
+
+/// `1h59`, `4m05`, `12s`: time left, short.
+fn left(s: u32) -> String<8> {
+    use core::fmt::Write;
+    let mut b = String::new();
+    let _ = if s >= 3600 {
+        write!(b, "{}h{:02}", s / 3600, s % 3600 / 60)
+    } else if s >= 60 {
+        write!(b, "{}m{:02}", s / 60, s % 60)
+    } else {
+        write!(b, "{s}s")
+    };
+    b
 }
 
 /// The evidence signing key's class, as far as the screen is concerned.
@@ -472,12 +547,27 @@ impl EvidenceStopWhy {
     }
 }
 
+/// Most caveat lines the strip draws at once (11 px each: 44 of 240 rows).
+pub const MAX_CAVEAT_LINES: usize = 4;
+/// Characters of one caveat line the panel shows (6x10 font, 320 px).
+pub const CAVEAT_COLUMNS: usize = 52;
+
 impl Caveats {
     /// The bottom strip's lines, top to bottom (`None`: no line). The first
     /// is the evidence state (only while evidence is not being written),
-    /// the second audio clips (while on), the third the build marks (key
-    /// class, bench build, open link).
-    pub fn lines(&self) -> [Option<String<64>>; 3] {
+    /// The bottom strip's lines by slot, top to bottom (`None`: no line):
+    /// 0 the evidence state (only while evidence is not being written),
+    /// 1 the alarms silenced (`MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES 3`),
+    /// 2 audio clips (while on, or recording), 3 the collection switches
+    /// that are on, 4 the build marks (key class, bench build, open link).
+    /// Not all of them always fit: the strip draws [`Caveats::shown`].
+    pub fn lines(&self) -> [Option<String<64>>; 5] {
+        self.lines_with(true)
+    }
+
+    /// [`Caveats::lines`], with or without `audio clips` in the switches
+    /// line (the audio line says the same thing louder).
+    fn lines_with(&self, audio_switch: bool) -> [Option<String<64>>; 5] {
         use core::fmt::Write;
         let ev = self.evidence.map(|e| {
             let mut s = String::new();
@@ -505,7 +595,88 @@ impl Caveats {
         if self.link_open {
             add("OPEN LINK");
         }
-        [ev, self.audio.line(), (!marks.is_empty()).then_some(marks)]
+        let q = &self.silenced;
+        let mut sil: String<64> = String::new();
+        let mut put = |t: core::fmt::Arguments<'_>| {
+            if !sil.is_empty() {
+                let _ = sil.push_str("  ");
+            }
+            let _ = sil.write_fmt(t);
+        };
+        if q.muted > 0 {
+            put(format_args!("MUTED {} {}", q.muted, left(q.mute_left_s)));
+        }
+        if q.snoozed > 0 {
+            put(format_args!("SNOOZED {} {}", q.snoozed, left(q.snooze_left_s)));
+        }
+        if q.site > 0 {
+            put(format_args!("SITE MUTES {}", q.site));
+        }
+        let w = &self.switches;
+        let mut sw: String<64> = String::new();
+        let mut on = |t: &str| {
+            let _ = sw.push_str(if sw.is_empty() { "ON: " } else { ", " });
+            let _ = sw.push_str(t);
+        };
+        if w.control_ids {
+            on("control IDs");
+        }
+        if w.control_content {
+            on("control content");
+        }
+        if w.audio_clips && audio_switch {
+            on("audio clips");
+        }
+        [
+            ev,
+            (!sil.is_empty()).then_some(sil),
+            self.audio.line(),
+            (!sw.is_empty()).then_some(sw),
+            (!marks.is_empty()).then_some(marks),
+        ]
+    }
+
+    /// What the strip actually draws, top to bottom: at most
+    /// [`MAX_CAVEAT_LINES`] (the strip covers the bottom of every page and
+    /// must not grow without limit). When more want to show, first the
+    /// switches line stops repeating `audio clips` (the audio line already
+    /// says so), then the least safety-relevant lines go: the switches
+    /// (the operator's own site-file choice, also in the evidence log),
+    /// then the build marks, then audio; the evidence state and silenced
+    /// alarms are never dropped. The last drawn line then ends `+N` for
+    /// the N lines not drawn.
+    pub fn shown(&self) -> Vec<String<64>, MAX_CAVEAT_LINES> {
+        let mut l = self.lines();
+        let count = |l: &[Option<String<64>>; 5]| l.iter().flatten().count();
+        if count(&l) > MAX_CAVEAT_LINES && l[2].is_some() {
+            l = self.lines_with(false);
+        }
+        // Drop order: switches, build marks, audio.
+        let mut hidden = 0;
+        for slot in [3, 4, 2] {
+            if count(&l) <= MAX_CAVEAT_LINES {
+                break;
+            }
+            if l[slot].take().is_some() {
+                hidden += 1;
+            }
+        }
+        let mut out: Vec<String<64>, MAX_CAVEAT_LINES> = Vec::new();
+        for s in l.into_iter().flatten() {
+            let _ = out.push(s);
+        }
+        if hidden > 0 {
+            if let Some(last) = out.last_mut() {
+                use core::fmt::Write;
+                let mut tag: String<8> = String::new();
+                let _ = write!(tag, "  +{hidden}");
+                // Keep the tag on the panel's 52 columns.
+                let keep = last.len().min(CAVEAT_COLUMNS - tag.len());
+                last.truncate(keep);
+                let _ = last.push_str(&tag);
+            }
+        }
+        out
     }
 }
 
@@ -691,6 +862,9 @@ pub struct UiState {
     pub drones: Vec<DroneView, MAX_DRONES>,
     /// Drones the tracker holds, which may exceed `drones.len()`.
     pub total_drones: u16,
+    /// Of those, unconfirmed (tracker `probation`). The big drone count
+    /// leaves them out and says "+N unconfirmed" instead.
+    pub total_unconfirmed: u16,
     pub hub_uptime_s: u32,
     /// `None` when the hub has no ADS-B receiver built in (no line shown).
     pub aircraft: Option<AircraftSummary>,
@@ -759,8 +933,20 @@ pub struct Threats {
     /// A node is jammed or deaf: the detector may be missing drones, so an
     /// empty list must not read as "all clear".
     pub jammed: bool,
-    /// Alarms the operator muted (still logged).
+    /// Alarms sounding but silenced (muted, snoozed or muted by the site
+    /// file; still logged).
     pub muted: u8,
+    /// Of `active`: nuisance alarms the operator has seen, which the
+    /// "Alarms" row mutes (tracker `Tracker::alarm_counts`).
+    pub mutable: u8,
+    /// Of `active`: safety-critical alarms seen (jamming, blinded, area
+    /// GPS, ID flood, forged traffic), which the row only snoozes, and only
+    /// when there is nothing to mute.
+    pub snoozable: u8,
+    /// A flood of forged drone identities (tracker `probation`): new IDs a
+    /// second while its alarm is raised, 0 otherwise. Unconfirmed drones in
+    /// the list are then mostly fakes.
+    pub flood_per_s: u16,
 }
 
 impl UiState {
@@ -774,9 +960,17 @@ impl UiState {
         self.drones.iter().filter(|d| !d.stale).count() + hidden
     }
 
-    /// Drone indices in screen order. With a position: active drones by
-    /// distance (those with no position yet after them), then stale ones.
-    /// Without: active drones newest first, then stale ones by last heard.
+    /// As [`Self::active_count`], confirmed drones only (unconfirmed ones
+    /// are never stale: the tracker drops them first).
+    pub fn confirmed_active_count(&self) -> usize {
+        self.active_count().saturating_sub(usize::from(self.total_unconfirmed))
+    }
+
+    /// Drone indices in screen order: confirmed before unconfirmed (WP-09:
+    /// a forged drone can claim any distance, so standing comes first), and
+    /// within each, with a position: active drones by distance (those with
+    /// no position yet after them), then stale ones. Without: active drones
+    /// newest first, then stale ones by last heard.
     ///
     /// "Newest first" rather than "last heard first" because every active
     /// drone is heard about once a second: ordering by last-heard would
@@ -796,7 +990,7 @@ impl UiState {
             } else {
                 d.first_seen_ms
             };
-            (d.stale, dist, u64::MAX - recency, d.key)
+            (d.stale, d.unconfirmed, dist, u64::MAX - recency, d.key)
         };
         idx.sort_unstable_by_key(key);
         idx

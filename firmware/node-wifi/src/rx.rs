@@ -131,27 +131,57 @@ pub fn init() {
     }
 }
 
+/// The most bytes of a received frame anything here reads: what one driver
+/// receive buffer holds after its receive-control header
+/// (`wifiwatch::mac::RX_BUFFER`). esp-radio builds the frame slice from the
+/// hardware's `sig_len` alone; a wrong one is clamped to this
+/// ([`CLAMPED`]) before any byte is read.
+pub const RX_MAX: usize = wifiwatch::mac::RX_BUFFER - core::mem::size_of::<sys::wifi_pkt_rx_ctrl_t>();
+/// Frames whose `sig_len` claimed more than [`RX_MAX`] bytes.
+pub static CLAMPED: AtomicU32 = AtomicU32::new(0);
+
+/// What the driver says a received frame is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RxKind {
+    Mgmt,
+    Data,
+    Other,
+}
+
 /// The promiscuous receive callback. Keep it this small.
 pub fn on_frame(pkt: PromiscuousPkt<'_>) {
-    let data = pkt.data;
-    if pkt.frame_type == sys::wifi_promiscuous_pkt_type_t_WIFI_PKT_DATA {
-        on_data(&pkt);
-        return;
+    if pkt.data.len() > RX_MAX {
+        CLAMPED.fetch_add(1, Relaxed);
     }
-    // Frame control byte 0: version (bits 0-1) and type (bits 2-3) both zero
-    // means a management frame. Checked here as well as by the filter.
-    if pkt.frame_type != sys::wifi_promiscuous_pkt_type_t_WIFI_PKT_MGMT
-        || data.len() < 24
-        || data[0] & 0x0F != 0
-    {
-        OTHER.fetch_add(1, Relaxed);
-        return;
-    }
-    MGMT_SEEN.fetch_add(1, Relaxed);
+    let data = wifiwatch::mac::rx_frame(pkt.data, RX_MAX);
+    let kind = match pkt.frame_type {
+        sys::wifi_promiscuous_pkt_type_t_WIFI_PKT_MGMT => RxKind::Mgmt,
+        sys::wifi_promiscuous_pkt_type_t_WIFI_PKT_DATA => RxKind::Data,
+        _ => RxKind::Other,
+    };
+    let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
     let channel = match pkt.rx_cntl.channel {
         0 => TUNED_CHANNEL.load(Relaxed),
         c => c.min(255) as u8,
     };
+    receive(kind, data, rssi, channel);
+}
+
+/// One received frame (`data`: frame control onwards, FCS slot included,
+/// at most [`RX_MAX`] bytes), from the callback or, in a `floodtest` bench
+/// build, from the injector (docs/BENCH.md "Frame flood").
+pub fn receive(kind: RxKind, data: &[u8], rssi: i8, channel: u8) {
+    if kind == RxKind::Data {
+        on_data(data, rssi, channel);
+        return;
+    }
+    // Frame control byte 0: version (bits 0-1) and type (bits 2-3) both zero
+    // means a management frame. Checked here as well as by the filter.
+    if kind != RxKind::Mgmt || data.len() < 24 || data[0] & 0x0F != 0 {
+        OTHER.fetch_add(1, Relaxed);
+        return;
+    }
+    MGMT_SEEN.fetch_add(1, Relaxed);
 
     // Header-only subtypes (and association responses): count them here,
     // never queue them.
@@ -159,7 +189,6 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
     let drone_link = wifiwatch::mac::drone_link(subtype);
     if wifiwatch::mac::header_only(subtype) || drone_link {
         let mpdu = &data[..data.len().saturating_sub(crate::chip::FCS_LEN)];
-        let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
         let now = embassy_time::Instant::now().as_micros();
         let drones = drone_link && DRONES_ON.load(Relaxed);
         critical_section::with(|cs| {
@@ -187,7 +216,7 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
     slot.data[..n].copy_from_slice(&data[..n]);
     slot.copied = n as u16;
     slot.raw_len = data.len().min(u16::MAX as usize) as u16;
-    slot.rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
+    slot.rssi = rssi;
     slot.channel = channel;
     slot.up_us = embassy_time::Instant::now().as_micros();
     // Cannot fail: FULL has room for every index.
@@ -195,26 +224,21 @@ pub fn on_frame(pkt: PromiscuousPkt<'_>) {
 }
 
 /// A data frame: classify it in place and count a hit. No slot, no queue.
-fn on_data(pkt: &PromiscuousPkt<'_>) {
+fn on_data(data: &[u8], rssi: i8, channel: u8) {
     DATA_SEEN.fetch_add(1, Relaxed);
-    let rssi = pkt.rx_cntl.rssi.clamp(-128, 127) as i8;
-    let channel = match pkt.rx_cntl.channel {
-        0 => TUNED_CHANNEL.load(Relaxed),
-        c => c.min(255) as u8,
-    };
     let now = embassy_time::Instant::now().as_micros();
     // Who is talking to a known drone (addresses only; FCS harmless).
     if DRONES_ON.load(Relaxed) {
-        critical_section::with(|cs| DRONES.borrow_ref_mut(cs).data(pkt.data, rssi, channel, now));
+        critical_section::with(|cs| DRONES.borrow_ref_mut(cs).data(data, rssi, channel, now));
     }
     // MAVLink over open Wi-Fi: one atomic load while the hub's `control
     // content` opt-in is off (the default).
     if MAV_ON.load(Relaxed) {
-        on_mavlink(pkt.data, rssi, channel, now);
+        on_mavlink(data, rssi, channel, now);
     }
     // `data` ends with the FCS slot, which `classify` expects. Its first test
     // is the frame-control byte, so ordinary (QoS) data costs one compare.
-    let Some(link) = openlink::classify(pkt.data) else { return };
+    let Some(link) = openlink::classify(data) else { return };
     OPEN_SEEN.fetch_add(1, Relaxed);
     critical_section::with(|cs| SIGHTINGS.borrow_ref_mut(cs).record(&link, channel, rssi, now));
 }
@@ -288,7 +312,7 @@ pub static MAV_DROPPED: AtomicU32 = AtomicU32::new(0);
 /// The opt-in from the hub (`role`). Prints a line when it changes.
 pub fn set_mavlink(on: bool) {
     if MAV_ON.swap(on, Relaxed) != on {
-        esp_println::println!(r#"{{"t":"mavlink","on":{on}}}"#);
+        crate::usb::usb_line!(r#"{{"t":"mavlink","on":{on}}}"#);
     }
 }
 
@@ -306,6 +330,7 @@ fn on_mavlink(data: &[u8], rssi: i8, channel: u8, now: u64) {
     };
     // SAFETY: we hold `idx`, so no one else can reach this slot.
     let slot = unsafe { &mut *MAV_POOL.0[usize::from(idx)].get() };
+    // `d.payload` lies within `data`, already clamped to RX_MAX.
     let n = d.payload.len().min(MAV_BYTES);
     slot.data[..n].copy_from_slice(&d.payload[..n]);
     slot.len = n as u16;

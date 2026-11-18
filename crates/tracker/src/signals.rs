@@ -452,9 +452,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 self.ingest_status(node, *role, *can, *plan, now_ms)
             }
             Frame::Hello { role, .. } => self.ingest_hello(node, *role, now_ms),
-            // Stats feed the hub's deaf-node check (a jammed node).
-            Frame::Stats { uptime_us, frames_seen, .. } => {
-                let _ = self.ingest_node_stats(node, *uptime_us, *frames_seen, now_ms);
+            // Stats feed the hub's deaf-node check (a jammed node) and the
+            // node-shed check (a node discarding a flood).
+            Frame::Stats { uptime_us, frames_seen, dropped, .. } => {
+                let _ = self.ingest_node_stats(node, *uptime_us, *frames_seen, *dropped, now_ms);
             }
             Frame::Via { .. } => {}
             // Protocol 10: wired-bus bookkeeping, consumed by the bus master.

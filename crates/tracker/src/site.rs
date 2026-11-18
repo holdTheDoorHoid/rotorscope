@@ -14,10 +14,10 @@
 //! node 10:bd:a3:ce:bd:18 clear
 //! node all here          # (console/screen only) every node at the hub
 //!
-//! # Muted alarms (kind names as in the hub's "threat" lines):
+//! # Alarms muted for good: a venue's known false alarm, one specific
+//! # thing per line (kind names as in the hub's "threat" lines):
 //! mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi
 //! mute deauth target=ff:ff:ff:ff:ff:ff
-//! mute jam_broadband mhz=2437.0
 //! unmute all
 //!
 //! # Drone control links (LR2021 nodes; both off unless a line says on):
@@ -31,15 +31,29 @@
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
 //! last.
+//!
+//! **Mutes are specific and never for safety alarms** (WP-11b). A `mute`
+//! line must name every field of its kind's key
+//! ([`crate::threats::key_of`]): a network copy its transmitter and name,
+//! a flood its victim, a contested control link its identifier and band.
+//! A line that names less (`mute deauth`, `mute evil_twin ssid=..`), and
+//! any line for a kind that can mean the hub is missing drones (jamming,
+//! `blinded`, `area_gnss`, `id_flood`, `forged_link`: those can only be
+//! snoozed on the hub, for five minutes), is **not honoured**: refused with
+//! a reason starting [`crate::threats::NOT_HONOURED`], counted in
+//! [`SiteState::mutes_dropped`]. Older hubs saved exactly such catch-all
+//! lines from the screen's "Mute" action; they are dropped this way on
+//! load. The operator's mutes from the screen are timed and kept in RAM
+//! only: they are not written here.
 
 use core::fmt::Write;
 
 use link::ThreatKind;
 
-use crate::threats::Mute;
+use crate::threats::{Mute, NOT_HONOURED};
 
 /// Every kind, in `ThreatKind` order, for reading names back.
-const KINDS: [ThreatKind; 22] = [
+const KINDS: [ThreatKind; 23] = [
     ThreatKind::Deauth,
     ThreatKind::Disassoc,
     ThreatKind::BeaconFlood,
@@ -62,6 +76,7 @@ const KINDS: [ThreatKind; 22] = [
     ThreatKind::ControlContested,
     ThreatKind::MavlinkAttack,
     ThreatKind::AreaGnss,
+    ThreatKind::IdFlood,
 ];
 
 /// A threat kind from its `name()` (`"evil_twin"`).
@@ -86,6 +101,12 @@ pub enum SiteLine {
     /// saves a clip when a sound contact alerts (PLAN.md Phase 15). Off
     /// when never said (owner decision 2026-11-18).
     AudioClips(bool),
+    /// `home LAT LON [HEIGHT]`: where the hub itself stands, placed by the operator (WP-12).
+    /// The strongest prior for the GPS spoofing checks: it replaces the home the hub learns.
+    /// Height in metres above the WGS-84 ellipsoid, optional.
+    Home { lat: f64, lon: f64, alt: Option<f64> },
+    /// `home clear`: no placed home (the hub learns one again).
+    HomeClear,
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -188,6 +209,28 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::AudioClips(on));
     }
+    if word.eq_ignore_ascii_case("home") {
+        let a = it.next().ok_or("home needs a position (lat lon [height]) or clear")?;
+        if a.eq_ignore_ascii_case("clear") {
+            return if it.next().is_none() { Ok(SiteLine::HomeClear) } else { Err("say: home clear") };
+        }
+        let b = it.next().ok_or("home needs a longitude after the latitude")?;
+        let (lat, lon) = lat_lon(a, b)?;
+        let alt = match it.next() {
+            None => None,
+            Some(h) => {
+                let h: f64 = h.parse().map_err(|_| "home height is not a number (metres)")?;
+                if !(-500.0..=9_000.0).contains(&h) {
+                    return Err("home height out of range (metres above the ellipsoid)");
+                }
+                Some(h)
+            }
+        };
+        if it.next().is_some() {
+            return Err("say: home LAT LON [HEIGHT]");
+        }
+        return Ok(SiteLine::Home { lat, lon, alt });
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -197,7 +240,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
     if word.eq_ignore_ascii_case("mute") {
         let (kind, mut rest) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let kind = kind_from_name(kind).ok_or("unknown alarm kind (see the hub's threat lines)")?;
-        let mut m = Mute { kind, ssid: heapless::String::new(), source: [0; 6], target: [0; 6], freq: 0 };
+        let mut m = Mute::empty(kind);
         loop {
             rest = rest.trim_start();
             if rest.is_empty() {
@@ -220,9 +263,11 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
                 _ => return Err("mute options: source= target= mhz= ssid="),
             }
         }
+        // For good, so specific and not a safety-critical kind.
+        m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, mute, unmute, control, audio)")
+    Err("unknown line (node, home, mute, unmute, control, audio)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -242,8 +287,19 @@ pub struct SiteState {
     /// `audio clips on|off` as the file last set it (`None`: never
     /// mentioned, which means off: [`SiteState::audio_clips_on`]).
     pub audio_clips: Option<bool>,
+    /// The hub's own placed position (`home` lines), `(lat, lon, height)`.
+    pub home: Option<(f64, f64, Option<f64>)>,
     pub used: u32,
     pub ignored: u32,
+    /// `mute` lines not honoured: too broad, or for a kind that can only be
+    /// snoozed (also counted in `ignored`).
+    pub mutes_dropped: u32,
+}
+
+/// Whether a refusal from [`parse_line`] is a `mute` line that was
+/// understood but not honoured (too broad, or a safety-critical kind).
+pub fn is_dropped_mute(e: SiteError) -> bool {
+    e.starts_with(NOT_HONOURED)
 }
 
 impl SiteState {
@@ -282,6 +338,8 @@ impl SiteState {
             SiteLine::Control { what: ControlSetting::Ids, on } => self.control_ids = Some(on),
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
             SiteLine::AudioClips(on) => self.audio_clips = Some(on),
+            SiteLine::Home { lat, lon, alt } => self.home = Some((lat, lon, alt)),
+            SiteLine::HomeClear => self.home = None,
             SiteLine::AllNodesHere => {
                 self.ignored += 1;
                 return;
@@ -338,13 +396,28 @@ impl Lines {
 /// Read a whole site file fed in pieces into a [`SiteState`]; `refused`
 /// hears each line that was not understood.
 pub fn read_into(state: &mut SiteState, lines: &mut Lines, bytes: &[u8], mut refused: impl FnMut(u32, SiteError)) {
-    lines.feed(bytes, |n, r| match r.and_then(parse_line) {
-        Ok(l) => state.apply(l),
-        Err(e) => {
-            state.ignored += 1;
-            refused(n, e);
+    lines.feed(bytes, |n, r| state.line(n, r, &mut refused));
+}
+
+/// The last line of a file fed with [`read_into`] (one without a final
+/// newline).
+pub fn finish_into(state: &mut SiteState, lines: &mut Lines, mut refused: impl FnMut(u32, SiteError)) {
+    lines.finish(|n, r| state.line(n, r, &mut refused));
+}
+
+impl SiteState {
+    fn line(&mut self, n: u32, r: Result<&str, SiteError>, refused: &mut impl FnMut(u32, SiteError)) {
+        match r.and_then(parse_line) {
+            Ok(l) => self.apply(l),
+            Err(e) => {
+                self.ignored += 1;
+                if is_dropped_mute(e) {
+                    self.mutes_dropped += 1;
+                }
+                refused(n, e);
+            }
         }
-    });
+    }
 }
 
 struct MacText<'a>(&'a [u8; 6]);
@@ -384,6 +457,190 @@ pub fn write_node<W: Write>(w: &mut W, mac: &[u8; 6], lat: f64, lon: f64) -> cor
     writeln!(w, "node {} {:.7} {:.7}", MacText(mac), lat, lon)
 }
 
+// ------------------------------------------------------ evidence wording --
+
+/// Evidence and console text for one rule: what it silences and for how
+/// long. Addresses and network names are what the alarm's frames claimed
+/// (anyone can put any address in a frame), and are said to be.
+/// `mute 2 h: Evil twin network; claimed source 02:11:22:33:44:55, claimed
+/// name "Cafe WiFi"; ends at hub uptime 7201 s`.
+pub fn write_mute_text<W: Write>(w: &mut W, m: &Mute, now_ms: u64) -> core::fmt::Result {
+    use crate::threats::key;
+    match m.ends_ms() {
+        None => w.write_str("mute for good (site file)")?,
+        Some(e) => {
+            let left = e.saturating_sub(now_ms);
+            let what = if m.snooze() { "snooze" } else { "mute" };
+            if left >= 3_600_000 && left % 3_600_000 < 1_000 {
+                write!(w, "{what} {} h", left / 3_600_000)?
+            } else {
+                write!(w, "{what} {} min", left.div_ceil(60_000))?
+            }
+        }
+    }
+    write!(w, ": {}", crate::threats::threat_label(m.kind))?;
+    let k = m.key();
+    if k & key::NODE != 0 {
+        write!(w, "; node {}", m.node)?;
+    }
+    if k & key::SOURCE != 0 {
+        write!(w, "; claimed source {}", MacText(&m.source))?;
+    }
+    if k & key::TARGET != 0 {
+        if m.kind == ThreatKind::AreaGnss {
+            w.write_str(if m.target[0] == 1 { "; jamming" } else { "; spoofing" })?;
+        } else {
+            write!(w, "; claimed target {}", MacText(&m.target))?;
+        }
+    }
+    if k & key::SSID != 0 {
+        write!(w, "; claimed name \"{}\"", link::printable::Printable(&m.ssid))?;
+    }
+    if k & (key::FREQ | key::BAND) != 0 {
+        write!(w, "; {}.{} MHz", m.freq / 10, m.freq % 10)?;
+    }
+    if k & key::SUB != 0 {
+        write!(w, "; sub {}", m.sub)?;
+    }
+    if let Some(e) = m.ends_ms() {
+        write!(w, "; ends at hub uptime {} s", e / 1000)?;
+    }
+    Ok(())
+}
+
+// ------------------------------------------------- the record of a load --
+
+/// One load of the site file at most logs this many change events; the
+/// rest are counted in one more event. (A file of any length holds at most
+/// [`crate::threats::MAX_MUTES`] mutes and [`MAX_PLACED`] positions, so a
+/// load can change at most 80 things; a huge file costs one hash, one
+/// summary and at most this many events.)
+pub const MAX_CHANGE_EVENTS: usize = 48;
+
+/// What changed from one load of the site file to the next.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Change<'a> {
+    MuteAdded(&'a Mute),
+    MuteRemoved(&'a Mute),
+    /// Placed, or moved (`from`: the old position).
+    NodeSet { mac: [u8; 6], lat: f64, lon: f64, from: Option<(f64, f64)> },
+    NodeCleared { mac: [u8; 6] },
+}
+
+/// Every change from `old` to `new`, in order (mutes added, mutes
+/// removed, positions set, positions cleared). Returns how many.
+pub fn changes<'a>(old: &'a SiteState, new: &'a SiteState, f: impl FnMut(Change<'a>)) -> usize {
+    changes_since(&old.mutes, &old.nodes, new, f)
+}
+
+/// As [`changes`], from what is in force rather than a whole old state:
+/// the hub passes the tracker's rules (only those for good are the file's)
+/// and the node positions it uses, so nothing is copied.
+pub fn changes_since<'a>(
+    old_mutes: &'a [Mute],
+    old_nodes: &[([u8; 6], f64, f64)],
+    new: &'a SiteState,
+    mut f: impl FnMut(Change<'a>),
+) -> usize {
+    let mut n = 0;
+    let mut out = |c| {
+        n += 1;
+        f(c)
+    };
+    let old = || old_mutes.iter().filter(|m| m.permanent());
+    for m in new.mutes.iter().filter(|m| !old().any(|o| o == *m)) {
+        out(Change::MuteAdded(m));
+    }
+    for m in old().filter(|m| !new.mutes.contains(m)) {
+        out(Change::MuteRemoved(m));
+    }
+    for &(mac, lat, lon) in &new.nodes {
+        let was = old_nodes.iter().find(|o| o.0 == mac).map(|o| (o.1, o.2));
+        if was != Some((lat, lon)) {
+            out(Change::NodeSet { mac, lat, lon, from: was });
+        }
+    }
+    for &(mac, ..) in old_nodes.iter().filter(|o| !new.nodes.iter().any(|n| n.0 == o.0)) {
+        out(Change::NodeCleared { mac });
+    }
+    n
+}
+
+/// Evidence text for one change.
+pub fn write_change<W: Write>(w: &mut W, c: &Change<'_>) -> core::fmt::Result {
+    w.write_str("site file changed: ")?;
+    match c {
+        Change::MuteAdded(m) => {
+            w.write_str("added ")?;
+            write_mute_text(w, m, 0)
+        }
+        Change::MuteRemoved(m) => {
+            w.write_str("removed ")?;
+            write_mute_text(w, m, 0)
+        }
+        Change::NodeSet { mac, lat, lon, from } => {
+            write!(w, "node {} at {lat:.7} {lon:.7}", MacText(mac))?;
+            match from {
+                Some((a, b)) => write!(w, " (was {a:.7} {b:.7}); spoof checks use it"),
+                None => w.write_str(" (new); spoof checks use it"),
+            }
+        }
+        Change::NodeCleared { mac } => write!(w, "node {} position removed", MacText(mac)),
+    }
+}
+
+/// The summary of one load, for an evidence Setting event: the file's
+/// SHA-256, its size, and what it sets. `lines`: lines read.
+pub struct LoadSummary<'a> {
+    pub st: &'a SiteState,
+    pub sha256: &'a [u8; 32],
+    pub bytes: u32,
+    pub lines: u32,
+}
+
+impl core::fmt::Display for LoadSummary<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let st = self.st;
+        f.write_str("site file loaded: sha256 ")?;
+        for b in self.sha256 {
+            write!(f, "{b:02x}")?;
+        }
+        let onoff = |v: Option<bool>| if v == Some(true) { "on" } else { "off" };
+        write!(
+            f,
+            ", {} bytes, {} lines ({} used, {} ignored); {} mutes for good, {} mute lines not honoured; {} node positions; control ids {}, control content {}, audio clips {}",
+            self.bytes,
+            self.lines,
+            st.used,
+            st.ignored,
+            st.mutes.len(),
+            st.mutes_dropped,
+            st.nodes.len(),
+            onoff(st.control_ids),
+            onoff(st.control_content),
+            onoff(st.audio_clips),
+        )
+    }
+}
+
+impl LoadSummary<'_> {
+    /// The event's data: the SHA-256, then mutes, mute lines not honoured,
+    /// node positions (one byte each, saturating), control ids, control
+    /// content and audio clips (0 off, 1 on).
+    pub fn data(&self) -> [u8; 38] {
+        let mut d = [0u8; 38];
+        d[..32].copy_from_slice(self.sha256);
+        let b = |n: usize| n.min(255) as u8;
+        d[32] = b(self.st.mutes.len());
+        d[33] = b(self.st.mutes_dropped as usize);
+        d[34] = b(self.st.nodes.len());
+        d[35] = u8::from(self.st.control_ids == Some(true));
+        d[36] = u8::from(self.st.control_content == Some(true));
+        d[37] = u8::from(self.st.audio_clips_on());
+        d
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -410,13 +667,27 @@ mod tests {
         assert_eq!(m.kind, ThreatKind::EvilTwin);
         assert_eq!(m.ssid.as_str(), "Cafe WiFi Guest");
         assert_eq!(m.source, [2, 0x11, 0x22, 0x33, 0x44, 0x55]);
-        let SiteLine::Mute(j) = parse_line("mute jam_broadband mhz=2437.0").unwrap() else { panic!() };
-        assert_eq!(j.freq, 24_370);
+        let SiteLine::Mute(j) = parse_line("mute control_contested target=00:00:12:34:56:78 mhz=915.5").unwrap() else {
+            panic!()
+        };
+        assert_eq!(j.freq, 9_155);
         assert_eq!(parse_line("control ids on"), Ok(SiteLine::Control { what: ControlSetting::Ids, on: true }));
         assert_eq!(parse_line("audio clips off"), Ok(SiteLine::AudioClips(false)));
         assert_eq!(parse_line("Audio Clips ON # not the default"), Ok(SiteLine::AudioClips(true)));
         assert!(parse_line("audio on").is_err());
         assert!(parse_line("audio clips maybe").is_err());
+        // WP-12: the hub's own placed position.
+        assert_eq!(parse_line("home 39.95210 -75.16380 12.5 # roof"), Ok(SiteLine::Home { lat: 39.9521, lon: -75.1638, alt: Some(12.5) }));
+        assert_eq!(parse_line("HOME 39.9521 -75.1638"), Ok(SiteLine::Home { lat: 39.9521, lon: -75.1638, alt: None }));
+        assert_eq!(parse_line("home clear"), Ok(SiteLine::HomeClear));
+        assert!(parse_line("home 91 0").is_err());
+        assert!(parse_line("home 39.9 -75.1 99999").is_err());
+        assert!(parse_line("home 39.9").is_err());
+        let mut st = SiteState::default();
+        st.apply(parse_line("home 1.5 2.5").unwrap());
+        assert_eq!(st.home, Some((1.5, 2.5, None)));
+        st.apply(parse_line("home clear").unwrap());
+        assert_eq!(st.home, None);
         assert_eq!(parse_line("CONTROL Content OFF # not today"), Ok(SiteLine::Control { what: ControlSetting::Content, on: false }));
     }
 
@@ -461,6 +732,8 @@ mod tests {
             "mute no_such_kind",
             "mute deauth target=zz",
             "mute deauth colour=red",
+            "mute deauth",
+            "mute jam_broadband mhz=2437.0",
             "unmute some",
             "control",
             "control ids",
@@ -486,17 +759,14 @@ mod tests {
         }
         text += "node 10:bd:a3:ce:bd:00 clear\nbad line here\n";
         text += &"x".repeat(400);
-        text += "\nmute evil_twin ssid=Last One"; // no final newline
+        text += "\nmute evil_twin source=02:00:00:00:00:01 ssid=Last One"; // no final newline
         for piece in [1usize, 7, 512] {
             let (mut st, mut lines) = (SiteState::default(), Lines::default());
             let mut refused = std::vec::Vec::new();
             for chunk in text.as_bytes().chunks(piece) {
                 read_into(&mut st, &mut lines, chunk, |n, e| refused.push((n, e)));
             }
-            lines.finish(|n, r| match r.and_then(parse_line) {
-                Ok(l) => st.apply(l),
-                Err(e) => refused.push((n, e)),
-            });
+            finish_into(&mut st, &mut lines, |n, e| refused.push((n, e)));
             assert_eq!(st.nodes.len(), 16, "20 nodes, oldest dropped past 16");
             assert!(st.nodes.iter().all(|n| n.0[5] != 0), "node :00 cleared");
             // The latest position of node :13 is from i = 299.
@@ -508,21 +778,88 @@ mod tests {
         }
     }
 
+    fn load(text: &str) -> SiteState {
+        let (mut st, mut lines) = (SiteState::default(), Lines::default());
+        read_into(&mut st, &mut lines, text.as_bytes(), |_, _| {});
+        finish_into(&mut st, &mut lines, |_, _| {});
+        st
+    }
+
+    #[test]
+    fn a_load_is_summarised_and_only_changes_are_listed() {
+        let text = "node 10:bd:a3:ce:bd:18 39.9521 -75.1638\n\
+                    mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi\n\
+                    mute deauth\n\
+                    control ids on\n";
+        let st = load(text);
+        let sha = [0xab; 32];
+        let sum = LoadSummary { st: &st, sha256: &sha, bytes: text.len() as u32, lines: 4 };
+        let s = std::format!("{sum}");
+        assert!(s.starts_with("site file loaded: sha256 abababab"), "{s}");
+        assert!(s.contains("1 mutes for good, 1 mute lines not honoured; 1 node positions; control ids on, control content off, audio clips off"), "{s}");
+        assert_eq!(&sum.data()[32..], &[1, 1, 1, 1, 0, 0]);
+        // The audio-clips switch is in the summary too (WP-07).
+        let on = load("audio clips on\nhome 39.9521 -75.1638\n");
+        let sum = LoadSummary { st: &on, sha256: &sha, bytes: 0, lines: 2 };
+        assert!(std::format!("{sum}").ends_with("control ids off, control content off, audio clips on"));
+        assert_eq!(&sum.data()[32..], &[0, 0, 0, 0, 0, 1]);
+        assert_eq!(on.home, Some((39.9521, -75.1638, None)));
+        assert_eq!((on.used, on.ignored), (2, 0));
+        // The first load after boot: everything is a change.
+        let empty = SiteState::default();
+        let mut seen = std::vec::Vec::new();
+        assert_eq!(changes(&empty, &st, |c| seen.push(std::format!("{}", Text(c)))), 2);
+        assert_eq!(
+            seen[0],
+            "site file changed: added mute for good (site file): Evil twin network; claimed source 02:11:22:33:44:55; claimed name \"Cafe WiFi\""
+        );
+        assert!(seen[1].contains("node 10:bd:a3:ce:bd:18 at 39.9521000 -75.1638000 (new)"), "{seen:?}");
+        // The same file again: nothing changed.
+        assert_eq!(changes(&st, &load(text), |_| panic!("no change")), 0);
+        // An edited card: the node moved and the mute is gone.
+        let edited = load("node 10:bd:a3:ce:bd:18 39.9600 -75.1638\ncontrol ids on\n");
+        let mut seen = std::vec::Vec::new();
+        assert_eq!(changes(&st, &edited, |c| seen.push(std::format!("{}", Text(c)))), 2);
+        assert!(seen[0].starts_with("site file changed: removed mute for good"), "{seen:?}");
+        assert!(seen[1].contains("(was 39.9521000 -75.1638000)"), "{seen:?}");
+    }
+
+    struct Text<'a>(Change<'a>);
+    impl core::fmt::Display for Text<'_> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write_change(f, &self.0)
+        }
+    }
+
+    #[test]
+    fn mute_text_says_what_and_how_long() {
+        let mut s = std::string::String::new();
+        let m = Mute { node: 3, until_s: 301, ..Mute::empty(ThreatKind::Blinded) };
+        write_mute_text(&mut s, &m, 1_000).unwrap();
+        assert_eq!(s, "snooze 5 min: Node blinded; node 3; ends at hub uptime 301 s");
+        s.clear();
+        let m = Mute {
+            ssid: heapless::String::try_from("Cafe\x1b[2J").unwrap(),
+            source: [2, 0, 0, 0, 0, 7],
+            until_s: 7_201,
+            ..Mute::empty(ThreatKind::EvilTwin)
+        };
+        write_mute_text(&mut s, &m, 1_000).unwrap();
+        assert!(s.starts_with("mute 2 h: Evil twin network; claimed source 02:00:00:00:00:07; claimed name \"Cafe"), "{s}");
+        assert!(!s.contains('\x1b'), "names from frames are never printed as received: {s}");
+    }
+
     #[test]
     fn written_lines_read_back_the_same() {
         let mut m = Mute {
-            kind: ThreatKind::Karma,
             ssid: heapless::String::try_from("Free Airport WiFi").unwrap(),
             source: [0xde, 0xad, 0xbe, 0xef, 0, 1],
-            target: [0xff; 6],
-            freq: 0,
+            ..Mute::empty(ThreatKind::AttackTool)
         };
         let mut s: heapless::String<128> = heapless::String::new();
         write_mute(&mut s, &m).unwrap();
         assert_eq!(parse_line(&s), Ok(SiteLine::Mute(m.clone())));
-        m.kind = ThreatKind::JamTone;
-        m.ssid.clear();
-        m.freq = 58_005;
+        m = Mute { target: [0x12; 6], freq: 58_005, ..Mute::empty(ThreatKind::ControlContested) };
         s.clear();
         write_mute(&mut s, &m).unwrap();
         assert_eq!(parse_line(&s), Ok(SiteLine::Mute(m)));

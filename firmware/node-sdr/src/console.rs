@@ -16,6 +16,12 @@
 //! @F <offset hex> <base64>  HIL: write sample bytes into the staging buffer
 //! hil run <len> <crc32 hex> HIL: check the staged bytes and run them through
 //!                           the live capture path (Radio::hil_run)
+//! hil train <n> <gap_ms> [nobudget] <len> <crc32 hex>
+//!                           HIL: replay the staged burst as a pulse train on a
+//!                           simulated clock, through the decode budget
+//!                           (radio/hilsim.rs)
+//! hil forge [<secs>]        HIL: run the forged-session scenario on the live
+//!                           follower for <secs>; without a number, its report
 //! fault panic|hang          `faulttest` builds only: panic, or spin in the
 //!                           capture loop until the watchdog resets the chip
 //! ```
@@ -77,6 +83,11 @@ pub enum Local {
     Uplink(bool),
     Assign(Assignment),
     HilRun { len: usize, crc: u32 },
+    /// `bringup` builds only (radio/hilsim.rs).
+    #[cfg(feature = "bringup")]
+    HilTrain { n: u32, gap_ms: u32, budget: bool, len: usize, crc: u32 },
+    #[cfg(feature = "bringup")]
+    HilForge(Option<u32>),
     /// `faulttest` builds only: true = panic, false = hang.
     #[cfg(feature = "faulttest")]
     Fault(bool),
@@ -105,6 +116,8 @@ pub fn bringup_only(c: &Cmd) -> bool {
         Cmd::Raw(c) => c.bringup_only(),
         Cmd::Local(l) => match l {
             Local::Role(_) | Local::Hop(_) | Local::Edge(_) | Local::Assign(_) | Local::HilRun { .. } => true,
+            #[cfg(feature = "bringup")]
+            Local::HilTrain { .. } | Local::HilForge(_) => true,
             Local::Plan | Local::FpvVerbose(_) | Local::Jam | Local::Uplink(_) => false,
             // Already a bench feature of its own.
             #[cfg(feature = "faulttest")]
@@ -160,7 +173,27 @@ fn parse_any(line: &str) -> Result<Option<Cmd>, &'static str> {
                 let crc = w.next().and_then(|v| u32::from_str_radix(v, 16).ok()).ok_or("hil run <len> <crc32 hex>")?;
                 Local::HilRun { len, crc }
             }
-            _ => return Err("hil run <len> <crc32 hex>"),
+            #[cfg(feature = "bringup")]
+            Some("train") => {
+                const USE: &str = "hil train <n> <gap_ms> [nobudget] <len> <crc32 hex>";
+                let n = w.next().and_then(|v| v.parse().ok()).filter(|&n: &u32| (1..=500).contains(&n)).ok_or(USE)?;
+                let gap_ms = w.next().and_then(|v| v.parse().ok()).filter(|&g: &u32| (1..=10_000).contains(&g)).ok_or(USE)?;
+                let mut next = w.next();
+                let budget = next != Some("nobudget");
+                if !budget {
+                    next = w.next();
+                }
+                let len = next.and_then(|v| v.parse().ok()).ok_or(USE)?;
+                let crc = w.next().and_then(|v| u32::from_str_radix(v, 16).ok()).ok_or(USE)?;
+                Local::HilTrain { n, gap_ms, budget, len, crc }
+            }
+            #[cfg(feature = "bringup")]
+            Some("forge") => match w.next() {
+                None => Local::HilForge(None),
+                Some(v) => Local::HilForge(Some(v.parse().ok().filter(|&s: &u32| (1..=3600).contains(&s)).ok_or("hil forge [<secs> 1-3600]")?)),
+            },
+            _ if !cfg!(feature = "bringup") => return Err(NEEDS_BRINGUP),
+            _ => return Err("hil run <len> <crc32 hex> | hil train ... | hil forge [<secs>]"),
         },
         #[cfg(feature = "faulttest")]
         Some("fault") => match w.next() {

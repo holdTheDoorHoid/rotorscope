@@ -16,6 +16,10 @@ pub enum FormatError {
     /// Deliberately not written: the object is already sent as something
     /// else (an ADS-B "UAV" that is a Remote ID drone track, for CoT).
     Duplicate,
+    /// Deliberately not written: the drone track is not confirmed yet
+    /// (`crate::probation`), so it is not sent to TAK (WP-09: a flood of
+    /// forged drones must not flood the team's map). It is sent once it is.
+    Unconfirmed,
 }
 
 /// `fmt::Write` into a byte slice; remembers overflow instead of panicking.

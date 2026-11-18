@@ -82,9 +82,40 @@ pub const CHANNELS_GAP_US: u64 = 500_000;
 pub const CONTROL_PER_S: u32 = 20;
 /// Without news, an energy frame per band at most this often.
 pub const ENERGY_QUIET_GAP_US: u64 = 30_000_000;
-/// Follow an ExpressLRS link this long after its sync packet, then go back
-/// to scanning.
+/// Follow an ExpressLRS link at most this long after its sync packet, then
+/// go back to scanning.
 pub const FOLLOW_US: u64 = 20_000_000;
+/// A follow ends early when no packet other than a sync passes its CRC for
+/// this many packet intervals (hopping with the hop table: one interval is
+/// the link's packet interval)...
+pub const QUIET_INTERVALS: u64 = 16;
+/// ...or, parked on one channel (no hop table), for this many passes
+/// through the hop table (one pass = channels x packets per hop x packet
+/// interval: FCC915 at 200 Hz, 40 x 4 x 5 ms = 0.8 s; the link lands on the
+/// parked channel about once a pass, with several packets). A SYNC packet
+/// alone never keeps a follow going: anyone can make one that checks (its
+/// CRC is seeded from the UID bytes it carries).
+pub const QUIET_PASSES: u64 = 3;
+/// The follower's share of control time, per mille, and the credit it may
+/// save up: a credit earning half of every non-following moment, spent at
+/// half rate while following, at most enough for one [`FOLLOW_US`] follow.
+pub const FOLLOW_SHARE_PERMILLE: u64 = 500;
+pub const FOLLOW_CREDIT_US: u64 = 10_000_000;
+/// A follow starts only with at least this much credit (about 4 s of
+/// following), so a start is not spent on a follow cut a moment later.
+pub const FOLLOW_START_CREDIT_US: u64 = 2_000_000;
+/// Within one control turn at least this long (the hub's 25 or 35 s
+/// turns), following stops at the share of that turn too. Shorter calls
+/// (a control-only plan runs in 1 s slices) rely on the credit alone.
+pub const FOLLOW_SLOT_MIN_US: u64 = 5_000_000;
+/// Time between two accounting calls counted at most this long (time the
+/// scan is not running, e.g. an aircraft turn, earns nothing).
+pub const FOLLOW_TICK_MAX_US: u64 = 1_000_000;
+/// A link (its UID bytes 4-5) is followed again at most this often...
+pub const FOLLOW_UID_GAP_US: u64 = 60_000_000;
+/// ...and at most this many follows start in any [`FOLLOW_STARTS_WINDOW_US`].
+pub const FOLLOW_STARTS_MAX: usize = 3;
+pub const FOLLOW_STARTS_WINDOW_US: u64 = 60_000_000;
 /// Without the hop table (UID bytes 2-3 unknown), stay on one channel this
 /// long before trying another, to collect observations for recovery.
 pub const PARK_US: u64 = 1_500_000;
@@ -714,6 +745,12 @@ pub struct FollowTarget {
 pub struct Follow {
     pub f: Follower,
     pub until_us: u64,
+    /// Last packet other than a sync that passed its CRC (the start before
+    /// any).
+    pub last_good_us: u64,
+    /// UID bytes 4-5 (from the sync; only for [`FollowGate`]'s per-link
+    /// limit, never reported).
+    key: u16,
     read_ids: bool,
     count: u8,
     sync_ch: u8,
@@ -754,6 +791,8 @@ impl Follow {
         Some(Self {
             f,
             until_us: t_us + FOLLOW_US,
+            last_good_us: t_us,
+            key: u16::from(s.uid4) << 8 | u16::from(s.uid5),
             read_ids: cfg.read_ids,
             count: dom.count,
             sync_ch: elrs::sync_channel(rx.region, version),
@@ -765,8 +804,32 @@ impl Follow {
         })
     }
 
+    /// Over: [`FOLLOW_US`] after its start, or quiet too long.
     pub fn expired(&self, now_us: u64) -> bool {
-        now_us >= self.until_us
+        self.end_reason(now_us).is_some()
+    }
+
+    /// Why the follow is over at `now_us`: `"time"` ([`FOLLOW_US`]) or
+    /// `"quiet"` (no checked non-sync packet for [`Follow::quiet_us`]).
+    pub fn end_reason(&self, now_us: u64) -> Option<&'static str> {
+        if now_us >= self.until_us {
+            Some("time")
+        } else if now_us.saturating_sub(self.last_good_us) >= self.quiet_us() {
+            Some("quiet")
+        } else {
+            None
+        }
+    }
+
+    /// How long the follow waits for a checked packet other than a sync.
+    pub fn quiet_us(&self) -> u64 {
+        let info = self.f.rate.info();
+        let iv = u64::from(info.interval_us);
+        if self.f.has_sequence() {
+            QUIET_INTERVALS * iv
+        } else {
+            QUIET_PASSES * u64::from(self.count) * u64::from(info.hop_interval) * iv
+        }
     }
 
     pub fn rate(&self) -> ElrsRate {
@@ -833,6 +896,9 @@ impl Follow {
     pub fn process(&mut self, pkt: &[u8], meta: RxMeta, channel: u8) -> Option<Followed> {
         let r = self.f.process(pkt, meta, channel)?;
         self.packets = self.packets.wrapping_add(1);
+        if !r.is_sync {
+            self.last_good_us = self.last_good_us.max(meta.t_us);
+        }
         if self.read_ids
             && !self.f.has_sequence()
             && self.f.observations().len() >= obs_needed(self.f.version)
@@ -843,6 +909,165 @@ impl Follow {
             }
         }
         Some(r)
+    }
+}
+
+/// Why [`FollowGate::try_start`] refused a follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// This link was followed less than [`FOLLOW_UID_GAP_US`] ago.
+    SameLink,
+    /// [`FOLLOW_STARTS_MAX`] follows already started in the last
+    /// [`FOLLOW_STARTS_WINDOW_US`].
+    TooMany,
+    /// The follower's share of control time is used up.
+    Share,
+}
+
+impl Refusal {
+    pub fn name(self) -> &'static str {
+        match self {
+            Refusal::SameLink => "same_link",
+            Refusal::TooMany => "too_many",
+            Refusal::Share => "share",
+        }
+    }
+}
+
+/// How much of the control scan [`Follow`] may take, and how often a follow
+/// may start. While following, nothing else is scanned (SiK, mLRS,
+/// OpenLRSng, the energy sweeps), and a follow starts on any sync whose CRC
+/// matches the UID bytes it carries, which anyone can send. So:
+///
+/// - follow time is paid from a credit that earns [`FOLLOW_SHARE_PERMILLE`]
+///   of the time not spent following and holds at most [`FOLLOW_CREDIT_US`];
+///   in a control turn of [`FOLLOW_SLOT_MIN_US`] or more, following also
+///   stops at that share of the turn;
+/// - a link is followed again only after [`FOLLOW_UID_GAP_US`], and at most
+///   [`FOLLOW_STARTS_MAX`] follows start in [`FOLLOW_STARTS_WINDOW_US`].
+///
+/// Together with [`Follow::end_reason`] (a sync alone ends after a few
+/// quiet passes) a forged sync costs the scan a few seconds at most, and a
+/// forger who also sends packets that check (it chose the UID bytes, so it
+/// can) gets at most half of the control time.
+#[derive(Debug, Clone)]
+pub struct FollowGate {
+    credit_us: i64,
+    last_us: Option<u64>,
+    following: bool,
+    slot_cap_us: Option<u64>,
+    slot_used_us: u64,
+    links: [(u16, u64); 8],
+    link_at: usize,
+    starts: [u64; FOLLOW_STARTS_MAX],
+    start_at: usize,
+    /// Follows refused (same link, too many, share) and cut by the share.
+    pub refused: [u32; 3],
+    pub cut: u32,
+    /// Time spent following.
+    pub used_us: u64,
+}
+
+impl Default for FollowGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FollowGate {
+    pub const fn new() -> Self {
+        Self {
+            credit_us: FOLLOW_CREDIT_US as i64,
+            last_us: None,
+            following: false,
+            slot_cap_us: None,
+            slot_used_us: 0,
+            links: [(0, 0); 8],
+            link_at: 0,
+            starts: [0; FOLLOW_STARTS_MAX],
+            start_at: 0,
+            refused: [0; 3],
+            cut: 0,
+            used_us: 0,
+        }
+    }
+
+    /// A control turn runs from `now_us` until `until_us`.
+    pub fn begin_slot(&mut self, now_us: u64, until_us: u64) {
+        self.tick(now_us);
+        let len = until_us.saturating_sub(now_us);
+        self.slot_cap_us = (len >= FOLLOW_SLOT_MIN_US).then_some(len * FOLLOW_SHARE_PERMILLE / 1000);
+        self.slot_used_us = 0;
+    }
+
+    /// Account the time since the last call (call at least every second
+    /// while the scan runs; longer gaps count as [`FOLLOW_TICK_MAX_US`]).
+    pub fn tick(&mut self, now_us: u64) {
+        let dt = self.last_us.map_or(0, |t| now_us.saturating_sub(t).min(FOLLOW_TICK_MAX_US));
+        self.last_us = Some(self.last_us.map_or(now_us, |t| t.max(now_us)));
+        if self.following {
+            self.credit_us -= (dt * (1000 - FOLLOW_SHARE_PERMILLE) / 1000) as i64;
+            self.slot_used_us += dt;
+            self.used_us += dt;
+        } else {
+            self.credit_us = (self.credit_us + (dt * FOLLOW_SHARE_PERMILLE / 1000) as i64).min(FOLLOW_CREDIT_US as i64);
+        }
+    }
+
+    fn share_left(&self) -> bool {
+        self.credit_us > 0 && self.slot_cap_us.is_none_or(|c| self.slot_used_us < c)
+    }
+
+    /// May `f` start following now? On yes, it is recorded and the
+    /// follower's time starts counting.
+    pub fn try_start(&mut self, f: &Follow, now_us: u64) -> Result<(), Refusal> {
+        self.tick(now_us);
+        let r = if self.links.iter().any(|&(k, t)| t != 0 && k == f.key && now_us.saturating_sub(t) < FOLLOW_UID_GAP_US) {
+            Err(Refusal::SameLink)
+        } else if self.starts.iter().filter(|&&t| t != 0 && now_us.saturating_sub(t) < FOLLOW_STARTS_WINDOW_US).count()
+            >= FOLLOW_STARTS_MAX
+        {
+            Err(Refusal::TooMany)
+        } else if !self.share_left() || self.credit_us < FOLLOW_START_CREDIT_US as i64 {
+            Err(Refusal::Share)
+        } else {
+            Ok(())
+        };
+        match r {
+            Ok(()) => {
+                let t = now_us.max(1);
+                self.links[self.link_at] = (f.key, t);
+                self.link_at = (self.link_at + 1) % self.links.len();
+                self.starts[self.start_at] = t;
+                self.start_at = (self.start_at + 1) % FOLLOW_STARTS_MAX;
+                self.following = true;
+            }
+            Err(e) => self.refused[e as usize] += 1,
+        }
+        r
+    }
+
+    /// May the running follow go on? False when its share is used up: end
+    /// it with [`FollowGate::cut_off`].
+    pub fn may_continue(&mut self, now_us: u64) -> bool {
+        self.tick(now_us);
+        self.share_left()
+    }
+
+    /// The follow ended (its own end: time or quiet).
+    pub fn stopped(&mut self, now_us: u64) {
+        self.tick(now_us);
+        self.following = false;
+    }
+
+    /// The follow was ended because its share ran out (counted).
+    pub fn cut_off(&mut self, now_us: u64) {
+        self.stopped(now_us);
+        self.cut += 1;
+    }
+
+    pub fn following(&self) -> bool {
+        self.following
     }
 }
 
@@ -1267,7 +1492,9 @@ mod tests {
             )
             .is_some_and(|x| x.is_sync)
         );
-        assert!(!f.expired(FOLLOW_US) && f.expired(FOLLOW_US + 1_000));
+        // A sync alone does not keep it: with no checked packet other than
+        // a sync it ends after QUIET_PASSES passes (see the tests below).
+        assert_eq!(f.end_reason(FOLLOW_US), Some("quiet"));
         // With read_ids it walks other channels to collect observations.
         let both = Config {
             read_ids: true,
@@ -1279,6 +1506,159 @@ mod tests {
         let c = f.target(2_000 + 2 * PARK_US).unwrap().channel;
         assert_eq!(a, 20);
         assert!(b != 20 && c != 20 && b != c);
+    }
+
+    /// A 4.x OTA4 RC packet of the link `uid4`/`uid5` with nonce `nonce`
+    /// (CRC-14 seeded with the UID bytes and the nonce).
+    fn rc_packet(nonce: u8, uid4: u8, uid5: u8) -> [u8; 8] {
+        let mut p = [0u8, 0x12, 0x34, 0x56, 0x78, 0x9A, 0x00, 0];
+        let init = OtaVersion::V4.crc_init(uid4, uid5) ^ u16::from(nonce);
+        let crc = ctrlwatch::crc::ELRS_CRC14.calc(&p[..7], init);
+        p[0] |= ((crc >> 8) as u8) << 2;
+        p[7] = crc as u8;
+        p
+    }
+
+    /// A follow started from the sync `sync_packet(40, 17, 0xAB, 0xCD)`
+    /// heard at 1 ms on the FCC915 200 Hz plan (5 ms interval, 4 packets per
+    /// hop, 40 channels: one pass is 0.8 s).
+    fn started() -> (Follow, ctrlwatch::RxConfig, RxMeta) {
+        let rx = scan::plan(System::ExpressLrs, Region::Fcc915).next().unwrap().config;
+        let pkt = sync_packet(40, 17, 0xAB, 0xCD);
+        let meta = RxMeta { rssi_dbm: -60, snr_db: 8, t_us: 1_000 };
+        let cfg = Config { read_ids: false, decode_content: true };
+        (Follow::start(&cfg, &pkt, &rx, 1_000).unwrap(), rx, meta)
+    }
+
+    #[test]
+    fn a_forged_sync_alone_ends_the_follow_within_a_few_passes() {
+        // Before: one sync parked the scanner for FOLLOW_US (20 s), and
+        // more syncs (forged every few seconds) re-anchored it.
+        let (mut f, _, meta) = started();
+        assert_eq!(f.quiet_us(), QUIET_PASSES * 800_000);
+        assert_eq!(f.end_reason(2_000_000), None);
+        // The forger re-sends its sync every second: still ends.
+        for k in 1..3u64 {
+            let t = 1_000 + k * 1_000_000;
+            assert!(f.process(&sync_packet(40, 17, 0xAB, 0xCD), RxMeta { t_us: t, ..meta }, 20).is_some_and(|x| x.is_sync));
+        }
+        assert_eq!(f.end_reason(1_000 + QUIET_PASSES * 800_000), Some("quiet"));
+        assert!(f.expired(2_500_000) && !f.expired(2_300_000));
+    }
+
+    #[test]
+    fn checked_packets_keep_a_follow_until_its_time_is_up() {
+        // The real link: on the parked channel a few packets every pass, all
+        // passing the CRC. It is followed for the whole FOLLOW_US.
+        let (mut f, _, meta) = started();
+        let mut t = 1_000u64;
+        while t + 800_000 < FOLLOW_US {
+            t += 800_000;
+            let nonce = (17 + (t - 1_000) / 5_000) as u8;
+            let got = f.process(&rc_packet(nonce, 0xAB, 0xCD), RxMeta { t_us: t, ..meta }, 20);
+            assert!(got.is_some_and(|x| !x.is_sync), "t {t}");
+            assert_eq!(f.end_reason(t + 1), None, "t {t}");
+        }
+        assert_eq!(f.end_reason(FOLLOW_US + 1_000), Some("time"));
+        // A packet of another link (other UID bytes) does not count.
+        let (mut g, _, meta) = started();
+        assert!(g.process(&rc_packet(17 + 160, 0x11, 0x22), RxMeta { t_us: 801_000, ..meta }, 20).is_none());
+        assert_eq!(g.end_reason(1_000 + QUIET_PASSES * 800_000), Some("quiet"));
+        // With the hop table the wait is QUIET_INTERVALS packet intervals.
+        assert_eq!(QUIET_INTERVALS * 5_000, 80_000);
+    }
+
+    #[test]
+    fn follow_starts_are_limited_per_link_and_overall() {
+        let (f, rx, _) = started();
+        let mut g = FollowGate::new();
+        g.begin_slot(0, 25_000_000);
+        assert_eq!(g.try_start(&f, 1_000), Ok(()));
+        g.stopped(3_000_000);
+        // The same link again within a minute: refused.
+        assert_eq!(g.try_start(&f, 10_000_000), Err(Refusal::SameLink));
+        // Other links (a forger choosing new UID bytes each time).
+        let cfg = Config { read_ids: false, decode_content: true };
+        let other = |u: u8, t: u64| Follow::start(&cfg, &sync_packet(40, 17, u, 0x55), &rx, t).unwrap();
+        assert_eq!(g.try_start(&other(1, 11_000_000), 11_000_000), Ok(()));
+        g.stopped(13_000_000);
+        assert_eq!(g.try_start(&other(2, 14_000_000), 14_000_000), Ok(()));
+        g.stopped(16_000_000);
+        assert_eq!(g.try_start(&other(3, 17_000_000), 17_000_000), Err(Refusal::TooMany));
+        // A minute after the first start, one more may start; the first link
+        // a minute after it was followed.
+        assert_eq!(g.try_start(&f, 62_000_000), Ok(()));
+        assert_eq!(g.refused, [1, 1, 0]);
+    }
+
+    /// Simulated control turns against a perfect forger: a fresh link
+    /// (new UID bytes) and packets that check, whenever the gate lets a
+    /// follow start. `gap_us`: time between control turns (an aircraft
+    /// turn). Returns the share of control time spent following.
+    fn forged_share(slot_us: u64, turns: u64, gap_us: u64) -> (u64, FollowGate) {
+        let (_, rx, _) = started();
+        let cfg = Config { read_ids: false, decode_content: true };
+        let mut g = FollowGate::new();
+        let mut t = 1_000_000u64;
+        let mut uid = 0u8;
+        let mut control = 0;
+        let mut following = false;
+        for _ in 0..turns {
+            let end = t + slot_us;
+            g.begin_slot(t, end);
+            while t < end {
+                if following {
+                    if !g.may_continue(t) {
+                        g.cut_off(t);
+                        following = false;
+                    }
+                } else {
+                    uid = uid.wrapping_add(1);
+                    let f = Follow::start(&cfg, &sync_packet(40, 17, uid, 0x55), &rx, t).unwrap();
+                    following = g.try_start(&f, t).is_ok();
+                }
+                t += 100_000;
+                if !following {
+                    g.tick(t);
+                }
+            }
+            // A follow outlives a 1 s slice (the node keeps it between
+            // calls), not an aircraft turn (it goes quiet meanwhile).
+            if following && gap_us > 0 {
+                g.stopped(t);
+                following = false;
+            }
+            control += slot_us;
+            // An aircraft turn between control turns earns at most
+            // FOLLOW_TICK_MAX_US of credit.
+            t += gap_us;
+        }
+        (g.used_us * 1000 / control, g)
+    }
+
+    #[test]
+    fn following_takes_at_most_half_of_each_control_turn() {
+        // Before: a follow ran FOLLOW_US whatever the turn; the next forged
+        // sync started the next one.
+        let (share, g) = forged_share(25_000_000, 40, 25_000_000);
+        assert!((400..=520).contains(&share), "25 s turns: {share} per mille");
+        assert!(g.cut > 0);
+        // A control-only plan, run in 1 s slices: the credit (and the start
+        // limit) hold it to half or less overall.
+        let (share, g) = forged_share(1_000_000, 1200, 0);
+        assert!((100..=520).contains(&share), "1 s slices: {share} per mille");
+        assert!(g.refused[1] + g.refused[2] > 0);
+        // With credit to spare, one real follow gets its whole FOLLOW_US in
+        // a long turn (35 s).
+        let (f, _, _) = started();
+        let mut g = FollowGate::new();
+        g.begin_slot(0, 41_000_000);
+        assert_eq!(g.try_start(&f, 1_000), Ok(()));
+        let mut t = 1_000;
+        while t + 100_000 < FOLLOW_US {
+            t += 100_000;
+            assert!(g.may_continue(t), "cut at {t}");
+        }
     }
 
     /// Receive only, for the control scan too: no chip sequence any scan,

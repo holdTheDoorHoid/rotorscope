@@ -31,23 +31,28 @@
 //! the S3 hub (`firmware/hub/src/gnss.rs`).
 //!
 //! **Integrity** (docs/GNSS-INTEGRITY.md): every parser event also goes to
-//! `gnss::Monitor`, which watches for jamming and spoofing of this receiver.
-//! [`Gps::integrity`] is its verdict. While it suspects spoofing
-//! (`IntegrityStatus::hold`), GPS no longer moves the hub's position or
-//! clock:
-//! - [`Gps::fix`] is held, with [`Fix::held`] set: the learned home position
-//!   if there is one, else the last fix from an epoch where no spoofing check
-//!   fired. A held fix counts as fresh ([`Gps::fresh_fix`]); its `at_ms`
-//!   stays the time of the trusted fix, so the evidence log's fix age grows.
-//! - [`Gps::time`] is held at the last anchor from such an epoch, so UTC runs
-//!   on from the hub's own clock ([`Gps::time_held`]; the evidence log then
-//!   says `free_running` after 2.5 s, as with no GPS at all).
+//! `gnss::Monitor`, which watches for jamming and spoofing of this receiver,
+//! and checks GPS time against the hub's own clock (`gnss::timeguard`, PPS
+//! edge included) and against the build date and the remembered time.
+//! [`Gps::integrity`] is its verdict. What is published is decided by
+//! `gnss::trust::Publisher` (WP-12):
+//! - Only an epoch the monitor **trusts** (no spoofing check fired for ten
+//!   epochs in a row, no spoofing state) moves [`Gps::fix`] and [`Gps::time`].
+//! - Otherwise the last trusted ones are held: [`Fix::held`] set (while
+//!   spoofing is suspected, the home position if there is one), [`Gps::time`]
+//!   at the last trusted anchor so UTC runs on from the hub's own clock
+//!   ([`Gps::time_held`]; the evidence log says `free_running` after 2.5 s).
+//! - With **nothing trusted** this boot, nothing is published: `fix` and
+//!   `time` are `None` ([`Gps::untrusted_pos`], [`Gps::untrusted_time`] say
+//!   why, for the screen, the status line and the evidence context). Every
+//!   consumer already copes with no GPS.
 //! - The receiver status (`status`: fix type, satellites) still shows what
 //!   the receiver says.
 //!
-//! Both are released when the monitor returns to `ok`. The integrity steps
-//! of the configuration are optional: a module that refuses them is still
-//! used, just with fewer checks.
+//! Home and the latest trusted time are remembered on the card
+//! (`ROTORSCP/GPSMEM.TXT`, written through the SD logger: [`Gps::memory_text`]).
+//! The integrity steps of the configuration are optional: a module that
+//! refuses them is still used, just with fewer checks.
 
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
@@ -203,14 +208,16 @@ pub struct Gps {
     pub fix: Option<Fix>,
     pub time: Option<TimeAnchor>,
     pub tx_short: u32,
-    /// Jamming and spoofing watch on this receiver.
+    /// Jamming and spoofing watch on this receiver (about 500 bytes).
     integrity: gnss::Monitor,
-    /// The last fix and time anchor from an epoch where no spoofing check
-    /// fired: what is held while spoofing is suspected.
-    trusted_fix: Option<Fix>,
-    trusted_time: Option<TimeAnchor>,
+    /// The last trusted fix and time anchor, and what to publish.
+    publisher: gnss::trust::Publisher<Fix, TimeAnchor>,
     /// UTC is running on the hub clock because GPS time is not trusted.
     pub time_held: bool,
+    /// Spoofing suspected (or GPS time before the floor) and no trusted
+    /// position / time to hold: none is published.
+    pub untrusted_pos: bool,
+    pub untrusted_time: bool,
     /// Optional configuration steps the module refused.
     pub cfg_skipped: u8,
 }
@@ -238,10 +245,15 @@ impl Gps {
             fix: None,
             time: None,
             tx_short: 0,
-            integrity: gnss::Monitor::new(),
-            trusted_fix: None,
-            trusted_time: None,
+            integrity: {
+                let mut m = gnss::Monitor::new();
+                m.set_time_floor(build_floor_ms());
+                m
+            },
+            publisher: gnss::trust::Publisher::new(),
             time_held: false,
+            untrusted_pos: false,
+            untrusted_time: false,
             cfg_skipped: 0,
         }
     }
@@ -266,6 +278,73 @@ impl Gps {
         self.integrity.forget_home();
     }
 
+    /// Where home came from, and whether a new place waits for the operator.
+    pub fn home_origin(&self) -> Option<gnss::HomeOrigin> {
+        self.integrity.home_origin()
+    }
+
+    pub fn home_pending(&self) -> Option<(f64, f64, Option<f64>)> {
+        self.integrity.home_pending()
+    }
+
+    /// The operator confirms the waiting new home; returns it.
+    pub fn confirm_home(&mut self) -> Option<(f64, f64, Option<f64>)> {
+        self.integrity.confirm_home()
+    }
+
+    /// Home from the card (remembered) or the site file (placed).
+    pub fn set_home(&mut self, lat: f64, lon: f64, alt: Option<f64>, origin: gnss::HomeOrigin) -> bool {
+        self.integrity.set_home(lat, lon, alt, origin)
+    }
+
+    /// Home learned / new place waiting, since the last call.
+    pub fn take_home_event(&mut self) -> Option<gnss::HomeEvent> {
+        self.integrity.take_home_event()
+    }
+
+    /// The latest time the hub trusted, from the card.
+    pub fn set_remembered_time(&mut self, utc_ms: Option<u64>) {
+        self.integrity.set_remembered_time(utc_ms.map(|u| u as i64));
+    }
+
+    pub fn remembered_time(&self) -> Option<u64> {
+        self.integrity.time_guard().remembered().map(|u| u.max(0) as u64)
+    }
+
+    /// The operator accepts GPS time as it now is (console `T`): the hub's
+    /// clock references and the remembered time are dropped.
+    pub fn accept_time(&mut self) {
+        self.integrity.accept_time();
+    }
+
+    /// UTC now from trusted GPS (not held, not free-running): what may be
+    /// remembered on the card.
+    pub fn trusted_utc_now(&self, now_ms: u64) -> Option<u64> {
+        if self.time_held {
+            return None;
+        }
+        self.time.filter(|a| now_ms.saturating_sub(a.at_ms) < 2_500).map(|a| a.utc_ms + now_ms.saturating_sub(a.at_ms))
+    }
+
+    /// The memory file's text (`ROTORSCP/GPSMEM.TXT`): home, if any, and the
+    /// time to remember (`utc_ms`, or the remembered one kept).
+    pub fn memory_text(&self, utc_ms: Option<u64>) -> heapless::String<128> {
+        use core::fmt::Write;
+        let mut t = heapless::String::new();
+        let _ = writeln!(t, "# rotorscope hub GPS memory (WP-12): written by the hub");
+        if let Some((lat, lon, alt)) = self.integrity.home()
+            && self.integrity.home_origin() != Some(gnss::HomeOrigin::Placed)
+        {
+            let _ = match alt {
+                Some(a) => writeln!(t, "home {lat:.7} {lon:.7} {a:.1}"),
+                None => writeln!(t, "home {lat:.7} {lon:.7}"),
+            };
+        }
+        if let Some(u) = utc_ms.or(self.remembered_time()) {
+            let _ = writeln!(t, "time {u}");
+        }
+        t
+    }
     pub fn baud(&self) -> u32 {
         BAUDS[self.baud_idx]
     }
@@ -459,6 +538,10 @@ impl Gps {
     }
 
     fn on_event(&mut self, ev: &Event, now: u64) {
+        if matches!(ev, Event::Fix(_)) {
+            // The PPS edge of this epoch, for the time check.
+            self.integrity.set_pps(pps_last_us());
+        }
         if self.phase == Phase::Detect
             && let Some(m) = Module::from_event(ev)
         {
@@ -506,71 +589,127 @@ impl Gps {
         self.status = GpsStatus { state, sats: Some(f.sats_used) };
         // The monitor has already seen this epoch (on_event runs it first).
         let integrity = *self.integrity.status();
-        if integrity.hold() {
-            self.hold();
-            return;
-        }
-        self.time_held = false;
-        if f.is_usable()
+        let live_fix = if f.is_usable()
             && let Some((lat, lon)) = f.position()
         {
             let alt_hae_m = if f.fix.has_altitude() { f.alt_ellipsoid_m.map(f64::from) } else { None };
-            let fix = Fix { lat, lon, alt_hae_m, at_ms: now, hacc_m: f.h_acc_m, hdop: f.hdop, held: false };
-            self.fix = Some(fix);
-            if integrity.clean {
-                self.trusted_fix = Some(fix);
-            }
-        } else if self.fix.is_some_and(|x| x.held) {
-            // Released from a hold with no fix this epoch: let it age out.
-            self.fix = self.trusted_fix;
-        }
+            Some(Fix { lat, lon, alt_hae_m, at_ms: now, hacc_m: f.h_acc_m, hdop: f.hdop, held: false })
+        } else {
+            None
+        };
         // UTC only when the receiver vouches for it: NMEA RMC status A, or
         // UBX with the time of day fully resolved.
-        let Some(utc) = f.utc else { return };
-        if f.source == Source::UbxNavPvt && !f.utc_fully_resolved {
-            return;
-        }
-        let utc_ms = utc.unix_ms().max(0) as u64;
-        let now_us = Instant::now().duration_since_epoch().as_micros();
-        let anchor = match pps_last_us() {
-            // The epoch is the top of a second (1 Hz), and the last PPS edge
-            // marked it if that edge is under a second old.
-            Some(edge) if now_us.saturating_sub(edge) < 1_000_000 => {
-                TimeAnchor { utc_ms: (utc_ms + 500) / 1000 * 1000, at_ms: edge / 1000, pps: true }
+        let live_time = f.utc.filter(|_| f.source != Source::UbxNavPvt || f.utc_fully_resolved).map(|utc| {
+            let utc_ms = utc.unix_ms().max(0) as u64;
+            let now_us = Instant::now().duration_since_epoch().as_micros();
+            match pps_last_us() {
+                // The epoch is the top of a second (1 Hz), and the last PPS edge
+                // marked it if that edge is under a second old.
+                Some(edge) if now_us.saturating_sub(edge) < 1_000_000 => {
+                    TimeAnchor { utc_ms: (utc_ms + 500) / 1000 * 1000, at_ms: edge / 1000, pps: true }
+                }
+                _ => TimeAnchor { utc_ms, at_ms: now, pps: false },
             }
-            _ => TimeAnchor { utc_ms, at_ms: now, pps: false },
-        };
-        self.time = Some(anchor);
-        if integrity.clean {
-            self.trusted_time = Some(anchor);
+        });
+        // Trusted time found before the build date or the remembered time:
+        // it is not held either.
+        if integrity.metrics.time_floor {
+            self.publisher.forget_time();
+        }
+        let out = self.publisher.epoch(integrity.trusted, live_fix, live_time);
+        let hold = integrity.hold();
+        use gnss::trust::Pub;
+        self.untrusted_pos = false;
+        match out.fix {
+            Pub::Live(x) => self.fix = Some(Fix { held: false, ..x }),
+            Pub::Keep => {}
+            // Spoofing suspected: home (a static hub's best estimate), else
+            // the last trusted fix. Otherwise (a check fired once, or trust
+            // not yet established): the last trusted fix.
+            Pub::Held(b) => self.fix = Some(self.held_fix(hold, Some(b))),
+            Pub::Withhold if hold && self.integrity.home().is_some() => self.fix = Some(self.held_fix(true, None)),
+            Pub::Withhold => {
+                self.fix = None;
+                self.untrusted_pos = hold;
+            }
+        }
+        self.untrusted_time = false;
+        match out.time {
+            Pub::Live(a) => {
+                self.time = Some(a);
+                self.time_held = false;
+            }
+            Pub::Keep => {}
+            Pub::Held(a) => {
+                self.time = Some(a);
+                self.time_held = true;
+            }
+            Pub::Withhold => {
+                self.time = None;
+                self.time_held = false;
+                self.untrusted_time = hold || integrity.metrics.time_floor;
+            }
         }
     }
 
-    /// Spoofing suspected: keep position and clock off GPS. Position: the
-    /// learned home (a static hub's best estimate), else the last trusted
-    /// fix. Clock: the last trusted anchor, run on by the hub's own clock.
-    fn hold(&mut self) {
-        if !self.fix.is_some_and(|f| f.held) {
-            let base = self.trusted_fix.or(self.fix);
-            self.fix = match (self.integrity.home(), base) {
-                (Some((lat, lon, alt)), b) => Some(Fix {
-                    lat,
-                    lon,
-                    alt_hae_m: alt.or(b.and_then(|b| b.alt_hae_m)),
-                    at_ms: b.map_or(0, |b| b.at_ms),
-                    hacc_m: b.and_then(|b| b.hacc_m),
-                    hdop: b.and_then(|b| b.hdop),
-                    held: true,
-                }),
-                (None, Some(b)) => Some(Fix { held: true, ..b }),
-                (None, None) => None,
-            };
+    /// The fix to publish while GPS is not believed: home while spoofing is
+    /// suspected (if there is one), else the last trusted fix `b`; marked
+    /// held, keeping `b`'s time so the evidence log's fix age grows.
+    fn held_fix(&self, hold: bool, b: Option<Fix>) -> Fix {
+        match (hold.then(|| self.integrity.home()).flatten(), b) {
+            (Some((lat, lon, alt)), b) => Fix {
+                lat,
+                lon,
+                alt_hae_m: alt.or(b.and_then(|b| b.alt_hae_m)),
+                at_ms: b.map_or(0, |b| b.at_ms),
+                hacc_m: b.and_then(|b| b.hacc_m),
+                hdop: b.and_then(|b| b.hdop),
+                held: true,
+            },
+            (None, Some(b)) => Fix { held: true, ..b },
+            // Not reached: callers pass a fix or hold with a home.
+            (None, None) => Fix { lat: 0.0, lon: 0.0, alt_hae_m: None, at_ms: 0, hacc_m: None, hdop: None, held: true },
         }
-        if !self.time_held {
-            self.time_held = true;
-            if self.trusted_time.is_some() {
-                self.time = self.trusted_time;
+    }
+}
+
+/// This firmware's build date (build.rs), Unix ms: GPS time before it is
+/// impossible.
+pub fn build_floor_ms() -> i64 {
+    let s: i64 = env!("ROTORSCOPE_BUILD_UNIX_S").parse().unwrap_or(0);
+    s.saturating_mul(1000)
+}
+
+/// What `ROTORSCP/GPSMEM.TXT` says (written by [`Gps::memory_text`]):
+/// `home LAT LON [HEIGHT]` and `time UNIX_MS` lines; anything else ignored.
+#[derive(Clone, Copy, Default)]
+pub struct Memory {
+    pub home: Option<(f64, f64, Option<f64>)>,
+    pub time_ms: Option<u64>,
+}
+
+impl Memory {
+    pub fn parse(b: &[u8]) -> Memory {
+        let mut m = Memory::default();
+        let text = core::str::from_utf8(b).unwrap_or("");
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            match it.next() {
+                Some("home") => {
+                    let lat = it.next().and_then(|v| v.parse::<f64>().ok());
+                    let lon = it.next().and_then(|v| v.parse::<f64>().ok());
+                    let alt = it.next().and_then(|v| v.parse::<f64>().ok());
+                    if let (Some(lat), Some(lon)) = (lat, lon)
+                        && (-90.0..=90.0).contains(&lat)
+                        && (-180.0..=180.0).contains(&lon)
+                    {
+                        m.home = Some((lat, lon, alt));
+                    }
+                }
+                Some("time") => m.time_ms = it.next().and_then(|v| v.parse().ok()),
+                _ => {}
             }
         }
+        m
     }
 }

@@ -346,20 +346,51 @@ struct Hub {
     mon: Monitor,
     now: u64,
     jitter: Rng,
+    /// Arrival jitter, +-ms (message length, main loop).
+    jitter_ms: i32,
+    /// The receiver's epochs arrive this much later than they should (a time spoofer moving
+    /// the receiver's second against the hub's clock), ms.
+    shift_ms: i64,
+    /// A PPS edge with every epoch (at the top of the receiver's second).
+    pps: bool,
+    /// The hub's crystal runs this many ppm fast (its uptime gains on true time).
+    crystal_ppm: i64,
+    crystal_acc_us: i64,
     states: Vec<State>,
     changes: Vec<(State, State, Option<Cause>)>,
+    trusted: Vec<bool>,
 }
 
 impl Hub {
     fn new() -> Hub {
-        Hub { parser: Parser::new(), mon: Monitor::new(), now: 10_000, jitter: Rng(99), states: Vec::new(), changes: Vec::new() }
+        Hub {
+            parser: Parser::new(),
+            mon: Monitor::new(),
+            now: 10_000,
+            jitter: Rng(99),
+            jitter_ms: 40,
+            shift_ms: 0,
+            pps: false,
+            crystal_ppm: 0,
+            crystal_acc_us: 0,
+            states: Vec::new(),
+            changes: Vec::new(),
+            trusted: Vec::new(),
+        }
     }
 
     /// One epoch of bytes, processed the way the hub does (collect events, then handle).
     fn feed(&mut self, bytes: &[u8]) -> State {
-        // Hub processing latency: 1 s per epoch plus up to +-150 ms of jitter.
-        self.now += 1000;
-        let at = (self.now as i64 + i64::from(self.jitter.pm(150))) as u64;
+        // Hub processing latency: 1 s per epoch plus up to +-40 ms of jitter.
+        self.crystal_acc_us += self.crystal_ppm;
+        let gain_ms = self.crystal_acc_us / 1000;
+        self.crystal_acc_us -= gain_ms * 1000;
+        self.now = (self.now as i64 + 1000 + gain_ms) as u64;
+        let top = self.now as i64 + self.shift_ms;
+        if self.pps {
+            self.mon.set_pps(Some(((top - 100) * 1000 + i64::from(self.jitter.pm(50))) as u64));
+        }
+        let at = (top + i64::from(self.jitter.pm(self.jitter_ms))) as u64;
         let evs: Vec<Event> = self.parser.feed(bytes).collect();
         for ev in &evs {
             if let Some(c) = self.mon.on_event(ev, self.parser.sats(), at) {
@@ -368,6 +399,7 @@ impl Hub {
         }
         let s = self.mon.status().state;
         self.states.push(s);
+        self.trusted.push(self.mon.status().trusted);
         s
     }
 
@@ -798,11 +830,11 @@ fn time_jump_is_caught_and_cleared() {
 
 #[test]
 fn hub_clock_drift_and_jitter_are_not_time_jumps() {
-    // GPS lost for an hour (hub crystal drifts 50 ppm, 180 ms), then back.
+    // GPS lost for an hour (hub crystal at the edge of the budget, 20 ppm: 72 ms), then back.
     let mut hub = Hub::new();
     let mut sky = Sky::new(38, Env::Open);
     run_nmea(&mut hub, &mut sky, 100);
-    hub.now += 3_600_000 + 180;
+    hub.now += 3_600_000 + 72;
     sky.t += 3600;
     run_nmea(&mut hub, &mut sky, 100);
     assert_eq!(hub.worst(), State::Ok, "{:?}", hub.changes);
@@ -870,6 +902,7 @@ fn cause_kinds_and_names() {
     assert_eq!(Cause::Cn0Collapse.kind(), 4);
     assert_eq!(Cause::RxSpoofFlag.kind(), 1);
     assert_eq!(Cause::ImpossibleSat.kind(), 10);
+    assert_eq!(Cause::TimeFloor.kind(), 11);
     assert!(Cause::OffHome.is_spoofing() && !Cause::AgcDrop.is_spoofing());
     assert_eq!(State::SuspectSpoofing.name(), "suspect_spoofing");
     assert!(State::Spoofing > State::Jamming);
@@ -886,4 +919,270 @@ fn local_maths() {
     assert!((integrity::dist_m(0.0, 0.0, 1.0, 0.0) - 111_195.0).abs() < 1.0);
     assert!((integrity::dist_m(60.0, 0.0, 60.0, 1.0) - 55_597.0).abs() < 5.0);
     assert!((integrity::dist_m(10.0, 179.9, 10.0, -179.9) - 21_901.0).abs() < 50.0, "across the date line");
+}
+
+// ------------------------------------------------- WP-12: time and trust --
+
+use crate::trust::{Pub, Publisher};
+
+/// Steps of 1 s, 0.5 s and 0.3 s of the receiver's second against the hub's clock (with and
+/// without PPS): each raises TimeJump within two epochs, no epoch after it is trusted (so its
+/// time is never published or adopted), and it stays raised while the step lasts. Before
+/// WP-12 anything under 2 s passed.
+#[test]
+fn sub_second_time_steps_are_caught_and_not_adopted() {
+    for &step in &[1_000i64, 500, 300, -500] {
+        for pps in [false, true] {
+            let mut hub = Hub::new();
+            hub.pps = pps;
+            let mut sky = Sky::new(40, Env::Open);
+            run_nmea(&mut hub, &mut sky, 200);
+            assert!(hub.mon.status().trusted);
+            assert!(hub.mon.status().metrics.time_disciplined);
+            hub.shift_ms = step;
+            let first = hub.trusted.len();
+            run_nmea(&mut hub, &mut sky, 2);
+            let st = *hub.mon.status();
+            assert_eq!(st.state, State::SuspectSpoofing, "step {step} pps {pps}: {:?}", hub.changes);
+            assert_eq!(st.cause.unwrap().cause, Cause::TimeJump);
+            run_nmea(&mut hub, &mut sky, 300);
+            assert_eq!(hub.mon.status().state, State::SuspectSpoofing, "stays while it lasts");
+            assert!(hub.trusted[first..].iter().all(|t| !t), "no stepped epoch is trusted");
+            let v = hub.mon.status().cause.unwrap().value;
+            assert!((i64::from(v) + step).abs() < 100, "step {step}: {v}");
+        }
+    }
+}
+
+/// An honest receiver for an hour, hub crystal at the edge of the budget (+-20 ppm), +-40 ms
+/// arrival jitter: never an alarm, trusted throughout once established.
+#[test]
+fn honest_hour_at_the_crystal_edge() {
+    for ppm in [20, -20] {
+        let mut hub = Hub::new();
+        hub.crystal_ppm = ppm;
+        hub.pps = ppm > 0;
+        let mut sky = Sky::new(41, Env::Open);
+        run_nmea(&mut hub, &mut sky, 3600);
+        assert_eq!(hub.worst(), State::Ok, "{ppm}: {:?} {:?} {:?} at {}", hub.changes, hub.mon.status().cause, hub.mon.time_guard(), hub.states.iter().position(|s| *s != State::Ok).unwrap_or(0));
+        assert!(hub.trusted[integrity::TRUST_EPOCHS as usize..].iter().all(|&t| t));
+    }
+}
+
+/// A slow walk of the receiver's time (2 ms a second, no PPS) is caught within 150 ms /
+/// (2000 - 20) ppm, about 76 s, plus the sustain.
+#[test]
+fn slow_time_walk_is_caught() {
+    let mut hub = Hub::new();
+    let mut sky = Sky::new(42, Env::Open);
+    run_nmea(&mut hub, &mut sky, 200);
+    let mut at = None;
+    for i in 0..300 {
+        hub.shift_ms += 2;
+        let e = sky.step();
+        if hub.feed(&nmea_epoch(&e, None)) == State::SuspectSpoofing {
+            at = Some(i);
+            break;
+        }
+    }
+    let at = at.expect("caught");
+    assert!((40..=110).contains(&at), "{at}");
+}
+
+/// The hub's publication as gps.rs applies it: (lat, lon) and UTC ms.
+fn publish(p: &mut Publisher<(f64, f64), i64>, hub: &Hub, e: &Epoch) -> (Pub<(f64, f64)>, Pub<i64>) {
+    let fix = e.fix.then_some((e.lat, e.lon));
+    let o = p.epoch(hub.mon.status().trusted, fix, e.fix.then_some(e.utc * 1000));
+    (o.fix, o.time)
+}
+
+/// A spoofer on from power-up (uniform signal strengths, another place, another time): the
+/// hub never trusts an epoch, so it publishes no position and no time, held or otherwise.
+/// Before WP-12 the first epochs' (spoofed) position and time were published and then held.
+/// When the spoofer goes, trust is established after a clean period and publication resumes
+/// with the real position and time.
+#[test]
+fn spoofer_from_boot_publishes_nothing_until_trust() {
+    let mut hub = Hub::new();
+    let mut sky = Sky::new(43, Env::Open);
+    sky.spoof_cn0 = Some(47);
+    sky.dn = 2_000.0;
+    sky.dt_s = 3_600;
+    let mut p = Publisher::new();
+    for _ in 0..600 {
+        let e = sky.step();
+        hub.feed(&nmea_epoch(&e, None));
+        let (f, t) = publish(&mut p, &hub, &e);
+        assert_eq!((f, t), (Pub::Withhold, Pub::Withhold));
+    }
+    assert!(hub.mon.status().hold());
+    sky.spoof_cn0 = None;
+    sky.dn = 0.0;
+    sky.dt_s = 0;
+    let mut live_at = None;
+    for i in 0..300 {
+        let e = sky.step();
+        hub.feed(&nmea_epoch(&e, None));
+        let (f, t) = publish(&mut p, &hub, &e);
+        if let (Pub::Live((lat, _)), Pub::Live(utc)) = (f, t) {
+            assert!((lat - HOME_LAT).abs() < 1e-3);
+            assert_eq!(utc, e.utc * 1000);
+            live_at = Some(i);
+            break;
+        }
+        assert_eq!((f, t), (Pub::Withhold, Pub::Withhold), "epoch {i}");
+    }
+    let at = live_at.expect("trust established");
+    // The 2 km jump stays counted 60 epochs, then 30 to clear, then 10 clean.
+    assert!(at <= 110, "{at} {:?}", hub.changes);
+}
+
+/// With trust established, a later spoof holds the last trusted values (never the receiver's).
+#[test]
+fn hold_after_trust_publishes_the_last_trusted() {
+    let mut hub = Hub::new();
+    let mut sky = Sky::new(44, Env::Open);
+    let mut p = Publisher::new();
+    let mut last = None;
+    for _ in 0..100 {
+        let e = sky.step();
+        hub.feed(&nmea_epoch(&e, None));
+        publish(&mut p, &hub, &e);
+        last = Some(e.utc * 1000);
+    }
+    sky.spoof_cn0 = Some(47);
+    sky.dt_s = 600;
+    for _ in 0..50 {
+        let e = sky.step();
+        hub.feed(&nmea_epoch(&e, None));
+        let (_, t) = publish(&mut p, &hub, &e);
+        assert!(matches!(t, Pub::Held(u) if u <= last.unwrap()), "{t:?}");
+    }
+}
+
+/// Home is remembered: a second boot given the first boot's learned home has it from the
+/// start, and a spoofer present from that boot is caught by the position check at once.
+#[test]
+fn remembered_home_survives_a_restart() {
+    let (mut hub, _) = settled_nmea(45);
+    let Some(integrity::HomeEvent::Learned { lat, lon, alt }) = hub.mon.take_home_event() else { panic!("learned event") };
+    assert_eq!(hub.mon.take_home_event(), None, "once");
+    // Restart, honest sky: home from the card, no new event, no alarm.
+    let mut hub = Hub::new();
+    assert!(hub.mon.set_home(lat, lon, alt, integrity::HomeOrigin::Remembered));
+    let mut sky = Sky::new(46, Env::Open);
+    run_nmea(&mut hub, &mut sky, 1000);
+    assert_eq!(hub.worst(), State::Ok, "{:?}", hub.changes);
+    assert_eq!(hub.mon.home_origin(), Some(integrity::HomeOrigin::Remembered));
+    assert_eq!(hub.mon.take_home_event(), None);
+    // Restart with a careful spoofer from power-up (realistic C/N0) placing the hub 500 m
+    // away: caught by the remembered home within the sustain.
+    let mut hub = Hub::new();
+    hub.mon.set_home(lat, lon, alt, integrity::HomeOrigin::Remembered);
+    let mut sky = Sky::new(47, Env::Open);
+    sky.dn = 500.0;
+    run_nmea(&mut hub, &mut sky, 15);
+    assert_eq!(hub.mon.status().state, State::Spoofing, "{:?}", hub.changes);
+    assert_eq!(hub.mon.status().cause.unwrap().cause, Cause::OffHome);
+}
+
+/// A newly learned place that disagrees with the remembered home is not adopted: the position
+/// check keeps alarming, a Pending event names it, and only the operator's confirmation makes
+/// it home.
+#[test]
+fn new_home_waits_for_the_operator() {
+    let (mut hub, _) = settled_nmea(48);
+    let Some(integrity::HomeEvent::Learned { lat, lon, alt }) = hub.mon.take_home_event() else { panic!() };
+    let mut hub = Hub::new();
+    hub.mon.set_home(lat, lon, alt, integrity::HomeOrigin::Remembered);
+    let mut sky = Sky::new(49, Env::Open);
+    sky.dn = 800.0; // moved while switched off (or a spoofer)
+    run_nmea(&mut hub, &mut sky, 950);
+    assert_eq!(hub.mon.status().state, State::Spoofing);
+    match hub.mon.take_home_event() {
+        Some(integrity::HomeEvent::Pending { dist_m, .. }) => assert!((780.0..820.0).contains(&dist_m), "{dist_m}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(hub.mon.status().metrics.home_pending);
+    let (hl, _, _) = hub.mon.home().unwrap();
+    assert!((hl - lat).abs() < 1e-6, "home not moved");
+    // Another 15 minutes: still not adopted, no second event.
+    run_nmea(&mut hub, &mut sky, 950);
+    assert_eq!(hub.mon.take_home_event(), None);
+    assert_eq!(hub.mon.status().state, State::Spoofing);
+    // The operator confirms.
+    let (nl, _, _) = hub.mon.confirm_home().expect("pending");
+    assert!((nl - (HOME_LAT + 800.0 / 111_195.0)).abs() < 1e-4);
+    run_nmea(&mut hub, &mut sky, (integrity::CLEAR_EPOCHS + 5) as usize);
+    assert_eq!(hub.mon.status().state, State::Ok, "{:?}", hub.changes);
+    assert_eq!(hub.mon.home_origin(), Some(integrity::HomeOrigin::Learned));
+    assert!(hub.mon.confirm_home().is_none(), "nothing waiting");
+}
+
+/// A placed home (site file) is the strongest prior: replaces a remembered one, and the
+/// operator cannot confirm a learned place over it (the file must be edited).
+#[test]
+fn placed_home_wins() {
+    let mut hub = Hub::new();
+    assert!(hub.mon.set_home(HOME_LAT, HOME_LON, None, integrity::HomeOrigin::Remembered));
+    assert!(!hub.mon.set_home(1.0, 1.0, None, integrity::HomeOrigin::Remembered), "a remembered one only fills an empty home");
+    assert!(hub.mon.set_home(HOME_LAT, HOME_LON, Some(HOME_ALT), integrity::HomeOrigin::Placed));
+    let mut sky = Sky::new(50, Env::Open);
+    sky.dn = 900.0;
+    run_nmea(&mut hub, &mut sky, 950);
+    assert!(hub.mon.status().metrics.home_pending);
+    assert!(hub.mon.confirm_home().is_none());
+    assert_eq!(hub.mon.home_origin(), Some(integrity::HomeOrigin::Placed));
+}
+
+/// GPS time before the remembered time is untrusted: TimeFloor, nothing trusted, no time
+/// published. GPS time after it is fine. The operator's "accept GPS time" clears it.
+#[test]
+fn time_before_the_remembered_time_is_untrusted() {
+    let mut hub = Hub::new();
+    hub.mon.set_time_floor((START_UTC - 30 * 86_400) * 1000);
+    hub.mon.set_remembered_time(Some((START_UTC + 86_400) * 1000));
+    let mut sky = Sky::new(51, Env::Open);
+    let mut p = Publisher::new();
+    for _ in 0..100 {
+        let e = sky.step();
+        hub.feed(&nmea_epoch(&e, None));
+        assert_eq!(publish(&mut p, &hub, &e), (Pub::Withhold, Pub::Withhold));
+    }
+    let st = *hub.mon.status();
+    assert_eq!(st.state, State::SuspectSpoofing);
+    assert_eq!(st.cause.unwrap().cause, Cause::TimeFloor);
+    assert!(st.metrics.time_floor);
+    assert!(reason(&hub).contains("before the build date or the last time the hub trusted"));
+    hub.mon.accept_time();
+    run_nmea(&mut hub, &mut sky, (integrity::CLEAR_EPOCHS + integrity::TRUST_EPOCHS + 2) as usize);
+    assert!(hub.mon.status().trusted, "{:?}", hub.changes);
+
+    // Remembered time in the past: no complaint.
+    let mut hub = Hub::new();
+    hub.mon.set_remembered_time(Some((START_UTC - 3_600) * 1000));
+    run_nmea(&mut hub, &mut Sky::new(52, Env::Open), 50);
+    assert_eq!(hub.worst(), State::Ok);
+}
+
+/// GPS time before this firmware's build date is impossible.
+#[test]
+fn time_before_the_build_date_is_impossible() {
+    let mut hub = Hub::new();
+    hub.mon.set_time_floor((START_UTC + 400 * 86_400) * 1000);
+    run_nmea(&mut hub, &mut Sky::new(53, Env::Open), 50);
+    let st = *hub.mon.status();
+    assert_eq!(st.cause.unwrap().cause, Cause::TimeFloor, "{st:?}");
+    assert!(st.cause.unwrap().value <= -400 * 86_400 + 60, "{st:?}");
+    assert!(hub.trusted.iter().all(|t| !t));
+}
+
+/// The monitor lives inside the hub's `Gps`, on the main task's stack.
+#[test]
+fn monitor_size() {
+    let m = core::mem::size_of::<Monitor>();
+    let g = core::mem::size_of::<crate::timeguard::TimeGuard>();
+    let p = core::mem::size_of::<Publisher<(f64, f64, Option<f64>, u64, Option<f32>, Option<f32>, bool), (u64, u64, bool)>>();
+    std::println!("Monitor {m} bytes, TimeGuard {g}, Publisher(hub types) {p}");
+    assert!(m <= 1024, "{m}");
 }

@@ -4,7 +4,20 @@
 //! A frame is accepted only when its X.25 checksum, seeded with the
 //! message's CRC_EXTRA, checks. CRC_EXTRA comes from the message definition,
 //! so only the messages in [`MESSAGES`] can be checked; any other message ID
-//! is skipped (never guessed at). MAVLink 2 signed frames are parsed and
+//! is skipped (never guessed at).
+//!
+//! **Any payload length is accepted** (0 to 255), MAVLink 1 or 2, as the
+//! common parsers do: the MAVLink C library built without
+//! `MAVLINK_CHECK_MESSAGE_LENGTH` (its default) and pymavlink check the
+//! checksum, then decode by copying at most the message's length and
+//! zero-filling the rest. So a hostile sender can deliver a payload in a
+//! frame that is longer or shorter than the message, and the ground station
+//! still acts on it. [`Frame::payload`] is what those parsers see (cut at
+//! the message's full length; the accessors zero-extend), and
+//! [`Frame::odd_length`] says when the length is one no conforming sender
+//! uses (until WP-11a such frames were rejected as `Bad`, which hid them).
+//! Not every ground station has been checked: QGroundControl and Mission
+//! Planner may be stricter or not; this follows the two parsers above. MAVLink 2 signed frames are parsed and
 //! their signature block (link ID, timestamp, signature) is returned; the
 //! signature itself cannot be checked without the link's secret key, and is
 //! not.
@@ -103,9 +116,13 @@ pub struct Frame<'a> {
     pub sysid: u8,
     pub compid: u8,
     pub msgid: u32,
-    /// Payload as sent (MAVLink 2 trims trailing zero bytes; read fields
-    /// with the zero-extending accessors below).
+    /// Payload as a lenient parser decodes it: the bytes sent, cut at the
+    /// message's full length (MAVLink 2 trims trailing zero bytes, and a
+    /// short frame is zero-filled: read fields with the zero-extending
+    /// accessors below).
     pub payload: &'a [u8],
+    /// Payload length as sent in the header.
+    pub sent_len: u8,
     /// MAVLink 2 signed frames only.
     pub signature: Option<Signature>,
     /// The whole frame, header to signature, as it was in the buffer.
@@ -124,6 +141,21 @@ impl Frame<'_> {
 
     pub fn signed(&self) -> bool {
         self.signature.is_some()
+    }
+
+    /// A payload length no conforming sender uses for this message: longer
+    /// than the message (either version), a MAVLink 1 frame not exactly the
+    /// base length, or an empty MAVLink 2 payload (trimming keeps one
+    /// byte). `(sent, expected)`, `expected` being the full length (MAVLink
+    /// 2) or the base length (MAVLink 1).
+    pub fn odd_length(&self) -> Option<(u8, u8)> {
+        let mi = info(self.msgid)?;
+        let n = self.sent_len;
+        let odd = match self.version {
+            1 => n != mi.base_len,
+            _ => n > mi.max_len || n == 0,
+        };
+        odd.then_some((n, if self.version == 1 { mi.base_len } else { mi.max_len }))
     }
 
     /// Payload byte `i`, zero past the end (MAVLink 2 truncation).
@@ -170,8 +202,8 @@ pub enum Parse<'a> {
     /// A plausible header for a known message, but the frame runs past the
     /// end of the buffer: wait for more bytes.
     Incomplete,
-    /// Not a frame starting here (wrong start byte, unknown message,
-    /// impossible length, CRC mismatch).
+    /// Not a frame starting here (wrong start byte, unknown message, unknown
+    /// incompatibility flags, CRC mismatch).
     Bad,
 }
 
@@ -194,9 +226,6 @@ pub fn parse_at(b: &[u8]) -> Parse<'_> {
             let Some(mi) = info(msgid) else {
                 return Parse::Bad;
             };
-            if plen > mi.max_len as usize {
-                return Parse::Bad;
-            }
             let crc_at = 10 + plen;
             let sig = if incompat & INCOMPAT_SIGNED != 0 {
                 SIGNATURE_LEN
@@ -232,7 +261,8 @@ pub fn parse_at(b: &[u8]) -> Parse<'_> {
                 sysid: b[5],
                 compid: b[6],
                 msgid,
-                payload: &b[10..crc_at],
+                payload: &b[10..10 + plen.min(mi.max_len as usize)],
+                sent_len: plen as u8,
                 signature,
                 bytes: &b[..total],
             })
@@ -246,10 +276,8 @@ pub fn parse_at(b: &[u8]) -> Parse<'_> {
             let Some(mi) = info(msgid) else {
                 return Parse::Bad;
             };
-            // MAVLink 1 has neither extensions nor truncation.
-            if plen != mi.base_len as usize {
-                return Parse::Bad;
-            }
+            // MAVLink 1 has neither extensions nor truncation, but lenient
+            // parsers take any length (see the module docs).
             let crc_at = 6 + plen;
             if b.len() < crc_at + 2 {
                 return Parse::Incomplete;
@@ -264,7 +292,8 @@ pub fn parse_at(b: &[u8]) -> Parse<'_> {
                 sysid: b[3],
                 compid: b[4],
                 msgid,
-                payload: &b[6..crc_at],
+                payload: &b[6..6 + plen.min(mi.max_len as usize)],
+                sent_len: plen as u8,
                 signature: None,
                 bytes: &b[..crc_at + 2],
             })
@@ -452,6 +481,31 @@ mod tests {
         };
         assert!(f.payload.len() < 23);
         assert_eq!((f.f32(0), f.u8(22), f.text(6, 16)), (1.5, 0, &b"A"[..]));
+    }
+
+    #[test]
+    fn any_length_parses_as_lenient_parsers_do() {
+        let mut b = [0u8; 300];
+        // HEARTBEAT (9 bytes) sent with 40 in MAVLink 2: cut at 9.
+        let n = v2_raw(&mut b, 0, 1, 1, 0, &[7; 40], None, false);
+        let Parse::Frame(f) = parse_at(&b[..n]) else { panic!() };
+        assert_eq!((f.payload.len(), f.sent_len, f.len(), f.odd_length()), (9, 40, n, Some((40, 9))));
+        // ...and 3 bytes in MAVLink 1: zero-extended.
+        let n = v1(&mut b, 0, 1, 1, 0, &[7; 3]);
+        let Parse::Frame(f) = parse_at(&b[..n]) else { panic!() };
+        assert_eq!((f.payload.len(), f.u8(2), f.u8(8), f.odd_length()), (3, 7, 0, Some((3, 9))));
+        // Conforming lengths are not odd.
+        let n = v1(&mut b, 0, 1, 1, 0, &[7; 9]);
+        let Parse::Frame(f) = parse_at(&b[..n]) else { panic!() };
+        assert_eq!(f.odd_length(), None);
+        let n = v2(&mut b, 0, 1, 1, 0, &[7, 0, 0, 0, 0, 0, 0, 0, 0], None);
+        let Parse::Frame(f) = parse_at(&b[..n]) else { panic!() };
+        assert_eq!((f.sent_len, f.odd_length()), (1, None));
+        // Every cut of a long frame is incomplete, never a frame.
+        let n = v2_raw(&mut b, 0, 1, 1, 0, &[7; 200], None, false);
+        for k in 0..n {
+            assert_eq!(parse_at(&b[..k]), Parse::Incomplete, "{k}");
+        }
     }
 
     #[test]

@@ -305,11 +305,14 @@ pub fn find<'a>(
     let now = ctx.now_ms;
     let planes: Vec<(AircraftKey, Body), { crate::aircraft::MAX_AIRCRAFT }> = aircraft
         .iter()
-        .filter(|a| ctx.aircraft_state(a) == TrackState::Active)
+        .filter(|a| ctx.aircraft_state(a) == TrackState::Active && a.established())
         .filter_map(|a| Some((a.key, aircraft_body(a, now)?)))
         .collect();
     let mut out: Vec<Conflict, MAX_CONFLICTS> = Vec::new();
-    for t in drones.filter(|t| ctx.state(t) == TrackState::Active) {
+    // Only standing on both sides (WP-09): a confirmed drone track and an
+    // established aircraft, so neither a forged drone nor a forged
+    // aircraft raises (or, by filling the tables, hides) the warning.
+    for t in drones.filter(|t| ctx.state(t) == TrackState::Active && t.confirmed()) {
         let Some(d) = drone_body(t, now) else {
             continue;
         };

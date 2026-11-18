@@ -26,6 +26,22 @@
 //!
 //! `no_std`, no heap. Unwrapping one CRYP record is one P-256-sized scalar
 //! multiplication (a few ms on the P4); INFP records cost one AES-CTR pass.
+//!
+//! # Decrypted is not authenticated
+//!
+//! Nothing in the scheme proves who sent a record (docs/SPOOFING.md
+//! "Impersonation and disputes"): anyone holding the receiver's public key
+//! can mint a session, a recorded exchange can be replayed, and AES-CTR is
+//! malleable (flip ciphertext bits, the same plaintext bits flip, and the
+//! range checks still pass). What this crate can do, it does: within a
+//! session an INFP-10 record whose sequence number or GPS time does not
+//! move forward is refused ([`Error::Replay`]), and one that jumps further
+//! ahead than the time since the last one allows is refused without moving
+//! the session on ([`Error::TooFarAhead`]), so a forged "future" record
+//! cannot lock the real one out. A CRYP whose session is already known
+//! costs no curve operation, and unwraps are rate-limited
+//! ([`UNWRAP_PER_S`]). The tracker treats every decrypted position as a
+//! claim, not a fact.
 #![no_std]
 
 use aes::cipher::{KeyIvInit, StreamCipher};
@@ -195,6 +211,15 @@ pub enum Error {
     /// Decrypted, but the plaintext failed the spec's structural checks
     /// (wrong key for a colliding key ID, or an unknown layout).
     Plain(o4plain::Reject),
+    /// An INFP-10 record whose sequence number or GPS time does not move
+    /// forward within its session: a replay, or an altered copy of one.
+    Replay,
+    /// An INFP-10 record further ahead (sequence or GPS time) than the time
+    /// since the session's last one allows. Not applied, and the session's
+    /// position is not moved on, so the real records still decrypt.
+    TooFarAhead,
+    /// A new CRYP while the unwrap budget ([`UNWRAP_PER_S`]) is spent.
+    RateLimited,
 }
 
 /// The core record inside a logical object (`[len][core][7 pad][crc16]`,
@@ -315,11 +340,104 @@ pub fn decrypt_core(core: &[u8], key: &SessionKey) -> Result<Plain, Error> {
 /// A session not used for this long is forgotten. Sessions change on
 /// every aircraft restart; a flight's CRYP repeats while it flies.
 pub const SESSION_TTL_MS: u64 = 30 * 60 * 1000;
+/// New session keys unwrapped (curve operations) a second, on average...
+pub const UNWRAP_PER_S: u32 = 2;
+/// ...and in a burst. A real aircraft needs one per flight.
+pub const UNWRAP_BURST: u32 = 4;
+/// INFP-10 GPS time may run ahead of hub time by this much between two
+/// records of a session (clock rates, reception delays).
+pub const GPS_AHEAD_SLACK_MS: u64 = 10_000;
+/// INFP-10 sequence numbers a second, at most, between two records
+/// (generous: records come a few times a second), plus a burst.
+pub const SEQ_PER_S: u64 = 50;
+
+/// The latest INFP-10 accepted in a session.
+#[derive(Clone, Copy)]
+struct Latest {
+    seq: u16,
+    gps_ms: u64,
+    hub_ms: u64,
+    /// FNV-1a of the fields a duplicate repeats (position, altitudes,
+    /// velocity, GPS time).
+    hash: u32,
+}
 
 struct Slot {
     key_id: [u8; 4],
     key: SessionKey,
     last_ms: u64,
+    latest: Option<Latest>,
+}
+
+fn infp10_hash(r: &Infp10) -> u32 {
+    let mut h = 0x811c_9dc5u32;
+    let mut eat = |b: &[u8]| {
+        for x in b {
+            h = (h ^ u32::from(*x)).wrapping_mul(0x0100_0193);
+        }
+    };
+    eat(&r.lat_raw.to_le_bytes());
+    eat(&r.lon_raw.to_le_bytes());
+    eat(&r.altitude_m.to_le_bytes());
+    eat(&r.height_dm.to_le_bytes());
+    eat(&r.v_north.to_le_bytes());
+    eat(&r.v_east.to_le_bytes());
+    eat(&r.v_up.to_le_bytes());
+    eat(&r.state.to_le_bytes());
+    eat(&r.gps_time_ms.to_le_bytes());
+    h
+}
+
+impl Slot {
+    /// Whether INFP-10 `r`, received at `now`, moves the session forward.
+    fn fresh(&mut self, r: &Infp10, now: u64) -> Result<(), Error> {
+        let h = infp10_hash(r);
+        let Some(l) = self.latest else {
+            self.latest = Some(Latest { seq: r.seq, gps_ms: r.gps_time_ms, hub_ms: now, hash: h });
+            return Ok(());
+        };
+        let dseq = r.seq.wrapping_sub(l.seq) as i16;
+        if dseq == 0 {
+            // The same record again (two nodes, or a repeat): fine if it is
+            // identical; an altered copy is refused.
+            return if h == l.hash { Ok(()) } else { Err(Error::Replay) };
+        }
+        if dseq < 0 || r.gps_time_ms < l.gps_ms {
+            return Err(Error::Replay);
+        }
+        let dt = now.saturating_sub(l.hub_ms);
+        if u64::from(dseq as u16) > SEQ_PER_S * (dt / 1000 + 1)
+            || r.gps_time_ms - l.gps_ms > dt + GPS_AHEAD_SLACK_MS
+        {
+            return Err(Error::TooFarAhead);
+        }
+        self.latest = Some(Latest { seq: r.seq, gps_ms: r.gps_time_ms, hub_ms: now, hash: h });
+        Ok(())
+    }
+}
+
+/// Unwrap budget: milli-tokens and when they were counted.
+#[derive(Clone, Copy, Debug)]
+struct Bucket {
+    milli: u32,
+    at_ms: u64,
+}
+
+impl Bucket {
+    const fn full() -> Self {
+        Self { milli: UNWRAP_BURST * 1000, at_ms: 0 }
+    }
+    fn take(&mut self, now: u64) -> bool {
+        let add = now.saturating_sub(self.at_ms).saturating_mul(u64::from(UNWRAP_PER_S)).min(u64::from(u32::MAX));
+        self.milli = self.milli.saturating_add(add as u32).min(UNWRAP_BURST * 1000);
+        self.at_ms = self.at_ms.max(now);
+        if self.milli >= 1000 {
+            self.milli -= 1000;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// The hub's O4 decryptor: the owner's private key (if installed) and the
@@ -327,6 +445,7 @@ struct Slot {
 pub struct Decryptor<const N: usize> {
     key: Option<PrivateKey>,
     slots: [Option<Slot>; N],
+    bucket: Bucket,
     pub stats: Stats,
 }
 
@@ -337,11 +456,21 @@ pub struct Stats {
     pub records_decrypted: u32,
     pub no_session: u32,
     pub rejected: u32,
+    /// Scalar multiplications done (one per new session unwrapped, or
+    /// attempted: a forged CRYP costs one too).
+    pub curve_ops: u32,
+    /// INFP-10 records refused as not newer than their session's last
+    /// ([`Error::Replay`]).
+    pub replayed: u32,
+    /// INFP-10 records refused as too far ahead ([`Error::TooFarAhead`]).
+    pub too_far_ahead: u32,
+    /// New CRYPs refused while the unwrap budget was spent.
+    pub rate_limited: u32,
 }
 
 impl<const N: usize> Default for Decryptor<N> {
     fn default() -> Self {
-        Self { key: None, slots: [const { None }; N], stats: Stats::default() }
+        Self { key: None, slots: [const { None }; N], bucket: Bucket::full(), stats: Stats::default() }
     }
 }
 
@@ -390,7 +519,7 @@ impl<const N: usize> Decryptor<N> {
                 (0..N).min_by_key(|&i| self.slots[i].as_ref().map_or(0, |s| s.last_ms)).unwrap_or(0)
             });
         if N > 0 {
-            self.slots[i] = Some(Slot { key_id, key, last_ms: now_ms });
+            self.slots[i] = Some(Slot { key_id, key, last_ms: now_ms, latest: None });
         }
     }
 
@@ -407,11 +536,16 @@ impl<const N: usize> Decryptor<N> {
     /// with its session's key.
     pub fn process(&mut self, object: &[u8], now_ms: u64) -> Result<Plain, Error> {
         let r = self.process_inner(object, now_ms);
-        match r {
-            Ok(_) => self.stats.records_decrypted += 1,
-            Err(Error::NoSession) | Err(Error::NoKey) => self.stats.no_session += 1,
-            Err(_) => self.stats.rejected += 1,
-        }
+        let s = &mut self.stats;
+        let c = match r {
+            Ok(_) => &mut s.records_decrypted,
+            Err(Error::NoSession) | Err(Error::NoKey) => &mut s.no_session,
+            Err(Error::Replay) => &mut s.replayed,
+            Err(Error::TooFarAhead) => &mut s.too_far_ahead,
+            Err(Error::RateLimited) => &mut s.rate_limited,
+            Err(_) => &mut s.rejected,
+        };
+        *c = c.saturating_add(1);
         r
     }
 
@@ -420,13 +554,23 @@ impl<const N: usize> Decryptor<N> {
         let core = core_of(object)?;
         let id = key_id_of(core)?;
         if core[0] == SEL_CRYP {
-            let d = self.key.as_ref().ok_or(Error::NoKey)?;
-            let k = unwrap_cryp(core, d)?;
-            let known = self.slots.iter().flatten().any(|s| s.key_id == id);
-            let plain = decrypt_core(core, &k)?;
-            if !known {
-                self.stats.sessions_unwrapped += 1;
+            // A session already unwrapped: its key decrypts the aux, with no
+            // curve operation. (A CRYP whose C1/C2/C3 were altered is not
+            // noticed then; nothing is lost, since its aux was never
+            // authenticated either.)
+            if let Some(slot) = self.slots.iter_mut().flatten().find(|s| s.key_id == id) {
+                let plain = decrypt_core(core, &slot.key)?;
+                slot.last_ms = now_ms;
+                return Ok(plain);
             }
+            let d = self.key.as_ref().ok_or(Error::NoKey)?;
+            if !self.bucket.take(now_ms) {
+                return Err(Error::RateLimited);
+            }
+            self.stats.curve_ops = self.stats.curve_ops.saturating_add(1);
+            let k = unwrap_cryp(core, d)?;
+            let plain = decrypt_core(core, &k)?;
+            self.stats.sessions_unwrapped += 1;
             self.store(id, k, now_ms);
             return Ok(plain);
         }
@@ -436,8 +580,12 @@ impl<const N: usize> Decryptor<N> {
             .flatten()
             .find(|s| s.key_id == id)
             .ok_or(Error::NoSession)?;
+        let plain = decrypt_core(core, &slot.key)?;
+        if let Plain::Infp10(r) = &plain {
+            slot.fresh(r, now_ms)?;
+        }
         slot.last_ms = now_ms;
-        decrypt_core(core, &slot.key)
+        Ok(plain)
     }
 }
 

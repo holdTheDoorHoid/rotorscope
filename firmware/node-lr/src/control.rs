@@ -12,7 +12,12 @@
 //!   strongest reading in the band's energy map; close the window and, for
 //!   a hopper, time its bursts on one of its channels.
 //! - **Follow** (ExpressLRS, only with content decoding on): park on, or hop
-//!   with, one link for `ctrl::FOLLOW_US`, decoding its packets.
+//!   with, one link for up to `ctrl::FOLLOW_US`, decoding its packets. It
+//!   ends early once no packet but a sync checks for a few passes
+//!   (`ctrl::Follow::end_reason`), and `ctrl::FollowGate` limits how often
+//!   follows start (per link and overall) and caps following to half of
+//!   the control time: anyone can send a sync that checks, and nothing
+//!   else is scanned while following.
 //!
 //! - **Contested links**: every recognised packet also goes to
 //!   `ctrlwatch::contested::Watch`, which looks for a link heard from more
@@ -45,7 +50,8 @@ use lr2021cfg::cmd;
 use lr2021cfg::config::{self, Modem, RxConfig as LrConfig};
 use lr2021cfg::ctrl::{
     self, BURST_DWELL_MS, CONTROL_PER_S, ContentGate, EnergyGate, EnergyMaps, Follow, Job,
-    MAX_CONTESTED, MAX_GROUP, MAX_SIGHTINGS, SIGHTING_MAX_AGE_US, SUMMARY_GAP_US, SWEEP_DWELL_US,
+    FollowGate, MAX_CONTESTED, MAX_GROUP, MAX_SIGHTINGS, SIGHTING_MAX_AGE_US, SUMMARY_GAP_US,
+    SWEEP_DWELL_US,
 };
 use lr2021cfg::node::RateLimit;
 use portable_atomic::Ordering::Relaxed;
@@ -59,6 +65,9 @@ use crate::state::{self, PLAN};
 const WAIT_US: u64 = 100_000;
 /// Summaries / expiry this often.
 const HOUSEKEEPING_US: u64 = 500_000;
+/// The detectors' pressure counters go to USB at most this often, when
+/// they changed.
+const PRESSURE_GAP_US: u64 = 5_000_000;
 
 fn now_us() -> u64 {
     Instant::now().as_micros()
@@ -74,6 +83,7 @@ pub struct Control {
     content_gate: ContentGate,
     limit: RateLimit,
     follow: Option<(Follow, Option<ctrlwatch::LinkId>)>,
+    gate: FollowGate,
     contested: ctrlwatch::contested::Watch<MAX_CONTESTED>,
     /// The opt-ins of the current plan entry (for reports made in
     /// housekeeping).
@@ -84,6 +94,9 @@ pub struct Control {
     /// Hostile-MAVLink scan (~8 KB), content decoding only.
     mav: mavwatch::Watch,
     mav_buf: [u8; 258],
+    /// Last pressure counters printed, and when.
+    pressure: [u32; 10],
+    pressure_at_us: u64,
 }
 
 impl Control {
@@ -96,6 +109,7 @@ impl Control {
             content_gate: ContentGate::new(),
             limit: RateLimit::new(CONTROL_PER_S, 0),
             follow: None,
+            gate: FollowGate::new(),
             contested: ctrlwatch::contested::Watch::new(),
             cfg: Config {
                 read_ids: false,
@@ -106,6 +120,8 @@ impl Control {
             fifo: [0; 256],
             mav: mavwatch::Watch::new(),
             mav_buf: [0; 258],
+            pressure: [0; 10],
+            pressure_at_us: 0,
         }
     }
 
@@ -127,18 +143,29 @@ impl Control {
     ) -> Result<(), Error> {
         self.scanner.set_masks(regions, energy);
         self.cfg = cfg;
-        if !cfg.decode_content {
+        self.gate.begin_slot(now_us(), until_us);
+        if !cfg.decode_content && self.follow.take().is_some() {
             // Content was turned off: stop following now.
-            self.follow = None;
+            self.gate.stopped(now_us());
         }
         while now_us() < until_us && !PLAN.signaled() {
             if let Some((f, _)) = &self.follow {
-                if f.expired(now_us()) {
+                let now = now_us();
+                let why = f
+                    .end_reason(now)
+                    .or_else(|| (!self.gate.may_continue(now)).then_some("share"));
+                if let Some(why) = why {
                     out::line(format_args!(
-                        r#"{{"t":"follow_end","packets":{},"recovered":{}}}"#,
+                        r#"{{"t":"follow_end","why":"{why}","packets":{},"recovered":{}}}"#,
                         f.packets, f.recovered
                     ));
                     self.follow = None;
+                    if why == "share" {
+                        bump(&COUNTERS.follows_cut);
+                        self.gate.cut_off(now);
+                    } else {
+                        self.gate.stopped(now);
+                    }
                 } else {
                     self.follow_until(lr, cfg, until_us).await?;
                     continue;
@@ -190,6 +217,8 @@ impl Control {
             return;
         }
         self.last_housekeeping_us = now;
+        // The follower's share of control time accrues while scanning.
+        self.gate.tick(now);
         self.table.take_due(now, SUMMARY_GAP_US, |s| {
             bump(&COUNTERS.ctrl_reports);
             out::line(format_args!(
@@ -222,6 +251,37 @@ impl Control {
             out::hub_frame(&Frame::Threat(ctrl::contested_threat(r, now)));
         });
         self.contested.expire(now);
+        self.print_pressure(now);
+    }
+
+    /// Signs of a forger pushing the detectors (WP-11a): links and MAVLink
+    /// table entries given up or turned away, contradictions on links
+    /// without history, new alarms held back. One USB line when they
+    /// change, at most every `PRESSURE_GAP_US`.
+    fn print_pressure(&mut self, now: u64) {
+        let c = &self.contested;
+        let m = self.mav.pressure();
+        let p = [
+            c.evicted,
+            c.pressure_evicted,
+            c.refused,
+            c.unseasoned,
+            c.throttled,
+            m.throttled,
+            m.evicted_evidence,
+            m.refused,
+            m.streams_refused,
+            m.streams_evicted,
+        ];
+        if p == self.pressure || now.saturating_sub(self.pressure_at_us) < PRESSURE_GAP_US {
+            return;
+        }
+        self.pressure = p;
+        self.pressure_at_us = now;
+        out::line(format_args!(
+            r#"{{"t":"ctrl_pressure","links":[{},{},{}],"unseasoned":{},"held":{},"mav":[{},{},{},{},{}]}}"#,
+            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]
+        ));
     }
 
     /// One packet's content (and raw bytes) to the hub, within the gates.
@@ -351,6 +411,13 @@ impl Control {
                 );
             }
             if let Some(f) = follow {
+                // Rate limits and the share (anyone can send a sync that
+                // checks): a refused follow leaves the scan as it was.
+                if let Err(e) = self.gate.try_start(&f, now_us()) {
+                    bump(&COUNTERS.follows_refused);
+                    out::line(format_args!(r#"{{"t":"follow_refused","why":"{}"}}"#, e.name()));
+                    continue;
+                }
                 out::line(format_args!(
                     r#"{{"t":"follow","rate":"{}","f":{}}}"#,
                     f.rate().info().name,
@@ -372,7 +439,8 @@ impl Control {
             let Some((f, _)) = self.follow.as_mut() else {
                 return Ok(());
             };
-            if f.expired(now) || now >= until_us || PLAN.signaled() {
+            // `run` ends the follow (time, quiet or share).
+            if f.expired(now) || now >= until_us || PLAN.signaled() || !self.gate.may_continue(now) {
                 return Ok(());
             }
             let Some(t) = f.target(now) else {
@@ -597,7 +665,10 @@ fn scan_mavlink(
             window_ms: now_ms.saturating_sub(f.first_ms).min(u64::from(u32::MAX)) as u32,
             source: addr((f.sysid, f.compid)),
             target: f.target.map_or([0; 6], addr),
-            detail: f.kind.code(),
+            // Kind code, plus mavwatch::analyse::DETAIL_SUSPECT for one
+            // uncorroborated frame (the hub holds the alert until it
+            // escalates).
+            detail: f.detail(),
             ssid: f.excerpt.clone(),
             uptime_us: s.t_us,
         };
@@ -613,12 +684,13 @@ fn scan_mavlink(
             frame: Vec::from_slice(&fr.bytes[..n]).unwrap_or_default(),
         }));
         out::line(format_args!(
-            r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"hits":{}}}"#,
+            r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"hits":{},"suspect":{}}}"#,
             f.kind.code(),
             f.sysid,
             f.compid,
             f.msgid,
-            f.hits
+            f.hits,
+            f.suspect
         ));
     });
 }
