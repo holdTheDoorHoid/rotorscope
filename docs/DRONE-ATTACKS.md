@@ -768,7 +768,9 @@ through its NIC or its lost position).
 ## Hostile MAVLink telemetry
 
 `ThreatKind::MavlinkAttack`, detector `crates/mavwatch`, run on the LR2021 node
-(`firmware/node-lr/src/control.rs`). Branch `mavwatch`, 2026-11-17.
+(`firmware/node-lr/src/control.rs`). Branch `mavwatch`, 2026-11-17. Also run by every Wi-Fi
+node on MAVLink sent over open Wi-Fi (branch `wifi-mavlink`, 2026-11-17; see "Over Wi-Fi"
+below).
 
 **Status: written and host-tested (31 mavwatch tests, plus tests in ctrlwatch, tracker and
 evidence); both firmware images build; never run against a real telemetry radio.**
@@ -826,7 +828,8 @@ address).
 
 **Off unless `control content on`.** The scan reads message content, so it obeys the same
 opt-in as decoding positions and telemetry (docs/CONTROL-LINKS.md). Kinds 16-18 also need
-`control ids on`. Nothing about the scan is transmitted; the node stays receive-only.
+`control ids on` on the LR2021 node (not over Wi-Fi: see "Over Wi-Fi"). Nothing about the scan
+is transmitted; the nodes stay receive-only.
 
 ### Kinds (`detail` on the threat)
 
@@ -914,6 +917,128 @@ Every number is a constant in `crates/mavwatch/src/analyse.rs`, documented there
   unchanged). node-lr: RAM +8.5 KB (the `Watch` sits in the control scan's static state; stack
   region 201,464 -> 192,960 bytes), code +17 KB.
 
+### Over Wi-Fi
+
+**In plain language.** Not every drone uses a telemetry radio. Cheap Wi-Fi drones, and many
+home-built ones with a small ESP8266 or ESP32 "Wi-Fi telemetry bridge", carry the same MAVLink
+conversation over Wi-Fi to a phone or laptop running QGroundControl. When that Wi-Fi network has
+no password (very common for these bridges and toys), anyone nearby can read it, and anyone
+nearby can join it and send their own messages: exactly the attacks in the table above, without
+even needing a radio. With `control content on`, every Wi-Fi node now reads MAVLink it hears on
+open Wi-Fi and raises the same alarm, shown as **"Hostile drone telemetry over Wi-Fi"** with the
+Wi-Fi channel. Networks with a password are encrypted and are never looked into.
+
+With the setting off (the default), the Wi-Fi nodes do not look inside anyone's Wi-Fi traffic
+at all: each data frame costs one on/off check and is gone.
+
+**How the setting reaches the Wi-Fi nodes.** The hub already sends each node its "plan" (which
+channels to visit, `Command::Assign`) every 5 seconds through the gateway or the wired bus, and
+the LR2021 nodes already get the two settings as an extra plan entry
+(`AeroMode::ControlFlags`, code bit 29). Wi-Fi plans now end with the same entry, by the same
+rule: only while a setting is on (`coverage::Coordinator::run`). Nothing new on the wire (link
+protocol 13 notes in `crates/link`): no new command, no gateway or bus change for delivery, and
+with both settings off every plan is byte-identical to before. Consequences:
+
+- **A change goes out at once**: a different plan gets a different plan id, so the hub sends it
+  in its next run (within 2 s) instead of waiting for the 5 s resend.
+- **A node that restarts gets it again** within 5 s (the resend), and until then the scan is
+  **off**: a node never takes the setting from a plan it stored before a restart
+  (`role::init`), only from the hub.
+- **Off is the default everywhere**: no entry = off; a plan the node rejects leaves the setting
+  as it was before that plan.
+- The node takes the entry out of the plan before hopping (`link::plan_control_flags`,
+  `role::plan_from`); a plan holding only the entry is the built-in plan.
+- A Wi-Fi node built before this would reject a plan carrying the entry ("bad channel") and keep
+  its previous plan; protocol 13 is unreleased, so update Wi-Fi nodes with the hub.
+
+**What the node looks at** (`crates/wifiwatch/src/mavwifi.rs`, host-tested):
+
+1. *In the radio's receive callback*, only while the setting is on: the 802.11 header (data
+   frames with a body; QoS or not; all four ToDS/FromDS address layouts; the HT Control field),
+   then LLC/SNAP, IPv4, UDP or TCP. Passed over: protected (encrypted) frames, null frames,
+   802.11 fragments, A-MSDUs, anything not IPv4, fragmented IPv4, anything not UDP or TCP.
+2. Still in the callback, the "might be MAVLink" test. To or from a usual MAVLink port (UDP or
+   TCP 14550, 14555, 14540, 14580, 5760): yes, whatever the bytes (a bridge that forwards raw
+   serial chunks splits frames anywhere). Any other UDP port: only if the datagram starts with a
+   plausible MAVLink header whose frame fits in it. Other TCP ports: no. The port is only a
+   hint: what is queued is analysed only as far as it holds frames whose MAVLink checksum
+   verifies, so a non-MAVLink datagram on port 14550 costs a little time and raises nothing.
+3. **Rate limit**: a token bucket, on average **100 datagrams a second, bursts of 10**
+   (`mavwifi::PER_S`, `BURST`). Then the payload (up to 560 bytes) is copied into one of **4
+   slots of its own**, separate from the 32 management-frame slots Remote ID uses. MAVLink can
+   therefore never take a slot from Remote ID, and never shows in the node's `drop` / `qmax`
+   counters (which count only those 32 slots). A datagram past the rate limit or with all 4
+   slots busy is dropped and counted (`mav` in the node's stats line: `[on, candidates,
+   rate-limited, no slot, analysed, findings]`). A busy bridge sends a few dozen datagrams a
+   second; past 100/s the scan misses part of the stream rather than slowing anything else.
+4. *In a task* (`mavlink` in `firmware/node-wifi/src/main.rs`): `mavwatch::Watch`, exactly as on
+   the LR2021 node. A payload longer than 560 bytes is analysed without reassembly as far as it
+   was kept.
+
+**The link-id rule** (what kinds 16-18 compare). Bytes are reassembled per direction of each
+UDP/TCP flow (network, addresses, ports), so bytes from two senders are never joined. The
+*link* is the **network**: its BSSID (for a four-address mesh frame, the transmitter address).
+That is the Wi-Fi equivalent of a SiK NET ID: an intruder who joins a drone's open network and
+injects as its ground station is on the same link as the drone, and the injected-frames check
+(kind 17) sees two sequence streams for one system and component; two drones on two networks,
+both with system ID 1, stay apart. Unlike a NET ID, a BSSID is not something the owner has to
+opt in to read: it is in every beacon, and the node's other Wi-Fi detectors (drone hijacking,
+evil twins) key on it already. So **over Wi-Fi kinds 16-18 run with `control content on`
+alone; `control ids` is not needed**. Two vehicles with the same system ID on *one* network
+look like one sender with two streams: that is a real MAVLink conflict on that network and is
+reported (mute it if it is expected).
+
+**TCP 5760** is scanned segment by segment through the same per-flow reassembly, without TCP
+reassembly: a lost segment loses the frames it cut (they fail their checksum), a retransmitted
+segment repeats frames the analyser already counts once (3 s resend rule), and segments are
+rarely reordered over one Wi-Fi hop. A full TCP reassembler would need a window of buffer per
+connection for what is a minority case (simulators and some bridges' TCP server).
+
+**What reaches the hub**: the same `Frame::Threat` (`MavlinkAttack`) + `Frame::MavlinkEvidence`
+pair as from the LR2021 node, with the same `detail`, `source`, `target`, `ssid` and raw frame,
+except that `channel` is the Wi-Fi channel (an LR2021 node sends 0) and `freq` its centre
+frequency (100 kHz units, 2437 MHz = 24370), `level` the frame's signal. No MAC or IP address is
+sent with the alarm: `source` / `target` remain the MAVLink system/component, so a mute rule
+works the same for both radios. The hub tables, logs and mutes it exactly like an LR2021
+finding (one per node, sender and kind); `channel != 0` makes the label "Hostile drone
+telemetry over Wi-Fi" on the screen, the console and the evidence log's threat text, and the
+JSON threat line carries `"via":"wifi"` (`"radio"` for SiK/mLRS) besides `"ch"`. The node also
+prints `{"t":"mavlink_attack",...}` and a `{"t":"mavlink","on":true|false}` line when the
+setting changes. The ESP-NOW gateway no longer takes a `MavlinkEvidence` frame as a sign that
+the sender is an aero node (it would have sent Wi-Fi nodes time syncs they ignore).
+
+**Memory (release builds, 2026-11-17)**: the `Watch` (8,240 bytes) lives in the `mavlink`
+task's static state and the 4 slots take 2,432 bytes. ESP32-C5: .bss 60,672 -> 71,448 bytes,
+.data 12,196 -> 12,260, stack region 206,280 -> 195,448, code +34 KB. ESP32-S3: .bss 49,120 ->
+59,904, .data 14,848 -> 14,920, stack region 235,008 -> 224,152, code +32 KB. The heap is
+unchanged. hub-p4 stack region 71,936 bytes before and after.
+
+**Tests** (`crates/wifiwatch/src/mavwifi/tests.rs`, 12): extraction from QoS and non-QoS
+frames, with and without HT Control, all four address layouts, a trailing FCS; protected,
+null, fragmented (802.11 and IP), A-MSDU, ARP, IPv6 and ICMP frames passed over; truncated
+datagrams flagged; the queue filter (ports, plausible headers, MAVLink 1, DNS and a QUIC-like
+0xFD byte refused, TCP only on MAVLink ports); the rate limit; a QGC-01 camera payload in an
+open data frame giving a `MavlinkAttack` with its raw frame; the same frame split over two
+datagrams, over three TCP segments, and with another flow's bytes in between; a minute of benign
+telemetry, two drones with system ID 1 on two networks, and a protected exploit frame staying
+quiet; an injector posing as the ground station on the drone's network caught (kind 17), the
+same on another network not. Plumbing: `link` (`protocol_13_wifi_plan_flags`: v12 bytes
+unchanged, the entry is never a channel), `coverage` (`wifi_plans_carry_control_flags`: off by
+default, a change is a new plan id sent at once, a restarted hub sends the same plans,
+`wifi_plans_leave_room_for_flags`), `tracker` (`mavlink_attack_over_wifi`).
+
+**Needs hardware**:
+
+- Whether the ESP32-S3 / C5 promiscuous callback delivers unprotected data frames of other
+  networks in full (length, FCS) as the code assumes, at the rates seen near a busy bridge.
+- Real bridges (mavesp8266, DroneBridge for ESP32, ArduPilot's own ESP32 boards) and Wi-Fi toys
+  that speak MAVLink: their datagram sizes, whether they cut frames across datagrams, and
+  whether 100 datagrams a second keeps up.
+- CPU cost of the callback check with the setting on, on a channel full of open-network
+  traffic; and that Remote ID counts (`rid`, `drop`, `qmax`) do not change with the setting on.
+- The node hops channels: a drone's network is only heard while the node is on its channel
+  (2.4 GHz node: channel 6 about three quarters of the time with the default plan).
+
 ### Sources
 
 - infected-drones (github.com/nicholasaleks/infected-drones), finding READMEs and PoCs read for
@@ -939,5 +1064,6 @@ Every number is a constant in `crates/mavwatch/src/analyse.rs`, documented there
 - No ground station was attacked to confirm that the frames these tests build are the ones the
   PoCs send byte for byte; they were built from the READMEs' field values.
 - Not covered: decompression bombs behind normal-looking `.xz` URIs (MAVSDK-03), malicious
-  DataFlash logs (QGC-04), anything delivered over IP rather than the radio, MAVLink over open
-  Wi-Fi telemetry bridges (UDP 14550; not yet forwarded by the Wi-Fi nodes).
+  DataFlash logs (QGC-04), anything delivered over IP rather than the radio (files fetched by
+  the ground station; MAVLink itself over open Wi-Fi is now covered, see "Over Wi-Fi"), MAVLink
+  over encrypted Wi-Fi, and A-MSDU-aggregated frames.

@@ -129,7 +129,22 @@ pub struct Threat {
 
 impl Threat {
     pub fn label(&self) -> &'static str {
+        if self.mavlink_over_wifi() {
+            return "Hostile drone telemetry over Wi-Fi";
+        }
         threat_label(self.kind)
+    }
+
+    /// A `MavlinkAttack` found on open Wi-Fi (protocol 13: a Wi-Fi node
+    /// sets `channel`; an LR2021 node's SiK / mLRS finding has 0).
+    pub fn mavlink_over_wifi(&self) -> bool {
+        self.kind == ThreatKind::MavlinkAttack && self.channel != 0
+    }
+
+    /// Which radio a `MavlinkAttack` came over: `"wifi"` or `"radio"`
+    /// (an LR2021 node: SiK, mLRS). `None` for other kinds.
+    pub fn via(&self) -> Option<&'static str> {
+        (self.kind == ThreatKind::MavlinkAttack).then_some(if self.mavlink_over_wifi() { "wifi" } else { "radio" })
     }
 
     pub fn freq_mhz(&self) -> f64 {
@@ -594,6 +609,9 @@ struct ThreatLine<'a> {
     /// Drone Wi-Fi kinds: the drone's maker (`wifidrone`).
     #[serde(skip_serializing_if = "Option::is_none")]
     maker: Option<&'static str>,
+    /// Hostile MAVLink: `"wifi"` (open Wi-Fi) or `"radio"` (SiK / mLRS).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<&'static str>,
     n: u32,
     first_ms: u64,
     last_ms: u64,
@@ -633,6 +651,7 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         transmitters: t.contested().map(|d| d.transmitters),
         rule: t.contested().map(|d| ctrlwatch::contested::rule_name(d.rules)),
         maker: drone_maker(t),
+        via: t.via(),
         n: t.reports,
         first_ms: t.first_seen_ms,
         last_ms: t.last_seen_ms,
@@ -868,6 +887,7 @@ mod tests {
         let mut tr: Tracker = Tracker::default();
         let mav = |sys: u8, comp: u8, detail: u32| {
             let mut s = sighting(ThreatKind::MavlinkAttack, 0, 9_150);
+            s.channel = 0; // an LR2021 node's (SiK) finding
             s.source = [0, 0, 0, 0, sys, comp];
             s.target = [0, 0, 0, 0, 1, 1];
             s.detail = detail;
@@ -885,9 +905,60 @@ mod tests {
         let n = threat_line(tr.get_threat(a).unwrap(), &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();
         assert!(text.contains("\"kind\":\"mavlink_attack\"") && text.contains("\"detail\":13"), "{text}");
+        assert!(text.contains("\"via\":\"radio\""), "{text}");
         // Muting the owner's own console silences that sender only.
         assert!(tr.mute(Mute::for_threat(tr.get_threat(a).unwrap())));
         assert_eq!(tr.active_threats(3_000).count(), 1);
+    }
+
+    /// Protocol 13: the same finding from a Wi-Fi node (`channel` set) is
+    /// tabled the same way, labelled as over Wi-Fi, and its JSON says so.
+    #[test]
+    fn mavlink_attack_over_wifi() {
+        let mut tr: Tracker = Tracker::default();
+        let mut s = sighting(ThreatKind::MavlinkAttack, 0, 24_370);
+        s.channel = 6;
+        s.source = [0, 0, 0, 0, 1, 100];
+        s.detail = 3;
+        s.ssid = heapless::String::try_from("../../../../../tmp").unwrap();
+        let a = tr.ingest_threat(2, &s, 1_000);
+        assert_eq!(tr.ingest_threat(2, &s, 2_000), a, "one per sender and finding");
+        let t = tr.get_threat(a).unwrap();
+        assert!(t.mavlink_over_wifi());
+        assert_eq!(t.label(), "Hostile drone telemetry over Wi-Fi");
+        let ctx = Context { now_ms: 2_000, utc_ms: None, own: None, config: Config::default() };
+        let mut buf = [0u8; MAX_THREAT_LINE];
+        let n = threat_line(t, &ctx, &mut buf).unwrap();
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        for want in [
+            "\"kind\":\"mavlink_attack\"",
+            "\"label\":\"Hostile drone telemetry over Wi-Fi\"",
+            "\"via\":\"wifi\"",
+            "\"ch\":6",
+            "\"mhz\":2437",
+            "\"detail\":3",
+        ] {
+            assert!(text.contains(want), "{want} in {text}");
+        }
+        // Other kinds carry no `via`.
+        let d = tr.ingest_threat(2, &sighting(ThreatKind::Deauth, 1, 0), 2_000);
+        let n = threat_line(tr.get_threat(d).unwrap(), &ctx, &mut buf).unwrap();
+        assert!(!core::str::from_utf8(&buf[..n]).unwrap().contains("via"));
+        // The longest such line still fits.
+        let mut big = s.clone();
+        big.ssid = heapless::String::try_from("\"".repeat(32).as_str()).unwrap();
+        big.source = [0xFF; 6];
+        big.target = [0xFF; 6];
+        big.channel = u8::MAX;
+        big.freq = u32::MAX;
+        big.width_khz = u32::MAX;
+        big.count = u32::MAX;
+        big.detail = u32::MAX;
+        big.level = i8::MIN;
+        let id = tr.ingest_threat(u8::MAX, &big, u64::MAX / 4);
+        let config = crate::Config { show_link_ids: true, ..Default::default() };
+        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config };
+        assert!(threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).is_ok());
     }
 
     #[test]

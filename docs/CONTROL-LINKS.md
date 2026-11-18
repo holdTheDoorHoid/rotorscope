@@ -146,7 +146,7 @@ never does).
 | Setting | Off (default) | On |
 |---|---|---|
 | `control ids` | which system, how sure, signal | also the link's identifier (ExpressLRS UID bytes, SiK NET ID, mLRS sync word, OpenLRSng magic); links with different IDs are told apart |
-| `control content` | no content, no raw packets | stick positions, telemetry, GPS positions, raw packets for evidence; ExpressLRS "follow" (stays with one link for 20 s to decode it) |
+| `control content` | no content, no raw packets; Wi-Fi nodes never look inside data frames | stick positions, telemetry, GPS positions, raw packets for evidence; ExpressLRS "follow" (stays with one link for 20 s to decode it); the hostile-MAVLink scan, on the LR2021 node's SiK / mLRS links **and on MAVLink over open Wi-Fi** (every Wi-Fi node) |
 
 The owner stated on 2026-11-17 that they have permission for both. Turn them on per kit:
 
@@ -167,6 +167,13 @@ Encrypted links stay encrypted: nothing tries to break them.
 "Hostile MAVLink telemetry"): the node reads the MAVLink on SiK and mLRS links for
 ground-station exploit payloads and shell access, and raises a "Hostile drone telemetry" alarm.
 Its link-integrity checks (injected, replayed or unsigned frames) also need `control ids on`.
+Since link protocol 13 the same setting also turns the scan on in **every Wi-Fi node**, for
+MAVLink sent over open (unprotected) Wi-Fi: telemetry bridges, Wi-Fi hobby drones, UDP 14550
+and friends. The hub puts the setting in the Wi-Fi nodes' plans too, so turning it on or off
+reaches them within a couple of seconds, and a node that restarts gets it again within 5 s.
+There the integrity checks do not need `control ids` (a Wi-Fi link is told apart by its
+network's address, which every beacon already shows). Details: docs/DRONE-ATTACKS.md,
+"Hostile MAVLink telemetry", "Over Wi-Fi".
 
 ### Protocol (link protocol 12)
 

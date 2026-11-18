@@ -76,6 +76,16 @@ use serde::{Deserialize, Serialize};
 ///   every v12 frame encodes exactly as before; a v12 hub counts a threat
 ///   of a new kind as corrupt. [`Frame::MavlinkEvidence`] appended: the
 ///   MAVLink frame behind a `MavlinkAttack` threat, for the evidence log.
+///   Wi-Fi nodes run the same MAVLink scan on open Wi-Fi (UDP/TCP MAVLink
+///   in unprotected data frames, `wifiwatch::mavwifi`), so a Wi-Fi role's
+///   [`Assignment::plan`] may now end with the same
+///   [`AeroMode::ControlFlags`] entry an aero plan carries (only when an
+///   opt-in is on; see [`plan_control_flags`]). No type changed: every
+///   frame and command encodes exactly as in v12, and a plan without the
+///   entry is byte-identical. A Wi-Fi node built before this rejects a plan
+///   carrying the entry as a bad channel and keeps its previous plan.
+///   A `MavlinkAttack` from a Wi-Fi node has `channel` set (the Wi-Fi
+///   channel); from an LR2021 node it is 0.
 pub const PROTOCOL_VERSION: u8 = 13;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
@@ -124,6 +134,12 @@ pub struct Assignment {
     /// Wi-Fi roles: channel numbers with dwell in ms, visited in order and
     /// repeated. Raw-capture roles: centre frequencies in units of 100 kHz
     /// (5756.5 MHz = 57565) with dwell in ms. Empty = the role's built-in plan.
+    ///
+    /// Protocol 13: a Wi-Fi plan may also hold one [`AeroMode::ControlFlags`]
+    /// entry (bit 29 set, never a channel number): the control-link
+    /// opt-ins, which turn the Wi-Fi MAVLink scan on. A setting, not a hop:
+    /// the node takes it out of the plan ([`plan_control_flags`]). A plan
+    /// holding nothing else is the built-in plan, as if empty.
     pub plan: Vec<(u32, u16), 24>,
     /// Changes whenever the hub changes the plan, echoed in [`Frame::Status`]
     /// so the hub knows the node has applied it.
@@ -230,6 +246,23 @@ impl AeroMode {
     pub const fn entry(self, dwell_ms: u16) -> (u32, u16) {
         (self.code(), dwell_ms)
     }
+}
+
+/// Protocol 13. The control-link opt-ins `(read_ids, decode_content)` a plan
+/// carries in an [`AeroMode::ControlFlags`] entry, or `None` without one
+/// (both off). Works on aero and Wi-Fi plans alike: the code (bit 29 and
+/// at most bits 0-1) is no channel number and no other mode.
+pub fn plan_control_flags(plan: &[(u32, u16)]) -> Option<(bool, bool)> {
+    plan.iter().find_map(|&(code, _)| match AeroMode::from_code(code) {
+        Some(AeroMode::ControlFlags { read_ids, decode_content }) => Some((read_ids, decode_content)),
+        _ => None,
+    })
+}
+
+/// Protocol 13. Whether a plan entry's code is an [`AeroMode::ControlFlags`]
+/// entry (a setting to skip when walking the plan).
+pub const fn is_control_flags_code(code: u32) -> bool {
+    matches!(AeroMode::from_code(code), Some(AeroMode::ControlFlags { .. }))
 }
 
 /// Protocol 4. Hub-to-node messages, framed exactly like [`Frame`] (postcard +
@@ -520,7 +553,12 @@ pub enum ThreatKind {
     ControlContested,
     /// Protocol 13. Hostile content on a drone's MAVLink telemetry
     /// (`crates/mavwatch`): ground-station exploit payloads, shell access
-    /// commands, signing downgrade, injected frames.
+    /// commands, signing downgrade, injected frames. `detail` =
+    /// `mavwatch::Kind` code, `source` / `target` = claimed sender and
+    /// target system/component in the last two bytes, `ssid` = excerpt.
+    /// From an LR2021 node (SiK, mLRS) `channel` is 0; from a Wi-Fi node
+    /// (MAVLink over open Wi-Fi, `wifiwatch::mavwifi`) `channel` is the
+    /// Wi-Fi channel and `freq` its centre.
     MavlinkAttack,
     /// Protocol 13, raised by the hub. Satellite navigation interference in
     /// the area, seen through other receivers: aircraft reporting degraded
@@ -1845,5 +1883,41 @@ mod tests {
             assert_eq!(control_region_bit(r), 1 << i, "{r:?}");
         }
         assert!(!AeroMode::Control { regions: 1, energy: 0 }.is_flags());
+    }
+
+    /// Protocol 13: the control-link opt-ins ride in a Wi-Fi plan as the
+    /// same `ControlFlags` entry aero plans use. No type changed, so a Wi-Fi
+    /// assignment without the entry encodes byte for byte as in v12, and the
+    /// entry is never mistaken for a channel or another mode.
+    #[test]
+    fn protocol_13_wifi_plan_flags() {
+        let mut buf = [0u8; MAX_FRAME];
+        let mut plan: Vec<(u32, u16), 24> = Vec::new();
+        plan.extend([(6, 150), (1, 50)]);
+        let a = Command::Assign(Assignment { role: NodeRole::Wifi24, plan: plan.clone(), id: 0x1234 });
+        // v12 bytes: tag 0, role 0, len 2, (6,150), (1,50), id 0x1234 (varints).
+        assert_eq!(postcard::to_slice(&a, &mut buf).unwrap(), [0, 0, 2, 6, 150, 1, 1, 50, 0xB4, 0x24]);
+        assert_eq!(plan_control_flags(&plan), None, "no entry: both off");
+        // With content decoding on: one more entry, code 0x2000_0002, dwell 0.
+        let on = AeroMode::ControlFlags { read_ids: false, decode_content: true }.entry(0);
+        plan.push(on).unwrap();
+        assert_eq!(on, (0x2000_0002, 0));
+        assert_eq!(plan_control_flags(&plan), Some((false, true)));
+        assert!(is_control_flags_code(on.0));
+        let a = Command::Assign(Assignment { role: NodeRole::Wifi24, plan: plan.clone(), id: 0x1234 });
+        let wire = encode_command(&a, &mut buf).unwrap();
+        let mut dec = CommandDecoder::new();
+        let mut got = None;
+        dec.feed(wire, |r| got = Some(r));
+        assert_eq!(got, Some(Ok(a)));
+        // Never a channel (1-14, 32-177) and never confused with a mode.
+        for ch in 1..=177u32 {
+            assert!(!is_control_flags_code(ch));
+        }
+        for m in [AeroMode::Es1090, AeroMode::Uat978, AeroMode::Control { regions: 0x3FF, energy: 0x3FF }] {
+            assert!(!is_control_flags_code(m.code()));
+        }
+        let both = AeroMode::ControlFlags { read_ids: true, decode_content: true }.entry(0);
+        assert_eq!(plan_control_flags(&[(149, 150), both]), Some((true, true)));
     }
 }

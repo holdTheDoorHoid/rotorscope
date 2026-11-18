@@ -9,3 +9,8 @@ license.workspace = true
 link.workspace = true
 heapless.workspace = true
 wifidrone.workspace = true
+# Hostile MAVLink over open Wi-Fi (`mavwifi`).
+mavwatch.workspace = true
+
+[dev-dependencies]
+mavwatch = { workspace = true, features = ["encode"] }

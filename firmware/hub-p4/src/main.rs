@@ -631,7 +631,9 @@ struct Lines<'a> {
 }
 
 /// The control-link opt-ins from the site settings to the coverage
-/// coordinator (which puts them in the LR2021 nodes' plans). A change is
+/// coordinator (which puts them in the LR2021 nodes' plans and, protocol
+/// 13, the Wi-Fi nodes' plans: content decoding also turns on their scan
+/// for hostile MAVLink on open Wi-Fi). A change is
 /// printed and logged as a Setting event, whatever made it (the card's
 /// file at mount, or a console line, which the site code logs as well).
 #[inline(never)]
@@ -645,7 +647,7 @@ fn control_settings(site: &site::Site, down: &mut downlink::Downlink, app: &mut 
     let mut t: heapless::String<96> = heapless::String::new();
     let _ = core::fmt::Write::write_fmt(
         &mut t,
-        format_args!("control links: read IDs {}, decode content {} (LR2021 nodes' plans)", onoff(ids), onoff(content)),
+        format_args!("control links: read IDs {}, decode content {} (LR2021 and Wi-Fi nodes' plans)", onoff(ids), onoff(content)),
     );
     ev.event(evidence::EventCode::Setting, t.as_bytes(), &[ids as u8, content as u8]);
     println!("hub-p4: {t}");

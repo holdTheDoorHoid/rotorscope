@@ -260,6 +260,10 @@ pub fn base_plan(role: NodeRole, k: usize, idx: usize) -> Plan {
 // - The two opt-ins (link IDs, decoded content) ride as one
 //   `AeroMode::ControlFlags` entry at the end of any plan with a control
 //   entry, only when one of them is on (no entry = both off).
+// - Protocol 13: Wi-Fi plans get the same entry (`Coordinator::run`), last,
+//   after the ESP-NOW visits, by the same rule: `control content` also
+//   turns on the Wi-Fi nodes' MAVLink scan. The node takes it out of the
+//   plan before hopping (`link::plan_control_flags`).
 
 /// FLARM/OGN hopping region (SoftRF `RF_BAND_*`): 2 = USA/Canada (902-928
 /// MHz). 1 = Europe (868 MHz), 3 = Australia/South America.
@@ -317,7 +321,11 @@ impl ControlSettings {
         }
     }
 
-    fn flags_entry(&self) -> Option<(u32, u16)> {
+    /// The `AeroMode::ControlFlags` entry for these opt-ins, `None` when
+    /// both are off. Aero plans end with it when they have a control entry;
+    /// Wi-Fi plans always end with it (protocol 13: `control content`
+    /// also turns on the MAVLink scan on open Wi-Fi, `wifiwatch::mavwifi`).
+    pub fn flags_entry(&self) -> Option<(u32, u16)> {
         (self.read_ids || self.decode_content)
             .then(|| link::AeroMode::ControlFlags { read_ids: self.read_ids, decode_content: self.decode_content }.entry(0))
     }

@@ -173,6 +173,10 @@ pub struct StatsLine {
     /// Scouting visits off the plan (`coverage::plans::scout_channel`) and the
     /// last channel scouted.
     pub scout: (u32, u8),
+    /// MAVLink over open Wi-Fi (protocol 13): [opt-in on (1/0), datagrams
+    /// past the filter, turned away by the rate limit, turned away with
+    /// every slot in use, analysed, findings], totals.
+    pub mav: [u32; 6],
 }
 
 pub fn stats_json(line: &StatsLine) {
@@ -453,6 +457,20 @@ pub fn threat(s: &link::ThreatSighting) {
 }
 
 // --------------------------------------------------------------------- hub --
+
+/// Protocol 13: the MAVLink frame behind a `MavlinkAttack` threat sent
+/// just before, for the hub's evidence log; and a line on USB.
+pub fn mavlink_evidence(e: &link::MavlinkEvidence) {
+    esp_println::println!(
+        r#"{{"t":"mavlink_attack","kind":{},"sys":{},"comp":{},"msg":{},"bytes":{}}}"#,
+        e.detail,
+        e.sysid,
+        e.compid,
+        e.msgid,
+        e.frame.len()
+    );
+    to_hub(&link::Frame::MavlinkEvidence(e.clone()));
+}
 
 fn to_hub(frame: &link::Frame) {
     let mut buf = [0u8; link::MAX_FRAME];

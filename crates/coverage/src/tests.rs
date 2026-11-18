@@ -719,3 +719,70 @@ fn aero_nodes_split_the_modes() {
     assert_eq!(count(&d, Aero), 2);
     assert_ne!(d[0].assignment.plan, d[1].assignment.plan);
 }
+
+/// Protocol 13: `control content` reaches Wi-Fi nodes as the same flags
+/// entry, last in their plans. Off by default (plans as before); a change
+/// is a new plan with a new id (sent at once, `plan_changed`), and the
+/// unchanged plan keeps its id across runs and hub restarts, so the 5 s
+/// resend brings a restarted node the setting again.
+#[test]
+fn wifi_plans_carry_control_flags() {
+    use link::AeroMode as M;
+    let mut nodes = [relayed(node(1, Wifi24.bit(), Wifi24)), node(2, Wifi5.bit(), Wifi5), node(3, Ble.bit(), Ble)];
+    let mut c = Coordinator::new();
+    let d = c.run(&nodes, 0);
+    for d in &d {
+        assert_eq!(link::plan_control_flags(&d.assignment.plan), None, "off by default: {:?}", d.assignment.role);
+    }
+    let before: std::vec::Vec<_> = d.iter().map(|d| d.assignment.clone()).collect();
+    apply(&mut nodes, &d);
+    heard(&mut nodes, 2_000);
+    // Content on: Wi-Fi plans change (new id, sent now); Bluetooth does not.
+    c.aero.control.decode_content = true;
+    let d = c.run(&nodes, 2_000);
+    for (d, old) in d.iter().zip(&before) {
+        if plans::is_wifi(d.assignment.role) {
+            assert!(d.plan_changed && d.assignment.id != old.id, "{:?}", d.assignment.role);
+            assert!(!d.applied, "the node has not got it yet");
+            assert_eq!(*d.assignment.plan.last().unwrap(), M::ControlFlags { read_ids: false, decode_content: true }.entry(0));
+            assert_eq!(&d.assignment.plan[..d.assignment.plan.len() - 1], &old.plan[..], "channels unchanged");
+            assert_eq!(link::plan_control_flags(&d.assignment.plan), Some((false, true)));
+        } else {
+            assert!(!d.plan_changed);
+            assert_eq!(link::plan_control_flags(&d.assignment.plan), None);
+        }
+    }
+    let on: std::vec::Vec<_> = d.iter().map(|d| d.assignment.clone()).collect();
+    apply(&mut nodes, &d);
+    heard(&mut nodes, 4_000);
+    // Steady: same plans, same ids, applied.
+    let d = c.run(&nodes, 4_000);
+    assert!(d.iter().all(|d| !d.plan_changed && d.applied));
+    assert_eq!(d.iter().map(|d| d.assignment.clone()).collect::<std::vec::Vec<_>>(), on);
+    // A hub that restarts with the same setting sends the same plans (ids
+    // come from the content).
+    let mut fresh = Coordinator::new();
+    fresh.aero.control.decode_content = true;
+    let d2 = fresh.run(&nodes, 4_000);
+    assert_eq!(d2.iter().map(|d| d.assignment.clone()).collect::<std::vec::Vec<_>>(), on);
+    // Off again: the entry goes, new ids.
+    c.aero.control.decode_content = false;
+    let d = c.run(&nodes, 6_000);
+    for d in d.iter().filter(|d| plans::is_wifi(d.assignment.role)) {
+        assert!(d.plan_changed);
+        assert_eq!(link::plan_control_flags(&d.assignment.plan), None);
+    }
+}
+
+/// Every Wi-Fi plan, ESP-NOW visits included, leaves room for the entry.
+#[test]
+fn wifi_plans_leave_room_for_flags() {
+    for role in [Wifi24, Wifi5] {
+        for k in 1..=8 {
+            for idx in 0..k {
+                let p = plans::with_espnow_visits(&base_plan(role, k, idx));
+                assert!(p.len() < 24, "{role:?} {k}/{idx}: {} hops", p.len());
+            }
+        }
+    }
+}

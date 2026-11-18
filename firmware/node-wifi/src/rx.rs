@@ -27,6 +27,10 @@
 //! [`DRONES`]. While no drone is known ([`DRONES_ON`] false) that costs one
 //! atomic load. Association responses are needed by nothing else, so they
 //! are not queued either.
+//!
+//! MAVLink over open Wi-Fi (protocol 13) has its own small pool and rate
+//! limit (see "MAVLink over open Wi-Fi" below); off unless the hub's
+//! `control content` opt-in is on, when it costs one atomic load.
 
 use core::cell::{RefCell, UnsafeCell};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering::Relaxed};
@@ -122,6 +126,9 @@ pub fn init() {
         // Cannot fail: the channel holds exactly SLOTS entries.
         let _ = FREE.try_send(i);
     }
+    for i in 0..MAV_SLOTS as u8 {
+        let _ = MAV_FREE.try_send(i);
+    }
 }
 
 /// The promiscuous receive callback. Keep it this small.
@@ -200,11 +207,138 @@ fn on_data(pkt: &PromiscuousPkt<'_>) {
     if DRONES_ON.load(Relaxed) {
         critical_section::with(|cs| DRONES.borrow_ref_mut(cs).data(pkt.data, rssi, channel, now));
     }
+    // MAVLink over open Wi-Fi: one atomic load while the hub's `control
+    // content` opt-in is off (the default).
+    if MAV_ON.load(Relaxed) {
+        on_mavlink(pkt.data, rssi, channel, now);
+    }
     // `data` ends with the FCS slot, which `classify` expects. Its first test
     // is the frame-control byte, so ordinary (QoS) data costs one compare.
     let Some(link) = openlink::classify(pkt.data) else { return };
     OPEN_SEEN.fetch_add(1, Relaxed);
     critical_section::with(|cs| SIGHTINGS.borrow_ref_mut(cs).record(&link, channel, rssi, now));
+}
+
+// ----------------------------------------------- MAVLink over open Wi-Fi --
+//
+// Protocol 13 (`wifiwatch::mavwifi`, docs/DRONE-ATTACKS.md). Only while the
+// hub's `control content` opt-in is on ([`MAV_ON`], set by `role`): the
+// callback reads the headers of each data frame (unprotected, LLC/SNAP
+// IPv4, unfragmented UDP/TCP, MAVLink port or a plausible MAVLink header),
+// takes a token from [`MAV_BUCKET`] (100 a second, bursts of 10) and copies
+// the payload into one of its own [`MAV_SLOTS`] slots, separate from the
+// management-frame pool: MAVLink can never take a slot Remote ID needs.
+// The `mavlink` task (main.rs) runs `mavwatch` on it.
+
+/// The hub's `control content` opt-in. Off at boot and until the hub's
+/// plan says otherwise.
+pub static MAV_ON: AtomicBool = AtomicBool::new(false);
+/// Payload bytes kept per datagram: two of the largest MAVLink frames (a
+/// longer datagram is analysed without reassembly, as far as it was kept).
+pub const MAV_BYTES: usize = 560;
+/// Datagrams queued at once.
+pub const MAV_SLOTS: usize = 4;
+
+pub struct MavFrame {
+    pub meta: wifiwatch::mavwifi::Meta,
+    pub len: u16,
+    pub data: [u8; MAV_BYTES],
+}
+
+impl MavFrame {
+    pub fn payload(&self) -> &[u8] {
+        &self.data[..usize::from(self.len).min(MAV_BYTES)]
+    }
+}
+
+struct MavPool([UnsafeCell<MavFrame>; MAV_SLOTS]);
+// SAFETY: as `Pool`: a slot is only touched by whoever holds its index.
+unsafe impl Sync for MavPool {}
+
+const MAV_EMPTY: MavFrame = MavFrame {
+    meta: wifiwatch::mavwifi::Meta {
+        flow: wifiwatch::mavwifi::Flow {
+            bssid: [0; 6],
+            src_mac: [0; 6],
+            src_ip: [0; 4],
+            dst_ip: [0; 4],
+            sport: 0,
+            dport: 0,
+            tcp: false,
+        },
+        channel: 0,
+        rssi: 0,
+        up_us: 0,
+        truncated: false,
+    },
+    len: 0,
+    data: [0; MAV_BYTES],
+};
+static MAV_POOL: MavPool = MavPool([const { UnsafeCell::new(MAV_EMPTY) }; MAV_SLOTS]);
+static MAV_FREE: Channel<CriticalSectionRawMutex, u8, MAV_SLOTS> = Channel::new();
+static MAV_FULL: Channel<CriticalSectionRawMutex, u8, MAV_SLOTS> = Channel::new();
+static MAV_BUCKET: critical_section::Mutex<RefCell<wifiwatch::mavwifi::Bucket>> =
+    critical_section::Mutex::new(RefCell::new(wifiwatch::mavwifi::Bucket::new()));
+/// Datagrams that passed the filter; of those, turned away by the rate
+/// limit, or with every slot in use.
+pub static MAV_CANDIDATES: AtomicU32 = AtomicU32::new(0);
+pub static MAV_LIMITED: AtomicU32 = AtomicU32::new(0);
+pub static MAV_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+/// The opt-in from the hub (`role`). Prints a line when it changes.
+pub fn set_mavlink(on: bool) {
+    if MAV_ON.swap(on, Relaxed) != on {
+        esp_println::println!(r#"{{"t":"mavlink","on":{on}}}"#);
+    }
+}
+
+fn on_mavlink(data: &[u8], rssi: i8, channel: u8, now: u64) {
+    let mpdu = &data[..data.len().saturating_sub(crate::chip::FCS_LEN)];
+    let Ok(d) = wifiwatch::mavwifi::candidate(mpdu) else { return };
+    MAV_CANDIDATES.fetch_add(1, Relaxed);
+    if !critical_section::with(|cs| MAV_BUCKET.borrow_ref_mut(cs).allow(now)) {
+        MAV_LIMITED.fetch_add(1, Relaxed);
+        return;
+    }
+    let Ok(idx) = MAV_FREE.try_receive() else {
+        MAV_DROPPED.fetch_add(1, Relaxed);
+        return;
+    };
+    // SAFETY: we hold `idx`, so no one else can reach this slot.
+    let slot = unsafe { &mut *MAV_POOL.0[usize::from(idx)].get() };
+    let n = d.payload.len().min(MAV_BYTES);
+    slot.data[..n].copy_from_slice(&d.payload[..n]);
+    slot.len = n as u16;
+    slot.meta = wifiwatch::mavwifi::Meta {
+        flow: d.flow,
+        channel,
+        rssi,
+        up_us: now,
+        truncated: d.truncated || n < d.payload.len(),
+    };
+    // Cannot fail: MAV_FULL has room for every index.
+    let _ = MAV_FULL.try_send(idx);
+}
+
+/// A queued MAVLink datagram, returned to its pool on drop.
+pub struct MavReceived(u8);
+
+impl core::ops::Deref for MavReceived {
+    type Target = MavFrame;
+    fn deref(&self) -> &MavFrame {
+        // SAFETY: we hold the index; the callback only writes to free slots.
+        unsafe { &*MAV_POOL.0[usize::from(self.0)].get() }
+    }
+}
+
+impl Drop for MavReceived {
+    fn drop(&mut self) {
+        let _ = MAV_FREE.try_send(self.0);
+    }
+}
+
+pub async fn next_mavlink() -> MavReceived {
+    MavReceived(MAV_FULL.receive().await)
 }
 
 /// A queued frame. Returning it to the pool happens on drop.

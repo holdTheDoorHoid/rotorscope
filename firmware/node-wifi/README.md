@@ -210,6 +210,16 @@ for what each detector looks for, thresholds and known false alarms.
   node carries on with the US set. Nothing new is transmitted.
 - Not yet checked on hardware: tuning 12-14 and 169-177, the scouting cost on
   Remote ID, and behaviour under a real deauth flood.
+- **Hostile MAVLink over open Wi-Fi** (link protocol 13, `wifiwatch::mavwifi`,
+  docs/DRONE-ATTACKS.md "Over Wi-Fi"): only while the hub's `control content`
+  opt-in is on (it arrives as a `ControlFlags` entry at the end of the Wi-Fi
+  plan; off at boot). The callback then reads unprotected data frames' headers
+  down to UDP/TCP and queues likely MAVLink (own 4 slots, 100 a second, bursts
+  of 10) for the `mavlink` task, which runs `mavwatch` and sends `Threat`
+  (`MavlinkAttack`, with the Wi-Fi channel) + `MavlinkEvidence`. USB:
+  `{"t":"mavlink","on":true}` on a change, `{"t":"mavlink_attack",...}` per
+  finding; stats `mav` = `[on, candidates, rate-limited, no slot, analysed,
+  findings]`.
 
 ## ESP-NOW uplink (experimental)
 

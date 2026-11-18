@@ -47,7 +47,11 @@ impl Downlink {
     }
 
     /// The two control-link opt-ins (SITE.TXT / console `L control ...`).
-    /// True when they changed; the next run sends new plans.
+    /// True when they changed; the next run sends new plans: to aero nodes
+    /// with a control entry and (protocol 13) to every Wi-Fi node, whose
+    /// plans carry the same flags entry (`coverage::Coordinator::run`). The
+    /// changed plan gets a new id, so it goes out at once; after that the
+    /// 5 s resend gives a node that restarted the setting again.
     pub fn set_control(&mut self, read_ids: bool, decode_content: bool) -> bool {
         let c = &mut self.coord.aero.control;
         if (c.read_ids, c.decode_content) == (read_ids, decode_content) {

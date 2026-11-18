@@ -131,6 +131,24 @@ impl Watch {
         now_ms: u64,
         out: &mut dyn FnMut(&Finding, &Frame<'_>),
     ) {
+        self.feed_on(key.link(), key, bytes, now_ms, out);
+    }
+
+    /// [`Watch::feed`] with the analyser's [`Link`] given separately from
+    /// the reassembly stream: the stream follows one sender's byte flow
+    /// (bytes from two senders must never be joined), while the link may
+    /// gather several flows. Over Wi-Fi (`wifiwatch::mavwifi`) each
+    /// direction of each UDP/TCP flow is a stream, and the network (BSSID)
+    /// is the link, so an injector on the same network shares the
+    /// vehicle's link.
+    pub fn feed_on(
+        &mut self,
+        link: Link,
+        key: StreamKey,
+        bytes: &[u8],
+        now_ms: u64,
+        out: &mut dyn FnMut(&Finding, &Frame<'_>),
+    ) {
         let i = match self.streams.iter().position(|s| s.key == key) {
             Some(i) => i,
             None if !self.streams.is_full() => {
@@ -145,7 +163,6 @@ impl Watch {
                 i
             }
         };
-        let link = key.link();
         let (streams, analyser) = (&mut self.streams, &mut self.analyser);
         let s = &mut streams[i];
         s.last_ms = now_ms;

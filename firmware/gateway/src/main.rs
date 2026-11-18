@@ -640,6 +640,8 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
         let Ok(via) = link::encode(&link::Frame::Via { node: src, rssi }, &mut via) else { continue };
         let via: &[u8] = via;
         // Whether this node says it is an aero node (it then gets time syncs).
+        // Not `MavlinkEvidence`: since protocol 13 Wi-Fi nodes send it too
+        // (MAVLink over open Wi-Fi), and an aero node says so anyway.
         let mut aero = false;
         for frame in pkt.payload.split_inclusive(|&b| b == 0) {
             if frame.last() != Some(&0) {
@@ -659,7 +661,6 @@ async fn relay(mut rx: EspNowReceiver, mut hub: UartTx<'static, esp_hal::Async>,
                             | link::Frame::Air(_)
                             | link::Frame::Control(_)
                             | link::Frame::ControlEnergy(_)
-                            | link::Frame::MavlinkEvidence(_)
                     );
                 }
                 Err(_) => {

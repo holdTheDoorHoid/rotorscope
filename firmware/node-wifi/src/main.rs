@@ -12,7 +12,10 @@
 //! probe responses and action frames are checked in `drain`. Drone
 //! hijacking (`wifiwatch::drones`) is split the same way: `drain` learns
 //! drones' networks from their beacons, the callback follows deauths,
-//! joins and data addresses on them, `threats` reports. The hopper
+//! joins and data addresses on them, `threats` reports. With the hub's
+//! `control content` opt-in on, the callback also queues MAVLink found in
+//! open data frames (`wifiwatch::mavwifi`, own small pool, rate-limited)
+//! and `mavlink` runs the hostile-MAVLink scan on it. The hopper
 //! also leaves its plan now and then to scout a channel the plan skips
 //! (`coverage::plans::scout_channel`). Receive-only:
 //! nothing here transmits on the air, except with the `espnow` feature, where
@@ -147,6 +150,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(threats().expect("spawn threats"));
     if chip::OPEN_LINKS {
         spawner.spawn(open_links().expect("spawn open_links"));
+        spawner.spawn(mavlink().expect("spawn mavlink"));
     }
 
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
@@ -383,6 +387,35 @@ async fn open_links() {
     }
 }
 
+/// MAVLink datagrams analysed and findings sent (`mavlink` task).
+static MAV_DATAGRAMS: AtomicU32 = AtomicU32::new(0);
+static MAV_FINDINGS: AtomicU32 = AtomicU32::new(0);
+
+/// Hostile MAVLink over open Wi-Fi (protocol 13, `wifiwatch::mavwifi`,
+/// docs/DRONE-ATTACKS.md): the datagrams the receive callback queued while
+/// the hub's `control content` opt-in is on, through `mavwatch`. Each
+/// finding goes to the hub as node-lr sends it: a `Threat`
+/// (`MavlinkAttack`, with the Wi-Fi channel) then the `MavlinkEvidence`
+/// frame. Idle (never woken) while the opt-in is off.
+#[embassy_executor::task]
+async fn mavlink() {
+    // ~8 KB (`mavwatch::Watch`), in the task's static state.
+    let mut scan = wifiwatch::mavwifi::MavWifi::new();
+    loop {
+        let d = rx::next_mavlink().await;
+        // Turned off since it was queued: dropped unread.
+        if !rx::MAV_ON.load(Relaxed) {
+            continue;
+        }
+        scan.feed(&d.meta, d.payload(), &mut |s, e| {
+            report::threat(s);
+            report::mavlink_evidence(e);
+        });
+        MAV_DATAGRAMS.store(scan.totals.datagrams, Relaxed);
+        MAV_FINDINGS.store(scan.totals.findings, Relaxed);
+    }
+}
+
 /// Judge the flood counters the receive callback fills (`rx::FLOODS`) and
 /// the drone-link watch (`rx::DRONES`) four times a second; each flood is
 /// reported at most once per one-second window, each drone kind at most
@@ -468,6 +501,14 @@ async fn stats() {
             csa: BEACON_CSA.load(Relaxed),
             threat: floods.threats.wrapping_add(BEACON_THREATS.load(Relaxed)).wrapping_add(drones.threats),
             scout: (SCOUT_VISITS.load(Relaxed), SCOUT_LAST.load(Relaxed)),
+            mav: [
+                u32::from(rx::MAV_ON.load(Relaxed)),
+                rx::MAV_CANDIDATES.load(Relaxed),
+                rx::MAV_LIMITED.load(Relaxed),
+                rx::MAV_DROPPED.load(Relaxed),
+                MAV_DATAGRAMS.load(Relaxed),
+                MAV_FINDINGS.load(Relaxed),
+            ],
         };
         last_seen = seen;
         report::stats_json(&line);

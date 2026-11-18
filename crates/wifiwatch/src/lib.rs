@@ -27,6 +27,11 @@
 //!   (and data-frame addresses); [`drones::Clones`], inside
 //!   [`beacons::Beacons`], reports copies of a drone's network.
 //!
+//! - [`mavwifi`] runs `crates/mavwatch` (hostile MAVLink telemetry) on
+//!   UDP / TCP MAVLink in unprotected data frames, only while the hub's
+//!   `control content` opt-in is on: a header-only filter for the receive
+//!   callback, a rate limit, and the analysis for a task.
+//!
 //! [`ble::BleWatch`] does the same for Bluetooth pairing pop-up spam.
 //! [`Watch`] bundles the Wi-Fi halves for callers (and tests) that have
 //! every frame in one place.
@@ -66,6 +71,7 @@ pub mod ble;
 pub mod drones;
 pub mod floods;
 pub mod mac;
+pub mod mavwifi;
 pub mod tools;
 pub mod util;
 

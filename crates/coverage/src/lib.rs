@@ -236,7 +236,15 @@ impl Coordinator {
                 NodeRole::Aero => plans::aero_plan(count[r as usize], usize::from(part[i]), &self.aero),
                 _ => plans::base_plan(r, count[r as usize], usize::from(part[i])),
             };
-            let plan = if n.relayed && plans::is_wifi(r) { plans::with_espnow_visits(&base) } else { base };
+            let mut plan = if n.relayed && plans::is_wifi(r) { plans::with_espnow_visits(&base) } else { base };
+            if plans::is_wifi(r) {
+                // Protocol 13: the opt-ins, for the Wi-Fi MAVLink scan. A
+                // change gives a new plan id, so it goes out at once; a
+                // full plan (never, see the tests) leaves the scan off.
+                if let Some(e) = self.aero.control.flags_entry() {
+                    let _ = plan.push(e);
+                }
+            }
             let role_changed = current[i] != Some(r);
             let mi = self.memory.iter().position(|m| m.key == n.key);
             let old = mi.map(|i| &self.memory[i]);
