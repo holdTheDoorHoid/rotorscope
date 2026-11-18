@@ -43,11 +43,11 @@ fn attribution_matches_a_gateway_stream() {
     let f1 = link::encode(&stats_frame(1), &mut b).unwrap().to_vec();
     let via = link::encode(&Frame::Via { node: other, rssi: -40 }, &mut b).unwrap().to_vec();
     let mut a = Attributor::new();
+    assert!(a.register_gateway(me));
     let mut stream = Vec::new();
     for chunk in [&f1, &via, &f1, &f1] {
         a.frame(me, chunk, &mut |x| stream.extend_from_slice(x));
     }
-    a.via_open = false;
     let mut got = Vec::new();
     link::Decoder::new().feed(&stream, |r| got.push(r.unwrap()));
     let v = |node| Frame::Via { node, rssi: 0 };
@@ -698,4 +698,86 @@ fn polls_and_overheads() {
     }
     println!("poll {} B, join slot {} B, grant {} B, BusDone {done} B, BusJoin {join} B; frames {sizes:?}", poll.len(), slot.len(), grant.len());
     assert!(poll.len() <= 10 && done <= 12);
+}
+
+/// A node that puts `Via { victim }` before its frames cannot attribute them
+/// to the victim: the Via is refused and the frame goes under its own MAC.
+#[test]
+fn a_node_cannot_borrow_a_victims_mac() {
+    let mut b = [0u8; 64];
+    let (me, victim) = ([1; 6], [9; 6]);
+    let via = link::encode(&Frame::Via { node: victim, rssi: -40 }, &mut b).unwrap().to_vec();
+    let f1 = link::encode(&stats_frame(1), &mut b).unwrap().to_vec();
+    let mut a = Attributor::new();
+    let mut stream = Vec::new();
+    for chunk in [&via, &f1, &via] {
+        a.frame(me, chunk, &mut |x| stream.extend_from_slice(x));
+    }
+    a.end_answer();
+    let mut got = Vec::new();
+    link::Decoder::new().feed(&stream, |r| got.push(r.unwrap()));
+    assert_eq!(got, [Frame::Via { node: me, rssi: 0 }, stats_frame(1)]);
+    assert_eq!((a.refused, a.relayed), (2, 0));
+    let mut reports = Vec::new();
+    a.log.drain(1000, 1000, |r| reports.push(r));
+    assert_eq!(reports.len(), 1);
+    assert_eq!((reports[0].source, reports[0].detail, reports[0].count), (me, link::origin::FORGED_ORIGIN, 2));
+}
+
+/// A registered gateway's Via still names the node it relays.
+#[test]
+fn a_registered_gateway_still_can() {
+    let mut b = [0u8; 64];
+    let (gw, relayed) = ([1; 6], [9; 6]);
+    let via = link::encode(&Frame::Via { node: relayed, rssi: -40 }, &mut b).unwrap().to_vec();
+    let f1 = link::encode(&stats_frame(1), &mut b).unwrap().to_vec();
+    let mut a = Attributor::new();
+    a.register_gateway(gw);
+    let mut stream = Vec::new();
+    for chunk in [&via, &f1] {
+        a.frame(gw, chunk, &mut |x| stream.extend_from_slice(x));
+    }
+    let mut got = Vec::new();
+    link::Decoder::new().feed(&stream, |r| got.push(r.unwrap()));
+    assert_eq!(got, [Frame::Via { node: relayed, rssi: -40 }, stats_frame(1)]);
+    assert_eq!((a.refused, a.relayed), (0, 1));
+    // ...but another node on the same bus still cannot.
+    let other = [3; 6];
+    let mut n = 0;
+    a.frame(other, &via, &mut |_| n += 1);
+    assert_eq!((n, a.refused), (0, 1));
+}
+
+/// Frames only the hub, the gateway or the bus layer may originate are
+/// refused from a bus node; a registered gateway may send its own frames
+/// (no Via, as on a gateway link) but may not relay them for a node.
+#[test]
+fn bus_nodes_cannot_send_hub_or_gateway_frames() {
+    let mut b = [0u8; 400];
+    let me = [1; 6];
+    let fix = Frame::HubFix(link::HubFix { state: link::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true });
+    let csbee = Frame::Csbee(b"#A:x".iter().copied().collect());
+    let flags = Frame::Flags(link::FlagReport { who: "x".try_into().unwrap(), level: 3, items: heapless::Vec::new(), pack_date: 0 });
+    let join = Frame::BusJoin { mac: [5; 6], want: 0, check: 0 };
+    let gw_hello = Frame::Hello { role: NodeRole::Gateway, protocol: 13, firmware: "gw key x".try_into().unwrap() };
+    let mut a = Attributor::new();
+    for f in [&fix, &csbee, &flags, &join, &gw_hello] {
+        let bytes = link::encode(f, &mut b).unwrap().to_vec();
+        a.frame(me, &bytes, &mut |_| panic!("{f:?} passed"));
+    }
+    assert_eq!(a.refused, 5);
+    // A registered gateway: its own Hello passes bare; relaying a HubFix does not.
+    a.register_gateway(me);
+    let hello = link::encode(&gw_hello, &mut b).unwrap().to_vec();
+    let mut stream = Vec::new();
+    a.frame(me, &hello, &mut |x| stream.extend_from_slice(x));
+    let via = link::encode(&Frame::Via { node: [9; 6], rssi: -40 }, &mut b).unwrap().to_vec();
+    let fixb = link::encode(&fix, &mut b).unwrap().to_vec();
+    a.frame(me, &via, &mut |x| stream.extend_from_slice(x));
+    a.frame(me, &fixb, &mut |x| stream.extend_from_slice(x));
+    a.frame(me, &fixb, &mut |x| stream.extend_from_slice(x));
+    let mut got = Vec::new();
+    link::Decoder::new().feed(&stream, |r| got.push(r.unwrap()));
+    assert_eq!(got, [gw_hello]);
+    assert_eq!(a.refused, 7);
 }
