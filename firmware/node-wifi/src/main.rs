@@ -494,6 +494,9 @@ async fn open_links() {
 /// MAVLink datagrams analysed and findings sent (`mavlink` task).
 static MAV_DATAGRAMS: AtomicU32 = AtomicU32::new(0);
 static MAV_FINDINGS: AtomicU32 = AtomicU32::new(0);
+/// `mavwatch::Pressure` (WP-11a): new alarms held back, sources / name sets
+/// holding evidence given up, newcomers turned away, streams turned away.
+static MAV_PRESSURE: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
 
 /// Hostile MAVLink over open Wi-Fi (protocol 13, `wifiwatch::mavwifi`,
 /// docs/DRONE-ATTACKS.md): the datagrams the receive callback queued while
@@ -519,6 +522,10 @@ async fn mavlink() {
         });
         MAV_DATAGRAMS.store(scan.totals.datagrams, Relaxed);
         MAV_FINDINGS.store(scan.totals.findings, Relaxed);
+        let p = scan.pressure();
+        for (a, v) in MAV_PRESSURE.iter().zip([p.throttled, p.evicted_evidence, p.refused, p.streams_refused]) {
+            a.store(v, Relaxed);
+        }
     }
 }
 
@@ -621,6 +628,8 @@ async fn stats() {
                 MAV_DATAGRAMS.load(Relaxed),
                 MAV_FINDINGS.load(Relaxed),
             ],
+            mavp: MAV_PRESSURE.each_ref().map(|c| c.load(Relaxed)),
+            dnet: [drones.learned, drones.evicted, drones.refused],
         };
         last_seen = seen;
         report::stats_json(&line);

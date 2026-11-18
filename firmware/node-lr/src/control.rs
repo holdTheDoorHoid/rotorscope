@@ -65,6 +65,9 @@ use crate::state::{self, PLAN};
 const WAIT_US: u64 = 100_000;
 /// Summaries / expiry this often.
 const HOUSEKEEPING_US: u64 = 500_000;
+/// The detectors' pressure counters go to USB at most this often, when
+/// they changed.
+const PRESSURE_GAP_US: u64 = 5_000_000;
 
 fn now_us() -> u64 {
     Instant::now().as_micros()
@@ -91,6 +94,9 @@ pub struct Control {
     /// Hostile-MAVLink scan (~8 KB), content decoding only.
     mav: mavwatch::Watch,
     mav_buf: [u8; 258],
+    /// Last pressure counters printed, and when.
+    pressure: [u32; 10],
+    pressure_at_us: u64,
 }
 
 impl Control {
@@ -114,6 +120,8 @@ impl Control {
             fifo: [0; 256],
             mav: mavwatch::Watch::new(),
             mav_buf: [0; 258],
+            pressure: [0; 10],
+            pressure_at_us: 0,
         }
     }
 
@@ -243,6 +251,37 @@ impl Control {
             out::hub_frame(&Frame::Threat(ctrl::contested_threat(r, now)));
         });
         self.contested.expire(now);
+        self.print_pressure(now);
+    }
+
+    /// Signs of a forger pushing the detectors (WP-11a): links and MAVLink
+    /// table entries given up or turned away, contradictions on links
+    /// without history, new alarms held back. One USB line when they
+    /// change, at most every `PRESSURE_GAP_US`.
+    fn print_pressure(&mut self, now: u64) {
+        let c = &self.contested;
+        let m = self.mav.pressure();
+        let p = [
+            c.evicted,
+            c.pressure_evicted,
+            c.refused,
+            c.unseasoned,
+            c.throttled,
+            m.throttled,
+            m.evicted_evidence,
+            m.refused,
+            m.streams_refused,
+            m.streams_evicted,
+        ];
+        if p == self.pressure || now.saturating_sub(self.pressure_at_us) < PRESSURE_GAP_US {
+            return;
+        }
+        self.pressure = p;
+        self.pressure_at_us = now;
+        out::line(format_args!(
+            r#"{{"t":"ctrl_pressure","links":[{},{},{}],"unseasoned":{},"held":{},"mav":[{},{},{},{},{}]}}"#,
+            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]
+        ));
     }
 
     /// One packet's content (and raw bytes) to the hub, within the gates.

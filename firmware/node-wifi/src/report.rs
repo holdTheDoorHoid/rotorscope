@@ -291,6 +291,14 @@ pub struct StatsLine {
     /// past the filter, turned away by the rate limit, turned away with
     /// every slot in use, analysed, findings], totals.
     pub mav: [u32; 6],
+    /// Hostile-MAVLink pressure (`mavwatch::Pressure`, WP-11a): [new alarms
+    /// held back by the budget, sources / parameter sets holding evidence
+    /// given up, newcomers turned away by a full table, streams turned
+    /// away], totals.
+    pub mavp: [u32; 4],
+    /// Drone networks (`wifiwatch::drones::Totals`): [learned, displaced
+    /// while holding evidence, newcomers that had to wait], totals.
+    pub dnet: [u32; 3],
 }
 
 pub fn stats_json(line: &StatsLine) {

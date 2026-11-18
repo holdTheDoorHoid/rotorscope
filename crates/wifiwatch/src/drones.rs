@@ -707,9 +707,9 @@ impl Waiting {
 pub struct DroneLinks {
     nets: heapless::Vec<Net, NETS>,
     waiting: [Waiting; WAITING],
-    /// Token for displacing a network holding evidence, and when the last
-    /// one was spent.
-    token: bool,
+    /// The token for displacing a network holding evidence has been spent
+    /// (at `token_at`). Inverted so the table starts all zero (`.bss`).
+    token_spent: bool,
     token_at: Ms,
     pub totals: Totals,
 }
@@ -725,7 +725,7 @@ impl DroneLinks {
         Self {
             nets: heapless::Vec::new(),
             waiting: [Waiting::FREE; WAITING],
-            token: true,
+            token_spent: false,
             token_at: 0,
             totals: Totals { learned: 0, threats: 0, evicted: 0, refused: 0 },
         }
@@ -799,10 +799,10 @@ impl DroneLinks {
         if !self.wait(bssid, now) {
             return false;
         }
-        if !self.token && elapsed(now, self.token_at) >= FORCE_GAP_MS {
-            self.token = true;
+        if self.token_spent && elapsed(now, self.token_at) >= FORCE_GAP_MS {
+            self.token_spent = false;
         }
-        if !self.token {
+        if self.token_spent {
             return false;
         }
         // Busy too long first, then not busy; never one busy for less
@@ -823,7 +823,7 @@ impl DroneLinks {
         };
         self.nets.swap_remove(v);
         self.unwait(&bssid);
-        self.token = false;
+        self.token_spent = true;
         self.token_at = now;
         self.totals.evicted = self.totals.evicted.wrapping_add(1);
         true

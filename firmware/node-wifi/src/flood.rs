@@ -15,6 +15,19 @@
 //! - `flood wfb <n>`: wfb-ng data frames, 64 link ids `0x7E57C0`.. in turn;
 //! - `flood spoof <n>`: DJI DroneID elements from the real drone's address
 //!   ([`REAL_MAC`]) with one fixed false position;
+//! - `flood retry <n>`: deauths at the test network [`RETRY_BSSID`] with the
+//!   Retry bit set and the sequence number moving on (an injector hiding
+//!   behind the bit; WP-11a: must raise `Deauth` from 30 a second);
+//! - `flood dup <n>`: deauths at [`RETRY_BSSID`], one fresh frame then its
+//!   retransmissions (Retry bit, same sequence number), eight per number
+//!   (a real access point kicking a gone station: must stay quiet below
+//!   240 a second);
+//! - `flood hijack <n>`: a test drone network ([`HIJACK_MAC`],
+//!   `TELLO-7E5701`, beaconing ten times a second on a steady clock while
+//!   this runs), and `n` times a second a deauth at it followed by a forged
+//!   beacon with the drone's address and a timestamp of 1 (WP-11a: must
+//!   raise `DroneDeauth` from 1 a second, and `DroneNetClone` with detail
+//!   bits 3 and 5, same address and two clocks);
 //! - `flood real on|off`: the "real" drone at [`REAL_MAC`]: one Remote ID
 //!   beacon a second (id `FLOODREAL0000000001`) and one DJI DroneID element
 //!   a second (serial `FLOODREAL0000001`, sequence number moving on);
@@ -42,12 +55,20 @@ use crate::usb::usb_line;
 
 /// The real drone's address ("REAL", locally administered).
 pub const REAL_MAC: [u8; 6] = [0x02, 0x52, 0x45, 0x41, 0x4C, 0x01];
+/// The access point the `retry` / `dup` deauths name ("RETRY", locally
+/// administered).
+pub const RETRY_BSSID: [u8; 6] = [0x02, 0x52, 0x45, 0x54, 0x52, 0x59];
+/// The test drone of `hijack`: a DJI block address ending 7E:57:01 ("TEST").
+pub const HIJACK_MAC: [u8; 6] = [0x60, 0x60, 0x1F, 0x7E, 0x57, 0x01];
+const HIJACK_SSID: &[u8] = b"TELLO-7E5701";
+/// The station the deauths name ("PHONE", locally administered).
+const PHONE: [u8; 6] = [0x02, 0x50, 0x48, 0x4F, 0x4E, 0x45];
 /// Most frames a second per kind.
 pub const MAX_RATE: u32 = 5000;
 const TICK_MS: u64 = 10;
 
-const KINDS: usize = 6;
-const NAMES: [&str; KINDS] = ["rid", "tool", "drone", "dji", "wfb", "spoof"];
+const KINDS: usize = 9;
+const NAMES: [&str; KINDS] = ["rid", "tool", "drone", "dji", "wfb", "spoof", "retry", "dup", "hijack"];
 
 /// The real drone's Remote ID frames: injected, seen by the drain task,
 /// admitted (`report::rid_admit`), queued for the hub.
@@ -149,6 +170,24 @@ fn beacon(src: [u8; 6], ssid: &[u8], vendor: Option<&[u8]>, out: &mut [u8; FRAME
     n
 }
 
+/// A deauthentication (reason 7) with a sequence number and Retry bit.
+fn deauth(dst: [u8; 6], src: [u8; 6], bssid: [u8; 6], seq: u16, retry: bool, out: &mut [u8; FRAME]) -> usize {
+    out[..4].copy_from_slice(&[0xC0, if retry { 0x08 } else { 0 }, 0, 0]);
+    out[4..10].copy_from_slice(&dst);
+    out[10..16].copy_from_slice(&src);
+    out[16..22].copy_from_slice(&bssid);
+    out[22..24].copy_from_slice(&((seq & 0x0FFF) << 4).to_le_bytes());
+    out[24..26].copy_from_slice(&7u16.to_le_bytes());
+    26
+}
+
+/// The test drone's beacon with timestamp `tsf_us`.
+fn drone_beacon(tsf_us: u64, out: &mut [u8; FRAME]) -> usize {
+    let n = beacon(HIJACK_MAC, HIJACK_SSID, None, out);
+    out[24..32].copy_from_slice(&tsf_us.to_le_bytes());
+    n
+}
+
 /// A DJI DroneID flight-information element body.
 fn dji_body(serial: &[u8], seq: u16, lat: f64, lon: f64, out: &mut [u8]) -> Option<usize> {
     let info = rid::dji::FlightInfo {
@@ -182,6 +221,9 @@ struct Injector {
     real_len: usize,
     drone_prefix: [u8; 3],
     n: u32,
+    /// The test drone's clock started here; next steady beacon.
+    hijack_boot: Instant,
+    hijack_next: Instant,
 }
 
 impl Injector {
@@ -225,10 +267,22 @@ impl Injector {
                 inject(RxKind::Data, f, len);
                 return;
             }
-            _ => {
+            5 => {
                 // The forger: the real drone's address, one false position.
                 let Some(b) = dji_body(b"FLOODREAL0000001", 0, 1.0, 1.0, &mut body) else { return };
                 beacon(REAL_MAC, b"FLOOD", Some(&body[..b]), f)
+            }
+            // Retry bit on every frame, a new number each time.
+            6 => deauth(PHONE, RETRY_BSSID, RETRY_BSSID, n as u16, true, f),
+            // Eight per number: the first fresh, then its retransmissions.
+            7 => deauth(PHONE, RETRY_BSSID, RETRY_BSSID, (n / 8) as u16, n % 8 != 0, f),
+            _ => {
+                // A deauth at the test drone, then a forged beacon with its
+                // address and a timestamp of 1.
+                let len = deauth(PHONE, HIJACK_MAC, HIJACK_MAC, n as u16, false, f);
+                self.sent[k] = self.sent[k].wrapping_add(1);
+                inject(RxKind::Mgmt, f, len);
+                drone_beacon(1, f)
             }
         };
         self.sent[k] = self.sent[k].wrapping_add(1);
@@ -253,6 +307,15 @@ impl Injector {
             self.real_next += Duration::from_secs(1);
             self.real(f);
         }
+        // The test drone beacons on its own clock while `hijack` runs.
+        if self.rates[8] > 0 && Instant::now() >= self.hijack_next {
+            self.hijack_next += Duration::from_millis(100);
+            // Up ten minutes already, so its deauths are not a fresh boot's
+            // (`wifiwatch::drones::BOOT_GRACE_MS`).
+            let tsf = (Instant::now() - self.hijack_boot).as_micros() + 600_000_000;
+            let len = drone_beacon(tsf, f);
+            inject(RxKind::Mgmt, f, len);
+        }
         for k in 0..KINDS {
             self.acc[k] += self.rates[k] * TICK_MS as u32;
             while self.acc[k] >= 1000 {
@@ -264,9 +327,11 @@ impl Injector {
 
     fn status(&self) {
         usb_line!(
-            r#"{{"t":"flood","rate":{{"rid":{},"tool":{},"drone":{},"dji":{},"wfb":{},"spoof":{}}},"sent":{{"rid":{},"tool":{},"drone":{},"dji":{},"wfb":{},"spoof":{}}},"real":{{"on":{},"sent":{},"seen":{},"admitted":{},"queued":{},"dji_sent":{}}}}}"#,
+            r#"{{"t":"flood","rate":{{"rid":{},"tool":{},"drone":{},"dji":{},"wfb":{},"spoof":{},"retry":{},"dup":{},"hijack":{}}},"sent":{{"rid":{},"tool":{},"drone":{},"dji":{},"wfb":{},"spoof":{},"retry":{},"dup":{},"hijack":{}}},"real":{{"on":{},"sent":{},"seen":{},"admitted":{},"queued":{},"dji_sent":{}}}}}"#,
             self.rates[0], self.rates[1], self.rates[2], self.rates[3], self.rates[4], self.rates[5],
+            self.rates[6], self.rates[7], self.rates[8],
             self.sent[0], self.sent[1], self.sent[2], self.sent[3], self.sent[4], self.sent[5],
+            self.sent[6], self.sent[7], self.sent[8],
             self.real,
             REAL_SENT.load(Relaxed),
             REAL_SEEN.load(Relaxed),
@@ -298,6 +363,11 @@ impl Injector {
             (Some(kind), Some(rate)) => {
                 let Some(k) = NAMES.iter().position(|n| *n == kind) else { return false };
                 let Ok(r) = rate.parse::<u32>() else { return false };
+                if k == 8 && self.rates[8] == 0 && r > 0 {
+                    // The test drone's clock starts now.
+                    self.hijack_boot = Instant::now();
+                    self.hijack_next = Instant::now();
+                }
                 self.rates[k] = r.min(MAX_RATE);
             }
             _ => return false,
@@ -328,12 +398,15 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
         real_len: 0,
         drone_prefix,
         n: 0,
+        hijack_boot: Instant::now(),
+        hijack_next: Instant::now(),
     };
     inj.fake_len = rid_pack(b"FLOODFAKE0000000001", 40.0, -75.0, &mut inj.fake_pack).unwrap_or(0);
     inj.real_len = rid_pack(b"FLOODREAL0000000001", 39.95, -75.16, &mut inj.real_pack).unwrap_or(0);
     let drone_ok = wifidrone::classify(&[drone_prefix[0], drone_prefix[1], drone_prefix[2], 1, 2, 3], b"MavicAir-FLOOD").is_some();
+    let hijack_ok = wifidrone::classify(&HIJACK_MAC, HIJACK_SSID).is_some();
     usb_line!(
-        r#"{{"t":"flood","note":"FLOOD TEST BUILD: synthetic frames into this node's receive path, nothing transmitted. Type 'flood rid|tool|drone|dji|wfb|spoof <per second>', 'flood real on|off', 'flood off' or 'flood' + Enter","packs_ok":{},"drone_ok":{drone_ok}}}"#,
+        r#"{{"t":"flood","note":"FLOOD TEST BUILD: synthetic frames into this node's receive path, nothing transmitted. Type 'flood rid|tool|drone|dji|wfb|spoof|retry|dup|hijack <per second>', 'flood real on|off', 'flood off' or 'flood' + Enter","packs_ok":{},"drone_ok":{drone_ok},"hijack_ok":{hijack_ok}}}"#,
         inj.fake_len > 0 && inj.real_len > 0
     );
 
@@ -354,7 +427,7 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
             }
             let cmd = core::str::from_utf8(&line).unwrap_or("").trim();
             if !cmd.is_empty() && !inj.command(cmd) {
-                usb_line!(r#"{{"t":"flood","err":"type 'flood <rid|tool|drone|dji|wfb|spoof> <per second>', 'flood real on|off', 'flood off' or 'flood'"}}"#);
+                usb_line!(r#"{{"t":"flood","err":"type 'flood <rid|tool|drone|dji|wfb|spoof|retry|dup|hijack> <per second>', 'flood real on|off', 'flood off' or 'flood'"}}"#);
             }
             line.clear();
         }

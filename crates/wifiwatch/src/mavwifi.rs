@@ -358,6 +358,12 @@ impl MavWifi {
         Self { watch: mavwatch::Watch::new(), totals: Totals { datagrams: 0, findings: 0 } }
     }
 
+    /// The analyser's pressure counters (new alarms held back, table
+    /// entries given up or turned away), for a node's stats line.
+    pub fn pressure(&self) -> mavwatch::Pressure {
+        self.watch.pressure()
+    }
+
     /// Analyse one queued payload. `out` gets each finding as the threat
     /// and the evidence frame node-lr sends for it, in that order.
     pub fn feed(&mut self, m: &Meta, payload: &[u8], out: &mut dyn FnMut(&ThreatSighting, &MavlinkEvidence)) {

@@ -507,6 +507,12 @@ fn a_real_reboot_is_believed_after_its_beacons() {
     assert!(s.drone_kinds().is_empty(), "{:?}", s.out);
 }
 
+/// node-wifi's `floodtest` (`flood hijack`) uses this address and name.
+#[test]
+fn floodtest_hijack_drone_is_a_drone() {
+    assert!(wifidrone::classify(&[0x60, 0x60, 0x1F, 0x7E, 0x57, 0x01], b"TELLO-7E5701").is_some());
+}
+
 #[test]
 fn table_is_bounded() {
     let mut s = Sim::new();
