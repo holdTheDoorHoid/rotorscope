@@ -89,7 +89,11 @@ one UID, a third SiK radio on one NET ID: what SiKW00F-style injection and
 ExpressLRS hijacking look like) and reports it as a `ControlContested`
 threat. How, its thresholds and its limits: docs/DRONE-ATTACKS.md, "Second
 transmitter on a control link". It uses identifiers inside the node only, and
-its MAVLink check only runs with content decoding on.
+its MAVLink check only runs with content decoding on. Since WP-11a a link
+must have been heard as one transmitter for 5 s before a second one counts
+(six forged syncs alternating two phases on a made-up UID used to raise it),
+and new contested links are reported at most two at once, then one every
+10 s.
 
 ## On the node and the hub (2026-11-17, branch `ctrl-node`)
 

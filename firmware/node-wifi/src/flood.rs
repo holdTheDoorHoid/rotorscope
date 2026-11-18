@@ -21,7 +21,7 @@
 //! - `flood dup <n>`: deauths at [`RETRY_BSSID`], one fresh frame then its
 //!   retransmissions (Retry bit, same sequence number), eight per number
 //!   (a real access point kicking a gone station: must stay quiet below
-//!   240 a second);
+//!   80 a second, under 10 fresh frames a second);
 //! - `flood hijack <n>`: a test drone network ([`HIJACK_MAC`],
 //!   `TELLO-7E5701`, beaconing ten times a second on a steady clock while
 //!   this runs), and `n` times a second a deauth at it followed by a forged

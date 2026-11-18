@@ -663,6 +663,52 @@ One `floodtest` node, wired to the P4 (or behind the gateway for step 5). Record
    has risen, and the hub kept getting the node's frames meanwhile (its frame count kept rising).
 7. Finish by flashing the normal build (no `floodtest`) and checking `"bench":[]`.
 
+## Alarm integrity on the nodes (WP-11a, 2026-11-18, compile-checked only)
+
+Branch `sec/p2-a`. Host-tested (`cargo test -p wifiwatch -p mavwatch -p ctrlwatch -p wifidrone
+-p tracker`); the firmware is compile-checked only (C5 `fw` and `fw24-now`, node-lr `fw`, S3
+`cargo check`, C5 `floodtest` `cargo check`). What changed is in docs/DRONE-ATTACKS.md and
+docs/WIFI-ATTACKS.md (marked WP-11a): Retry-bit deauths with new sequence numbers count; a drone
+restart is believed only from several beacons on the new clock, and two clocks on one address are
+a `DroneNetClone` (detail bits 3 and 5); 4 drone networks with displacement rules; MAVLink frames
+of any length; one MAVLink frame is a suspicion (`detail` bit 24); contested links need 5 s of
+history; small tables keep entries holding evidence.
+
+New stats: node-wifi `stats` gains `"mavp":[held back, evidence given up, turned away, streams
+turned away]` and `"dnet":[learned, displaced, made to wait]`; node-lr prints
+`{"t":"ctrl_pressure",...}` when its counters change (at most every 5 s), and its
+`mavlink_attack` line has `"suspect"`.
+
+RAM, static `.data` + `.bss` from the ELF: node-wifi C5 ESP-NOW 88 676 -> 89 844 bytes (+1 168),
+C5 wired 5 GHz 87 852 -> 89 020 (+1 168); node-lr (C3) 127 168 -> 127 848 (+680). Detector state:
+`wifiwatch::Watch` 6 104 -> 6 616 bytes (`DroneLinks` 440 -> 816, `Floods` 1 176 -> 1 312),
+`mavwatch::Watch` 8 216 -> 8 784, `ctrlwatch::contested::Watch<8>` 5 456 -> 5 616.
+
+### To check on hardware with `floodtest` (not yet run)
+
+A `floodtest` node-wifi (build as in "The `floodtest` build"; its first `flood` line must also say
+`"hijack_ok":true`), wired to the P4. Nothing is transmitted. Record the `stats`, `flood`, `threat`
+lines and the hub's threats.
+
+1. **Retry-bit flood.** `flood retry 60` for 10 s: `Deauth` threats at `02:52:45:54:52:59`
+   (target `02:50:48:4f:4e:45`) about once a second, `kill` rising by about 60 a second. Before
+   WP-11a: no threat. `flood off`.
+2. **Genuine retransmissions.** `flood dup 64` for 10 s (8 fresh frames a second, each retried
+   seven times): no `Deauth` threat while `kill` rises by about 64 a second (counting every frame
+   would be 64 a second, over the 30-a-second bar). `flood dup 400` (50 fresh a second): a
+   `Deauth` about once a second. `flood off`.
+3. **Forged restarts between deauths.** `flood hijack 1` for 15 s: the test drone `TELLO-7E5701`
+   (`60:60:1f:7e:57:01`) is learned (`dnet` first number rises), then a `drone_deauth` threat for
+   it within ~3 s and about once a second after, and `drone_net_clone` with `source` = `target` =
+   `60:60:1f:7e:57:01` and detail bits 3 and 5 (`detail & 0x3F` = 40). Before WP-11a: no
+   `drone_deauth` (each forged beacon emptied the count). `flood off`; both stop within ~10 s.
+4. **A real drone, if one is available (your own Tello, in a shielded box):** power-cycle it while
+   its phone app runs: no drone alarm (the restart is believed after about a second of beacons).
+5. Finish with the normal build and `"bench":[]`.
+
+The node-lr changes (contested-link history, the MAVLink suspicion and budgets, the tables) have no
+bench injector; they need a real SiK pair or ExpressLRS link and are host-tested only.
+
 ## node-sdr under hostile signals (2026-11-18, compile-checked only)
 
 Anyone in radio range can make the DroneID node work for them. Two ways were found and closed in

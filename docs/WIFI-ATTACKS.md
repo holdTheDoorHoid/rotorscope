@@ -148,6 +148,25 @@ what the frames say about who sent them, and to whom, is a claim:
   jamming-like alarms after five minutes), and never clears JAMMED
   (docs/SITE.md "Silencing alarms").
 
+### Cheapest forgery, and what still gets past (after WP-11a)
+
+Raising each alarm on purpose (left) and hiding the real attack from it
+(right), for someone in radio range who has read this source. Rates are
+*as heard* by the node (a visited channel is heard ~12% of the time). The
+drone kinds are in docs/DRONE-ATTACKS.md, same heading.
+
+| Alarm | Cheapest forgery that raises it | Known evasions that remain |
+|---|---|---|
+| `deauth`, `disassoc` | 30 frames in a second at one BSSID, any addresses (or 10/s for 2 s, or 10 to broadcast). Retry bit or not, as long as the sequence numbers move. | Stay under 10 a second as heard: a few frames disconnect one client. Repeating one sequence number with the Retry bit hides frames from the count, but the victim discards them too (only the first acts). A channel the node is not on. |
+| `auth_flood` | 100 authentication / association requests in a second at one BSSID, or 30/s from 8+ addresses for 2 s. | Stay under the rates. |
+| `probe_flood` | 300 probe requests in a second, or 100 from 36+ addresses. | Stay under the rates. |
+| `beacon_flood` | 20 new transmitters in a second on a channel heard continuously for 4 s. | Fewer new names a second; reuse addresses heard in the last 10-20 s. |
+| `karma` | Probe responses or beacons with 5 names from one address in 30 s. | Answer with a new address per name. |
+| `evil_twin` | A protected network's name beaconed 5 times in 60 s, then an open network with the same name twice: both from the forger, so any name can be accused. | A twin that is not open (same security as the original). |
+| `channel_switch` | Beacons with a channel-switch element that contradicts the same address's plain beacons (2 + 2 within 3 s), or names no valid channel. | A switch announced once, briefly, to a valid channel, with no plain beacons to contradict it. |
+| `attack_tool` | One beacon with a tool's name or address (`pwned`, `GhostNet`, `de:ad:be:ef:de:ad`, ...). | Rename the tool's network or change its address. |
+| `ble_spam` | 20 new addresses of one pairing family in 5 s. | Fewer than 20 new addresses per 5 s; a family not in the list. |
+
 The hub labels these fields as claims: the threat JSON line carries
 `"claimed":true` whenever it shows `src`, `target` or `ssid` (addresses
 only with `show_link_ids`), the evidence text says `claimed "name"`, and
