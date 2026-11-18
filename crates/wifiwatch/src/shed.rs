@@ -411,7 +411,7 @@ mod tests {
         let mut real_sent = 0;
         let mut flood_acc = 0u32;
         let mut drain_acc = 0u32;
-        let mut push = |shed: &mut Shed, sim: &mut Sim, kind: Option<Kind>, real: bool| {
+        let push = |shed: &mut Shed, sim: &mut Sim, kind: Option<Kind>, real: bool| {
             let Some(kind) = kind else { return };
             if legacy {
                 if sim.queue.len() < CAP {
