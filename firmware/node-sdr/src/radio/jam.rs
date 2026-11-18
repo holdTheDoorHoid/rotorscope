@@ -3,7 +3,9 @@
 //! dwell time; it reads what the dwell already captured.
 //!
 //! - During the dwell every trigger probe's power also goes into
-//!   `jamwatch::ProbeStats` (`Radio::probe`).
+//!   `jamwatch::ProbeStats` (`Radio::probe`), and at its end the decode
+//!   budget's pressure (`Radio::end_dwell`): a train of DroneID-length
+//!   pulses that floods the decoder counts as pulsed interference.
 //! - At the end of the dwell (the ring is stopped anyway for the retune)
 //!   [`Radio::jam_judge`] runs a 128-frame 64-point spectrogram over the
 //!   newest ring bytes (about 2 ms of CPU, no extra air time), lets the
@@ -144,7 +146,7 @@ impl Radio {
             let mut line = Line::new();
             let _ = write!(
                 line,
-                r#"{{"t":"jamhop","f":{},"lo":{},"band":"{}","floor":{},"rise":{},"p50":{},"p99":{},"loud":{},"runs":{},"on_us":{},"clip_ppm":{},"occ":{},"link":{},"raised":{},"pulsed":{},"oven":{}"#,
+                r#"{{"t":"jamhop","f":{},"lo":{},"band":"{}","floor":{},"rise":{},"p50":{},"p99":{},"loud":{},"runs":{},"on_us":{},"clip_ppm":{},"occ":{},"link":{},"raised":{},"pulsed":{},"oven":{},"pressure":{}"#,
                 v.freq,
                 v.lo_mhz,
                 band_name(v.band),
@@ -164,7 +166,8 @@ impl Radio {
                 },
                 v.raised,
                 v.pulsed,
-                v.oven
+                v.oven,
+                v.pressure
             );
             if let Some(t) = v.tone {
                 let _ = write!(line, r#","tone":{t}"#);
