@@ -88,7 +88,11 @@ fn elrs_second_transmitter_on_one_uid_fires() {
     let a = Elrs::new(tx("victim", None), 0);
     let b = Elrs::new(tx("victim", None), 777_777); // same UID, own clock
     let mut out = std::vec::Vec::new();
-    for i in 0..8u64 {
+    // The link alone first (WP-11a: a contest needs history).
+    for i in 0..4u64 {
+        feed_elrs(&mut w, &a, 1_000_000 + i * 2_000_000, 0, -60, &cfg);
+    }
+    for i in 4..12u64 {
         let t = 1_000_000 + i * 2_000_000;
         feed_elrs(&mut w, &a, t, 0, -60, &cfg);
         feed_elrs(&mut w, &b, t + 1_000_000, 0, -75, &cfg);
@@ -107,8 +111,8 @@ fn elrs_second_transmitter_on_one_uid_fires() {
         read_ids: true,
         ..Default::default()
     };
-    feed_elrs(&mut w, &a, 40_000_000, 0, -60, &ids);
-    let r = reports(&mut w, 40_000_001, &ids);
+    feed_elrs(&mut w, &a, 50_000_000, 0, -60, &ids);
+    let r = reports(&mut w, 50_000_001, &ids);
     assert!(matches!(r[0].id, Some(LinkId::ElrsUid { .. })));
 }
 
@@ -201,7 +205,7 @@ fn elrs_takeover_after_silence_is_a_handover() {
     let a = Elrs::new(tx("victim", None), 0);
     let mut b = Elrs::new(tx("victim", None), 900_000);
     b.tlm = 5; // a different telemetry ratio from the attacker's radio
-    for i in 0..5u64 {
+    for i in 0..6u64 {
         feed_elrs(&mut w, &a, 1_000_000 + i * 1_000_000, 0, -60, &cfg);
     }
     // 12 s silent (jammed), then a new transmitter.
@@ -221,7 +225,7 @@ fn elrs_takeover_after_silence_is_a_handover() {
     // Same settings but 25 dB weaker: also a handover.
     let mut w = W::new();
     let b = Elrs::new(tx("victim", None), 900_000);
-    for i in 0..5u64 {
+    for i in 0..6u64 {
         feed_elrs(&mut w, &a, 1_000_000 + i * 1_000_000, 0, -60, &cfg);
     }
     for i in 0..3u64 {
@@ -247,7 +251,10 @@ fn elrs_reports_hold_then_lapse() {
     let a = Elrs::new(tx("victim", None), 0);
     let b = Elrs::new(tx("victim", None), 500_000);
     let mut t = 0;
-    for i in 0..6u64 {
+    for i in 0..4u64 {
+        feed_elrs(&mut w, &a, 1_000_000 + i * 2_000_000, 0, -60, &cfg);
+    }
+    for i in 4..10u64 {
         t = 1_000_000 + i * 2_000_000;
         feed_elrs(&mut w, &a, t, 0, -60, &cfg);
         feed_elrs(&mut w, &b, t + 1_000_000, 0, -70, &cfg);
@@ -279,14 +286,17 @@ fn mlrs_second_uplink_transmitter_fires() {
     let up = tx_frame(0x5A5A, 1, [1024; 8], &[]);
     let down = rx_frame(0x5A5A, 1, &[]);
     let mut out = std::vec::Vec::new();
-    for v in 0..8u64 {
+    for v in 0..14u64 {
         let base = 10_000_000 + v * VISIT;
         // The real pair: uplink at phase 3 ms, the receiver's answer at 19 ms.
         w.observe(&up, &mlrs_rx(), meta(base + 3_000, -70), &cfg);
         w.observe(&down, &mlrs_rx(), meta(base + 19_000, -80), &cfg);
         // The intruder's uplink on its own frame clock (phase 11 ms),
-        // reaching this channel on another frame.
-        w.observe(&up, &mlrs_rx(), meta(base + 700_000 + 11_000, -65), &cfg);
+        // reaching this channel on another frame, once the pair has been
+        // heard alone for a while.
+        if v >= 5 {
+            w.observe(&up, &mlrs_rx(), meta(base + 700_000 + 11_000, -65), &cfg);
+        }
         out.extend(reports(&mut w, base + 800_000, &cfg));
     }
     let r = out.last().expect("contested");
@@ -487,7 +497,12 @@ fn sik_synced_injector_needs_content_and_two_sequences() {
     };
     let mut w = W::new();
     let mut out = std::vec::Vec::new();
-    for v in 0..3u64 {
+    // The pair alone first.
+    let mut rng = Lcg(2);
+    for v in 0..4u64 {
+        sik_window(&mut w, 1_000_000 + v * 1_500_000, 4, &mut rng, &on, false);
+    }
+    for v in 4..7u64 {
         sik_synced_injection(&mut w, &on, 1_000_000 + v * 1_500_000, (v * 40) as u8);
         out.extend(reports(&mut w, 1_100_000 + v * 1_500_000, &on));
     }
@@ -524,6 +539,85 @@ fn sik_one_sender_with_resends_and_loss_is_quiet() {
     assert!(reports(&mut w, 60_000_000, &on).is_empty());
 }
 
+// ------------------------------------------------ cheap false alarms --
+
+#[test]
+fn six_alternating_syncs_from_nowhere_raise_nothing() {
+    // One radio, a made-up UID, alternating between two nonce phases:
+    // three syncs each, five switches. Until WP-11a: "link hijack".
+    let cfg = Config::default();
+    let mut w = W::new();
+    let a = Elrs::new(tx("made up", None), 0);
+    let b = Elrs::new(tx("made up", None), 777_777);
+    for i in 0..3u64 {
+        feed_elrs(&mut w, &a, 1_000_000 + i * 600_000, 0, -60, &cfg);
+        feed_elrs(&mut w, &b, 1_300_000 + i * 600_000, 0, -60, &cfg);
+    }
+    // And kept up for a while: the second group was there from the start,
+    // so the link never had one transmitter's history.
+    for i in 3..20u64 {
+        feed_elrs(&mut w, &a, 1_000_000 + i * 600_000, 0, -60, &cfg);
+        feed_elrs(&mut w, &b, 1_300_000 + i * 600_000, 0, -60, &cfg);
+    }
+    assert!(reports(&mut w, 20_000_000, &cfg).is_empty());
+    assert!(w.unseasoned > 0, "the contradiction is counted, not reported");
+    // A three-sync "handover" from nowhere: also nothing.
+    let mut w = W::new();
+    let mut c = Elrs::new(tx("made up 2", None), 900_000);
+    c.tlm = 5;
+    for i in 0..3u64 {
+        feed_elrs(&mut w, &a, 1_000_000 + i * 300_000, 0, -60, &cfg);
+    }
+    for i in 0..3u64 {
+        feed_elrs(&mut w, &c, 5_000_000 + i * 300_000, 0, -60, &cfg);
+    }
+    assert!(reports(&mut w, 8_000_000, &cfg).is_empty());
+}
+
+#[test]
+fn new_contested_links_are_rate_limited() {
+    // Eight made-up links, each given its history and then contested, all
+    // at once: an alarm storm. The first NEW_FINDING_BURST go out; the
+    // rest wait for tokens (one per NEW_FINDING_REFILL_US), none is lost.
+    let cfg = Config::default();
+    let mut w = W::new();
+    let names = ["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7"];
+    let txs: std::vec::Vec<(Elrs, Elrs)> =
+        names.iter().map(|n| (Elrs::new(tx(n, None), 0), Elrs::new(tx(n, None), 777_777))).collect();
+    for i in 0..4u64 {
+        for (a, _) in &txs {
+            feed_elrs(&mut w, a, 1_000_000 + i * 2_000_000, 0, -60, &cfg);
+        }
+    }
+    let mut first = std::vec::Vec::new();
+    for i in 4..12u64 {
+        let t = 1_000_000 + i * 2_000_000;
+        for (a, b) in &txs {
+            feed_elrs(&mut w, a, t, 0, -60, &cfg);
+            feed_elrs(&mut w, b, t + 1_000_000, 0, -75, &cfg);
+        }
+        first.extend(reports(&mut w, t + 1_500_000, &cfg));
+    }
+    let handles = |v: &[Report]| {
+        let mut h: std::vec::Vec<u8> = v.iter().map(|r| r.handle).collect();
+        h.sort();
+        h.dedup();
+        h.len()
+    };
+    // 12 s of contest: the burst, plus at most one refill.
+    let n = handles(&first);
+    assert!((NEW_FINDING_BURST as usize..=NEW_FINDING_BURST as usize + 1).contains(&n), "{n}: {first:?}");
+    assert!(w.throttled > 0);
+    // Over the next minutes the rest come out, one per refill.
+    let mut later = first.clone();
+    let mut t = 30_000_000;
+    while t < 30_000_000 + 8 * NEW_FINDING_REFILL_US {
+        later.extend(reports(&mut w, t, &cfg));
+        t += 1_000_000;
+    }
+    assert_eq!(handles(&later), 8);
+}
+
 // ---------------------------------------------------------------- misc --
 
 #[test]
@@ -553,6 +647,6 @@ fn table_is_bounded() {
 }
 
 #[test]
-fn state_size() {
+fn state_size_printed() {
     std::println!("SIZE contested Watch<8> {} B, Link {} B", core::mem::size_of::<W>(), core::mem::size_of::<Link>());
 }
