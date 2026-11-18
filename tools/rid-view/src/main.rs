@@ -65,14 +65,14 @@ OPTIONS:
                              operator once a second, e.g. udp://239.2.3.1:6969
                              (ATAK's default multicast). Off by default.
     --dragonsync BIND        Publish drones to DragonSync (WarDragon's TAK/MQTT
-                             bridge) as ZeroMQ JSON, e.g. tcp://0.0.0.0:4230.
+                             bridge) as ZeroMQ JSON, e.g. tcp://127.0.0.1:4230.
                              Point DragonSync's zmq_host/zmq_port at it. Off
                              by default; no default port, so it never lands
                              on a WarDragon's own 4224.
     --dragonsync-signals BIND
                              Publish signal alerts (analog FPV video, DJI
                              links, open FPV links) on a second port, e.g.
-                             tcp://0.0.0.0:4231. Point DragonSync's
+                             tcp://127.0.0.1:4231. Point DragonSync's
                              fpv_zmq_host/fpv_zmq_port at it and set
                              fpv_enabled = true. Must differ from
                              --dragonsync's. Link identifiers stay hidden
@@ -128,6 +128,9 @@ OPTIONS:
     --http ADDR              Serve the hub's phone page and API on ADDR, e.g.
                              127.0.0.1:8080 (port 0 picks a free one). The
                              page can set --own-pos (POST /api/own-pos).
+                             Keep it on loopback: the page shows where
+                             drones are and takes a position, and other
+                             addresses print a warning.
     -h, --help               This text.
 ";
 
@@ -756,6 +759,9 @@ fn run(o: Options) -> Result<(), String> {
             let listener = TcpListener::bind(addr).map_err(|e| format!("--http {addr}: {e}"))?;
             let at = listener.local_addr().map_err(|e| e.to_string())?;
             eprintln!("rid-view: phone page at http://{at}/");
+            if let Some(w) = http::exposure_warning(at) {
+                eprintln!("{w}");
+            }
             let shared = Arc::new(http::Shared {
                 state: Mutex::new(Vec::new()),
                 own_pos: Mutex::new(pos_tx),
