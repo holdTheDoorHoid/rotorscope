@@ -323,7 +323,14 @@ fn cold_start_without_gps_is_marked() {
     let rep = check(&s.bytes);
     assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
     assert!(fails(&rep).is_empty(), "{:?}", fails(&rep));
-    assert!(rep.findings.iter().any(|f| f.what.contains("marked \"untrusted\"")));
+    assert!(rep.findings.iter().any(|f| f.what.contains("marked time source \"untrusted\"")));
+    // The summary counts each source apart: one "none" record (the boot
+    // before any GPS), two "untrusted". Never "all 3 marked none" first and
+    // "2 of them untrusted" after (bench 2026-11-18: 27 and 22).
+    let notes: Vec<&str> = rep.findings.iter().map(|f| f.what.as_str()).collect();
+    assert!(notes.iter().any(|w| w.starts_with("1 record has no UTC time") && w.contains("\"none\"")), "{notes:?}");
+    assert!(notes.iter().any(|w| w.starts_with("2 records have no UTC time") && w.contains("\"untrusted\"")), "{notes:?}");
+    assert!(!notes.iter().any(|w| w.contains("3 records have no UTC")), "{notes:?}");
     assert!(rep.findings.iter().any(|f| f.what.contains("no hub position")));
     let line = verify::describe(&r);
     assert!(line.contains("NO-UTC") && line.contains("NO-POSITION(gps searching)"), "{line}");

@@ -177,6 +177,11 @@ pub struct ChainSummary {
     pub missing: Vec<(u64, u64)>,
 }
 
+/// "1 record has" / "N records have".
+fn records_have(n: u64) -> String {
+    if n == 1 { "1 record has".into() } else { format!("{n} records have") }
+}
+
 #[derive(Debug, Default)]
 pub struct Report {
     pub findings: Vec<Finding>,
@@ -449,15 +454,25 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
                 "signed with the published test key: accepted only because the test key was allowed. Its secret is in this project's source code; anyone can produce such a log",
             );
         }
-        if c.sum.no_time > 0 {
-            rep.add(Level::Note, w.clone(), format!("{} records have no UTC time (no GPS time yet): they carry uptime only, marked time source \"none\"", c.sum.no_time));
-            if c.sum.untrusted_time > 0 {
-                rep.add(
-                    Level::Note,
-                    w.clone(),
-                    format!("{} of them are marked \"untrusted\": the GPS gave a time the hub did not trust (suspected spoofing, or before the build date or the latest time it had trusted)", c.sum.untrusted_time),
-                );
-            }
+        // Each time source on its own line: "none" (no GPS time yet) and
+        // "untrusted" (GPS time withheld) are both records without UTC.
+        let none = c.sum.no_time - c.sum.untrusted_time;
+        if none > 0 {
+            rep.add(
+                Level::Note,
+                w.clone(),
+                format!("{} no UTC time (no GPS time yet): uptime only, marked time source \"none\"", records_have(none)),
+            );
+        }
+        if c.sum.untrusted_time > 0 {
+            rep.add(
+                Level::Note,
+                w.clone(),
+                format!(
+                    "{} no UTC time because the hub did not trust the GPS time (suspected spoofing, or before the build date or the latest time it had trusted): uptime only, marked time source \"untrusted\"",
+                    records_have(c.sum.untrusted_time)
+                ),
+            );
         }
         if c.sum.no_position > 0 {
             rep.add(Level::Note, w.clone(), format!("{} records have no hub position (no GPS fix and none typed in)", c.sum.no_position));
