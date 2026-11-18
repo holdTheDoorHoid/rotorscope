@@ -43,10 +43,15 @@ trailer: a freshness stamp and an authentication tag.
 ## On the hub's side
 
 The gateway writes `link::Frame::Via { node, rssi }` before each relayed
-frame (protocol version 3). It is a marker, not a wrapper, so relayed frames
-keep their full size budget. The S3 hub accepts and ignores `Via` (relayed
-frames count against the gateway's link); the P4 hub will use it for per-node
-health. Gateway TX is XIAO D6 (GPIO11), 921600 baud, like a node.
+frame (protocol version 3), in the same UART write as the frame. It is a
+marker, not a wrapper, so relayed frames keep their full size budget. The P4
+hub keeps a node table by it (per-node health, roles, the coverage
+coordinator) and names each frame's sender in the tracker and the evidence
+log; a `Via` names exactly the one frame after it. Gateway TX is XIAO D6
+(GPIO11), 921600 baud, like a node.
+
+The gateway relays only frames a node may send: see "Who may send what"
+below.
 
 ## Downlink: hub to node (protocol 4)
 
@@ -202,15 +207,24 @@ with an error when there is no key.
   The ID must be the same on every board. A board built without the key
   prints a `"t":"warn"` line saying `built WITHOUT a link key` instead.
 * **Once a second**, the gateway's `"t":"gw"` line has `"key":"<ID>"` and
-  counters `bad_tag`, `replay`, `unauth`, `stale` (rejected packets) and
-  `syncs`. On a healthy kit the four reject counters stay at 0 (a few
-  `stale` right after the gateway restarts are normal).
+  counters `bad_tag`, `replay`, `unauth`, `stale` (rejected packets),
+  `syncs`, `refused` (node frames of a type a node may not send) and
+  `table_full` (packets from a 17th node). On a healthy kit all of these
+  but `syncs` stay at 0 (a few `stale` right after the gateway restarts are
+  normal).
 * **Nodes still report**: the hub keeps showing every ESP-NOW node, and the
   gateway's `"t":"node"` lines keep counting packets. A node that shows up
   only as rejects was built without the key, or with an old one.
-* **On the hub**, the gateway's own `Hello` says `gw key <ID>` (or
-  `gw OPEN no key`); rejected packets arrive as `Threat` frames of kind
-  `forged_link` naming the claimed node, at most once a second.
+* **On the P4 hub**: the USB `{"t":"hub"}` line's `"link"` object has
+  `"gw":"gw key <ID>"` (from the gateway's own `Hello`; `"gw OPEN no key"`
+  for an open gateway). The **screen** does not show the key ID: it shows
+  `OPEN LINK` in the strip at the bottom edge while the gateway's last
+  `Hello` says the link is open, and nothing about the link when it is keyed
+  (no strip at all on a normal build with an evidence key). Rejected
+  packets arrive as `Threat` frames of kind `forged_link` naming the claimed
+  node, at most once a second per node and reason, and show up as
+  `hub-p4: THREAT Forged node traffic ...` console lines and threats on the
+  screen.
 
 ### 4. If a board is lost or you think the key leaked
 
@@ -249,12 +263,100 @@ node. Boards with the old key go deaf to the kit (that is the point).
   batch, 0.35 ms for a full 1 KB one). The C5 has a SHA accelerator if this
   ever matters.
 * **Reports**: `link::ThreatKind::ForgedLink`, `detail` 1 bad tag, 2 replay,
-  3 unauthenticated, 4 stale (see its doc comment).
+  3 unauthenticated, 4 stale (see its doc comment); since 2026-11-18 also
+  5 origin and 6 table full ("Who may send what" below).
 
 Not verified on hardware yet (2026-11-17): everything above passes host
 tests and all four images build with and without a key; the radio behaviour
 (syncs after a gateway restart, node image switches, the threat report on the
 hub) needs a bench run.
+
+## Who may send what
+
+The key proves a packet came from a board of this kit. It does not say what
+that board may send. Since 2026-11-18 every hop also checks **origin**: who
+may originate each frame type (`crates/link/src/origin.rs`, one table with
+no catch-all, so a new frame type does not compile until someone decides).
+
+| Who | Frames |
+|---|---|
+| A node | `Hello` and `Status` with a node role, `Detection`, `Stats`, `OpenLink`, `DroneId`, `Rf`, `DjiWifi`, `WifiDrone`, `Air`, `AeroStatus`, `Control`, `ControlEnergy`, `MavlinkEvidence`, `Threat` of every kind a node detects |
+| The gateway itself (no `Via` before it) | `Via`; `Hello` / `Status` with role `Gateway`; `Threat` `forged_link` |
+| The hub only (to its web head) | `HubFix` (the kit's GPS position and UTC), `Csbee` (aircraft from the hub's ADSBee), `Flags` (FAA flags), `Threat` `area_gnss` |
+| Bus control (wired bus only) | `BusJoin`, `BusDone` |
+
+Where it is enforced:
+
+* **Gateway** (`firmware/gateway/src/main.rs`, `link::origin::node_batch`):
+  of each node batch only node frames are relayed. Anything else, a frame
+  that does not decode included, is dropped; the refused ones are counted
+  (`refused`) and reported to the hub like a rejected packet: a `Threat`
+  `forged_link` with **`detail` 5 (origin)** naming the node, at most once a
+  second per node. A keyed gateway whose 16-node table is full drops a new
+  node's packets (it has nowhere to keep that node's replay state) and
+  reports **`detail` 6 (table full)**; an open gateway still relays them and
+  only counts them. Table entries are never evicted: forgetting a node's
+  replay state would let a recording of its packets from this gateway boot
+  be played back once.
+* **P4 hub** (`firmware/hub-p4/src/links.rs`, `link::origin::Sorter`), for
+  an old or compromised gateway and for the wired bus: a frame after a `Via`
+  must be a node's; a frame with no `Via` must be a node's or the
+  gateway's; a `Via` applies to exactly the next frame and is dropped with
+  it when that frame is refused; a `Via` straight after a `Via` is refused
+  together with the one before it (so a node batch ending in its own
+  `Via { X }` can never make the gateway's next `Hello` or `forged_link`
+  report look like X's). Refusals are counted (`refused=` on the
+  once-a-second `hub-p4: link` line, `"refused"` in the `{"t":"hub"}` line)
+  and raised once a second per claimed sender as the hub's own
+  `forged_link` threat, `detail` 5 (`source` all zero when it was the
+  gateway's own stream).
+* **Web head feed** (`crates/link/src/forward.rs`): the same sort, so a
+  frame refused at the hub is never passed on, and `HubFix`, `Csbee` and
+  `Flags` reach the web head only as the hub's own (`refused=` on the
+  `hub-p4: webhead` line). The web head's own check is separate
+  (`firmware/hub`).
+
+What these codes mean on the hub: `forged_link` 5 is a board of this kit (or
+something with its key, or anything at all on an open kit) sending a frame
+type it has no business sending: treat it as an attack or a badly broken
+image. 6 means more than 16 keyed nodes are talking to one gateway: a second
+kit on the same key, or someone with the key making up addresses.
+
+### What someone holding the kit key can and cannot do
+
+The key is in every board of the kit; reading it out of one stolen or
+borrowed board gives it away. With it, an attacker within radio range of
+the gateway **can**:
+
+* send made-up node reports (drones, open links, jamming, threats, aircraft
+  frames from a fake aero node) under any node address, including a real
+  node's, as long as its packets are fresher than that node's (each address
+  has its own replay counter);
+* fill a keyed gateway's node table with made-up addresses (reported,
+  `detail` 6), which keeps real nodes that join later out until the gateway
+  restarts;
+* pose as the gateway to the nodes: send them beacons and signed
+  commands (an `Assign` that moves a node to another role or plan, a
+  `TimeSync` with a wrong time for aero nodes), echoing the session it
+  overhears in that node's own packets.
+
+Nothing on the link is encrypted, key or no key: anyone in range can read
+node reports and the hub's commands.
+
+It **cannot**, since this change:
+
+* move the kit's own position or clock, show made-up aircraft from the
+  hub's ADS-B receiver or made-up FAA flags (`HubFix`, `Csbee`, `Flags` are
+  refused at the gateway, again at the hub, and never forwarded);
+* name another node as the sender of its frames with a `Via` of its own, or
+  pass as the gateway (`Hello` with role `Gateway`, `forged_link` reports);
+* inject wired-bus control frames through the radio link;
+* do any of it without being counted and reported (`forged_link` 5).
+
+Without the key (on a keyed kit) none of the above works: packets fail the
+tag check (`forged_link` 1-4). On an **open** kit (no key, `OPEN LINK` on the
+P4 screen) anyone in range has the "can" list above, and the "cannot" list
+still holds.
 
 ## Bench results (2026-11-14, c5a node, c5c gateway, c5b test beacon, ~1 m)
 

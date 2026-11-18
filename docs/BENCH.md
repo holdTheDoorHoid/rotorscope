@@ -379,7 +379,7 @@ Now:
 | Firmware | Bench features | Bench build switches (environment at build time) |
 |---|---|---|
 | gateway | `faulttest` | |
-| node-wifi | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-wifi | `faulttest`, `forgetest` (send frames a node may not originate: "Origin checks" below) | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-lr | `faulttest` | |
 | node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
@@ -433,3 +433,72 @@ only (2026-11-18, branch `sec/lane-a`). On the bench:
 8. **Over-the-air text**: with `rid-beacon` or a fake open network whose SSID holds a control
    character (if the beacon can send one), the P4's `THREAT` console line and evidence text show
    `?` in its place.
+
+## Origin checks (2026-11-18, compile-checked only)
+
+Who may send which frame type (docs/ESPNOW.md "Who may send what") is checked by the gateway, the P4
+hub, the P4's web-head feed and the wired bus. Host tests cover the rules (`cargo test -p link -p
+wirebus`); the firmware changes are compile-checked only. On the bench, a node built with the bench
+feature **`forgetest`** sends frames it must never originate, and both hops must refuse them.
+
+### The `forgetest` build (node-wifi only)
+
+`export ROTORSCOPE_BENCH=1` first (bench fence). Not together with `faulttest` (both read the USB
+console). From `firmware/node-wifi/c5/`:
+
+| Link under test | Build |
+|---|---|
+| ESP-NOW through the gateway | `cargo build --release --features esp32c5,band24,espnow,forgetest --target-dir ../target-espnow` |
+| Wired bus | `cargo build --release --features esp32c5,band24,wirebus,forgetest --target-dir ../target-bus` |
+| Point-to-point wire (the P4 in legacy mode) | `cargo build --release --features esp32c5,band24,forgetest` |
+
+Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench ELF without
+`ROTORSCOPE_BENCH=1`). Its `hello` has `"bench":["forgetest"]` and a `bench_build` warning, then
+`{"t":"forge","note":"FORGE TEST BUILD: ..."}`. Type a whole line and Enter (for example
+`tools/dev-board.sh --log 20 c5a --send $'forge hubfix\r'`); each answers `{"t":"forge","sent":"..."}`:
+
+| Command | Sends | Must never |
+|---|---|---|
+| `forge hubfix` | a `HubFix` at 0 N 0 E, UTC in 2001 | move the web head's map or clock |
+| `forge csbee` | an ADS-B line for a made-up aircraft | show an aircraft `FA4E00` |
+| `forge flags` | an FAA flag report for `FORGED` | show a flag |
+| `forge via` | `Via` naming 02:00:00:00:00:99, then a `Stats` | create node 02:00:00:00:00:99 on the hub |
+| `forge hello` | `Hello` role Gateway, `gw key FAKE` | change the hub's `"gw"` field or `OPEN LINK` state |
+| `forge threat` | `forged_link` report naming 02:00:00:00:00:99 | appear as the gateway's report |
+| `forge join` | a `BusJoin` | reach the bus master or the tracker |
+
+### To check on hardware (not yet run)
+
+1. **Gateway (keyed kit; c5a forgetest node, c5c gateway, P4 hub).** After each `forge` command:
+   the gateway's `"t":"gw"` line's `refused` goes up by one (for `forge via` the `Via`; the `Stats`
+   after it is relayed under c5a's own address), and within a second a `{"t":"threat","kind":"forged_link",
+   "src":"<c5a>","why":"origin",...}` line. On the P4: `hub-p4: THREAT Forged node traffic` naming
+   c5a (detail 5); its `hub-p4: link` line's `refused=` does **not** move (the gateway already
+   dropped the frames). Nothing in the "Must never" column happens on the P4 screen or the web head.
+2. **Gateway, open kit.** The same with the gateway and node built `ROTORSCOPE_LINK_KEY_FILE=none`
+   (`OPEN LINK` on the P4): the same refusals; the rules do not depend on the key.
+3. **P4, wired bus (forgetest node on the bus).** After each command the `{"t":"hub"}` line's
+   `"bus":{...,"refused":N}` goes up, and within a second `hub-p4: refused 1 frame(s) from <node
+   MAC> ...` plus a `THREAT Forged node traffic` line. `forge via`: the `Stats` arrives under the
+   node's own MAC; no node 02:00:00:00:00:99 appears in the node list.
+4. **P4, point-to-point wire (legacy mode).** `forge hubfix`, `csbee`, `flags`, `join`: the
+   `hub-p4: link` line's `refused=` goes up and the hub raises its own `forged_link` with an
+   all-zero source (the link's own stream). `forge hello` and `forge threat` are **accepted** here
+   on purpose: a frame with no `Via` on a point-to-point link is the gateway's own. `forge via`: the
+   `Via` names the node's `Stats`, so node 02:00:00:00:00:99 appears: that is what a one-node wire
+   can do, and why the bus is the default.
+5. **Old gateway (defence in depth).** Flash the gateway built from a commit before this change
+   (for example `git show 0d0bfe3:firmware/gateway/src/main.rs`; build it in a scratch checkout),
+   keep the P4 on this change. `forge hubfix|csbee|flags|hello|threat|join` now reach the P4 after a
+   `Via`: its `refused=` goes up for each, a hub `forged_link` names c5a, and nothing in the "Must
+   never" column happens. `forge via`: one refusal (the `Via` after the gateway's `Via`); the
+   `Stats` is c5a's, and the gateway's next `Hello` still sets `"gw"` (no lingering).
+6. **Web head.** The `hub-p4: webhead` line's `refused=` moves with the `hub-p4: link` line's
+   `refused=` (so not in 1 and 3, where the gateway or the bus already dropped the frames), and
+   the web head shows none of the forged frames in any of 1-5.
+7. **Node table.** With 16 relayed nodes known to the P4 (the bus and a gateway together, or
+   `fakenode` plus real nodes), power one node off; after 60 s a new node takes its slot
+   (`evicted=` on the `hub-p4: link` line goes up); before that the new node's frames count as
+   `table_full=`. A keyed gateway with 16 nodes: a 17th node's packets count as `table_full` on the
+   `"t":"gw"` line and arrive on the P4 as `forged_link` detail 6.
+8. Finish by flashing the normal node build (no `forgetest`) and checking `"bench":[]`.
