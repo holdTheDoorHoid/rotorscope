@@ -119,15 +119,31 @@ mod soft {
         }
         fn sign_digest(&mut self, digest: &[u8; 32]) -> Result<[u8; 64], SignError> {
             let sig: Signature = self.key.sign_prehash(digest).map_err(|_| SignError::Unavailable)?;
-            Ok(sig.to_bytes().into())
+            // Low-S form: (r, s) and (r, n - s) are both valid ECDSA, so
+            // anyone could turn one checkpoint into a second, byte-different
+            // valid one. Only the low form is written and accepted.
+            Ok(sig.normalize_s().unwrap_or(sig).to_bytes().into())
         }
     }
 
-    /// Check an ECDSA P-256 signature over a SHA-256 digest.
+    /// Check an ECDSA P-256 signature over a SHA-256 digest. Only the low-S
+    /// form is accepted (s <= n/2), so a valid signature has exactly one
+    /// byte form and two genuine copies of a log cannot be made to differ.
     pub fn verify_digest(pubkey: &[u8; 65], digest: &[u8; 32], sig: &[u8; 64]) -> bool {
         let Ok(vk) = VerifyingKey::from_sec1_bytes(pubkey) else { return false };
         let Ok(sig) = Signature::from_slice(sig) else { return false };
-        vk.verify_prehash(digest, &sig).is_ok()
+        sig.normalize_s().is_none() && vk.verify_prehash(digest, &sig).is_ok()
+    }
+
+    /// The signature is in high-S form (s > n/2): valid ECDSA, but refused
+    /// here (see [`verify_digest`]). For a clearer message.
+    pub fn is_high_s(sig: &[u8; 64]) -> bool {
+        Signature::from_slice(sig).is_ok_and(|s| s.normalize_s().is_some())
+    }
+
+    /// The published test key's public half (see [`public_test_secret`]).
+    pub fn public_test_key() -> [u8; 65] {
+        SoftSigner::public_test().public
     }
 
     /// The bytes are a valid uncompressed point on P-256.
