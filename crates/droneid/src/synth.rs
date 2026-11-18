@@ -468,4 +468,81 @@ mod tests {
         assert!(got[0].crc24_ok);
         assert_eq!(got[0].block, p);
     }
+
+    /// The node's cheap gates (`firmware/node-sdr` sets them for the tuned
+    /// channel): a span far from where a burst must be is refused before
+    /// resampling, and a burst that failed the systematic attempt goes to
+    /// the turbo decoder only with a usable reference SNR, near the expected
+    /// frequency. Bursts the turbo decoder can decode still pass.
+    #[test]
+    fn cheap_gates_refuse_off_frequency_and_hopeless_bursts_only() {
+        use crate::rx::{SyncError, TurboGate};
+        let mut rng = Rng::new(11);
+        let fs = 20_000_000;
+        // As node-sdr: the burst belongs at +500 kHz.
+        let window = Some((500_000, 1_000_000));
+        let gate = Some(TurboGate { min_snr_db: -5.0, cfo_hz: 500_000, cfo_tol_hz: 300_000 });
+        let gated = |x: &[crate::math::C16], start: f64, layout: Layout| {
+            let mut rx = Box::new(Receiver::new(fs).unwrap());
+            rx.config.cfo_window = window;
+            rx.config.turbo_gate = gate;
+            let len = layout.len() as f64 * fs as f64 / 15.36e6;
+            rx.decode_span(x, Span { start: start as usize, end: (start + len) as usize }, &mut |_| {})
+        };
+        // 3.5 MHz off (a Wi-Fi frame of DroneID length, or a forged burst on
+        // the wrong frequency): refused before resampling.
+        let p = random_payload(&mut rng);
+        let cap = Capture { snr_db: 20.0, cfo_hz: 4.0e6, ..Capture::clean(fs) };
+        let (x, start) = capture(&p, Layout::Nine, &cap, &mut rng);
+        assert_eq!(gated(&x, start, Layout::Nine).unwrap_err(), SyncError::OffFrequency);
+        assert!(decode_known(&x, fs, start, Layout::Nine).crc24_ok, "decodes without the window");
+        // Low SNR, where the turbo decoder is the last hope: the gate must
+        // never refuse a burst it would have decoded, and should save it
+        // the bursts it cannot. (Seed 11: the lowest estimate the turbo
+        // decoder succeeded at was -3.0 dB; 20 of 48 were skipped.)
+        let (mut skipped, mut lost, mut turbo_ok) = (0, 0, 0);
+        for k in 0..48 {
+            let layout = if k % 2 == 0 { Layout::Nine } else { Layout::Eight };
+            let p = random_payload(&mut rng);
+            let cap = Capture { snr_db: [-5.0, -4.0, -3.0, -2.0, -1.0, 0.0][k % 6], cfo_hz: 500e3, ..Capture::clean(fs) };
+            let (x, start) = capture(&p, layout, &cap, &mut rng);
+            let mut rx = Box::new(Receiver::new(fs).unwrap());
+            let len = layout.len() as f64 * fs as f64 / 15.36e6;
+            let span = Span { start: start as usize, end: (start + len) as usize };
+            let Ok(free) = rx.decode_span(&x, span, &mut |_| {}) else { continue };
+            let b = gated(&x, start, layout).unwrap();
+            assert_eq!(b.turbo_skipped, free.path.is_none() && b.snr_db < -5.0, "snr {} cfo {}", b.snr_db, b.cfo_hz);
+            lost += (free.crc24_ok && !b.crc24_ok) as u32;
+            turbo_ok += (free.path == Some(Path::Turbo)) as u32;
+            if b.turbo_skipped {
+                assert_eq!(b.half_iterations, 0);
+                skipped += 1;
+            }
+        }
+        assert_eq!(lost, 0, "the gate refused a decodable burst");
+        assert!(skipped >= 5 && turbo_ok >= 5, "skipped {skipped}, turbo decoded {turbo_ok}");
+        // Decodable only by the turbo decoder, at the expected frequency
+        // give or take crystal error: still decoded.
+        let mut decoded = 0;
+        for k in 0..8 {
+            let layout = if k % 2 == 0 { Layout::Nine } else { Layout::Eight };
+            let p = random_payload(&mut rng);
+            let cfo = 500e3 + [-220e3, -90e3, 0.0, 120e3, 230e3, -150e3, 60e3, 200e3][k];
+            let cap = Capture { snr_db: 2.0, cfo_hz: cfo, ..Capture::clean(fs) };
+            let (x, start) = capture(&p, layout, &cap, &mut rng);
+            let free = decode_known(&x, fs, start, layout);
+            let b = gated(&x, start, layout).unwrap();
+            assert_eq!((b.crc24_ok, b.block), (free.crc24_ok, free.block), "k {k}: snr {} cfo {}", b.snr_db, b.cfo_hz);
+            assert!(!b.turbo_skipped || free.path != Some(Path::Turbo), "k {k}");
+            decoded += b.crc24_ok as u32;
+        }
+        assert!(decoded >= 6, "turbo decoded only {decoded}/8 at 2 dB");
+        // A good burst 400 kHz off the expected frequency: systematic still
+        // decodes it; only the turbo decoder is gated.
+        let p = random_payload(&mut rng);
+        let cap = Capture { snr_db: 20.0, cfo_hz: 900e3, ..Capture::clean(fs) };
+        let (x, start) = capture(&p, Layout::Nine, &cap, &mut rng);
+        let b = gated(&x, start, Layout::Nine).unwrap();
+        assert_eq!((b.path, b.block, b.turbo_skipped), (Some(Path::Systematic), p, false));
+    }
 }
