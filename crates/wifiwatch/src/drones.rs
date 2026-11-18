@@ -54,9 +54,34 @@
 //!   say what was seen of the newcomer and why it is suspicious. `source` =
 //!   the newcomer, `target` = drone BSSID, `count` = its frames since the
 //!   last report, `window_ms` = since its first frame.
-//! - `DroneNetClone`: `detail` bits [`CLONE_OPEN`] .. [`CLONE_OTHER_CHANNEL`].
+//! - `DroneNetClone`: `detail` bits [`CLONE_OPEN`] .. [`CLONE_TWO_CLOCKS`].
 //!   `source` = the copy, `target` = the original (all zero if the node never
-//!   heard it), `count` = frames from the copy.
+//!   heard it), `count` = frames from the copy. Two beacon clocks on one
+//!   address ([`CLONE_SAME_ADDRESS`] | [`CLONE_TWO_CLOCKS`], from
+//!   [`DroneLinks`]): `source` = `target` = the drone's address, `count` =
+//!   beacons on the second clock.
+//!
+//! # Restarts are believed slowly
+//!
+//! A drone that restarts drops its controller, so its beacon timestamp (its
+//! radio's uptime) jumping is how [`DroneLinks`] knows to forget who flies
+//! it. That timestamp is in every beacon and anyone can forge it, so one
+//! beacon must never be enough: until WP-11a a single beacon with the
+//! drone's address and a timestamp of 1 cleared the deauth count and the
+//! learned controller, which hid a deauth attack and turned the attacker into
+//! "the controller" (and the pilot into the takeover's newcomer).
+//!
+//! Now a beacon off the drone's clock (its start more than
+//! [`REBOOT_JUMP_MS`] away) is a *second timeline*. It replaces the old one
+//! only when it has been heard [`REBOOT_BEACONS`] times over at least
+//! [`REBOOT_CONFIRM_MS`] and the old clock was not heard since the new one
+//! appeared, and either the old one had been silent for
+//! [`REBOOT_SILENCE_MS`] before it (a restart takes seconds) or has been
+//! silent for [`REBOOT_ALONE_MS`] since. Both clocks heard in turn is a copy
+//! with the drone's own address: [`ThreatKind::DroneNetClone`] with
+//! [`CLONE_SAME_ADDRESS`] | [`CLONE_TWO_CLOCKS`]. While a believable restart
+//! is pending, the new drone's reason 6 / 7 deauths are excused as after a
+//! confirmed one ([`BOOT_GRACE_MS`]).
 
 use crate::mac::{self, ASSOC_REQ, ASSOC_RESP, AUTH, BssInfo, DEAUTH, DISASSOC, REASSOC_REQ, REASSOC_RESP, Security};
 use crate::util::{BROADCAST, Dups, Ms, NONE, RateLimit, elapsed, hash, ms};
@@ -83,10 +108,22 @@ pub const KILL_QUIET_MS: Ms = 5000;
 /// joined") to the phone that kept talking to it across the reboot. Those
 /// are not counted.
 pub const BOOT_GRACE_MS: Ms = 60_000;
-/// A beacon timestamp that puts the drone's start this much later than
-/// before means it restarted: its controller has to join again, so the
-/// controller and any newcomer are forgotten.
+/// A beacon timestamp that puts the drone's start this much away from its
+/// clock is another timeline: a restart (its controller has to join again,
+/// so the controller and any newcomer are forgotten) or a copy. See the
+/// module docs, "Restarts are believed slowly".
 pub const REBOOT_JUMP_MS: Ms = 2000;
+/// Beacons on the new timeline before a restart is believed...
+pub const REBOOT_BEACONS: u8 = 3;
+/// ...spread over at least this long (a burst of forged beacons between two
+/// of the drone's own is not a restart).
+pub const REBOOT_CONFIRM_MS: Ms = 1000;
+/// ...and the old clock silent this long before the new one appeared (a
+/// drone takes seconds to restart; one interrupted by forged beacons is
+/// heard every 100 ms)...
+pub const REBOOT_SILENCE_MS: Ms = 1000;
+/// ...or silent this long since (the new clock heard alone).
+pub const REBOOT_ALONE_MS: Ms = 10_000;
 
 /// A station joining within this long after a [`ThreatKind::DroneDeauth`]
 /// on the drone (and not its controller) is a takeover.
@@ -139,6 +176,9 @@ pub const CLONE_WRONG_MAKER: u32 = 1 << 2;
 pub const CLONE_SAME_ADDRESS: u32 = 1 << 3;
 /// The copy says it is on another channel than the original.
 pub const CLONE_OTHER_CHANNEL: u32 = 1 << 4;
+/// The copy uses the original's own address, with a beacon clock of its own
+/// (two timestamp timelines on one address, heard in turn).
+pub const CLONE_TWO_CLOCKS: u32 = 1 << 5;
 /// Bit offset of the maker index in every drone kind's `detail`.
 pub const MAKER_SHIFT: u32 = 24;
 
@@ -176,6 +216,8 @@ pub struct Heard<'a> {
     pub channel: u8,
     /// The beacon's timestamp (the drone's radio uptime), µs; 0 if unknown.
     pub tsf_us: u64,
+    /// Signal strength of the frame, dBm.
+    pub rssi: i8,
 }
 
 const fn group(a: &[u8; 6]) -> bool {
@@ -190,11 +232,23 @@ struct Net {
     maker: u8,
     channel: u8,
     /// Bit set: [`F_BOOTED`] etc.
-    flags: u8,
-    /// Last beacon (node ms).
+    flags: u16,
+    /// Last beacon on the drone's clock (node ms).
     seen: Ms,
     /// The drone's start, node ms (from its beacon timestamp).
     boot: Ms,
+
+    /// A second timeline: its start, first and latest beacon, beacons (0 =
+    /// none), and the strongest of them.
+    alt_boot: Ms,
+    alt_first: Ms,
+    alt_last: Ms,
+    alt_n: u8,
+    alt_rssi: i8,
+    alt_ch: u8,
+    /// Beacons on the second clock since the last two-clocks report.
+    alt_new: u8,
+    c_reported: Ms,
 
     /// The station flying it, `NONE` if not known.
     ctrl: [u8; 6],
@@ -237,17 +291,24 @@ struct Net {
 }
 
 /// The beacon timestamp gave the drone's start.
-const F_BOOTED: u8 = 1 << 0;
+const F_BOOTED: u16 = 1 << 0;
 /// The controller sent (or was sent) a deauth / disassoc: it may be leaving.
-const F_LEFT: u8 = 1 << 1;
+const F_LEFT: u16 = 1 << 1;
 /// A `DroneDeauth` is on (enough frames in the window, not yet quiet).
-const F_ATTACK: u8 = 1 << 2;
+const F_ATTACK: u16 = 1 << 2;
 /// There was a `DroneDeauth` at `kicked_at`.
-const F_KICKED: u8 = 1 << 3;
+const F_KICKED: u16 = 1 << 3;
 /// The current `DroneDeauth` has been reported at least once.
-const F_K_REPORTED: u8 = 1 << 4;
+const F_K_REPORTED: u16 = 1 << 4;
 /// The newcomer has enough frames: a `DroneTakeover` is on.
-const F_TAKEN: u8 = 1 << 5;
+const F_TAKEN: u16 = 1 << 5;
+/// The drone's own clock was heard after the second timeline appeared.
+const F_ALT_MIXED: u16 = 1 << 6;
+/// The drone's clock had been silent [`REBOOT_SILENCE_MS`] when the second
+/// timeline appeared.
+const F_ALT_QUIET: u16 = 1 << 7;
+/// Two clocks heard in turn: a `DroneNetClone` is on.
+const F_CLOCKS: u16 = 1 << 8;
 
 impl Net {
     fn new(bssid: [u8; 6], now: Ms) -> Self {
@@ -260,6 +321,14 @@ impl Net {
             flags: 0,
             seen: now,
             boot: now,
+            alt_boot: now,
+            alt_first: now,
+            alt_last: now,
+            alt_n: 0,
+            alt_rssi: i8::MIN,
+            alt_ch: 0,
+            alt_new: 0,
+            c_reported: now,
             ctrl: NONE,
             ctrl_last: now,
             left_at: now,
@@ -291,11 +360,11 @@ impl Net {
         }
     }
 
-    fn has(&self, f: u8) -> bool {
+    fn has(&self, f: u16) -> bool {
         self.flags & f != 0
     }
 
-    fn set(&mut self, f: u8, on: bool) {
+    fn set(&mut self, f: u16, on: bool) {
         if on {
             self.flags |= f;
         } else {
@@ -317,7 +386,7 @@ impl Net {
 
     /// Forget who is attached (the drone restarted).
     fn reset_link(&mut self, now: Ms) {
-        self.flags &= F_BOOTED;
+        self.flags &= F_BOOTED | F_CLOCKS;
         self.ctrl = NONE;
         self.ring_len = 0;
         self.clear_kills(now);
@@ -354,11 +423,15 @@ impl Net {
             return;
         }
         // A drone that just restarted tells the phone it does not know it.
-        if h.addr2 == self.bssid
-            && matches!(reason, 6 | 7)
-            && self.has(F_BOOTED)
-            && elapsed(now, self.boot) < BOOT_GRACE_MS
-        {
+        // A restart not yet believed counts too, when it could be one (the
+        // old clock fell silent first and has not been heard since).
+        let fresh_boot = self.has(F_BOOTED) && elapsed(now, self.boot) < BOOT_GRACE_MS;
+        let pending_boot = self.alt_n > 0
+            && self.has(F_ALT_QUIET)
+            && !self.has(F_ALT_MIXED)
+            && elapsed(now, self.alt_last) <= REBOOT_CONFIRM_MS
+            && elapsed(now, self.alt_boot) < BOOT_GRACE_MS;
+        if h.addr2 == self.bssid && matches!(reason, 6 | 7) && (fresh_boot || pending_boot) {
             return;
         }
         if self.k_frames == 0 {
@@ -400,6 +473,57 @@ impl Net {
             self.set(F_KICKED, true);
             self.kicked_at = now;
         }
+    }
+
+    /// A beacon with a timestamp, the drone's clock known: true when it is
+    /// on the drone's clock (now or after a believed restart), false when
+    /// it is on a second timeline (see the module docs).
+    fn timeline(&mut self, d: &Heard<'_>, now: Ms) -> bool {
+        let boot = now.wrapping_sub((d.tsf_us / 1000) as Ms);
+        let near = |a: Ms, b: Ms| (a.wrapping_sub(b) as i32).unsigned_abs() <= REBOOT_JUMP_MS;
+        if near(boot, self.boot) {
+            // Tracks the drone's slow drift against the node's clock.
+            self.boot = boot;
+            if self.alt_n > 0 {
+                self.set(F_ALT_MIXED, true);
+            }
+            return true;
+        }
+        if self.alt_n > 0 && elapsed(now, self.alt_last) <= CLONE_INTERLEAVE_MS && near(boot, self.alt_boot) {
+            self.alt_n = self.alt_n.saturating_add(1);
+            self.alt_new = self.alt_new.saturating_add(1);
+        } else {
+            self.alt_n = 1;
+            self.alt_new = 1;
+            self.alt_first = now;
+            self.alt_rssi = i8::MIN;
+            self.set(F_ALT_MIXED, false);
+            self.set(F_ALT_QUIET, elapsed(now, self.seen) >= REBOOT_SILENCE_MS);
+        }
+        self.alt_boot = boot;
+        self.alt_last = now;
+        self.alt_rssi = self.alt_rssi.max(d.rssi);
+        self.alt_ch = d.channel;
+        if self.has(F_ALT_MIXED) {
+            // Both clocks in turn: a copy with the drone's address.
+            if usize::from(self.alt_n) >= usize::from(CLONE_FRAMES) {
+                self.set(F_CLOCKS, true);
+            }
+            return false;
+        }
+        let settled = self.alt_n >= REBOOT_BEACONS && elapsed(now, self.alt_first) >= REBOOT_CONFIRM_MS;
+        let gone = self.has(F_ALT_QUIET) || elapsed(now, self.seen) >= REBOOT_ALONE_MS;
+        if !(settled && gone) {
+            return false;
+        }
+        // Believed. A clock that started later is a restart: whoever was
+        // attached has to join again.
+        if boot.wrapping_sub(self.boot) as i32 > 0 {
+            self.reset_link(now);
+        }
+        self.boot = boot;
+        self.alt_n = 0;
+        true
     }
 
     /// A frame showing `sta` joining or attached to the drone.
@@ -523,19 +647,20 @@ impl DroneLinks {
             }
         };
         let n = &mut self.nets[i];
+        // Once the drone's clock is known, a beacon is the drone's only on
+        // that clock (a zero timestamp is on none: nothing transmits that
+        // after its first microsecond, so it is ignored).
+        if n.has(F_BOOTED) && (d.tsf_us == 0 || !n.timeline(d, now)) {
+            return;
+        }
         let len = d.ssid.len().min(32);
         n.ssid[..len].copy_from_slice(&d.ssid[..len]);
         n.ssid_len = len as u8;
         n.maker = d.maker;
         n.channel = d.channel;
         n.seen = now;
-        if d.tsf_us > 0 {
-            let boot = now.wrapping_sub((d.tsf_us / 1000) as Ms);
-            let later = boot.wrapping_sub(n.boot) as i32;
-            if n.has(F_BOOTED) && later > REBOOT_JUMP_MS as i32 {
-                n.reset_link(now);
-            }
-            n.boot = boot;
+        if d.tsf_us > 0 && !n.has(F_BOOTED) {
+            n.boot = now.wrapping_sub((d.tsf_us / 1000) as Ms);
             n.set(F_BOOTED, true);
         }
     }
@@ -646,6 +771,30 @@ impl DroneLinks {
                 n.clear_kills(now);
             }
 
+            // Two clocks on the drone's address.
+            if n.has(F_CLOCKS) {
+                if elapsed(now, n.alt_last) > CLONE_INTERLEAVE_MS {
+                    n.set(F_CLOCKS, false);
+                    n.alt_n = 0;
+                } else if n.alt_new > 0 && elapsed(now, n.c_reported) >= REPORT_GAP_MS {
+                    emit(sighting(
+                        ThreatKind::DroneNetClone,
+                        n.alt_ch,
+                        n.alt_rssi,
+                        n.alt_n.into(),
+                        elapsed(now, n.alt_first),
+                        n.bssid,
+                        n.bssid,
+                        CLONE_SAME_ADDRESS | CLONE_TWO_CLOCKS | n.maker_bits(),
+                        n.ssid(),
+                        now_us,
+                    ));
+                    sent += 1;
+                    n.c_reported = now;
+                    n.alt_new = 0;
+                }
+            }
+
             // Takeover.
             if n.cand != NONE && elapsed(now, n.cand_last) > TAKEOVER_QUIET_MS {
                 n.cand = NONE;
@@ -673,7 +822,7 @@ impl DroneLinks {
                 n.cand_reported_n = n.cand_n;
             }
         }
-        self.nets.retain(|n| n.busy() || elapsed(now, n.seen) <= FORGET_MS);
+        self.nets.retain(|n| n.busy() || n.has(F_CLOCKS) || elapsed(now, n.seen) <= FORGET_MS);
         self.totals.threats = self.totals.threats.wrapping_add(sent);
     }
 }
@@ -804,7 +953,7 @@ impl Clones {
                 _ => return None,
             },
         };
-        let heard = genuine.map(|maker| Heard { bssid, maker, ssid, channel, tsf_us: info.tsf });
+        let heard = genuine.map(|maker| Heard { bssid, maker, ssid, channel, tsf_us: info.tsf, rssi });
         if !wrong && !unit_name(ssid) {
             return heard;
         }
