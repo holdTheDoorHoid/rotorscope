@@ -9,6 +9,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod forward;
+pub mod origin;
 pub mod printable;
 
 /// The firmware build scripts' bench-feature check (`std`; included by path
@@ -529,7 +530,22 @@ pub enum ThreatKind {
     ///   not try;
     /// - 4 **stale**: a genuine packet from before the gateway's last
     ///   restart, more than a minute after it (expected, and not reported,
-    ///   for the few seconds a node takes to resync after a restart).
+    ///   for the few seconds a node takes to resync after a restart);
+    /// - 5 **origin** ([`origin::FORGED_ORIGIN`]): a frame of a type the
+    ///   sender may not originate ([`origin::origin`]): a node sending a
+    ///   hub-only frame (`HubFix`, `Csbee`, `Flags`), a `Via` of its own,
+    ///   bus control, or the gateway's own `Hello` / `ForgedLink` report.
+    ///   Raised by the gateway (`source` = the node), and by the hub for
+    ///   what reaches it anyway (from an old or compromised gateway, or a
+    ///   wired-bus node). The hub's own report has `target`, `channel` and
+    ///   `freq` 0, and `source` all zero when the refused frame was the
+    ///   link's own (no `Via` before it);
+    /// - 6 **table full** ([`origin::FORGED_TABLE_FULL`]): a genuine node
+    ///   packet a keyed gateway dropped because its node table (16) was full.
+    ///
+    /// Codes 5 and 6 need no protocol change: the frame is the same and
+    /// `detail` was always a number; a hub that does not know them shows
+    /// the threat with an unknown reason.
     ForgedLink,
     /// Protocol 13 (docs/DRONE-ATTACKS.md). Deauthentication or
     /// disassociation aimed at a network that `crates/wifidrone` recognises
