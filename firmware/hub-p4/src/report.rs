@@ -235,7 +235,7 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     app.aero.hub_json(w.0, if app.aero.has_keys() { "loaded" } else { sd.flarm_key_state }, crate::bus::syncs(), gw.air_full);
     let _ = write!(
         w.0,
-        ",\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{},\"gw\":\"{}\"}},\"console_drops\":{},",
+        ",\"sd\":{{\"state\":\"{}\",\"file\":\"{}\",\"rows\":{},\"dropped\":{},\"errors\":{}}},\"link\":{{\"frames\":{},\"corrupt\":{},\"uart_err\":{},\"ring_full\":{},\"nodes\":{},\"refused\":{},\"evicted\":{},\"table_full\":{},\"gw\":\"{}\"}},\"console_drops\":{},",
         sd.state_name(),
         sd.file_name(),
         sd.rows,
@@ -246,6 +246,9 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         s.uart_err,
         s.ring_full,
         gw.nodes.len(),
+        s.refused,
+        s.evicted,
+        s.table_full,
         // From a link frame: never printed as received.
         link::printable::JsonPrintable(&s.gw_hello),
         console::DROPS.load(core::sync::atomic::Ordering::Relaxed),
