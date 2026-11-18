@@ -603,7 +603,7 @@ Type a whole line and Enter (`tools/dev-board.sh --log 20 c5a --send $'flood rid
 
 | Command | Injects |
 |---|---|
-| `flood rid <n>` | `n` Remote ID beacons a second, each from a new random address, id `FLOODFAKE0000000001` |
+| `flood rid <n>` | `n` Remote ID beacons a second, each from a new random address with a new id (`FLOODFAKE` + ten digits, so a hub sees a flood of never-confirmed drones) |
 | `flood tool <n>` | beacons named `ESP_RIDS`, `pwned`, `GhostNet` in turn, random addresses |
 | `flood drone <n>` | beacons from DJI's first address block with random low bytes, named `MavicAir-FLOOD` |
 | `flood dji <n>` | beacons with a DJI DroneID element (serial `FLOODDJI00000001`), random addresses |
