@@ -62,6 +62,15 @@ extern "Rust" fn custom_halt() -> ! {
     esp_hal::system::software_reset()
 }
 
+/// Hang watchdog timeout (docs/BENCH.md "Crash recovery"). The once-a-second
+/// stats loop in `main` feeds it, so it fires when the executor stops going
+/// round (a task that never yields, an SPI wait that never ends, interrupts
+/// left off). Not fed from the radio task: a control-scan plan entry may
+/// legitimately keep it inside one call for the entry's whole length, and a
+/// missing or deaf LR2021 is handled there already (`bring_up`, the 1090
+/// receive watchdog).
+const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(10);
+
 fn hello_frame() -> link::Frame {
     let mut firmware = heapless::String::new();
     let _ = firmware.push_str(&FIRMWARE[..FIRMWARE.len().min(16)]);
@@ -78,8 +87,10 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
 
-    let (_, usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).into_async().split();
+    let (_usb_rx, usb_tx) = UsbSerialJtag::new(p.USB_DEVICE).into_async().split();
     spawner.spawn(usb_task(usb_tx).unwrap());
+    #[cfg(feature = "faulttest")]
+    spawner.spawn(faulttest(_usb_rx).unwrap());
 
     // The LR2021 (pins: src/board.rs).
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(board::SPI_MHZ)))
@@ -94,11 +105,13 @@ async fn main(spawner: Spawner) -> ! {
     let lr = lr::Lr::new(spi, nss, busy, rst, irq);
 
     out::line(format_args!(
-        r#"{{"t":"hello","node":"lr","fw":"{FIRMWARE}","chip":"{}","proto":{},"espnow":{},"wirebus":{},"tx":"never on the LR2021"}}"#,
+        r#"{{"t":"hello","node":"lr","fw":"{FIRMWARE}","chip":"{}","proto":{},"espnow":{},"wirebus":{},"tx":"never on the LR2021","reset":"{}","faulttest":{}}}"#,
         board::CHIP,
         link::PROTOCOL_VERSION,
         cfg!(feature = "espnow"),
         cfg!(feature = "wirebus"),
+        node_common::fault::reset_reason(),
+        cfg!(feature = "faulttest"),
     ));
 
     // The hub link.
@@ -139,8 +152,10 @@ async fn main(spawner: Spawner) -> ! {
     // Status and AeroStatus; AeroStatus at once when it changes.
     let mut ticker = Ticker::every(Duration::from_secs(1));
     let mut secs: u64 = 0;
+    node_common::fault::arm(WATCHDOG);
     loop {
         ticker.next().await;
+        node_common::fault::feed();
         secs += 1;
         let up = Instant::now().as_micros();
         let c = &COUNTERS;
@@ -190,6 +205,13 @@ async fn main(spawner: Spawner) -> ! {
             out::hub_frame(&state::aero_status_frame());
         }
     }
+}
+
+/// Bench only: `fault panic` / `fault hang` typed on USB (docs/BENCH.md).
+#[cfg(feature = "faulttest")]
+#[embassy_executor::task]
+async fn faulttest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, Async>) {
+    node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| out::line(format_args!("{l}"))).await
 }
 
 #[embassy_executor::task]

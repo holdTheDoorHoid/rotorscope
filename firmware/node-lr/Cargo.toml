@@ -30,7 +30,11 @@ default = []
 espnow = ["dep:esp-radio", "esp-radio/wifi", "esp-radio/esp-now", "esp-rtos/esp-radio", "dep:airlink"]
 # The wired bus (crates/wirebus, docs/WIREBUS.md): TX open-drain, see
 # src/board.rs. Not with `espnow`.
-wirebus = ["dep:node-common", "node-common/wirebus"]
+wirebus = ["node-common/wirebus"]
+# Bench only (docs/BENCH.md "Crash recovery"): type `fault panic` / `fault hang`
+# on USB to prove the reboot after a panic and the hang watchdog. Never in a
+# normal build.
+faulttest = ["node-common/faulttest"]
 
 [dependencies]
 link      = { path = "../../crates/link" }
@@ -39,7 +43,8 @@ aerohop   = { path = "../../crates/aerohop" }
 ctrlwatch = { path = "../../crates/ctrlwatch" }
 mavwatch  = { path = "../../crates/mavwatch" }
 airlink   = { path = "../../crates/airlink", optional = true }
-node-common = { path = "../node-common", optional = true, features = ["esp32c3"] }
+# Crash recovery (`node_common::fault`), and the wired-bus glue (`wirebus`).
+node-common = { path = "../node-common", features = ["esp32c3"] }
 heapless  = { version = "0.8", features = ["serde"] }
 
 esp-hal                = { version = "~1.2.2", features = ["esp32c3", "unstable"] }
