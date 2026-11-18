@@ -78,10 +78,16 @@ pub enum Kind {
     /// on the same signing stream (a replay; receivers drop these, but
     /// someone is trying). Needs link IDs.
     SignedReplay = 18,
+    /// A checksum-valid frame of a known message with a payload length no
+    /// conforming sender uses (longer than the message, or a MAVLink 1
+    /// frame not exactly its length). Lenient parsers still decode it, cut
+    /// or zero-filled ([`crate::frame`]), and the frame is also analysed
+    /// that way; the shape itself is the finding.
+    OddLength = 19,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 18] = [
+    pub const ALL: [Kind; 19] = [
         Kind::UriTraversal,
         Kind::UriScheme,
         Kind::CameraName,
@@ -100,9 +106,10 @@ impl Kind {
         Kind::SigningDowngrade,
         Kind::SeqInterleave,
         Kind::SignedReplay,
+        Kind::OddLength,
     ];
 
-    const LABELS: [&'static str; 18] = [
+    const LABELS: [&'static str; 19] = [
         "URI path traversal",
         "URI with a forbidden scheme or path",
         "Camera name with a file path",
@@ -121,6 +128,7 @@ impl Kind {
         "Unsigned commands on a signed link",
         "Injected frames (two sequence streams)",
         "Replayed signed frames",
+        "Frame of a length no sender uses",
     ];
 
     /// The `detail` number.
@@ -428,6 +436,14 @@ impl Analyser {
 
         if link.distinct {
             self.integrity(si, link, f, now_ms, &mut hit);
+        }
+        if let Some((sent, want)) = f.odd_length() {
+            let name = crate::frame::info(f.msgid).map_or("?", |m| m.name);
+            hit(
+                Kind::OddLength,
+                target_of(f),
+                describe(format_args!("v{} {name} len {sent}/{want}", f.version)),
+            );
         }
         self.payload(si, link, f, now_ms, &mut hit);
 

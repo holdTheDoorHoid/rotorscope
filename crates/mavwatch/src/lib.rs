@@ -40,6 +40,7 @@
 //! | 16 | `SigningDowngrade` | 2 unsigned commands in 30 s, signed frames in the last 10 s |
 //! | 17 | `SeqInterleave` | 10 switches between two live sequence tracks in 10 s, 5+ frames each |
 //! | 18 | `SignedReplay` | 2 stale signed timestamps in 60 s |
+//! | 19 | `OddLength` | one frame: a payload length no conforming sender uses (still analysed, cut or zero-filled, as lenient parsers decode it) |
 //!
 //! The one-frame kinds look for shapes that no working autopilot, camera
 //! or companion computer sends (a camera definition at `file:///...`, a
@@ -49,7 +50,9 @@
 //! [`analyse`].
 //!
 //! Only frames whose checksum verifies with their message's CRC_EXTRA are
-//! looked at ([`frame`]), so radio noise never becomes a finding. Frames
+//! looked at ([`frame`]), so radio noise never becomes a finding. Any
+//! payload length is accepted, as the MAVLink C library and pymavlink
+//! accept it ([`frame`] module docs). Frames
 //! heard twice within [`analyse::RESEND_MS`] (radio resends) count once.
 //!
 //! # What it cannot see

@@ -883,6 +883,78 @@ fn setup_signing_over_the_air_never_shows_the_key() {
     assert!(!got[0].excerpt.contains("KEY"));
 }
 
+// ------------------------------------------ lengths parsers accept --
+
+/// A frame of a known message with any payload length (the checksum, with
+/// the message's CRC_EXTRA, right), as a lenient parser accepts it.
+fn enc_len(version: u8, msgid: u32, payload: &[u8]) -> Vec<u8> {
+    let mut b = [0u8; 300];
+    let n = if version == 1 {
+        v1(&mut b, 0, 255, 190, msgid, payload)
+    } else {
+        crate::frame::encode::v2_raw(&mut b, 0, 255, 190, msgid, payload, None, false)
+    };
+    b[..n].to_vec()
+}
+
+fn found(bytes: &[u8]) -> Vec<Kind> {
+    let mut an = Analyser::new();
+    let mut k: Vec<Kind> = run(&mut an, LINK, &[(bytes.to_vec(), 1_000)]).iter().map(|f| f.kind).collect();
+    k.sort();
+    k
+}
+
+#[test]
+fn over_long_frames_are_analysed_truncated() {
+    // SERIAL_CONTROL is 81 bytes at most; this one carries 120 (the C
+    // library without strict length checks and pymavlink take the first
+    // 81). Until WP-11a: "Bad", never analysed.
+    let mut p = serial_control(msg::serial_control::DEV_SHELL, 8, b"reboot\n\0").to_vec();
+    p.extend_from_slice(&[0x5A; 39]);
+    assert_eq!(found(&enc_len(2, msg::SERIAL_CONTROL, &p)), [Kind::SerialControl, Kind::OddLength]);
+    // MAVLink 1 has one length per message: anything longer is odd too.
+    let mut st = statustext(6, b"[link;file:///c:/x.exe;Click]").to_vec();
+    st.truncate(51);
+    st.extend_from_slice(&[1; 9]);
+    assert_eq!(found(&enc_len(1, msg::STATUSTEXT, &st)), [Kind::StatusLink, Kind::OddLength]);
+    // FTP's 254-byte payload sent as 255.
+    let mut f = ftp_msg(ftp::ACK, ftp::LIST_DIRECTORY, 12, 0, b"F../../x\t1\0").to_vec();
+    f.push(0x77);
+    assert_eq!(found(&enc_len(2, msg::FILE_TRANSFER_PROTOCOL, &f)), [Kind::FtpTraversal, Kind::OddLength]);
+}
+
+#[test]
+fn short_frames_are_analysed_zero_padded() {
+    // SERIAL_CONTROL in MAVLink 1 with 30 of its 79 bytes: parsers pad it
+    // with zeros and act on it.
+    let short = &serial_control(msg::serial_control::DEV_SHELL, 5, b"ls /\n")[..30];
+    assert_eq!(found(&enc_len(1, msg::SERIAL_CONTROL, short)), [Kind::SerialControl, Kind::OddLength]);
+    // An empty MAVLink 2 payload (senders keep at least one byte).
+    assert_eq!(found(&enc_len(2, msg::SETUP_SIGNING, &[])), [Kind::SetupSigning, Kind::OddLength]);
+}
+
+#[test]
+fn strict_frames_behave_as_before_and_bad_checksums_stay_bad() {
+    // Exactly the base length (v1), trimmed (v2), full with extensions (v2):
+    // no length finding.
+    let p = serial_control(msg::serial_control::DEV_SHELL, 8, b"reboot\n\0");
+    assert_eq!(found(&enc_len(1, msg::SERIAL_CONTROL, &p[..79])), [Kind::SerialControl]);
+    assert_eq!(found(&enc(0, 255, 190, msg::SERIAL_CONTROL, &p, None)), [Kind::SerialControl]);
+    assert_eq!(found(&enc_len(2, msg::SERIAL_CONTROL, &p)), [Kind::SerialControl]);
+    assert!(found(&enc(0, 1, 1, msg::HEARTBEAT, &heartbeat(), None)).is_empty());
+    // Odd length and a wrong checksum: not a frame.
+    let mut long = serial_control(0, 8, b"x").to_vec();
+    long.extend_from_slice(&[1; 30]);
+    let mut b = enc_len(2, msg::SERIAL_CONTROL, &long);
+    let n = b.len();
+    b[n - 1] ^= 0x40;
+    assert!(found(&b).is_empty());
+    assert_eq!(crate::parse_at(&b), crate::Parse::Bad);
+    let mut b = enc_len(1, msg::STATUSTEXT, &[b'x'; 70]);
+    b[10] ^= 1;
+    assert_eq!(crate::parse_at(&b), crate::Parse::Bad);
+}
+
 // --------------------------------------------------- link integrity --
 
 #[test]
@@ -1007,7 +1079,7 @@ fn kind_codes_are_stable() {
         assert!(!k.label().is_empty());
     }
     assert_eq!(Kind::from_code(0), None);
-    assert_eq!(Kind::from_code(19), None);
+    assert_eq!(Kind::from_code(20), None);
     assert!(
         core::mem::size_of::<Watch>() < 9 * 1024,
         "{}",
