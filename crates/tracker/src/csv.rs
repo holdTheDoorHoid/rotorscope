@@ -31,6 +31,11 @@
 //! Wi-Fi drones ([`wifi_drone_row`]): `track` is `W<n>`, `uas_id` the
 //! network name with `id_type` `Ssid`, `ua_type` the maker, `transports`
 //! `WifiDrone` (`WifiDrone5G` on 5 GHz). The address is not logged.
+//!
+//! Sound contacts ([`sound_row`]): `track` is `S<n>`, `uas_id` the pitch in
+//! Hz with `id_type` `PitchHz`, `ua_type` the kind (`NoRadio`, `Aircraft`,
+//! `WithRadio`), `transports` `Sound`, and `rssi_dbm` holds the loudness in
+//! dB relative to full scale, not a radio level.
 
 use core::fmt::Write;
 
@@ -277,6 +282,18 @@ pub fn rf_row(e: &Emitter, ctx: &Context, buf: &mut [u8]) -> Result<usize, Forma
         write!(w, "{:.1},FreqMHz,{:?},Rf", e.freq_mhz(), e.kind)?;
         // No position, speed or operator: seven empty fields.
         write!(w, ",,,,,,,,{}", e.snr_db)?;
+        w.write_str(",,,,,\n")
+    })();
+    w.finish()
+}
+
+/// Write one row for a sound contact (see the module docs), `\n`-terminated.
+pub fn sound_row(c: &crate::sound::SoundContact, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let mut w = Buf::new(buf);
+    let _ = (|| -> core::fmt::Result {
+        front(&mut w, ctx, format_args!("S{}", c.id.0))?;
+        write!(w, "{},PitchHz,{:?},Sound", c.pitch_hz, c.kind)?;
+        write!(w, ",,,,,,,,{}", c.level_dbfs)?;
         w.write_str(",,,,,\n")
     })();
     w.finish()

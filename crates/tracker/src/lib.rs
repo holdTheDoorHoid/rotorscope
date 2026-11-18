@@ -72,6 +72,7 @@ pub mod geo;
 pub mod json;
 pub mod openlinks;
 pub mod signals;
+pub mod sound;
 pub mod spoof;
 mod text;
 pub mod site;
@@ -798,6 +799,8 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     /// Attacks and jamming (protocol 9) and the hub's deaf-node check.
     threats: threats::ThreatTable,
     deaf: threats::DeafWatch,
+    /// What the hub's microphone hears (Phase 15).
+    sounds: sound::SoundTable,
     /// Drone / crewed-aircraft pairs already announced.
     conflict_watch: conflict::ConflictWatch,
     /// UTC and node positions for the spoofing checks.
@@ -824,6 +827,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             nodes: signals::NodeTable::new(),
             threats: threats::ThreatTable::new(),
             deaf: threats::DeafWatch::new(),
+            sounds: sound::SoundTable::new(),
             conflict_watch: conflict::ConflictWatch::new(),
             spoof_cfg: spoof::SpoofConfig {
                 utc_offset_ms: None,
@@ -1172,6 +1176,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.emitters.expire(now_ms, &self.config);
         self.wifi_drones.expire(now_ms, &self.config);
         self.threats.expire(now_ms, self.config.remove_after_ms);
+        self.sounds.expire(now_ms, self.config.remove_after_ms);
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
         self.tracks
@@ -1207,5 +1212,7 @@ mod tests_control;
 mod tests_openlinks;
 #[cfg(test)]
 mod tests_signals;
+#[cfg(test)]
+mod tests_sound;
 #[cfg(test)]
 mod tests_spoof;

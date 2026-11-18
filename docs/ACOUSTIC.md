@@ -1,8 +1,9 @@
 # Hearing drones: the acoustic detector
 
-PLAN.md Phase 15. Status 2026-11-17: the detector library and the file tool are built and
-tested on recordings. Nothing has run on the hub yet, and nothing has been tested with our own
-microphone or a real drone.
+PLAN.md Phase 15. Status 2026-11-17: the detector library, the file tool and the hub tracker's
+sound-contact table are built and tested on a laptop. Nothing has run on the hub yet (the
+microphone driver is not written), and nothing has been tested with our own microphone or a
+real drone.
 
 ## What it does
 
@@ -12,6 +13,21 @@ sound has been present for most of three seconds. It reports the pitch, a rough 
 documentation (`crates/acoustic/src/lib.rs`).
 
 It needs no training data and no model file. The numbers that tune it are in `acoustic::Config`.
+
+## What the hub does with it
+
+`tracker::sound` groups the detector's once-a-second reports into **sound contacts** and labels
+each one:
+
+| Label | When | Alerts |
+|---|---|---|
+| Drone audible (close) | a drone, FPV link, DJI link or Wi-Fi drone was on the radio in the last 15 s | yes |
+| Aircraft heard | no drone on the radio, but a tracked aircraft is airborne within 3 km | no |
+| Possible drone heard, no radio | neither | yes, after 5 s |
+
+Contacts appear as `"t":"sound"` JSON lines and as `S<n>` rows in the SD log. The aircraft
+check needs the hub's own position and uses distance only; matching the pitch curve to the
+aircraft's track and looking up its type are PLAN 15f and 15g.
 
 ## Trying it on recordings
 
