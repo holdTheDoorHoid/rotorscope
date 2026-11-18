@@ -70,7 +70,12 @@ use serde::{Deserialize, Serialize};
 ///   appended, so every v11 frame and command encodes exactly as before; a
 ///   v11 hub counts the new frames as corrupt, and a v11 node skips the new
 ///   plan codes as unknown (and so never reads IDs or content).
-pub const PROTOCOL_VERSION: u8 = 12;
+/// - 13: drone attack detectors (docs/DRONE-ATTACKS.md). Six
+///   [`ThreatKind`]s appended (`DroneDeauth`, `DroneTakeover`,
+///   `DroneNetClone`, `ControlContested`, `MavlinkAttack`, `AreaGnss`), so
+///   every v12 frame encodes exactly as before; a v12 hub counts a threat
+///   of a new kind as corrupt.
+pub const PROTOCOL_VERSION: u8 = 13;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -485,6 +490,32 @@ pub enum ThreatKind {
     ///   restart, more than a minute after it (expected, and not reported,
     ///   for the few seconds a node takes to resync after a restart).
     ForgedLink,
+    /// Protocol 13 (docs/DRONE-ATTACKS.md). Deauthentication or
+    /// disassociation aimed at a network that `crates/wifidrone` recognises
+    /// as a drone's own Wi-Fi (the first step of SkyJack-style hijacking).
+    /// `target` = the drone's BSSID, `ssid` = its network name.
+    DroneDeauth,
+    /// Protocol 13. A drone's Wi-Fi network gained a new controller (a
+    /// station associating) shortly after its previous one was kicked off,
+    /// or while it still has one. `target` = the drone's BSSID, `source` =
+    /// the newcomer.
+    DroneTakeover,
+    /// Protocol 13. A drone's network name from a second transmitter: a
+    /// copy set up to catch the pilot's phone or controller. `ssid` = the
+    /// name, `source` = the copy, `target` = the original.
+    DroneNetClone,
+    /// Protocol 13. A drone control or telemetry link heard from more
+    /// transmitters than it can have (a third SiK radio on one NET ID, two
+    /// ExpressLRS transmitters on one UID): injection or a takeover.
+    ControlContested,
+    /// Protocol 13. Hostile content on a drone's MAVLink telemetry
+    /// (`crates/mavwatch`): ground-station exploit payloads, shell access
+    /// commands, signing downgrade, injected frames.
+    MavlinkAttack,
+    /// Protocol 13, raised by the hub. Satellite navigation interference in
+    /// the area, seen through other receivers: aircraft reporting degraded
+    /// position integrity, or drones' positions jumping together.
+    AreaGnss,
 }
 
 impl ThreatKind {
@@ -507,6 +538,12 @@ impl ThreatKind {
             JamPulsed => "jam_pulsed",
             Blinded => "blinded",
             ForgedLink => "forged_link",
+            DroneDeauth => "drone_deauth",
+            DroneTakeover => "drone_takeover",
+            DroneNetClone => "drone_net_clone",
+            ControlContested => "control_contested",
+            MavlinkAttack => "mavlink_attack",
+            AreaGnss => "area_gnss",
         }
     }
 
@@ -1421,7 +1458,7 @@ mod tests {
     fn protocol_9_threat_appended() {
         let mut buf = [0u8; MAX_FRAME];
         let mut dec = Decoder::new();
-        for k in 0..=15u8 {
+        for k in 0..=21u8 {
             let kind: ThreatKind = postcard::from_bytes(&[k]).unwrap();
             let f = Frame::Threat(ThreatSighting {
                 kind,
@@ -1444,7 +1481,7 @@ mod tests {
             dec.feed(wire, |r| got = Some(r));
             assert_eq!(got, Some(Ok(f)));
         }
-        assert!(postcard::from_bytes::<ThreatKind>(&[16]).is_err());
+        assert!(postcard::from_bytes::<ThreatKind>(&[22]).is_err());
         assert!(ThreatKind::Blinded.is_jamming() && !ThreatKind::Deauth.is_jamming());
     }
 

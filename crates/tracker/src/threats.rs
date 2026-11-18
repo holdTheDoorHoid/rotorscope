@@ -60,6 +60,12 @@ pub const fn threat_label(kind: ThreatKind) -> &'static str {
         ThreatKind::JamPulsed => "Jamming (pulsed)",
         ThreatKind::Blinded => "Node blinded",
         ThreatKind::ForgedLink => "Forged node traffic",
+        ThreatKind::DroneDeauth => "Drone kicked off its Wi-Fi",
+        ThreatKind::DroneTakeover => "Drone Wi-Fi taken over",
+        ThreatKind::DroneNetClone => "Copy of a drone's network",
+        ThreatKind::ControlContested => "Second controller on a link",
+        ThreatKind::MavlinkAttack => "Hostile drone telemetry",
+        ThreatKind::AreaGnss => "GPS interference nearby",
     }
 }
 
@@ -119,7 +125,7 @@ impl Threat {
         }
         match s.kind {
             // Name-centred kinds: one per network name (and newcomer).
-            ThreatKind::EvilTwin => self.ssid == s.ssid && self.source == s.source,
+            ThreatKind::EvilTwin | ThreatKind::DroneNetClone => self.ssid == s.ssid && self.source == s.source,
             ThreatKind::Karma => self.source == s.source,
             ThreatKind::ForgedLink => self.source == s.source,
             _ => self.target == s.target,
@@ -165,7 +171,7 @@ impl Mute {
         }
         match t.kind {
             // Named things: the name and the transmitter.
-            ThreatKind::EvilTwin | ThreatKind::Karma | ThreatKind::AttackTool => {
+            ThreatKind::EvilTwin | ThreatKind::Karma | ThreatKind::AttackTool | ThreatKind::DroneNetClone => {
                 m.ssid = t.ssid.clone();
                 m.source = t.source;
             }
