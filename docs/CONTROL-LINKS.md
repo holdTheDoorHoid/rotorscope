@@ -194,7 +194,7 @@ network's address, which every beacon already shows). Details: docs/DRONE-ATTACK
   frames, report splitting and rate limits, ExpressLRS follow mode.
 - `firmware/node-lr/src/control.rs`: runs those jobs on the chip.
 - `crates/coverage/src/plans.rs`: the time split above.
-- `crates/tracker/src/ctrllinks.rs`: the hub's table (4 links, 3 bands; kept apart from the
+- `crates/tracker/src/ctrllinks.rs`: the hub's table (8 links, 3 bands; kept apart from the
   tracker, in PSRAM on the P4 hub next to the aero frame queue),
   positions to drone tracks, JSON lines; `crates/tracker/src/site.rs`: the `control` lines.
 - Receive only: a test runs every scan, sweep and follow setting through the chip layer and
