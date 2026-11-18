@@ -94,6 +94,9 @@ struct HubLine {
     /// each follows), and relayed frames from nodes that did not fit.
     relayed: usize,
     relayed_full: u32,
+    /// Hub-only frames (own position/clock, ADS-B, flags) refused because
+    /// they came relayed for a node rather than from the relay itself.
+    relay_refused: u32,
     heap_used: usize,
     heap_free: usize,
     /// Lowest `heap_free` seen since boot.
@@ -241,6 +244,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
                 .collect(),
             relayed: hub.relayed.borrow().len(),
             relayed_full: hub.relayed_full.get(),
+            relay_refused: hub.relay_refused.get(),
             heap_used: esp_alloc::HEAP.used(),
             heap_free,
             heap_min_free,

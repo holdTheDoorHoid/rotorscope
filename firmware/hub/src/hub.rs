@@ -172,6 +172,9 @@ pub struct Hub {
     /// Relayed frames from nodes that did not fit in `relayed` (counted
     /// against their link instead).
     pub relayed_full: Cell<u32>,
+    /// Hub-only frames (`HubFix`, `Csbee`, `Flags`) refused because a relay
+    /// passed them on for a node (`link::web_head_accepts`).
+    pub relay_refused: Cell<u32>,
     pub adsb: Cell<AdsbHealth>,
     /// Set by `POST /api/own-pos` or the USB `p` command. Kept until cleared:
     /// a person typed it in, so it does not go stale like a GPS fix. Not kept
@@ -193,6 +196,7 @@ impl Hub {
             nodes: RefCell::new(core::array::from_fn(|_| NodeStatus::default())),
             relayed: RefCell::new(heapless::Vec::new()),
             relayed_full: Cell::new(0),
+            relay_refused: Cell::new(0),
             adsb: Cell::new(AdsbHealth::default()),
             manual_pos: Cell::new(None),
             flags: RefCell::new(heapless::Vec::new()),
@@ -266,6 +270,15 @@ impl Hub {
             }
             node
         };
+        // The kit's own position and clock, aircraft and FAA flags come only
+        // from the relay itself (the P4 hub), never from a node it relays.
+        // `via`, not `node`: a relayed frame whose node did not fit in the
+        // table falls back to the link's own number above, but is still
+        // relayed.
+        if !link::web_head_accepts(&frame, via.is_some()) {
+            self.relay_refused.set(self.relay_refused.get().wrapping_add(1));
+            return;
+        }
         match frame {
             // Protocol 5, from a P4 hub this board is the web head of.
             Frame::HubFix(fix) => gnss::set_upstream(&fix, now),
