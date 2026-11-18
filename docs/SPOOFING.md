@@ -400,9 +400,91 @@ A busy airport does not raise the aircraft alarm: real aircraft are heard
 every second and are never replaced (tested with 50 against a 32-entry
 table).
 
+### The slow rules (2026-11-18)
+
+The 20-a-second line has a blind side. A cheap Wi-Fi or Bluetooth flooder
+that paces itself at, say, 3 new IDs a second stays under node-wifi's
+new-source budget (8 a second, so nothing is shed and the node-shed alarm
+below never sees it) and under the fast line: 180 fake drones a minute and
+no alarm. If it sends each fake twice, a second apart, they are even
+confirmed and announced. A DJI DroneID flood cannot reach the fast line at
+all: one node-sdr decodes at most about 2.8 valid bursts a second. So the
+same alarm has two slower rules, evaluated once a second over the same
+count of new drone identities (`probation::SlowWatch`, 96 bytes):
+
+| Rule (`flood_rule`) | Raised when | Says |
+|---|---|---|
+| `rate` (as before) | 20 new a second averaged over 5 s (`FLOOD_NEW_PER_S`) | "25 new a second over 5 s (limit 20)" |
+| `minute` | **60 new drone identities within the last 60 whole seconds** (`FLOOD_NEW_PER_MIN`, `FLOOD_MINUTE_S`): one a second averaged over a minute | "64 new drone IDs in the last minute (limit 60)" |
+| `active` | **32 drone identities heard within the last 10 s at once**, confirmed or not (`FLOOD_ACTIVE_IDS`, `ACTIVE_HEARD_MS`) | "34 drone IDs active at once (limit 32)" |
+
+The fast rule, when it holds, is the one reported; else the minute rule;
+else the population rule. All three are the one hub-wide `id_flood` entry
+of table `drones` (so one snooze covers it, as before), and the threat's
+`detail` names the rule in bits 16-23 (0 = rate, the only value before, so
+old lines read as they did; 1 = minute, 2 = active) with the rule's number
+in bits 0-15. The console and the evidence `Threat` event carry the
+sentence of whichever rule raised it first (`probation::describe`, for
+example "Flood of new drone IDs: 64 new drone IDs in the last minute (limit
+60); unconfirmed ones are kept out of alerts"); the JSON threat line adds
+`flood_rule`, `ids` (for the slow rules, in place of `per_s`) and `says`;
+`/api/state`'s `"flood"` adds `rule`, `minute` and `active`, and the phone
+banner reads the rule's number in words. The screen shows `ID FLOOD` as for
+the fast rule. Tracks are shown exactly as before: the alarm blocks nothing.
+It ends 10 s after its rule stops holding, like the other flood alarms.
+
+**What counts.** A *new identity* is the same thing the fast rule counts: a
+frame whose drone matches no track (by any of its IDs, then its address)
+and no remembered sighting. A drone that changes its address, or is heard
+on Wi-Fi and Bluetooth at once, matches its own track by ID and is counted
+once; frames never count, identities do. The population rule counts
+**tracks** heard in the last 10 s, and a track is one drone however many
+addresses or media it uses. (The one place an address still makes an
+identity is a frame without any ID, a Bluetooth 4 advert carrying one
+message, until its ID arrives on the same address and the two are merged.)
+
+**Why these lines, and why 10 s for "at once".** A real site's drones are
+each new once, so the minute rule measures arrivals: 60 drones switching on
+within a minute is a light show powering up, a race meet's whole field
+on the grid at once, or a flood. Remote ID sends at least once a second, so
+a transmitting drone is heard about ten times in 10 s; one that has landed
+or left stops counting within 10 s, and an alarm raised by kept-alive fakes
+ends about 20 s after they stop (10 s to stop counting, 10 s hold). 32 at
+once is half the P4's table, the whole table of a C5 hub, and the number
+PLAN.md D7 takes as the most a site needs followed.
+
+**When a real site raises it.** A drone show (dozens to hundreds of
+broadcasting drones within radio range) raises the population rule as long
+as it flies, and the minute rule while it powers up. A large meet where
+more than 32 broadcasting drones are powered on at once (pilots' drones
+idling in the pits count: standard Remote ID transmits from power-up) raises
+the population rule; the host test of a 40-drone race shows it, with the
+fast and minute rules quiet. A typical race (4 to 8 in the air) or a busy
+park does not: the host test of an hour with a new drone every 4 minutes,
+each flying 20 minutes on two media with its address changing every 30 s
+(about 6 at once), raises nothing, and 30 drones switched on within 3 s
+raise nothing. In every case the alarm is information for the operator:
+"more drone IDs than a real sky usually holds; unconfirmed ones are
+probably fake". Nothing is refused or hidden because of it.
+
+**Timings (host tests).** 3 new one-frame IDs a second: raised 21 s after
+the start (the 60th new ID; the old rules never raise it), ended 51 s after
+the flood stopped (the minute's count falls under 60 about 40 s later, then
+the 10 s hold). The same with each fake repeated a second later (confirmed
+fakes): raised at 12 s, by the population rule (30 fakes heard in the last
+10 s plus the real drone). One new fake every 2 s, every fake kept alive
+(sent again every 5 s): under both rate lines, raised at 62 s when 31 fakes
+and the real drone are active at once, ended 18 s after the fakes stopped.
+
+**Cost.** One byte per second for 64 seconds plus the latest count: 96
+bytes in the tracker (75 848 bytes for `Tracker<64, 32>` in all), one pass
+over 60 bytes and one over the drone table once a second.
+
 ### One node shedding a flood
 
-The hub-wide line above cannot be reached through one Wi-Fi node. Under a
+The hub-wide fast line above cannot be reached through one Wi-Fi node (the
+minute rule can: 8 new IDs a second is 60 in under 8 s, so a shedding node
+now raises both alarms). Under a
 frame flood node-wifi lets at most **8 Remote ID frames a second from new
 sources** through (`wifiwatch::shed`, docs/BENCH.md "Frame flood") and sheds
 the rest, so a fake-drone flood heard by one node reaches the hub as a steady
@@ -505,8 +587,21 @@ nodes (about 60 bytes each).
   or forged-traffic one, and the mute ends after two hours.
 - **Stay under the node-shed lines.** Through one Wi-Fi node, a flood of
   up to about 15 new IDs a second (or one paced at under 4 a second) raises
-  no alarm at all; the probation rules above still keep every fake
-  unconfirmed and out of alerts.
+  no node-shed alarm; the probation rules above still keep every fake
+  unconfirmed and out of alerts. Since the slow rules, any such flood of one
+  new ID a second or more raises the hub-wide alarm within a minute.
+- **Stay under the slow lines.** One-frame fakes slower than one a second
+  are each removed 30 s after their frame, so fewer than 30 are ever in the
+  table and neither slow rule is reached: a trickle of under 60 unconfirmed
+  fakes a minute raises no alarm. Kept alive, they reach the population line
+  at 32. Under that they are a few faint, unconfirmed rows (or, sent like
+  real drones, the "confirmed tier" case above).
+- **Slow forged-aircraft and control-link floods.** The aircraft (5
+  replaced a second) and control-link (2 a second) flood lines have the
+  same blind side as the drone one had: a forger pacing itself under them
+  raises nothing. It also gains nothing: established aircraft and links are
+  never replaced by unproven ones, and the unproven ones are never paired
+  into the drone-near-aircraft warning. No slow rule was added there.
 - **Unconfirmed clutter.** The list and the page still show the unconfirmed
   fakes, faint and last. They are never announced, never sent to TAK, and
   never ranked above a real drone.

@@ -58,6 +58,16 @@
 //! (about 5 x N, 320 for 64 tracks) does, and that is the truth too: the
 //! hub can no longer follow them all.
 //!
+//! Two slower rules raise the same alarm ([`SlowWatch`], [`FloodRule`]):
+//! [`FLOOD_NEW_PER_MIN`] (60) new drone identities within the last
+//! [`FLOOD_MINUTE_S`] (60) whole seconds, and [`FLOOD_ACTIVE_IDS`] (32)
+//! drone identities heard within [`ACTIVE_HEARD_MS`] (10 s) at once. A
+//! flooder that paces itself under the fast line and under a node's
+//! new-source budget (3 a second is 180 fakes a minute), and DJI DroneID,
+//! whose node decodes under 3 bursts a second, reach neither of the fast
+//! lines; they reach these. The fast rule, when it holds, is the one
+//! reported.
+//!
 //! # Cost
 //!
 //! Per frame of an unknown identity: one pass over the sightings table
@@ -101,6 +111,21 @@ pub const PROMOTE_PER_S: u32 = 4;
 pub const FLOOD_WINDOW_S: u64 = 5;
 /// New drone identities a second (averaged over the window) that raise it.
 pub const FLOOD_NEW_PER_S: u32 = 20;
+/// The slow window, whole seconds.
+pub const FLOOD_MINUTE_S: u64 = 60;
+/// New drone identities within the slow window that raise it: one a second
+/// averaged over a minute. A real site's drones are each new once; 60 new
+/// ones in a minute is a show powering up, or a flood.
+pub const FLOOD_NEW_PER_MIN: u32 = 60;
+/// A drone counts as active at once when heard within this long. Remote ID
+/// sends at least once a second, so a transmitting drone is heard several
+/// times over; one that has left stops counting soon.
+pub const ACTIVE_HEARD_MS: u64 = 10_000;
+/// Drone identities active at once that raise it (confirmed or not): half
+/// the P4's table (all of a C5 hub's 32). PLAN.md D7 asks for 32 at once as
+/// the most a site needs followed; more than that within radio range is a
+/// drone show, or a flood slower than any rate window.
+pub const FLOOD_ACTIVE_IDS: u32 = 32;
 /// Unproven aircraft, still being reported, thrown out a second for newer
 /// ones (averaged over the window): raise it for ADS-B. A real sky does not
 /// do this (real aircraft are heard every second, so never quiet enough to
@@ -153,20 +178,87 @@ impl FloodTable {
     }
 }
 
+/// Which rule raised a hub-wide drone flood alarm (`detail` bits 16-23 of
+/// table [`FloodTable::Drones`]; 0 in every alarm before the slow rules, so
+/// old values read as the fast rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(u8)]
+pub enum FloodRule {
+    /// [`FLOOD_NEW_PER_S`] new a second over [`FLOOD_WINDOW_S`]; the low 16
+    /// bits are the rate.
+    #[default]
+    Rate = 0,
+    /// [`FLOOD_NEW_PER_MIN`] new within [`FLOOD_MINUTE_S`]; the low 16 bits
+    /// are the count.
+    Minute = 1,
+    /// [`FLOOD_ACTIVE_IDS`] active at once; the low 16 bits are the count.
+    Active = 2,
+}
+
+impl FloodRule {
+    pub const fn of_detail(detail: u32) -> FloodRule {
+        match (detail >> 16) & 0xff {
+            1 => FloodRule::Minute,
+            2 => FloodRule::Active,
+            _ => FloodRule::Rate,
+        }
+    }
+
+    /// Short name for JSON (`"flood_rule"` of a threat line, `"rule"` of
+    /// `/api/state`'s `"flood"`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            FloodRule::Rate => "rate",
+            FloodRule::Minute => "minute",
+            FloodRule::Active => "active",
+        }
+    }
+}
+
 /// The table an [`ThreatKind::IdFlood`] threat is about (`None` for other
 /// kinds).
 pub fn flood_table(t: &Threat) -> Option<FloodTable> {
     (t.kind == ThreatKind::IdFlood).then(|| FloodTable::of_detail(t.detail))
 }
 
+/// The rule that raised a hub-wide drone flood alarm (`None` for other
+/// tables and kinds).
+pub fn flood_rule(t: &Threat) -> Option<FloodRule> {
+    (flood_table(t) == Some(FloodTable::Drones)).then(|| FloodRule::of_detail(t.detail))
+}
+
+/// The count a [`FloodRule::Minute`] or [`FloodRule::Active`] alarm saw
+/// (`None` for the rate rule and other tables).
+pub fn flood_ids(t: &Threat) -> Option<u32> {
+    flood_rule(t).filter(|r| *r != FloodRule::Rate).map(|_| t.detail & 0xffff)
+}
+
 /// New identities a second the latest report of an `IdFlood` saw (for
 /// [`FloodTable::NodeShed`]: new drone IDs a second from that node that
-/// never confirmed).
+/// never confirmed). Meaningful for the rate rule; for the slow drone rules
+/// see [`flood_ids`].
 pub fn flood_rate(t: &Threat) -> u32 {
     if FloodTable::of_detail(t.detail) == FloodTable::NodeShed {
         return (t.detail >> 16) & 0xff;
     }
     t.detail & 0xffff
+}
+
+/// The rule's reading in plain words, for a hub-wide drone flood alarm:
+/// "25 new drone IDs a second over 5 s", "64 new drone IDs in the last
+/// minute", "34 drone IDs active at once". `None` for other tables.
+pub fn flood_reason(t: &Threat) -> Option<heapless::String<48>> {
+    use core::fmt::Write;
+    let rule = flood_rule(t)?;
+    let mut s = heapless::String::new();
+    let n = t.detail & 0xffff;
+    let _ = match rule {
+        FloodRule::Rate => write!(s, "{n} new drone IDs a second over {FLOOD_WINDOW_S} s"),
+        FloodRule::Minute => write!(s, "{n} new drone IDs in the last minute"),
+        FloodRule::Active => write!(s, "{n} drone IDs active at once"),
+    };
+    Some(s)
 }
 
 /// Frames a second the node discarded, for a [`FloodTable::NodeShed`]
@@ -190,6 +282,11 @@ pub fn describe(t: &Threat) -> heapless::String<128> {
             flood_rate(t),
             SHED_WINDOW_S,
         );
+        return s;
+    }
+    if let (Some(rule @ (FloodRule::Minute | FloodRule::Active)), Some(why)) = (flood_rule(t), flood_reason(t)) {
+        let limit = if rule == FloodRule::Minute { FLOOD_NEW_PER_MIN } else { FLOOD_ACTIVE_IDS };
+        let _ = write!(s, "{}: {} (limit {}); unconfirmed ones are kept out of alerts", table.label(), why, limit);
         return s;
     }
     let _ = write!(
@@ -357,6 +454,8 @@ pub struct FloodWatch {
     since_ms: Option<u64>,
     /// New identities refused a track (counted since boot).
     pub refused: u32,
+    /// The rule of the latest raise.
+    rule: FloodRule,
 }
 
 /// A flood as the phone page shows it (`"flood"` in `/api/state`).
@@ -369,11 +468,19 @@ pub struct FloodStatus {
     pub refused: u32,
     /// Hub ms the alarm was first raised.
     pub since_ms: u64,
+    /// The rule of the latest raise (`"rate"`, `"minute"`, `"active"`).
+    /// Added with the slow rules; `"v"` stays 1.
+    pub rule: FloodRule,
+    /// New drone identities in the last [`FLOOD_MINUTE_S`] whole seconds.
+    pub minute: u32,
+    /// Drone identities heard within [`ACTIVE_HEARD_MS`], at the latest
+    /// check.
+    pub active: u32,
 }
 
 impl FloodWatch {
     pub const fn new() -> Self {
-        Self { per_s: [0; 8], second: 0, raised_s: None, since_ms: None, refused: 0 }
+        Self { per_s: [0; 8], second: 0, raised_s: None, since_ms: None, refused: 0, rule: FloodRule::Rate }
     }
 
     fn advance(&mut self, now_ms: u64) {
@@ -408,6 +515,24 @@ impl FloodWatch {
     /// once a second, while the rate is at or over `limit`.
     pub fn check(&mut self, now_ms: u64, limit: u32, table: FloodTable) -> Option<ThreatSighting> {
         let rate = self.rate(now_ms);
+        self.raise(now_ms, table, (rate >= limit).then(|| Hit::rate(rate)))
+    }
+
+    /// [`FloodWatch::check`] for the drone table, with the slow rules of
+    /// `slow` behind the fast one: the fast rule when it holds, else the
+    /// minute rule, else the population rule (`active`: drone identities
+    /// heard within [`ACTIVE_HEARD_MS`], asked at most once a second).
+    pub fn check_drones(&mut self, slow: &mut SlowWatch, now_ms: u64, active: impl FnOnce() -> u32) -> Option<ThreatSighting> {
+        let rate = self.rate(now_ms);
+        // Evaluated whatever the fast rule says, so the counts stay current.
+        let slow_hit = slow.check(now_ms, active);
+        let hit = if rate >= FLOOD_NEW_PER_S { Some(Hit::rate(rate)) } else { slow_hit };
+        self.raise(now_ms, FloodTable::Drones, hit)
+    }
+
+    /// The sighting for `hit`, at most once a second; keeps the alarm's
+    /// start while it stays active.
+    fn raise(&mut self, now_ms: u64, table: FloodTable, hit: Option<Hit>) -> Option<ThreatSighting> {
         let s = now_ms / 1000;
         let active = self
             .raised_s
@@ -415,22 +540,24 @@ impl FloodWatch {
         if !active {
             self.since_ms = None;
         }
-        if rate < limit || self.raised_s == Some(s) {
+        let hit = hit?;
+        if self.raised_s == Some(s) {
             return None;
         }
         self.raised_s = Some(s);
         self.since_ms.get_or_insert(now_ms);
+        self.rule = hit.rule;
         Some(ThreatSighting {
             kind: ThreatKind::IdFlood,
             channel: 0,
             freq: 0,
             width_khz: 0,
             level: 0,
-            count: rate.saturating_mul(FLOOD_WINDOW_S as u32),
-            window_ms: (FLOOD_WINDOW_S * 1000) as u32,
+            count: hit.count,
+            window_ms: hit.window_ms,
             source: [0; 6],
             target: [0; 6],
-            detail: (table as u32) << 24 | rate.min(0xffff),
+            detail: (table as u32) << 24 | (hit.rule as u32) << 16 | hit.figure.min(0xffff),
             ssid: heapless::String::new(),
             uptime_us: 0,
         })
@@ -449,6 +576,124 @@ impl FloodWatch {
             new_per_s: sum / FLOOD_WINDOW_S as u32,
             refused: self.refused,
             since_ms: self.since_ms.unwrap_or(r * 1000),
+            rule: self.rule,
+            minute: 0,
+            active: 0,
+        })
+    }
+
+    /// [`FloodWatch::status`] for the drone table, with the slow rules'
+    /// counts.
+    pub fn status_drones(&self, slow: &SlowWatch, now_ms: u64) -> Option<FloodStatus> {
+        let mut st = self.status(now_ms)?;
+        st.minute = slow.minute_at(now_ms);
+        st.active = u32::from(slow.active);
+        Some(st)
+    }
+}
+
+/// What one rule saw, for [`FloodWatch::raise`].
+#[derive(Debug, Clone, Copy)]
+struct Hit {
+    rule: FloodRule,
+    /// The rule's number (`detail` low 16 bits).
+    figure: u32,
+    count: u32,
+    window_ms: u32,
+}
+
+impl Hit {
+    fn rate(rate: u32) -> Hit {
+        Hit {
+            rule: FloodRule::Rate,
+            figure: rate,
+            count: rate.saturating_mul(FLOOD_WINDOW_S as u32),
+            window_ms: (FLOOD_WINDOW_S * 1000) as u32,
+        }
+    }
+}
+
+// ------------------------------------------------------- the slow rules --
+
+/// Seconds kept: the slow window plus the current second, rounded up.
+const MINUTE_RING: usize = 64;
+const _: () = assert!(FLOOD_MINUTE_S as usize + 1 <= MINUTE_RING);
+
+/// The slow drone flood rules: new drone identities per second over the
+/// last [`FLOOD_MINUTE_S`] whole seconds (one byte a second, saturating: a
+/// second with more than 255 is the fast rule's business), and the latest
+/// count of drone identities active at once. 80 bytes.
+#[derive(Debug, Clone)]
+pub struct SlowWatch {
+    per_s: [u8; MINUTE_RING],
+    /// The second `per_s` was last advanced to.
+    second: u64,
+    /// The second the rules were last evaluated.
+    checked: Option<u64>,
+    /// Drone identities active at the latest evaluation.
+    active: u16,
+}
+
+impl Default for SlowWatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SlowWatch {
+    pub const fn new() -> Self {
+        Self { per_s: [0; MINUTE_RING], second: 0, checked: None, active: 0 }
+    }
+
+    fn advance(&mut self, now_ms: u64) {
+        let s = now_ms / 1000;
+        if s <= self.second {
+            return;
+        }
+        for k in (self.second + 1)..=s.min(self.second + MINUTE_RING as u64) {
+            self.per_s[(k % MINUTE_RING as u64) as usize] = 0;
+        }
+        self.second = s;
+    }
+
+    /// One new drone identity.
+    pub fn note(&mut self, now_ms: u64) {
+        self.advance(now_ms);
+        let c = &mut self.per_s[(self.second % MINUTE_RING as u64) as usize];
+        *c = c.saturating_add(1);
+    }
+
+    /// New identities in the last [`FLOOD_MINUTE_S`] whole seconds before
+    /// `now_ms`'s (the current, partial one left out), without advancing.
+    pub fn minute_at(&self, now_ms: u64) -> u32 {
+        let s = now_ms / 1000;
+        (1..=FLOOD_MINUTE_S)
+            .filter_map(|k| s.checked_sub(k))
+            .filter(|&k| k <= self.second && self.second - k < MINUTE_RING as u64)
+            .map(|k| u32::from(self.per_s[(k % MINUTE_RING as u64) as usize]))
+            .sum()
+    }
+
+    /// Once a second: the slow rule that holds, if any.
+    fn check(&mut self, now_ms: u64, active: impl FnOnce() -> u32) -> Option<Hit> {
+        self.advance(now_ms);
+        let s = now_ms / 1000;
+        if self.checked == Some(s) {
+            return None;
+        }
+        self.checked = Some(s);
+        let minute = self.minute_at(now_ms);
+        let latest = s.checked_sub(1).map_or(0, |k| u32::from(self.per_s[(k % MINUTE_RING as u64) as usize]));
+        let active = active();
+        self.active = active.min(u32::from(u16::MAX)) as u16;
+        if minute >= FLOOD_NEW_PER_MIN {
+            return Some(Hit { rule: FloodRule::Minute, figure: minute, count: latest, window_ms: (FLOOD_MINUTE_S * 1000) as u32 });
+        }
+        (active >= FLOOD_ACTIVE_IDS).then_some(Hit {
+            rule: FloodRule::Active,
+            figure: active,
+            count: latest,
+            window_ms: ACTIVE_HEARD_MS as u32,
         })
     }
 }

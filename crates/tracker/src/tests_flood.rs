@@ -249,14 +249,12 @@ fn repeating_fakes_never_displace_a_confirmed_drone() {
     assert!(created <= bound, "{created} tracks made, bound {bound}");
 }
 
-/// The flood alarm has a threshold: a busy but real sky does not raise it.
-#[test]
-fn a_drone_race_does_not_raise_the_flood_alarm() {
-    let mut tr: Tracker = Tracker::default();
-    // 40 drones switched on within 4 s, then all flying at 2 Hz for 60 s.
+/// `drones` switched on within `drones / 10` s, then all flying at 2 Hz
+/// for 60 s.
+fn race(tr: &mut Tracker, drones: u8) -> u64 {
     let mut t = 0;
     while t < 64_000 {
-        for n in 0..40u8 {
+        for n in 0..drones {
             if t >= u64::from(n) * 100 {
                 tr.ingest(0, &real(n), t + u64::from(n));
             }
@@ -264,9 +262,33 @@ fn a_drone_race_does_not_raise_the_flood_alarm() {
         tr.expire(t);
         t += 500;
     }
-    assert_eq!(tr.tracks().iter().filter(|t| t.confirmed()).count(), 40);
+    t
+}
+
+/// The flood alarm has a threshold: a busy but real sky does not raise it.
+/// 30 drones switched on within 3 s raise nothing at all. 40 switched on
+/// within 4 s never reach the fast line (20 new a second for 5 s) nor the
+/// minute line (60 new in a minute); being more than 32 at once they raise
+/// the population rule, which says so in words and blocks nothing.
+#[test]
+fn a_drone_race_does_not_raise_the_flood_alarm() {
+    let mut tr: Tracker = Tracker::default();
+    let t = race(&mut tr, 30);
+    assert_eq!(tr.tracks().iter().filter(|t| t.confirmed()).count(), 30);
     assert!(tr.threats().iter().all(|t| t.kind != link::ThreatKind::IdFlood));
     assert!(tr.flood_status(t).is_none());
+
+    let mut tr: Tracker = Tracker::default();
+    let t = race(&mut tr, 40);
+    assert_eq!(tr.tracks().iter().filter(|t| t.confirmed()).count(), 40);
+    let floods: std::vec::Vec<_> = tr.threats().iter().filter(|t| t.kind == link::ThreatKind::IdFlood).collect();
+    assert_eq!(floods.len(), 1, "{floods:?}");
+    assert_eq!(probation::flood_rule(floods[0]), Some(probation::FloodRule::Active), "never the fast or minute rule");
+    assert_eq!(probation::flood_reason(floods[0]).unwrap().as_str(), "40 drone IDs active at once");
+    let st = tr.flood_status(t - 500).unwrap();
+    assert_eq!((st.rule, st.active), (probation::FloodRule::Active, 40));
+    assert!(st.minute < probation::FLOOD_NEW_PER_MIN, "{st:?}");
+    assert!(tr.take_new_drone(t).is_some(), "the drones are still announced: the alarm blocks nothing");
 }
 
 /// Antipodal fakes (drone and operator on opposite sides of the Earth)
@@ -309,6 +331,14 @@ fn sizes() {
         size_of::<threats::Mute>(),
         size_of::<threats::ThreatTable>(),
     );
+    std::println!(
+        "FloodWatch {} B, SlowWatch {} B",
+        size_of::<probation::FloodWatch>(),
+        size_of::<probation::SlowWatch>()
+    );
+    // The slow drone flood rules cost the tracker one SlowWatch.
+    assert_eq!(size_of::<probation::FloodWatch>(), 64);
+    assert!(size_of::<probation::SlowWatch>() <= 96);
     // The P4 keeps the tracker in a 1 MiB PSRAM window.
     assert!(size_of::<Tracker<64, 32>>() < 1 << 20);
 }
@@ -639,9 +669,13 @@ fn a_flood_shed_by_one_node_raises_the_node_shed_alarm() {
     let text = core::str::from_utf8(&buf[..n]).unwrap();
     assert!(text.contains("\"node\":2"), "{text}");
     assert!(text.contains("\"table\":\"node\",\"per_s\":8,\"dropped_per_s\":192"), "{text}");
-    // The hub-wide line (20 new IDs a second) is not reached by one node.
-    assert!(tr.flood_status(40_000).is_none());
-    assert!(tr.threats().iter().all(|t| probation::flood_table(t) != Some(probation::FloodTable::Drones)));
+    // The hub-wide fast line (20 new IDs a second) is not reached by one
+    // node; its 8 a second do reach the minute line (60 in a minute), so
+    // the hub-wide alarm is raised too, by that rule.
+    let st = tr.flood_status(40_000).expect("the minute rule");
+    assert_eq!(st.rule, probation::FloodRule::Minute);
+    assert!(st.minute >= 200, "{st:?}");
+    assert!(tr.threats().iter().all(|t| probation::flood_rule(t) != Some(probation::FloodRule::Rate)));
     // The real drone on node 1 is tracked and confirmed throughout.
     assert!(track_of(&tr, 1).is_some_and(|t| t.confirmed()));
     // Node 1 is not shedding anything.
@@ -716,14 +750,20 @@ fn a_booting_node_raises_no_node_shed_alarm() {
 
 /// A busy venue: the node's receive pool overflows steadily (40 frames a
 /// second, over the drop line) and now and then a stray Remote ID frame is
-/// heard once and never again (one a second). And a modest steady drop
-/// rate (5 a second) with the same strays. Neither is a flood.
+/// heard once and never again (one every 2 s). And a modest steady drop
+/// rate (5 a second) with the same strays. Neither is a flood. (A new,
+/// never-repeated drone ID every second for a minute is 60 phantom drones
+/// a minute: that is the minute rule's line, by design.)
 #[test]
 fn busy_venue_drops_raise_no_node_shed_alarm() {
     for drops in [40, 5] {
         let mut tr: Tracker = Tracker::default();
         let (mut next, mut up, mut dropped) = (0, 0, 0);
-        assert_eq!(node_run(&mut tr, 1, 0, 120, 1, drops, &[2, 5], &mut next, &mut up, &mut dropped), None, "{drops}");
+        for s in 0..120u64 {
+            let stray = u32::from(s % 2 == 0);
+            let r = node_run(&mut tr, 1, s * 1000, 1, stray, drops, &[2, 5], &mut next, &mut up, &mut dropped);
+            assert_eq!(r, None, "{drops}");
+        }
         no_flood_alarm_at_all(&tr, 120_000);
     }
 }
@@ -731,9 +771,10 @@ fn busy_venue_drops_raise_no_node_shed_alarm() {
 /// The 40-drone race through one node, which also drops: the node's
 /// budget sheds some first frames as the drones switch on (8 new sources a
 /// second), and the venue's receive pool overflows (20 a second). Every
-/// new ID confirms, so no alarm of any table.
+/// new ID confirms, so no node-shed alarm and no rate alarm; 40 at once is
+/// over the population line (see `a_drone_race_does_not_raise_the_flood_alarm`).
 #[test]
-fn a_drone_race_through_a_shedding_node_raises_no_alarm() {
+fn a_drone_race_through_a_shedding_node_raises_no_node_shed_alarm() {
     let mut tr: Tracker = Tracker::default();
     let mut t = 0;
     let (mut up, mut dropped) = (0u64, 0u32);
@@ -753,5 +794,215 @@ fn a_drone_race_through_a_shedding_node_raises_no_alarm() {
         t += 500;
     }
     assert_eq!(tr.tracks().iter().filter(|t| t.confirmed()).count(), 40);
-    no_flood_alarm_at_all(&tr, t);
+    assert!(node_shed(&tr, 0, t).is_none());
+    assert!(
+        tr.threats().iter().filter(|t| t.kind == link::ThreatKind::IdFlood).all(|t| probation::flood_rule(t) == Some(probation::FloodRule::Active)),
+        "only the population rule: {:?}",
+        tr.threats()
+    );
+}
+
+// ------------------------------------------------ a slow fake-drone flood --
+
+/// The hub-wide drone flood alarm (any rule) is active at `now`.
+fn drone_flood<const N: usize, const A: usize>(tr: &Tracker<N, A>, now: u64) -> Option<&threats::Threat> {
+    tr.active_threats(now).find(|t| probation::flood_table(t) == Some(probation::FloodTable::Drones))
+}
+
+/// A slow flood: every second `per_s` new one-frame fakes (spread over the
+/// second, each also repeated `repeat_ms` later when given) and the real
+/// drone 1 once, for `secs` seconds from `from_ms`; then only the real drone
+/// until `until_ms`. Returns (first ms the drone flood alarm was active, first
+/// ms after the flood it was no longer active).
+fn slow_flood(tr: &mut Tracker, from_ms: u64, secs: u64, per_s: u32, repeat_ms: Option<u64>, until_ms: u64) -> (Option<u64>, Option<u64>) {
+    let stop = from_ms + secs * 1000;
+    let (mut raised, mut ended) = (None, None);
+    let mut next = 0u32;
+    let mut pending: std::vec::Vec<(u64, u32)> = std::vec::Vec::new();
+    let mut s = from_ms;
+    while s < until_ms {
+        let mut frames: std::vec::Vec<(u64, Option<u32>)> = std::vec::Vec::new();
+        if s < stop {
+            for j in 0..per_s {
+                let at = s + u64::from(j) * 1000 / u64::from(per_s) + 3;
+                frames.push((at, Some(next)));
+                if let Some(r) = repeat_ms {
+                    pending.push((at + r, next));
+                }
+                next += 1;
+            }
+        }
+        pending.retain(|&(at, i)| {
+            if at < s + 1000 {
+                frames.push((at, Some(i)));
+                false
+            } else {
+                true
+            }
+        });
+        frames.push((s + 7, None));
+        frames.sort_by_key(|f| f.0);
+        for (at, f) in frames {
+            match f {
+                Some(i) => tr.ingest(0, &fake(i), at),
+                None => tr.ingest(1, &real(1), at),
+            };
+        }
+        let now = s + 950;
+        tr.expire(now);
+        let on = drone_flood(tr, now).is_some();
+        if on && raised.is_none() {
+            raised = Some(now);
+        }
+        if !on && raised.is_some() && now >= stop && ended.is_none() {
+            ended = Some(now);
+        }
+        s += 1000;
+    }
+    (raised, ended)
+}
+
+/// Five quiet seconds with the real drone, confirmed.
+fn quiet_start() -> Tracker {
+    let mut tr: Tracker = Tracker::default();
+    for s in 0..5u64 {
+        tr.ingest(1, &real(1), s * 1000 + 7);
+        tr.expire(s * 1000 + 950);
+    }
+    assert!(track_of(&tr, 1).is_some_and(|t| t.confirmed()));
+    tr
+}
+
+/// 3 new one-frame drone IDs a second: under node-wifi's new-source budget
+/// (8 a second, nothing shed) and under the fast line (20 a second). 180
+/// fakes a minute. The minute rule raises it within about 25 s of the
+/// start; the real drone keeps its confirmed track; the alarm ends by
+/// itself after the flood.
+#[test]
+fn a_slow_flood_of_3_new_ids_a_second_raises_the_alarm() {
+    let mut tr = quiet_start();
+    let id = track_of(&tr, 1).unwrap().id;
+    let (raised, ended) = slow_flood(&mut tr, 5_000, 60, 3, None, 200_000);
+    let raised = raised.expect("a slow flood raises the drone flood alarm");
+    std::println!("3/s one-frame: raised {} ms after the start", raised - 5_000);
+    assert!(raised - 5_000 <= 25_000, "raised at {raised}");
+    let ended = ended.expect("the alarm ends after the flood");
+    std::println!("3/s one-frame: ended {} ms after the flood stopped", ended - 65_000);
+    assert!(ended - 65_000 <= 60_000 + crate::threats::THREAT_ACTIVE_MS + 2_000, "ended at {ended}");
+    let r = track_of(&tr, 1).unwrap();
+    assert_eq!(r.id, id);
+    assert!(r.confirmed());
+    // Never the fast rule (no 5 s at 20 a second): the minute rule, in words.
+    let ev: std::vec::Vec<_> = tr.threats().iter().filter(|t| probation::flood_table(t) == Some(probation::FloodTable::Drones)).collect();
+    assert_eq!(ev.len(), 1, "one drone flood entry");
+    assert_eq!(probation::flood_rule(ev[0]), Some(probation::FloodRule::Minute));
+    // What the console and the evidence log say, and the JSON line.
+    let text = probation::describe(ev[0]);
+    std::println!("{text}");
+    assert!(text.starts_with("Flood of new drone IDs: "), "{text}");
+    assert!(text.contains(" new drone IDs in the last minute (limit 60); unconfirmed ones are kept out of alerts"), "{text}");
+    let ctx = tr.context(raised, None);
+    let mut buf = [0u8; threats::MAX_THREAT_LINE];
+    let n = threats::threat_line(ev[0], &ctx, &mut buf).unwrap();
+    let line = core::str::from_utf8(&buf[..n]).unwrap();
+    assert!(line.contains("\"table\":\"drones\",\"flood_rule\":\"minute\",\"ids\":"), "{line}");
+    assert!(line.contains(" new drone IDs in the last minute\""), "{line}");
+    assert!(!line.contains("\"per_s\""), "no rate for the minute rule: {line}");
+}
+
+/// The same with every fake sent again a second later, so each one is
+/// confirmed (2 frames over 1 s) and announced: the alarm still raises.
+#[test]
+fn a_slow_flood_of_confirmed_fakes_raises_the_alarm() {
+    let mut tr = quiet_start();
+    let (raised, ended) = slow_flood(&mut tr, 5_000, 60, 3, Some(1_000), 200_000);
+    assert!(tr.tracks().iter().filter(|t| t.confirmed()).count() > 30, "the fakes confirm");
+    let raised = raised.expect("a slow flood of confirmed fakes raises the alarm");
+    std::println!("3/s confirmed: raised {} ms after the start", raised - 5_000);
+    assert!(raised - 5_000 <= 25_000, "raised at {raised}");
+    assert!(ended.is_some(), "and it ends");
+    assert!(track_of(&tr, 1).is_some_and(|t| t.confirmed()));
+}
+
+/// Slower than any rate line: one new fake every 2 s, every fake kept alive
+/// (sent again every 5 s). The population rule raises it once 32 are active
+/// at once; it ends once they stop.
+#[test]
+fn a_kept_alive_trickle_raises_the_population_alarm() {
+    let mut tr = quiet_start();
+    let (from, stop, until) = (5_000u64, 125_000u64, 200_000u64);
+    let (mut raised, mut ended) = (None, None);
+    let mut alive = 0u32;
+    let mut s = from;
+    while s < until {
+        if s < stop {
+            if (s - from) % 2_000 == 0 {
+                alive += 1;
+            }
+            // Each fake every 5 s, staggered.
+            for i in 0..alive {
+                if (s / 1000 + u64::from(i)) % 5 == 0 {
+                    tr.ingest(0, &fake(i), s + 3 + u64::from(i));
+                }
+            }
+            // A new fake is heard at once.
+            if (s - from) % 2_000 == 0 {
+                tr.ingest(0, &fake(alive - 1), s + 500);
+            }
+        }
+        tr.ingest(1, &real(1), s + 7);
+        let now = s + 950;
+        tr.expire(now);
+        let on = drone_flood(&tr, now).is_some();
+        if on && raised.is_none() {
+            raised = Some(now);
+            std::println!("kept-alive 0.5/s: raised at {} ms with {alive} fakes", now - from);
+        }
+        if !on && raised.is_some() && now >= stop && ended.is_none() {
+            ended = Some(now);
+        }
+        s += 1_000;
+    }
+    let raised = raised.expect("the population rule raises it");
+    // 32 fakes plus the real drone: the 32nd fake comes at 62 s.
+    assert!(raised - from <= 66_000, "raised at {raised}");
+    let ended = ended.expect("it ends");
+    std::println!("kept-alive 0.5/s: ended {} ms after the flood stopped", ended - stop);
+    assert!(ended - stop <= 30_000, "ended at {ended}");
+    assert!(track_of(&tr, 1).is_some_and(|t| t.confirmed()));
+    let t = tr.threats().iter().find(|t| probation::flood_table(t) == Some(probation::FloodTable::Drones)).unwrap();
+    assert_eq!(probation::flood_rule(t), Some(probation::FloodRule::Active), "never the rate or minute rule");
+    let text = probation::describe(t);
+    std::println!("{text}");
+    assert!(text.ends_with(" drone IDs active at once (limit 32); unconfirmed ones are kept out of alerts"), "{text}");
+}
+
+/// A normal busy site over an hour: a new drone every 4 minutes, each flying
+/// 20 minutes at 1 Hz on Wi-Fi and Bluetooth with its address changing every
+/// 30 s (one identity, many addresses), so about 5 at once. Nothing raised.
+#[test]
+fn a_busy_site_over_an_hour_raises_nothing() {
+    let mut tr: Tracker = Tracker::default();
+    let mut most = 0;
+    for s in 0..3_600u64 {
+        for n in 0..15u8 {
+            let start = u64::from(n) * 240;
+            if s < start || s >= start + 1_200 {
+                continue;
+            }
+            let mut d = real(n);
+            let epoch = (s / 30) as u8;
+            d.mac = [0x60, 0x60, 0x1f, epoch, n, 0x01];
+            tr.ingest(1, &d, s * 1000 + u64::from(n) * 13);
+            let mut b = real(n);
+            b.transport = Transport::BleExtended;
+            b.mac = [0xc0, 0x11, epoch, 0x22, n, 0x02];
+            tr.ingest(2, &b, s * 1000 + 400 + u64::from(n) * 13);
+        }
+        tr.expire(s * 1000 + 950);
+        most = most.max(tr.active_count(s * 1000 + 950));
+        assert!(drone_flood(&tr, s * 1000 + 950).is_none(), "raised at {s} s");
+    }
+    std::println!("busy site: at most {most} drones active at once");
+    assert!(tr.threats().iter().all(|t| t.kind != link::ThreatKind::IdFlood));
 }

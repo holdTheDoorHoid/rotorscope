@@ -1240,6 +1240,17 @@ struct ThreatLine<'a> {
     /// `IdFlood` table `"node"` only: frames a second the node discarded.
     #[serde(skip_serializing_if = "Option::is_none")]
     dropped_per_s: Option<u32>,
+    /// `IdFlood` table `"drones"` only: the rule that raised it, `"rate"`
+    /// (`per_s`), `"minute"` (`ids` new drone IDs in the last minute) or
+    /// `"active"` (`ids` drone IDs active at once), and that reading in
+    /// words (`says`). `per_s` is left out for the last two. Added with the
+    /// slow rules (2026-11-18).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flood_rule: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ids: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    says: Option<&'a str>,
     n: u32,
     first_ms: u64,
     last_ms: u64,
@@ -1254,6 +1265,7 @@ const _: () = assert!(MAX_THREAT_LINE <= crate::json::MAX_LINE);
 pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
     let show = ctx.config.show_link_ids;
     let known = |m: &[u8; 6]| *m != [0; 6];
+    let says = crate::probation::flood_reason(t);
     let line = ThreatLine {
         t: "threat",
         id: t.id,
@@ -1291,8 +1303,13 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         via: t.via(),
         per_node: t.per_node,
         table: crate::probation::flood_table(t).map(|f| f.name()),
-        per_s: crate::probation::flood_table(t).map(|_| crate::probation::flood_rate(t)),
+        per_s: crate::probation::flood_table(t)
+            .filter(|_| crate::probation::flood_ids(t).is_none())
+            .map(|_| crate::probation::flood_rate(t)),
         dropped_per_s: crate::probation::shed_rate(t),
+        flood_rule: crate::probation::flood_rule(t).map(|r| r.name()),
+        ids: crate::probation::flood_ids(t),
+        says: says.as_ref().map(|s| s.as_str()),
         n: t.reports,
         first_ms: t.first_seen_ms,
         last_ms: t.last_seen_ms,

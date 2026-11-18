@@ -624,13 +624,17 @@ function renderBanners(lost) {
       `<button type="button" data-dismiss aria-label="Dismiss alert">&#10005;</button>`);
   }
   // A flood of forged drone IDs (the hub's alarm, `st.flood`): say so, with
-  // the rate, so the operator is told rather than buried. Numbers only.
+  // the rule's reading, so the operator is told rather than buried. Numbers
+  // only. `rule` is missing from hubs before the slow rules (the rate).
   const fl = st && st.flood;
   $('flood').hidden = !fl;
   if (fl) {
     const unc = tracks().filter(isUnc).length;
+    const why = fl.rule === 'minute' ? `${Number(fl.minute) | 0} new drone IDs in the last minute`
+      : fl.rule === 'active' ? `${Number(fl.active) | 0} drone IDs active at once`
+      : `${Number(fl.new_per_s) | 0} new drone IDs a second`;
     setHTML('flood', `<span aria-hidden="true">&#9888;</span><span class="grow">FAKE DRONE FLOOD?` +
-      `<small>${Number(fl.new_per_s) | 0} new drone IDs a second, far more than a real sky. ` +
+      `<small>${why}, far more than a real sky. ` +
       `${unc} unconfirmed drone(s) listed last are probably fake; confirmed ones are unaffected.</small></span>`);
   }
   $('nopos').hidden = !(st && !st.own && !lost && tab !== 'set');

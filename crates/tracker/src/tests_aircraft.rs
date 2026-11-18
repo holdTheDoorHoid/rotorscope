@@ -389,7 +389,14 @@ fn state_lists_aircraft_last_and_streams_exactly() {
 fn state_head_with_adsb_fits_its_bound() {
     let tr: Tracker = Tracker::default();
     let mut ctx = tr.context(u64::MAX, Some(u64::MAX));
-    ctx.flood = Some(crate::probation::FloodStatus { new_per_s: u32::MAX, refused: u32::MAX, since_ms: u64::MAX });
+    ctx.flood = Some(crate::probation::FloodStatus {
+        new_per_s: u32::MAX,
+        refused: u32::MAX,
+        since_ms: u64::MAX,
+        rule: crate::probation::FloodRule::Minute,
+        minute: u32::MAX,
+        active: u32::MAX,
+    });
     ctx.own = Some(OwnFix {
         lat: -89.123_456_789_012_3,
         lon: -179.123_456_789_012_3,

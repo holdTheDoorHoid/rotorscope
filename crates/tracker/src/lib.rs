@@ -973,6 +973,9 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     candidates: probation::Candidates<N>,
     /// New drone identities a second, for the flood alarm.
     flood: probation::FloodWatch,
+    /// New drone identities a minute and drone identities active at once,
+    /// for the flood alarm's slow rules.
+    slow_flood: probation::SlowWatch,
     /// Unproven aircraft replaced a second, for the aircraft flood alarm.
     aircraft_flood: probation::FloodWatch,
     /// Per node: frames discarded and new IDs that never confirm, for the
@@ -1012,6 +1015,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             },
             candidates: probation::Candidates::new(),
             flood: probation::FloodWatch::new(),
+            slow_flood: probation::SlowWatch::new(),
             aircraft_flood: probation::FloodWatch::new(),
             shed: probation::ShedWatch::new(),
             merges: heapless::Vec::new(),
@@ -1055,13 +1059,13 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             utc_ms,
             own: self.own_position(now_ms),
             config: self.config,
-            flood: self.flood.status(now_ms),
+            flood: self.flood.status_drones(&self.slow_flood, now_ms),
         }
     }
 
     /// A flood of new drone identities, while its alarm is raised.
     pub fn flood_status(&self, now_ms: u64) -> Option<probation::FloodStatus> {
-        self.flood.status(now_ms)
+        self.flood.status_drones(&self.slow_flood, now_ms)
     }
 
     /// Tracks confirmed ([`Track::confirmed`]).
@@ -1504,6 +1508,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         let s = self.candidates.sight(key, now_ms);
         if s.new {
             self.flood.note(now_ms);
+            self.slow_flood.note(now_ms);
             self.shed.new_id(node, now_ms);
         }
         let stale_after = self.config.stale_after_ms;
@@ -1666,9 +1671,6 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.emitters.expire(now_ms, &self.config);
         self.wifi_drones.expire(now_ms, &self.config);
         self.threats.expire(now_ms, self.config.remove_after_ms);
-        if let Some(s) = self.flood.check(now_ms, probation::FLOOD_NEW_PER_S, probation::FloodTable::Drones) {
-            let _ = self.threats.ingest(0, true, &s, now_ms);
-        }
         if let Some(s) =
             self.aircraft_flood.check(now_ms, probation::AIRCRAFT_FLOOD_PER_S, probation::FloodTable::Aircraft)
         {
@@ -1685,6 +1687,16 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.tracks.retain(|t| {
             now_ms.saturating_sub(t.last_seen_ms) < if t.confirmed() { limit } else { unconfirmed }
         });
+        // The drone flood alarm, after the table is pruned: its population
+        // rule counts what is left (one track is one drone identity,
+        // however many addresses or media it uses).
+        let tracks = &self.tracks;
+        let active = || {
+            tracks.iter().filter(|t| now_ms.saturating_sub(t.last_seen_ms) < probation::ACTIVE_HEARD_MS).count() as u32
+        };
+        if let Some(s) = self.flood.check_drones(&mut self.slow_flood, now_ms, active) {
+            let _ = self.threats.ingest(0, true, &s, now_ms);
+        }
         before - self.tracks.len()
     }
 

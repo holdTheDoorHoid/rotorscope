@@ -237,22 +237,29 @@ mod tests {
         assert!(unc < dist, "{sorted}");
         // The flood banner: reads st.flood, interpolates numbers only.
         assert!(src.contains("const fl = st && st.flood;"));
+        // `why` (the rule's reading) is itself built from numbers only.
+        let why = &src[src.find("const why = fl.rule").unwrap()..];
+        let why = &why[..why.find(";\n").unwrap()];
         let ban = &src[src.find("setHTML('flood'").unwrap()..];
         let ban = &ban[..ban.find(");").unwrap()];
-        let mut rest = ban;
-        let mut n = 0;
-        while let Some(i) = rest.find("${") {
-            let e = &rest[i + 2..];
-            let end = e.find('}').unwrap();
-            let expr = &e[..end];
-            assert!(
-                ["Number(fl.new_per_s) | 0", "unc"].contains(&expr),
-                "flood banner interpolates {expr:?}: numbers only, or esc()"
-            );
-            rest = &e[end..];
-            n += 1;
+        let interpolated = |text: &str| {
+            let mut rest = text;
+            let mut out = std::vec::Vec::new();
+            while let Some(i) = rest.find("${") {
+                let e = &rest[i + 2..];
+                let end = e.find('}').unwrap();
+                out.push(std::string::String::from(&e[..end]));
+                rest = &e[end..];
+            }
+            out
+        };
+        let w = interpolated(why);
+        assert_eq!(w, ["Number(fl.minute) | 0", "Number(fl.active) | 0", "Number(fl.new_per_s) | 0"], "{why}");
+        let b = interpolated(ban);
+        for expr in &b {
+            assert!(["why", "unc"].contains(&expr.as_str()), "flood banner interpolates {expr:?}: numbers only, or esc()");
         }
-        assert_eq!(n, 2);
+        assert_eq!(b.len(), 2);
         // The unconfirmed marking is a class and plain text (no style
         // attribute, which the CSP would block).
         assert!(src.contains(".trk.unc{"));
