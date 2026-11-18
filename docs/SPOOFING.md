@@ -617,7 +617,7 @@ Tensions, and what was chosen (the owner delegated these):
   the radar draws the other claim as a hollow "?" diamond joined to the
   shown position. Phone page: a dashed DISPUTED tag (not the alert colour)
   and a section with both positions, how far apart, the other's source and
-  what else differs. Evidence: event 23 `id_disputed`, text `track 7
+  what else differs. Evidence: event 25 `id_disputed`, text `track 7
   SerialNumber 1ZZZ9FAKE00001: two transmitters claim this ID; another
   Remote ID claim 2163 m from the shown one. Neither is verified.` No
   buzzer: a dispute does not mean a new drone.

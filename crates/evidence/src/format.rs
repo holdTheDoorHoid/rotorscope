@@ -249,7 +249,8 @@ pub enum EventCode {
     /// ID, 3 a second ID), the other claim's source (1: 0 Remote ID, 1
     /// DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none).
     /// Text: the ID, how far apart, and that neither is verified.
-    IdDisputed = 23,
+    /// (Codes 23 and 24 are taken by the acoustic work: `sound`, `sound_clip`.)
+    IdDisputed = 25,
 }
 
 impl EventCode {
@@ -278,7 +279,7 @@ impl EventCode {
             20 => SpoofSuspect,
             21 => LinkForgery,
             22 => AircraftConflict,
-            23 => IdDisputed,
+            25 => IdDisputed,
             _ => return None,
         })
     }
