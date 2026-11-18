@@ -133,13 +133,21 @@ pub type Out = heapless::Deque<(u8, Frame), 8>;
 /// health for the deaf-node and node-shed checks. Kept apart from `out` so a
 /// flood that fills `out` cannot cost the very report that shows it, and
 /// never logged as evidence. One per node (the latest of each wins).
+/// Packed (20 bytes): `GatewayLink` lives in the main loop's frame.
 #[derive(Clone, Copy)]
 pub struct NodeDue {
     pub node: u8,
-    /// Role, roles it can take, plan.
-    pub status: Option<(link::NodeRole, u8, u16)>,
-    /// Uptime us, frames seen, drop total.
-    pub stats: Option<(u64, u32, u32)>,
+    /// From a Status: role (`None`: no Status pending), roles it can take,
+    /// plan.
+    pub role: Option<link::NodeRole>,
+    pub can: u8,
+    pub plan: u16,
+    /// From a Stats: node uptime ms (low 32 bits; a wrap reads as a reboot,
+    /// which only restarts the checks), frames seen, drop total.
+    pub has_stats: bool,
+    pub up_ms: u32,
+    pub seen: u32,
+    pub dropped: u32,
 }
 pub type StatsDue = heapless::Vec<NodeDue, { MAX_RELAYED + 1 }>;
 
@@ -407,19 +415,7 @@ impl<'d> GatewayLink<'d> {
                 if let Frame::Hello { role: link::NodeRole::Gateway, firmware, .. } = &f {
                     stats.gw_hello = firmware.clone();
                 }
-                match &f {
-                    Frame::Stats { uptime_us, frames_seen, dropped, .. } => {
-                        if let Some(d) = q.due(0) {
-                            d.stats = Some((*uptime_us, *frames_seen, *dropped));
-                        }
-                    }
-                    Frame::Status { role, can, plan } => {
-                        if let Some(d) = q.due(0) {
-                            d.status = Some((*role, *can, *plan));
-                        }
-                    }
-                    _ => {}
-                }
+                q.health(0, &f);
                 if is_data(&f) {
                     q.push(0, f);
                 }
@@ -462,20 +458,15 @@ impl<'d> GatewayLink<'d> {
                 n.role = Some(*role);
                 n.can = *can;
                 n.plan = *plan;
-                if let Some(d) = q.due(i as u8 + 1) {
-                    d.status = Some((*role, *can, *plan));
-                }
             }
-            Frame::Stats { uptime_us, frames_seen, rid_found, dropped, .. } => {
+            Frame::Stats { uptime_us, rid_found, dropped, .. } => {
                 n.rid_found = *rid_found;
                 n.dropped = *dropped;
                 n.uptime_s = (*uptime_us / 1_000_000) as u32;
-                if let Some(d) = q.due(i as u8 + 1) {
-                    d.stats = Some((*uptime_us, *frames_seen, *dropped));
-                }
             }
             _ => {}
         }
+        q.health(i as u8 + 1, &f);
         if is_data(&f) {
             q.push(i as u8 + 1, f);
         }
@@ -492,17 +483,36 @@ struct Queues<'a> {
 }
 
 impl Queues<'_> {
-    /// The pending entry for `node` (`None`: no room, cannot happen with
-    /// one per node number).
-    fn due(&mut self, node: u8) -> Option<&mut NodeDue> {
+    /// Keep `node`'s latest Status or Stats for the tracker. Out of line:
+    /// `poll` inlines into the main loop, whose frame is the P4's tightest
+    /// stack budget.
+    #[inline(never)]
+    fn health(&mut self, node: u8, f: &Frame) {
+        if !matches!(f, Frame::Status { .. } | Frame::Stats { .. }) {
+            return;
+        }
         let i = match self.stats.iter().position(|x| x.node == node) {
             Some(i) => i,
             None => {
-                self.stats.push(NodeDue { node, status: None, stats: None }).ok()?;
+                let empty = NodeDue { node, role: None, can: 0, plan: 0, has_stats: false, up_ms: 0, seen: 0, dropped: 0 };
+                if self.stats.push(empty).is_err() {
+                    return;
+                }
                 self.stats.len() - 1
             }
         };
-        self.stats.get_mut(i)
+        let d = &mut self.stats[i];
+        match f {
+            Frame::Status { role, can, plan } => {
+                (d.role, d.can, d.plan) = (Some(*role), *can, *plan);
+            }
+            Frame::Stats { uptime_us, frames_seen, dropped, .. } => {
+                d.has_stats = true;
+                d.up_ms = (*uptime_us / 1000) as u32;
+                (d.seen, d.dropped) = (*frames_seen, *dropped);
+            }
+            _ => {}
+        }
     }
 
     fn push(&mut self, node: u8, f: Frame) {

@@ -147,21 +147,28 @@ impl App {
             };
             self.take(gw, ev, actx, node, f, now);
         }
-        // Nodes' Status and Stats: role and plan, then the deaf-node and
-        // node-shed checks (not evidence).
-        while let Some(d) = gw.stats_due.pop() {
-            if let Some((role, can, plan)) = d.status {
-                self.tracker.ingest_status(d.node, role, can, plan, now);
-            }
-            if let Some((up, seen, dropped)) = d.stats {
-                let _ = self.tracker.ingest_node_stats(d.node, up, seen, dropped, now);
-            }
-        }
+        self.node_health(gw, now);
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
         self.announce_disputes(ev, now);
         self.announce_conflicts(ev, now);
+    }
+
+    /// Nodes' Status and Stats: role and plan, then the deaf-node and
+    /// node-shed checks (not evidence). Out of line: the main loop's frame
+    /// is the P4's tightest stack budget.
+    #[inline(never)]
+    fn node_health(&mut self, gw: &mut GatewayLink<'_>, now: u64) {
+        while let Some(d) = gw.stats_due.pop() {
+            if let Some(role) = d.role {
+                self.tracker.ingest_status(d.node, role, d.can, d.plan, now);
+            }
+            if d.has_stats {
+                let up_us = u64::from(d.up_ms) * 1000;
+                let _ = self.tracker.ingest_node_stats(d.node, up_us, d.seen, d.dropped, now);
+            }
+        }
     }
 
     /// One frame: the evidence log first (raw bytes, always), then whoever
