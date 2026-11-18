@@ -177,7 +177,8 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         if gps.module.is_some() { "\"" } else { "" },
         gps.module.map_or("null", |m| m.name()),
         if gps.module.is_some() { "\"" } else { "" },
-        gps.version,
+        // Reported by the GPS module: never printed as received.
+        link::printable::JsonPrintable(&gps.version),
         gps.baud(),
         gps.cfg.name(),
         st.frames_ok,
@@ -245,7 +246,8 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
         s.uart_err,
         s.ring_full,
         gw.nodes.len(),
-        s.gw_hello,
+        // From a link frame: never printed as received.
+        link::printable::JsonPrintable(&s.gw_hello),
         console::DROPS.load(core::sync::atomic::Ordering::Relaxed),
     );
     // Wired bus (Phase 5a): a summary here, every node's counters on the
