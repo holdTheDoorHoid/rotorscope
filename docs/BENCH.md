@@ -835,6 +835,53 @@ still give `"intact":true` (compare the capture CRC) and identical decodes, and 
 0 over a ten-minute soak with a 10 Hz beacon; (2) a `poll` hook in `decode_span` stages; measure
 the longest gap between hook calls (it must stay under 1 ms) and the decode-time cost.
 
+## GPS time and trust scenarios (WP-12, 2026-11-18, compile-checked only)
+
+No real GPS receiver has been on the P4 hub yet; its GPS path has only run
+against the on-chip emulation (`firmware/hub-p4/src/gpsloop.rs`). These
+scripted scenarios make the emulated receiver misbehave so the hub's reaction
+(docs/GNSS-INTEGRITY.md "Trust and holding", "Time", "Home") can be watched.
+**Not yet run.** Nothing transmits; leave the UART3-IN header, GPIO29 and
+GPIO30 unconnected, as for any `gpsloop` run. The scenario is chosen at
+build time:
+
+```sh
+cd firmware/hub-p4
+GPSLOOP_SCENARIO=step1s ROTORSCOPE_BENCH=1 cargo build --release --features gpsloop
+#   scenarios: honest (default), step1s, step500, drift, spoofboot, early
+#   gpsloop-m10 for the u-blox emulation (no satellite table: spoofboot does nothing there)
+```
+
+The emulated UTC starts one day after the firmware's build date. Loop builds
+keep their GPS memory in `ROTORSCP/GPSLOOP.TXT`, never `GPSMEM.TXT`, and do
+not remember the time (the emulation restarts its clock at every boot).
+Every run starts with `hub-p4: gpsloop scenario <name> (GPSLOOP_SCENARIO;
+emulated UTC starts <s> s)`. Watch the console and the `{"t":"hub"}` line's
+`gps` object: `trusted`, `untrusted_pos`, `untrusted_time`, `time_held`,
+`time_step_ms`, `time_floor`, `home`, `home_pending`.
+
+| Scenario | What the emulated receiver does | Expected |
+|---|---|---|
+| `honest` | as before | `trusted:true` from about 10 s after the first fix; `time_step_ms` within +-5 (PPS); no `gps integrity` line, no `gnss_*` evidence event for an hour |
+| `step1s` | from second 120 every epoch's UTC is 1 s early | `gpsloop scenario step1s begins now`, then within 2 s `gps integrity ok -> suspect_spoofing: possible GPS spoofing: GPS time jumped -1000 ms against the hub's clock; holding last trusted position and time`. `trusted:false`, `time_held:true` for as long as it runs (it never ends); evidence context goes `free_running` after 2.5 s; the aero `TimeSync` keeps the hub's held clock, not the stepped one |
+| `step500` | at second 120 the epochs and the PPS edge move 500 ms later | as `step1s` with about `-500 ms` |
+| `drift` | from second 120 each epoch 2 ms later than the last (2000 ppm) | with PPS (both emulations drive it) the alarm comes about 3-5 s after `begins now`, `time_step_ms` around -5 to -10; then held as above |
+| `spoofboot` | until second 600 every satellite at 46 dB-Hz | within 5 s of the first fix `gps integrity ok -> spoofing: GPS spoofing: ... satellites all near 46 dB-Hz ...`; from the start `untrusted_pos:true`, `untrusted_time:true`, `utc_ms:null`, `own:null`; health page `GPS no trusted position/time`; evidence records time source `untrusted`; no `TimeSync` sent (aero `syncs` does not grow); the SD log opens after 90 s numbered `LOGnnnnn.CSV`. After `spoofer off now` (second 600): back to `ok` 30 s later, `trusted:true` 10 s after that, then an evidence `UTC set from GPS` clock event |
+| `early` | honest; the hub is told at boot it last trusted a time one day later | `gpsloop early: the hub now remembers trusting UTC ...`; at the first fix `gps integrity ok -> suspect_spoofing: possible GPS spoofing: GPS time 86397 s before the build date or the last time the hub trusted` (about a day); `untrusted_time:true`, `time_floor:true`. Console `T`: `GPS time accepted by the operator (console)`, then `ok` after 30 s and `trusted:true` 10 s later |
+
+Home (any loop build, about 16 minutes): `GPS home learned: 39.9526000
+-75.1652000 (15 min of steady fixes); remembered on the card` and a
+`GPSLOOP.TXT` with a `home` line. Reboot: `GPS home loaded from the card`.
+A placed home far away (console `L`, `home 39.9 -75.2`) makes the next fixes
+alarm `off_home`; after 15 minutes `GPS: the hub seems to stand at ... NOT
+adopted`, the Settings row reads `New home / Accept here`; SEL (or console
+`H`) logs `GPS home confirmed` only if home is not placed (a placed home
+answers that the site file wins: `home clear` first).
+
+Link and node side (host-tested only): with a keyed kit an honest run keeps
+`"late":0` on every node's `link_auth` line and `"sync_refused":0` on an aero
+node's `stats` line.
+
 ## Bench results, 2026-11-18
 
 The first hardware pass of the crash-recovery, bench-fence and origin-check work.
