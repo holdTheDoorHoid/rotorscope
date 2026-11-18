@@ -29,9 +29,10 @@
 //!   number generator, so an attacker cannot aim at a slot), and a slot held
 //!   by a known source is not given up while that source keeps sending: a
 //!   flood cannot evict a drone the node already follows. A known source is
-//!   limited to one frame per [`KNOWN_GAP_MS`] (12.5 a second; Wi-Fi Remote
-//!   ID beacons come at 1 to 10 a second), so a forger spoofing a known
-//!   address cannot use the reserved slots any faster than that.
+//!   limited to [`KNOWN_RATE`] frames a second (bursts of [`KNOWN_BURST`];
+//!   Wi-Fi Remote ID comes at 1 to 10 a second per transport, and a drone
+//!   may send beacons and NAN both), so a forger spoofing a known address
+//!   cannot use the reserved slots any faster than that.
 //!
 //! Every frame turned away is counted per kind ([`Shed::dropped`]), so the
 //! node can say what it shed.
@@ -128,7 +129,7 @@ impl Kind {
     }
 
     /// `(per second, burst)` for kinds with a budget. Known Remote ID is
-    /// limited per source instead ([`KNOWN_GAP_MS`]); health is the node's
+    /// limited per source instead ([`KNOWN_RATE`]); health is the node's
     /// own, a few frames a second; `Other` follows a budgeted frame or is a
     /// bench frame.
     ///
@@ -187,9 +188,10 @@ impl Bucket {
 pub const PROBATION_MS: Ms = 2_500;
 /// A known source silent this long is forgotten (its slot is free again).
 pub const FORGET_MS: Ms = 30_000;
-/// Shortest gap between two frames of one known source (12.5 a second).
-pub const KNOWN_GAP_MS: Ms = 80;
-/// Slots in the node's source table (16 bytes each).
+/// Frames a second one known source may send on, and its burst.
+pub const KNOWN_RATE: u16 = 20;
+pub const KNOWN_BURST: u16 = 10;
+/// Slots in the node's source table (24 bytes each).
 pub const RID_SOURCES: usize = 32;
 
 #[derive(Clone, Copy, Debug)]
@@ -198,10 +200,11 @@ struct Source {
     /// 0: empty slot; 1: heard once (probation); 2: known.
     hits: u8,
     heard: Ms,
-    sent: Ms,
+    /// The source's own rate limit, used once it is known.
+    bucket: Bucket,
 }
 
-const EMPTY: Source = Source { mac: [0; 6], hits: 0, heard: 0, sent: 0 };
+const EMPTY: Source = Source { mac: [0; 6], hits: 0, heard: 0, bucket: Bucket::new(KNOWN_RATE, KNOWN_BURST) };
 
 /// Remote ID sources by address: known (heard twice within
 /// [`PROBATION_MS`]) or new. See the module doc.
@@ -216,7 +219,7 @@ pub struct RidSources<const N: usize> {
 pub enum Class {
     Known,
     New,
-    /// A known source sending faster than one frame per [`KNOWN_GAP_MS`].
+    /// A known source sending faster than [`KNOWN_RATE`].
     TooFast,
 }
 
@@ -249,15 +252,15 @@ impl<const N: usize> RidSources<N> {
                     s.hits = 1;
                     return Class::New;
                 }
-                if elapsed(now, s.sent) < KNOWN_GAP_MS {
+                if !s.bucket.take(now) {
                     return Class::TooFast;
                 }
-                s.sent = now;
                 return Class::Known;
             }
             if gap <= PROBATION_MS {
                 s.hits = 2;
-                s.sent = now;
+                s.bucket = Bucket::new(KNOWN_RATE, KNOWN_BURST);
+                s.bucket.take(now);
                 return Class::Known;
             }
             return Class::New;
@@ -268,7 +271,7 @@ impl<const N: usize> RidSources<N> {
             _ => elapsed(now, s.heard) > FORGET_MS,
         };
         if free {
-            *s = Source { mac, hits: 1, heard: now, sent: now };
+            *s = Source { mac, hits: 1, heard: now, bucket: Bucket::new(KNOWN_RATE, KNOWN_BURST) };
         }
         Class::New
     }
@@ -280,7 +283,7 @@ impl<const N: usize> RidSources<N> {
 }
 
 /// The node's admission state: budgets, Remote ID sources, drop counts.
-/// About 650 bytes.
+/// About 900 bytes.
 #[derive(Clone, Debug)]
 pub struct Shed {
     pub rid: RidSources<RID_SOURCES>,
@@ -563,10 +566,17 @@ mod tests {
         let mut r = RidSources::<32>::new(7);
         assert_eq!(r.classify(REAL, 0), Class::New);
         assert_eq!(r.classify(REAL, 1000), Class::Known);
-        assert_eq!(r.classify(REAL, 1050), Class::TooFast);
-        assert_eq!(r.classify(REAL, 1100), Class::Known);
+        // Beacon and NAN together at 10 Hz: all through.
+        for ms in (1100..11_000u32).step_by(100) {
+            assert_eq!(r.classify(REAL, ms), Class::Known);
+            assert_eq!(r.classify(REAL, ms + 2), Class::Known);
+        }
+        // A forger on the known address: its burst, then the rate.
+        let fast = (0..1000u32).filter(|&i| r.classify(REAL, 20_000 + i) == Class::Known).count();
+        assert!((KNOWN_BURST as usize..=KNOWN_BURST as usize + 21).contains(&fast), "{fast}");
+        assert_eq!(r.classify(REAL, 21_100), Class::Known);
         // Silent past FORGET_MS: probation again.
-        assert_eq!(r.classify(REAL, 1100 + FORGET_MS + 1), Class::New);
+        assert_eq!(r.classify(REAL, 21_100 + FORGET_MS + 1), Class::New);
         // Heard once, then again too late: still new.
         let mut r = RidSources::<32>::new(7);
         assert_eq!(r.classify(REAL, 0), Class::New);
