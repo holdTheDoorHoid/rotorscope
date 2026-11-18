@@ -56,8 +56,8 @@ goes through the gateway:
 
 1. **Hub to gateway, wire.** The hub writes `Command::To { node }` then
    `Command::Assign(..)` (postcard + COBS, like every link frame) on its
-   UART TX, 921600 baud. On the P4 that is the UART3-IN header **TX =
-   GPIO27**, wired to the gateway's **D7 = GPIO12** (its UART1 RX). The hub
+   UART TX, 921600 baud. On the P4 that is the UART1 header **TX =
+   GPIO47**, wired to the gateway's **D7 = GPIO12** (its UART1 RX). The hub
    decides every 2 s, sends a changed assignment at once and resends every
    assignment every 5 s.
 2. **Gateway to node, air.** The gateway pairs each `To` with the `Assign`

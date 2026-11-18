@@ -1,4 +1,4 @@
-//! Interrupt-driven receive rings for the slow serial inputs (GPS on UART1,
+//! Interrupt-driven receive rings for the slow serial inputs (GPS on UART1, wired to the UART3-IN header;
 //! ADSBee on UART4), the same pattern as the gateway link (`links.rs`).
 //!
 //! The main loop can be away for ~7 ms (one screen band, or an SD block),

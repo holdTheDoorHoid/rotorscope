@@ -1,10 +1,10 @@
 //! Bench only (`--features gpsloop` or `gpsloop-m10`): an on-chip loop-back
 //! test of the GPS and ADS-B inputs, like the gateway self-test (BRINGUP
-//! step 7). Nothing outside the chip is driven or needed; **leave the UART1
+//! step 7). Nothing outside the chip is driven or needed; **leave the UART3-IN
 //! header, GPIO29 and GPIO30 unconnected while it runs**.
 //!
 //! - **GPS.** UART2 plays the receiver: its TX drives the GPS RX pad
-//!   (GPIO48) and its RX listens to the hub's GPS TX pad (GPIO47), so the
+//!   (GPIO28) and its RX listens to the hub's GPS TX pad (GPIO27), so the
 //!   hub's probe and configuration commands really leave UART1 and come back
 //!   through the pads. `gpsloop`: a Quectel LC29H(AA) at 115200 that answers
 //!   `$PQTMVERNO`, ACKs `$PAIR062` and `$PQTMCFGPPS`, and sends a dual-band
@@ -63,15 +63,15 @@ fn xor(b: &[u8]) -> u8 {
 
 impl Loop {
     pub fn new(uart2: esp_hal::peripherals::UART2<'static>) -> Self {
-        // SAFETY: bench only. GPIO48 is the GPS RX pad (UART1 RX listens to
-        // it); GPIO47 the GPS TX pad (UART1 drives it). UART2 drives 48 and
-        // listens to 47: the pads are shared on purpose.
-        let tx = unsafe { esp_hal::peripherals::GPIO48::steal() };
-        let rx = unsafe { esp_hal::peripherals::GPIO47::steal() };
+        // SAFETY: bench only. GPIO28 is the GPS RX pad (UART1 RX listens to
+        // it); GPIO27 the GPS TX pad (UART1 drives it). UART2 drives 28 and
+        // listens to 27: the pads are shared on purpose.
+        let tx = unsafe { esp_hal::peripherals::GPIO28::steal() };
+        let rx = unsafe { esp_hal::peripherals::GPIO27::steal() };
         let baud = if M10 { 9_600 } else { 115_200 };
         let uart = Uart::new(uart2, Config::default().with_baudrate(baud)).expect("UART2").with_tx(tx).with_rx(rx);
         crate::println!(
-            "hub-p4: gpsloop: emulating {} on UART2 (TX GPIO48, RX GPIO47) at {baud}; PPS on GPIO29; CSBee on GPIO30",
+            "hub-p4: gpsloop: emulating {} on UART2 (TX GPIO28, RX GPIO27) at {baud}; PPS on GPIO29; CSBee on GPIO30",
             if M10 { "u-blox MAX-M10S" } else { "Quectel LC29H(AA)" }
         );
         Self {

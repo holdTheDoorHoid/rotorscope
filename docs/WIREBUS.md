@@ -1,7 +1,7 @@
 # Wired bus: many nodes on one hub UART
 
 PLAN.md Phase 5a. The radio nodes (XIAO ESP32-C5 boards running node-wifi,
-node-ble or node-sdr) share **one** UART of the P4 hub, UART3, over two
+node-ble or node-sdr) share **one** UART of the P4 hub (the UART3 peripheral, on the board's UART1 header since 2026-11-17), over two
 signal wires and a ground. The hub asks each node in turn for its reports.
 Nothing in the kit transmits on the air: the nodes only listen, and the
 ESP-NOW gateway C5 becomes one more listener.
@@ -175,8 +175,8 @@ the bus against the ESP-NOW figures above (the bench checklist, step 8).
 |---|---|---|---|
 | XIAO ESP32-C5 node (every image) | RX, from the command wire | **D7 = GPIO12** | same pin as the point-to-point wired build |
 | | TX, onto the return wire | **D9 = GPIO9** | open-drain. Not D6 (GPIO11): the chip's ROM prints its boot text there, push-pull, at every reset, which would garble the bus whenever any node reboots. GPIO9 is not a strapping pin and no image uses it |
-| P4 hub (CrowPanel Advanced 5"), UART3-IN header | TX, the command wire | **GPIO27** (header "TX") | |
-| | RX, the return wire | **GPIO28** (header "RX") | |
+| P4 hub (CrowPanel Advanced 5"), UART1 header (DIP switch 1 on UART1) | TX, the command wire | **GPIO47** (header "TX") | |
+| | RX, the return wire | **GPIO48** (header "RX") | |
 
 **Open drain, how.** esp-hal 1.2 supports it on the C5:
 `node_common::bus::uart` makes the pin an `Output` with
@@ -200,18 +200,19 @@ a 5 V pin to any of the wires below. Check the pin names printed on each
 board; the table above says which pin is which.
 
 1. **Ground.** Connect a GND pin of every node to a GND pin of the P4 (the
-   UART3-IN header has one). Every board must share ground, or nothing works.
-2. **The command wire (hub to nodes).** Connect the P4's UART3-IN **TX** pin
-   (GPIO27) to pin **D7** of every node. One wire, branching to each node.
+   UART1 header has one). Every board must share ground, or nothing works.
+2. **The command wire (hub to nodes).** Connect the P4's UART1-header **TX** pin
+   (GPIO47) to pin **D7** of every node. One wire, branching to each node.
 3. **(Optional, recommended)** Put a 1 kohm resistor in each node's D7 lead,
    at the node. It protects a node that is switched off while the hub is on.
-4. **The return wire (nodes to hub).** Connect the P4's UART3-IN **RX** pin
-   (GPIO28) to one wire that runs past every node. At each node, connect a
+4. **The return wire (nodes to hub).** Connect the P4's UART1-header **RX** pin
+   (GPIO48) to one wire that runs past every node. At each node, connect a
    diode between that wire and the node's pin **D9**: the end of the diode
    with the **stripe goes to D9**, the plain end to the return wire.
 5. **The pull-up.** Connect the 470 ohm resistor between the return wire and
-   **3.3 V**, at the P4 end. The P4's 3.3 V is on the UART1 header (the pin
-   the GPS also takes its power from; share it) or on the I2C header. Only
+   **3.3 V**, at the P4 end. The P4's 3.3 V is on the UART1 header (the
+   same header as the bus; the GPS takes its power from a 3.3 V pin too;
+   share it) or on the I2C header. Only
    one resistor for the whole bus.
 6. **Power the nodes separately.** Do not power the nodes from the P4's 5 V
    header pin: it is not meant for several C5 boards (each can draw up to
@@ -222,10 +223,10 @@ board; the table above says which pin is which.
    about **1 m**. Twist each signal wire with a ground wire if you can.
 
 ```
- P4 UART3-IN                 node 1            node 2           node N
-   TX (GPIO27) ----+---------- D7      +-------- D7      +------- D7
+ P4 UART1 hdr               node 1            node 2           node N
+   TX (GPIO47) ----+---------- D7      +-------- D7      +------- D7
                    |                   |                 |
-   RX (GPIO28) ----)----+------|<|---- D9  +---|<|---- D9  +--|<|-- D9
+   RX (GPIO48) ----)----+------|<|---- D9  +---|<|---- D9  +--|<|-- D9
                    |    |    (stripe at D9)
    3.3 V ----[470R]-----+
    GND -------------------------- GND -------------- GND ------------ GND
@@ -263,7 +264,7 @@ combined.
 
 ## What the hub prints
 
-* At boot: `hub-p4: node link on UART3 ... wired bus`.
+* At boot: `hub-p4: node link on the UART1 header ... wired bus`.
 * Events: `hub-p4: bus node aa:bb:..:ff joined as 3` (`(again: ...)` for a
   rejoin), `stopped answering`, `answering again`.
 * In the 1 Hz `{"t":"hub"}` line: `"bus":{"mode","nodes","present","polls",
@@ -281,22 +282,22 @@ answers, resends, empty, stale (polls skipped because it was late), joins,
 granted, lost (addresses given up), cmds (Assigns taken), bad, frames, bytes,
 rx_err, tx_err.
 
-## Old gateways on UART3
+## Old gateways on the node link
 
 The hub tells the two kinds of device apart by itself. A device that sends
 whole `link` frames without being asked (an ESP-NOW gateway, or one
 point-to-point node) while no bus node answers is read the old way: polling
-stops and the hub prints `UART3 carries an unpolled stream`. After 10 s of
+stops and the hub prints `node link carries an unpolled stream`. After 10 s of
 silence it tries the bus again. So a kit with the old gateway keeps working
 on the new hub firmware. A gateway and bus nodes cannot share the two wires
 (the gateway's TX is push-pull and talks whenever it likes); during a
 migration either flash the gateway C5 as a bus node, or keep the old gateway
-on UART3 until all nodes are wired. `--no-default-features` builds a hub that
+on the node link until all nodes are wired. `--no-default-features` builds a hub that
 never polls.
 
 ## Bench checklist (needs the wiring above)
 
-1. Hub alone, nothing on UART3: `"bus":{"mode":"bus","nodes":0,...}`, no
+1. Hub alone, nothing on the node link: `"bus":{"mode":"bus","nodes":0,...}`, no
    errors.
 2. One node (`NODE_BUS=1 tools/flash-node.sh c5a`): within a second the hub
    prints `joined as 1`; the node prints `"addr":1`. In the `{"t":"bus"}`

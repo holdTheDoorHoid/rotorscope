@@ -72,19 +72,20 @@ const STC8_BACKLIGHT: u8 = 0x20;
 const GT911_ADDRS: [u8; 2] = [0x5D, 0x14];
 
 
-/// GPIO28 for the UART3 receiver. With `selftest` the same pad is also driven
-/// by UART2's transmitter, so the pin is handed out twice on purpose.
-fn unsafe_pin28() -> esp_hal::peripherals::GPIO28<'static> {
-    // SAFETY: bring-up only. Without `selftest`, `main` never uses GPIO28
+/// GPIO48 (UART1 header "RX") for the node link's receiver (UART3 peripheral).
+/// With `selftest` the same pad is also driven by UART2's transmitter, so the
+/// pin is handed out twice on purpose.
+fn unsafe_link_rx() -> esp_hal::peripherals::GPIO48<'static> {
+    // SAFETY: bring-up only. Without `selftest`, `main` never uses GPIO48
     // otherwise; with it, a second user drives the pad as output (see below).
-    unsafe { esp_hal::peripherals::GPIO28::steal() }
+    unsafe { esp_hal::peripherals::GPIO48::steal() }
 }
 
 #[cfg(feature = "selftest")]
 mod selftest {
     //! Sends a fixed sequence (Via, Hello, Via, Status, Via, Detection, a
-    //! direct Stats) every 100 ms from UART2 TX on GPIO28, the gateway RX
-    //! pin, and reads the hub's commands back from the UART3 TX pad (GPIO27)
+    //! direct Stats) every 100 ms from UART2 TX on GPIO48, the node-link RX
+    //! pin, and reads the hub's commands back from the node-link TX pad (GPIO47)
     //! on UART2 RX, decoding them as the gateway would.
     use esp_hal::time::{Duration, Instant};
     use esp_hal::uart::{Config, Uart};
@@ -103,12 +104,12 @@ mod selftest {
 
     impl Sender {
         pub fn new(uart: esp_hal::peripherals::UART2<'static>) -> Self {
-            // SAFETY: bring-up only: GPIO27 is UART3's TX pad; we only listen to it.
-            let pin27 = unsafe { esp_hal::peripherals::GPIO27::steal() };
+            // SAFETY: bring-up only: GPIO47 is the node link's TX pad; we only listen to it.
+            let pin47 = unsafe { esp_hal::peripherals::GPIO47::steal() };
             let uart = Uart::new(uart, Config::default().with_baudrate(super::links::BAUD))
                 .expect("UART2")
-                .with_tx(super::unsafe_pin28())
-                .with_rx(pin27);
+                .with_tx(super::unsafe_link_rx())
+                .with_rx(pin47);
             Self {
                 uart,
                 last: Instant::now(),
@@ -247,9 +248,11 @@ fn main() -> ! {
         panel
     });
 
-    let mut gw = links::GatewayLink::new(p.UART3, unsafe_pin28(), p.GPIO27);
+    // Node link on the UART1 header (RX GPIO48, TX GPIO47), driven by the
+    // UART3 peripheral; the GPS has the UART3-IN header. Swapped 2026-11-17.
+    let mut gw = links::GatewayLink::new(p.UART3, unsafe_link_rx(), p.GPIO47);
     println!(
-        "hub-p4: node link on UART3 RX GPIO28, TX GPIO27 at {} baud: {}",
+        "hub-p4: node link on the UART1 header RX GPIO48, TX GPIO47 at {} baud: {}",
         links::BAUD,
         if bus::BUS_DEFAULT { "wired bus (an ESP-NOW gateway is recognised and read as before)" } else { "gateway / point-to-point only" }
     );
@@ -275,12 +278,13 @@ fn main() -> ! {
         println!("hub-p4: web head feed on UART2 TX GPIO{} at {} baud", webhead::TX_PIN, webhead::BAUD);
     }
 
-    // GPS on UART1 (header RX GPIO48 / TX GPIO47), PPS on GPIO29; ADSBee on
+    // GPS on the UART3-IN header (RX GPIO28 / TX GPIO27, UART1 peripheral),
+    // PPS on GPIO29; ADSBee on
     // UART4 RX GPIO30. See gps.rs, adsbee.rs and PARITY.md.
     let gps_uart = esp_hal::uart::Uart::new(p.UART1, uartring::gps_rx::config(gps::BAUDS[0]))
         .expect("UART1")
-        .with_rx(p.GPIO48)
-        .with_tx(p.GPIO47);
+        .with_rx(p.GPIO28)
+        .with_tx(p.GPIO27);
     uartring::gps_rx::install(gps_uart);
     let mut io = esp_hal::gpio::Io::new(p.IO_MUX);
     gps::pps_init(&mut io, Flex::new(p.GPIO29));
@@ -308,7 +312,7 @@ fn main() -> ! {
     {
         adsbee.raw.table = aero_es.take();
     }
-    println!("hub-p4: gps on UART1 RX GPIO48 TX GPIO47 (hunting {:?} baud), PPS GPIO29; adsbee on UART4 RX GPIO30 at {}", gps::BAUDS, adsb::DEFAULT_BAUD);
+    println!("hub-p4: gps on the UART3-IN header RX GPIO28 TX GPIO27 (hunting {:?} baud), PPS GPIO29; adsbee on UART4 RX GPIO30 at {}", gps::BAUDS, adsb::DEFAULT_BAUD);
     #[cfg(feature = "gpsloop")]
     let mut gpsloop = gpsloop::Loop::new(p.UART2);
     #[cfg(feature = "modesloop")]
@@ -348,16 +352,8 @@ fn main() -> ! {
     #[cfg(feature = "webheadloop")]
     let mut whloop = webheadloop::Loop::new();
 
-    // SAFETY: each static is taken exactly once, here, before the loop.
-    let tracker = unsafe {
-        (&raw mut TRACKER).write(core::mem::MaybeUninit::new(app::HubTracker::new(tracker::Config {
-            // Project policy: open-link identifiers stay hidden unless built
-            // with `--features show-link-ids` (as the S3 hub).
-            show_link_ids: cfg!(feature = "show-link-ids"),
-            ..tracker::Config::default()
-        })));
-        (*(&raw mut TRACKER)).assume_init_mut()
-    };
+    let tracker = place_tracker(psram);
+    // SAFETY: the static is taken exactly once, here, before the loop.
     let band = unsafe { &mut *(&raw mut BAND) };
     let mut app = app::App::new(tracker, band);
     // Protocol 12: drone control links from the same nodes, in PSRAM.
@@ -872,7 +868,43 @@ fn print_gps_adsb(app: &app::App, gps: &gps::Gps, adsbee: &adsbee::Adsbee, now: 
     }
 }
 
-static mut TRACKER: core::mem::MaybeUninit<app::HubTracker> = core::mem::MaybeUninit::uninit();
+/// Where the tracker (~64 KB) lives in PSRAM. Until 2026-11-17 it was a
+/// static in internal RAM, and on this chip the main stack is whatever
+/// internal RAM the statics leave: with `main`'s ~65 KB frame that left about
+/// 7 KB below it, and the SD mount (plus an interrupt on top) overran the
+/// stack guard on every boot with a card in. In PSRAM it gives that 64 KB to
+/// the stack instead.
+pub const TRACKER_OFFSET: usize = 2 << 20;
+const _: () = assert!(rgb::H_RES * rgb::V_RES * 2 <= TRACKER_OFFSET, "framebuffer overlaps the tracker");
+const _: () = assert!(
+    TRACKER_OFFSET + core::mem::size_of::<app::HubTracker>() <= evlog::QUEUE_OFFSET,
+    "tracker overlaps the evidence queue"
+);
+
+/// Builds the tracker in PSRAM at [`TRACKER_OFFSET`]. The hub cannot run
+/// without PSRAM (it is inside the P4 package; a failed PSRAM test is a
+/// hardware fault), so it stops here with a message rather than overrun the
+/// stack later.
+#[inline(never)]
+fn place_tracker(psram: Option<(*mut u32, usize)>) -> &'static mut app::HubTracker {
+    let Some((base, size)) = psram else {
+        panic!("hub-p4: no PSRAM: the tracker lives there; cannot start");
+    };
+    assert!(size >= TRACKER_OFFSET + core::mem::size_of::<app::HubTracker>(), "PSRAM too small for the tracker");
+    // SAFETY: [TRACKER_OFFSET, + size_of) is inside PSRAM (checked above),
+    // used by nothing else (the asserts above: after the framebuffer, before
+    // the evidence queue), and 2 MB is aligned for any type. Called once.
+    unsafe {
+        let p = base.cast::<u8>().add(TRACKER_OFFSET).cast::<app::HubTracker>();
+        p.write(app::HubTracker::new(tracker::Config {
+            // Project policy: open-link identifiers stay hidden unless built
+            // with `--features show-link-ids` (as the S3 hub).
+            show_link_ids: cfg!(feature = "show-link-ids"),
+            ..tracker::Config::default()
+        }));
+        &mut *p
+    }
+}
 static mut FAA: core::mem::MaybeUninit<faa::Faa> = core::mem::MaybeUninit::uninit();
 static mut BAND: [embedded_graphics::pixelcolor::Rgb565; screen::WIDTH as usize * screen::BAND_ROWS] =
     [embedded_graphics::pixelcolor::Rgb565::new(0, 0, 0); screen::WIDTH as usize * screen::BAND_ROWS];

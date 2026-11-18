@@ -17,9 +17,9 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 | Touch | GT911, I2C 0x5D, INT 42, RST 36 |
 | Board I2C | SDA 45, SCL 46 (touch, STC8, PH2.0 header) |
 | UART0 | GPIO37 TX / 38 RX via the CH340 USB-C port (flash + log) |
-| UART1 header | 47 TX / 48 RX (shares the wireless-module socket SPI; DIP switch). **GPS** (2026-11-15) |
+| UART1 header | 47 TX / 48 RX (shares the wireless-module socket SPI; DIP switch 1 must select UART1), 3.3 V out. **Node link** (since 2026-11-17; GPS before) |
 | Wireless-module socket | GPIO26 CLK, 47/48 (shared with UART1), 29-32 (SX1262 BUSY/NSS/IRQ/NRST, nRF24 IRQ/CE/CS). With no module fitted: **GPIO29 = GPS PPS, GPIO30 = ADSBee TX in** (2026-11-15) |
-| UART3 header | 27 TX / 28 RX (XH2.54, also a 5 V input) |
+| UART3 header | 27 TX / 28 RX (XH2.54, also a 5 V input). **GPS** (since 2026-11-17; node link before). Its power pin is 5 V |
 | Web-head feed | UART2 TX on GPIO31 (wireless-module socket), 921600, to the web head's node-A RX; WEBHEAD.md (2026-11-15) |
 | Radio | ESP32-C6 on SDIO slot 1 (CMD 54, CLK 53, D0-D3 52/51/50/49), factory esp-hosted firmware; no UART/boot pads |
 | Factory image | Backed up: `~/Desktop/rotorscope-backups/elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
@@ -176,7 +176,7 @@ What the S3 hub does and the P4 now does too, and what it cannot yet, is in
 
 | Piece | What |
 |---|---|
-| `src/gps.rs` | GPS on **UART1** (header: hub RX GPIO48, hub TX GPIO47; DIP switch 1 on UART1), PPS on **GPIO29** (socket pin, rising-edge GPIO interrupt). Hunts 115200 / 9600 / 38400, detects u-blox MAX-M10S (UBX MON-VER) or Quectel LC29H (`$PQTMVERNO`), configures it for this boot only, publishes fix, UTC (PPS-anchored) and the sky view. **Untested with a real module** |
+| `src/gps.rs` | GPS on the **UART3-IN header** (hub RX GPIO28, hub TX GPIO27; UART1 peripheral; header power is 5 V), PPS on **GPIO29** (socket pin, rising-edge GPIO interrupt). Hunts 115200 / 9600 / 38400, detects u-blox MAX-M10S (UBX MON-VER) or Quectel LC29H (`$PQTMVERNO`), configures it for this boot only, publishes fix, UTC (PPS-anchored) and the sky view. **Untested with a real module** |
 | `src/adsbee.rs` | ADSBee CSBee on **UART4 RX GPIO30** (socket pin), 115200. **Untested with the real ADSBee** (not wired to the P4) |
 | `src/uartring.rs` | UART1/UART4 receive by interrupt into RAM rings (2 KB / 4 KB), like the gateway link |
 | `src/console.rs` | UART0 (the CH340 USB-C port) taken over from esp-println: log lines and JSON lines go through a 16 KB ring drained without waiting; JSON lines dropped whole when full. Commands `p` / `c` / `h` |

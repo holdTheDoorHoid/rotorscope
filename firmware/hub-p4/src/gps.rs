@@ -1,11 +1,13 @@
-//! GPS on the P4 hub: a u-blox MAX-M10S or a Quectel LC29H(AA) on UART1, PPS
+//! GPS on the P4 hub: a u-blox MAX-M10S or a Quectel LC29H(AA) on the UART3-IN header, PPS
 //! on a GPIO interrupt. **Untested with a real module**: built, host-tested
 //! (`crates/gnss`) and loop-back tested on the chip only (`--features
 //! gpsloop` / `gpsloop-m10`, see `gpsloop.rs` and BRINGUP.md).
 //!
 //! Wiring (PARITY.md, BRINGUP.md "GPS and ADS-B pins"):
-//! - UART1 header (PH2.0-4P, DIP switch 1 on UART1): GPS TX -> GPIO48 (hub
-//!   RX), hub TX GPIO47 -> GPS RX, 3V3, GND.
+//! - UART3-IN header (XH2.54): GPS TX -> GPIO28 (hub RX), hub TX GPIO27 ->
+//!   GPS RX, GND. Driven by the UART1 peripheral. **That header's power pin
+//!   is 5 V**: power a 3.3 V-only GPS from the UART1 or I2C header's 3V3.
+//!   (Until 2026-11-17 the GPS had the UART1 header and the nodes UART3-IN.)
 //! - PPS -> GPIO29 (wireless-module socket pin, free with no module fitted).
 //!
 //! The bytes go through `crates/gnss`; this module is the superloop driver:

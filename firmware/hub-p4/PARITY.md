@@ -20,7 +20,7 @@ to be the GPS / ADSBee on its own pins), never with the real modules.
 | Drone tracks from radio nodes | done | Through the ESP-NOW gateway (C5) on UART3. The S3 reads up to three wired nodes; the P4 reads one gateway that relays many nodes (and still accepts a wired node: `direct` frames). The P4 also handles protocol 4 (DroneID, RF, Wi-Fi drones), which the S3 does not |
 | Open FPV links table | done | Shared tracker. Identifiers hidden by default; `--features show-link-ids` now exists on the P4 too (**done this task**) |
 | Telling nodes what to listen to (coverage) | done | P4 only (BRINGUP step 13) |
-| **GPS position (own position)** | **done this task** | u-blox MAX-M10S *or* Quectel LC29H(AA) on the UART1 header, found automatically. Loop-back tested with both (below). **Untested with a real module** |
+| **GPS position (own position)** | **done this task** | u-blox MAX-M10S *or* Quectel LC29H(AA) on the UART3-IN header (UART1 header until 2026-11-17), found automatically. Loop-back tested with both (below). **Untested with a real module** |
 | **GPS time (UTC)** | **done this task** | From RMC (LC29H) or NAV-PVT (M10). Loop-back: `utc_src` `gps_pps` |
 | **GPS PPS (sub-millisecond time)** | **done this task** | GPIO29 edge interrupt; UTC anchored to the edge as on the S3. Loop-back: edges counted, anchor used |
 | **Distance and bearing to drones** | **done this task** | Own position now goes into the tracker once a second (GPS first, manual second, same rule as the S3). Loop-back: the test aircraft showed `dist_m 1401.1, brg 37.6` in the console JSON. Screen not checked by eye |
@@ -50,16 +50,16 @@ to be the GPS / ADSBee on its own pins), never with the real modules.
 
 | What | P4 pin | Where on the board |
 |---|---|---|
-| GPS TX -> hub RX | GPIO48 | UART1 header (PH2.0-4P) "RX". DIP switch 1 must select UART1, not the wireless module |
-| hub TX -> GPS RX | GPIO47 | UART1 header "TX" |
-| GPS power | 3V3, GND | UART1 header (3.3 V out, 1 A max) |
+| GPS TX -> hub RX | GPIO28 | UART3-IN header (XH2.54) "RX" |
+| hub TX -> GPS RX | GPIO27 | UART3-IN header "TX" |
+| GPS power | 3V3, GND | UART1 header (3.3 V out, 1 A max) or I2C header. **Not** the UART3-IN power pin: it is 5 V |
 | GPS PPS | GPIO29 | Wireless-module socket (the SX1262 BUSY / nRF24 IRQ pin). Free while no radio module is fitted |
 | ADSBee TX -> hub | GPIO30 | Wireless-module socket (the SX1262 NSS pin). Plus GND |
-| Gateway link | GPIO27 / 28 | UART3-IN header, unchanged |
+| Gateway / node link | GPIO47 TX / 48 RX | UART1 header (PH2.0-4P). DIP switch 1 must select UART1, not the wireless module. Swapped with the GPS 2026-11-17 |
 | Web head feed (P4 TX -> web head RX) | GPIO31 | Wireless-module socket (SX1262 IRQ / nRF24 CE). Plus GND. WEBHEAD.md |
 
-UARTs: UART0 console, UART1 GPS, UART2 web-head feed (TX GPIO31; the bench
-self-tests `selftest`/`gpsloop` take it instead), UART3 gateway, UART4 ADSBee. The socket pin numbers are from Elecrow's wiki;
+UARTs (peripherals, not header names): UART0 console, UART1 GPS (UART3-IN header), UART2 web-head feed (TX GPIO31; the bench
+self-tests `selftest`/`gpsloop` take it instead), UART3 gateway / node link (UART1 header), UART4 ADSBee. The socket pin numbers are from Elecrow's wiki;
 **check with a meter which socket hole is GPIO29 and GPIO30 before wiring**,
 and do not fit a radio module in the socket while they are used.
 

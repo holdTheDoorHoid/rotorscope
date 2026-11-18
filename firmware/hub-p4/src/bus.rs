@@ -1,9 +1,9 @@
-//! The wired bus on UART3 (PLAN.md Phase 5a, docs/WIREBUS.md): many nodes
-//! on the UART3-IN header, polled in turn by `wirebus::Master`.
+//! The wired bus on the UART3 peripheral (PLAN.md Phase 5a, docs/WIREBUS.md):
+//! many nodes on the UART1 header, polled in turn by `wirebus::Master`.
 //!
-//! Wiring: hub TX (GPIO27) to every node's RX (XIAO D7); every node's TX
+//! Wiring: hub TX (GPIO47) to every node's RX (XIAO D7); every node's TX
 //! (XIAO D9, open-drain, through a diode) onto one return wire into hub RX
-//! (GPIO28), with one 470 ohm pull-up to 3.3 V at the hub.
+//! (GPIO48), with one 470 ohm pull-up to 3.3 V at the hub.
 //!
 //! **Where it runs.** The UART3 interrupt (`links.rs`) hands every received
 //! byte to [`rx`] at once, and the UART's TX-done interrupt calls
@@ -394,9 +394,9 @@ pub fn print_notes() {
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
             ),
             Note::Mode(Mode::Legacy) => crate::println!(
-                "hub-p4: UART3 carries an unpolled stream (an ESP-NOW gateway or one point-to-point node): bus polling off, reading it as before"
+                "hub-p4: node link carries an unpolled stream (an ESP-NOW gateway or one point-to-point node): bus polling off, reading it as before"
             ),
-            Note::Mode(Mode::Bus) => crate::println!("hub-p4: UART3 quiet for 10 s: bus polling on again"),
+            Note::Mode(Mode::Bus) => crate::println!("hub-p4: node link quiet for 10 s: bus polling on again"),
         }
     }
 }

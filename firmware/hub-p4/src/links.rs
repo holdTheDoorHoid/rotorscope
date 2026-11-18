@@ -1,4 +1,6 @@
-//! Node links on the P4: UART3 (header UART3-IN, RX = GPIO28, TX = GPIO27),
+//! Node links on the P4: the UART3 peripheral on the **UART1 header**
+//! (RX = GPIO48, TX = GPIO47; DIP switch 1 on UART1; swapped with the GPS
+//! 2026-11-17),
 //! 921600 baud, `link` frames in, `link::Command`s out. Two ways to use it,
 //! told apart at run time (`bus.rs`):
 //! - **the wired bus** (default): many nodes share the two wires and the hub
@@ -148,7 +150,7 @@ impl<'d> GatewayLink<'d> {
         let cfg = Config::default()
             .with_baudrate(BAUD)
             .with_rx(RxConfig::default().with_fifo_full_threshold(64).with_timeout(10));
-        let mut uart = Uart::new(uart, cfg).expect("UART3 config").with_rx(rx_pin).with_tx(tx_pin);
+        let mut uart = Uart::new(uart, cfg).expect("node link UART config").with_rx(rx_pin).with_tx(tx_pin);
         // A random epoch per boot: nodes holding an address from an earlier
         // boot join again (and ask for the same address back).
         let mut epoch = [0u8; 2];
