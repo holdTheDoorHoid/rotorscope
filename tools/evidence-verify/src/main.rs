@@ -250,8 +250,8 @@ fn print_report(r: &Report, list: bool) {
             _ => println!("  UTC: none (no GPS time in any record)"),
         }
         println!(
-            "  time: {} records without UTC, {} free-running; position: {} without, {} typed in",
-            c.no_time, c.free_running, c.no_position, c.manual_position
+            "  time: {} records without UTC ({} no GPS time yet, {} GPS time untrusted), {} free-running; position: {} without, {} typed in",
+            c.no_time, c.no_time - c.untrusted_time, c.untrusted_time, c.free_running, c.no_position, c.manual_position
         );
         for (a, b) in &c.missing {
             println!("  missing records #{a}..#{b}");
