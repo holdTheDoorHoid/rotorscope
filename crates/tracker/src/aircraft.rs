@@ -95,15 +95,10 @@ pub struct AircraftTrack {
     pub last_seen_ms: u64,
     /// Reports received (heard or not).
     pub reports: u32,
-    /// Navigation integrity category (0-11, `adsb::nicnac`) from the latest
-    /// report that updated the position (it describes that position), so
-    /// it is as fresh as [`Self::position`]. `None` until then, and always
-    /// for FLARM / OGN, which carry none.
-    pub nic: Option<u8>,
-    /// Navigation accuracy for position (1-11) from the latest report that
-    /// carried a non-zero value (and heard the aircraft). 0 is not taken: the ADSBee and our UAT
-    /// decoder print 0 both for "10 NM or worse" and for "not received".
-    pub nacp: Option<u8>,
+    /// NIC and NACp packed in one byte (it fits in the struct's padding,
+    /// so the hub's static RAM does not grow): low nibble NIC + 1, high
+    /// nibble NACp, 0 = none. Read with [`Self::nic`] and [`Self::nacp`].
+    integrity: u8,
 }
 
 impl AircraftTrack {
@@ -129,6 +124,23 @@ impl AircraftTrack {
         self.gnss_alt_ft
             .or(self.baro_alt_ft)
             .map(|ft| f64::from(ft) * FT)
+    }
+
+    /// Navigation integrity category (0-11, `adsb::nicnac`) from the latest
+    /// report that heard the aircraft and updated its position (it
+    /// describes that position), so it is as fresh as [`Self::position`].
+    /// `None` until then, and always for FLARM / OGN, which carry none.
+    pub fn nic(&self) -> Option<u8> {
+        (self.integrity & 0x0f).checked_sub(1)
+    }
+
+    /// Navigation accuracy for position (1-11) from the latest report that
+    /// heard the aircraft and carried a non-zero value. 0 is not taken:
+    /// the ADSBee and our UAT decoder print 0 both for "10 NM or worse"
+    /// and for "not received".
+    pub fn nacp(&self) -> Option<u8> {
+        let v = self.integrity >> 4;
+        (v != 0).then_some(v)
     }
 
     pub fn speed_mps(&self) -> Option<f64> {
@@ -166,10 +178,10 @@ impl AircraftTrack {
         // aircraft's last values for a while after it goes quiet.
         if matches!(a.source, Source::ModeS | Source::Uat) && a.heard() {
             if a.position_updated() {
-                self.nic = Some(a.nic());
+                self.integrity = (self.integrity & 0xf0) | (a.nic().min(14) + 1);
             }
             if a.nacp() != 0 {
-                self.nacp = Some(a.nacp());
+                self.integrity = (self.integrity & 0x0f) | (a.nacp() << 4);
             }
         }
         if a.heard() {
@@ -313,8 +325,7 @@ impl<const A: usize> AircraftTable<A> {
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
             reports: 0,
-            nic: None,
-            nacp: None,
+            integrity: 0,
         };
         new.update(r, now_ms);
         if self.aircraft.is_full() {

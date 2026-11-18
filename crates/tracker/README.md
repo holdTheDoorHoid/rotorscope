@@ -40,6 +40,16 @@ for a in tracker.aircraft() {
 }
 ```
 
+GPS interference in the area (aircraft integrity, drones jumping together;
+docs/DRONE-ATTACKS.md) is a separate object the hub keeps, in PSRAM on the P4:
+
+```rust
+let mut area = area_gnss::AreaWatch::new();                    // ~8 KB
+area.set_own_gnss(area_gnss::OwnGnss::Ok, now_ms);              // the hub's own verdict, optional
+area.tick(&mut tracker, now_ms);                                // ~1 Hz: raises ThreatKind::AreaGnss
+area_gnss::status_line(area.status(), &mut buf)?;               // {"t":"area_gnss",...}
+```
+
 `now_ms` is hub uptime in milliseconds throughout. UTC is only needed for CoT
 and the CSV `utc` column.
 

@@ -34,8 +34,9 @@
 //! position; that is not used here (a drone landing looks the same).
 //!
 //! **Memory.** [`AreaWatch`] is about 8 KB and lives outside the tracker
-//! (the P4 hub keeps it in PSRAM); the tracker only gained two bytes per
-//! aircraft ([`AircraftTrack::nic`], [`AircraftTrack::nacp`]). Fixed
+//! (the P4 hub keeps it in PSRAM); the tracker only gained one byte per
+//! aircraft, inside existing padding ([`AircraftTrack::nic`],
+//! [`AircraftTrack::nacp`]). Fixed
 //! tables, no allocation, deterministic thresholds (the constants below).
 
 use core::fmt::Write as _;
@@ -158,13 +159,16 @@ pub mod detail {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnGnss {
-    #[default]
-    Unknown,
+    // Same order as `gnss::integrity::State`, so the hub's mapping is a
+    // plain copy (no lookup table in scarce RAM).
     Ok,
     SuspectJamming,
     Jamming,
     SuspectSpoofing,
     Spoofing,
+    /// No receiver, or no verdict yet.
+    #[default]
+    Unknown,
 }
 
 impl OwnGnss {
@@ -555,7 +559,7 @@ impl AreaWatch {
 
             // Integrity: only airborne aircraft heard recently, with figures.
             let heard = now.saturating_sub(a.last_seen_ms) <= AIR_FRESH_MS;
-            if !a.airborne || !heard || a.nic.is_none() {
+            if !a.airborne || !heard || a.nic().is_none() {
                 s.degraded_since = None;
                 continue;
             }
@@ -571,8 +575,8 @@ impl AreaWatch {
                 continue;
             }
             counted += 1;
-            let nic_low = pos_age <= AIR_FRESH_MS && a.nic.is_some_and(|n| n < NIC_GOOD);
-            let nacp_low = a.nacp.is_some_and(|n| n < NACP_GOOD);
+            let nic_low = pos_age <= AIR_FRESH_MS && a.nic().is_some_and(|n| n < NIC_GOOD);
+            let nacp_low = a.nacp().is_some_and(|n| n < NACP_GOOD);
             if lost || nic_low || nacp_low {
                 let since = *s.degraded_since.get_or_insert(now);
                 if now.saturating_sub(since) >= AIR_HOLD_MS {

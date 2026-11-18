@@ -101,6 +101,19 @@ pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd:
             return;
         }
     }
+    // GPS interference in the area: one {"t":"area_gnss"} line while
+    // anything is degraded, jumped or raised (quiet otherwise).
+    if let Some(area) = app.area.as_deref() {
+        let st = area.status();
+        if st.jamming || st.spoofing || st.degraded > 0 || st.air_jumpers > 0 || st.drone_jumpers > 0 {
+            let mut al = [0u8; tracker::area_gnss::MAX_STATUS_LINE];
+            if let Ok(n) = tracker::area_gnss::status_line(st, &mut al)
+                && !console::json(&al[..n])
+            {
+                return;
+            }
+        }
+    }
     // Phase 12: one {"t":"flags"} line per flagged drone or aircraft (only
     // whole lines: one that does not fit the buffer is skipped).
     for e in faa.engine.entries().iter().filter(|e| !e.flags.is_empty()) {

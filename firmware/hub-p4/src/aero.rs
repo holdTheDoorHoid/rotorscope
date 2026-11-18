@@ -62,6 +62,9 @@ pub struct Store {
     /// Protocol 12: the same nodes' drone control links and control-band
     /// energy (`tracker::ctrllinks`).
     pub control: tracker::ctrllinks::ControlTable,
+    /// GPS jamming / spoofing in the area, from aircraft and drones
+    /// (`tracker::area_gnss`, ~8 KB).
+    pub area: tracker::area_gnss::AreaWatch,
 }
 
 const _: () = assert!(STORE_OFFSET + core::mem::size_of::<Store>() <= crate::faa::PACK_OFFSET);
@@ -84,6 +87,7 @@ pub fn store(psram: Option<(*mut u32, usize)>) -> Option<&'static mut Store> {
         (&raw mut (*p).queue).write(heapless::Deque::new());
         EsTable::init_in_place(&raw mut (*p).table, modes::Config::default());
         (&raw mut (*p).control).write(tracker::ctrllinks::ControlTable::new());
+        (&raw mut (*p).area).write(tracker::area_gnss::AreaWatch::new());
         Some(&mut *p)
     }
 }
@@ -429,18 +433,20 @@ pub fn screen_label(st: &AeroStatus) -> &'static str {
 
 /// The PSRAM store's parts for their users (`links.rs` gets the queue; the
 /// 1090 table goes to the ADSBee with `modes`, else stays with the main
-/// loop for aero frames; the control-link table goes to the app). All
+/// loop for aero frames; the control-link table and the area GPS check go
+/// to the app). All
 /// `None` without PSRAM.
 pub type Parts = (
     Option<&'static mut AirQueue>,
     Option<&'static mut EsTable>,
     Option<&'static mut tracker::ctrllinks::ControlTable>,
+    Option<&'static mut tracker::area_gnss::AreaWatch>,
 );
 
 #[inline(never)]
 pub fn split(st: Option<&'static mut Store>) -> Parts {
     match st {
-        Some(Store { queue, table, control }) => (Some(queue), Some(table), Some(control)),
-        None => (None, None, None),
+        Some(Store { queue, table, control, area }) => (Some(queue), Some(table), Some(control), Some(area)),
+        None => (None, None, None, None),
     }
 }
