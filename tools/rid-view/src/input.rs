@@ -63,6 +63,60 @@ impl Clock {
     }
 }
 
+/// The longest line kept. A node's JSON lines are a few hundred bytes; a
+/// source that never sends a newline must not grow memory without limit.
+const MAX_LINE: usize = 64 * 1024;
+
+/// What [`read_line_bounded`] found.
+#[derive(Debug, PartialEq, Eq)]
+enum LineRead {
+    Eof,
+    /// A line is in the buffer (without its newline when it had one).
+    Line,
+    /// The line was longer than the cap: dropped, buffer left empty.
+    TooLong,
+}
+
+/// Like `read_until(b'\n')` but keeps at most `max` bytes: the rest of an
+/// over-long line is read and thrown away up to its newline.
+fn read_line_bounded<R: BufRead>(r: &mut R, out: &mut Vec<u8>, max: usize) -> io::Result<LineRead> {
+    out.clear();
+    let mut too_long = false;
+    let mut any = false;
+    loop {
+        let chunk = match r.fill_buf() {
+            Ok(c) => c,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if chunk.is_empty() {
+            break;
+        }
+        any = true;
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if !too_long {
+            if out.len() + take > max {
+                too_long = true;
+                out.clear();
+            } else {
+                out.extend_from_slice(&chunk[..take]);
+            }
+        }
+        r.consume(take);
+        if done {
+            break;
+        }
+    }
+    Ok(match (any, too_long) {
+        (false, _) => LineRead::Eof,
+        (true, true) => LineRead::TooLong,
+        (true, false) => LineRead::Line,
+    })
+}
+
 /// Open `path` ("-" = stdin) and read JSON lines from it on a new thread.
 /// With `realtime`, sleep between detections by the gaps in their `up_us`,
 /// so a recording plays back at the speed it was captured.
@@ -84,15 +138,20 @@ pub fn spawn_reader(
         let mut buf = BufReader::new(reader);
         let mut raw = Vec::new();
         let why = loop {
-            raw.clear();
-            match buf.read_until(b'\n', &mut raw) {
-                Ok(0) => break "end of input".to_string(),
-                Ok(_) => {}
+            let too_long = match read_line_bounded(&mut buf, &mut raw, MAX_LINE) {
+                Ok(LineRead::Eof) => break "end of input".to_string(),
+                Ok(LineRead::Line) => false,
+                Ok(LineRead::TooLong) => true,
                 Err(e) => break e.to_string(),
-            }
+            };
             // A node that panics may print non-UTF-8; keep going.
             let text = String::from_utf8_lossy(&raw);
-            let line = parse::line(&text);
+            // An over-long line counts as unparsed.
+            let line = if too_long {
+                Line::Bad
+            } else {
+                parse::line(&text)
+            };
             if realtime
                 && let Line::Rid(r) = &line
                 && let Some(up) = r.up_us
@@ -205,4 +264,60 @@ fn raw_mode(file: &File) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_line_without_a_newline_cannot_grow_memory() {
+        // 1 MiB with no newline, then a normal line. `read_until` would hold
+        // all of the first in the buffer.
+        let mut data = vec![b'x'; 1 << 20];
+        data.extend_from_slice(b"\nnext\n");
+        let mut r = BufReader::with_capacity(4096, &data[..]);
+        let mut raw = Vec::new();
+        assert_eq!(
+            read_line_bounded(&mut r, &mut raw, MAX_LINE).unwrap(),
+            LineRead::TooLong
+        );
+        assert!(raw.is_empty());
+        assert_eq!(
+            read_line_bounded(&mut r, &mut raw, MAX_LINE).unwrap(),
+            LineRead::Line
+        );
+        assert_eq!(raw, b"next\n");
+        assert_eq!(
+            read_line_bounded(&mut r, &mut raw, MAX_LINE).unwrap(),
+            LineRead::Eof
+        );
+    }
+
+    #[test]
+    fn the_cap_is_per_line_and_inclusive() {
+        let mut data = vec![b'a'; MAX_LINE - 1];
+        data.push(b'\n');
+        data.extend_from_slice(&vec![b'b'; MAX_LINE]);
+        data.push(b'\n');
+        let mut r = BufReader::with_capacity(512, &data[..]);
+        let mut raw = Vec::new();
+        assert_eq!(
+            read_line_bounded(&mut r, &mut raw, MAX_LINE).unwrap(),
+            LineRead::Line
+        );
+        assert_eq!(raw.len(), MAX_LINE);
+        // MAX_LINE bytes plus the newline is one over.
+        assert_eq!(
+            read_line_bounded(&mut r, &mut raw, MAX_LINE).unwrap(),
+            LineRead::TooLong
+        );
+        // A last line with no newline at all is still a line.
+        let mut r = &b"tail"[..];
+        assert_eq!(
+            read_line_bounded(&mut r, &mut raw, MAX_LINE).unwrap(),
+            LineRead::Line
+        );
+        assert_eq!(raw, b"tail");
+    }
 }
