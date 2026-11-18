@@ -236,6 +236,14 @@ pub enum EventCode {
     /// `adsb::Source` index). Text: the pair, distance, height difference
     /// and predicted closest approach.
     AircraftConflict = 22,
+    /// Two transmitters claim one drone ID (tracker `claims`): a rival
+    /// claim formed its own path while the original continued, or a text
+    /// field alternated. Not an accusation of either. Data: drone track id
+    /// (u32 LE), what is disputed (1: bit 0 position, 1 Self-ID, 2 operator
+    /// ID, 3 a second ID), the other claim's source (1: 0 Remote ID, 1
+    /// DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none).
+    /// Text: the ID, how far apart, and that neither is verified.
+    IdDisputed = 23,
 }
 
 impl EventCode {
@@ -264,6 +272,7 @@ impl EventCode {
             20 => SpoofSuspect,
             21 => LinkForgery,
             22 => AircraftConflict,
+            23 => IdDisputed,
             _ => return None,
         })
     }
@@ -292,6 +301,7 @@ impl EventCode {
             SpoofSuspect => "spoof_suspect",
             LinkForgery => "link_forgery",
             AircraftConflict => "aircraft_conflict",
+            IdDisputed => "id_disputed",
         }
     }
 }

@@ -150,6 +150,7 @@ impl App {
         self.announce_new(now);
         self.announce_threats(gw, ev, now);
         self.announce_spoof(ev, now);
+        self.announce_disputes(ev, now);
         self.announce_conflicts(ev, now);
     }
 
@@ -212,6 +213,18 @@ impl App {
             let text: heapless::String<192> = clean(&tracker::spoof::event_text(&e, self.tracker.get(e.track)));
             ev.event(evidence::format::EventCode::SpoofSuspect, text.as_bytes(), &e.data());
             crate::println!("hub-p4: SPOOF? {}", text);
+        }
+    }
+
+    /// Drone IDs claimed by two transmitters (tracker `claims`): one
+    /// evidence event and one console line per dispute, and again when it
+    /// grows. Worded as a dispute over the ID, never as the drone spoofing.
+    fn announce_disputes(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
+        while let Some(d) = self.tracker.take_dispute(now) {
+            // The track's ID arrived over the air.
+            let text: heapless::String<192> = clean(&tracker::claims::event_text(&d, self.tracker.get(d.track)));
+            ev.event(evidence::format::EventCode::IdDisputed, text.as_bytes(), &d.data());
+            crate::println!("hub-p4: DISPUTED {}", text);
         }
     }
 
@@ -290,7 +303,15 @@ impl App {
         use tracker::O4Decrypted;
         let plain = match self.o4.process(object, now) {
             Ok(p) => p,
-            Err(djicrypt::Error::NoSession | djicrypt::Error::NoKey) => return,
+            // Counted in the decryptor's stats; not worth a console line
+            // each (a replay or a flood of forged CRYPs would fill it).
+            Err(
+                djicrypt::Error::NoSession
+                | djicrypt::Error::NoKey
+                | djicrypt::Error::Replay
+                | djicrypt::Error::TooFarAhead
+                | djicrypt::Error::RateLimited,
+            ) => return,
             Err(e) => {
                 crate::println!("hub-p4: O4 {:02x}{:02x}{:02x}{:02x} not decrypted: {e:?}", key_id[0], key_id[1], key_id[2], key_id[3]);
                 return;
