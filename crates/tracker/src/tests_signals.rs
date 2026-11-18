@@ -344,6 +344,8 @@ fn o4_records_are_presence_tracks_keyed_by_key_id() {
     let c = tr.ingest_droneid(0, &encrypted([9, 9, 9, 9], 57565), 300).unwrap();
     assert_eq!(a, b);
     assert_ne!(a, c);
+    // (Standing is beside the point here.)
+    tr.vouch_for_tests(300);
     let t = tr.get(a).unwrap();
     assert!(t.location.is_none() && t.uas_ids.is_empty() && !t.dji.undecoded);
     assert_eq!(t.dji.ocusync.count, 2);

@@ -590,7 +590,7 @@ fn s(buf: &[u8], n: usize) -> String {
 #[test]
 fn json_golden() {
     let (tr, ctx) = golden();
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 1100];
     let n = json::track_line(&tr.tracks()[0], &ctx, &mut buf).unwrap();
     let got = s(&buf, n);
     let want = concat!(
@@ -606,7 +606,7 @@ fn json_golden() {
         r#""loc_src":"RemoteId","op_src":"RemoteId","home":null,"dji":null,"#,
         // The made-up serial's length character says 15, and 11 follow:
         // a weak flag, so the score stays below the report level.
-        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null}"#,
+        r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null,"confirmed":false}"#,
         "\n"
     );
     assert_eq!(got, want);
@@ -628,9 +628,13 @@ fn json_golden() {
 
 #[test]
 fn cot_golden() {
-    let (tr, ctx) = golden();
-    let t = &tr.tracks()[0];
+    let (mut tr, ctx) = golden();
     let mut buf = [0u8; 2048];
+    // Not confirmed yet (heard over 0.5 s): not sent to TAK (`probation`).
+    assert_eq!(cot::drone_event(&tr.tracks()[0], &ctx, &mut buf), Err(FormatError::Unconfirmed));
+    assert_eq!(cot::operator_event(&tr.tracks()[0], &ctx, &mut buf), Err(FormatError::Unconfirmed));
+    tr.vouch_for_tests(5_000);
+    let t = &tr.tracks()[0];
     let n = cot::drone_event(t, &ctx, &mut buf).unwrap();
     let want = concat!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
@@ -675,6 +679,7 @@ fn cot_golden() {
         &det(Transport::BleLegacy, BLE_MAC, -50, &[self_id("x")]),
         0,
     );
+    bare.vouch_for_tests(0);
     let c = bare.context(0, Some(0));
     assert_eq!(
         cot::drone_event(&bare.tracks()[0], &c, &mut buf),
@@ -840,6 +845,7 @@ fn json_worst_case_fits() {
     std::println!("worst-case JSON line: {n} bytes");
     assert!(n <= json::MAX_LINE, "{n}");
     // CoT and CSV for the same track fit the buffers rid-view uses.
+    tr.vouch_for_tests(0);
     let ctx = tr.context(u64::MAX / 2, Some(u64::MAX / 4));
     assert!(cot::drone_event(&tr.tracks()[0], &ctx, &mut big).unwrap() <= cot::MAX_EVENT);
     assert!(csv::row(&tr.tracks()[0], &ctx, &mut big).unwrap() <= csv::MAX_ROW);
@@ -898,7 +904,7 @@ fn state_golden() {
     )
     .unwrap();
     let got = s(&buf, n);
-    let mut line = [0u8; 1024];
+    let mut line = [0u8; 1100];
     let ln = json::track_line(&tr.tracks()[0], &ctx, &mut line).unwrap();
     let track = s(&line, ln - 1); // without its newline
     let want = std::format!(
@@ -1195,6 +1201,8 @@ fn wifi_on_both_bands_keeps_both_slots() {
         s(&buf, n)
     );
     let ctx = tr.context(2_000, Some(1_794_232_987_250));
+    tr.vouch_for_tests(2_000);
+    let t = &tr.tracks()[0];
     let n = cot::drone_event(t, &ctx, &mut buf).unwrap();
     assert!(
         s(&buf, n).contains("Transport: WifiBeacon+WifiBeacon5G"),

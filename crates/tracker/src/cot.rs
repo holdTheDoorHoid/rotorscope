@@ -116,6 +116,9 @@ fn point(
 
 /// Write the drone's CoT event. Needs a Location with a position and UTC.
 pub fn drone_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    if !track.confirmed() {
+        return Err(FormatError::Unconfirmed);
+    }
     let loc = track.location.as_ref().ok_or(FormatError::NoPosition)?;
     let pos = loc.value.position.ok_or(FormatError::NoPosition)?;
     let time = ctx.utc_of(loc.rx_ms).ok_or(FormatError::NoTime)?;
@@ -234,6 +237,9 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
 /// Write the operator's CoT event. Needs a System message with an operator
 /// position, and UTC.
 pub fn operator_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    if !track.confirmed() {
+        return Err(FormatError::Unconfirmed);
+    }
     let sys = track.system.as_ref().ok_or(FormatError::NoPosition)?;
     let pos = sys.value.operator_position.ok_or(FormatError::NoPosition)?;
     let time = ctx.utc_of(sys.rx_ms).ok_or(FormatError::NoTime)?;
