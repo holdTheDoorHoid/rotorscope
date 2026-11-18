@@ -396,7 +396,7 @@ Now:
 | Firmware | Bench features | Bench build switches (environment at build time) |
 |---|---|---|
 | gateway | `faulttest` | |
-| node-wifi | `faulttest`, `forgetest` (send frames a node may not originate: "Origin checks" below) | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-wifi | `faulttest`, `forgetest` (send frames a node may not originate: "Origin checks" below), `floodtest` (synthetic frames into the node's own receive path: "Frame flood" below) | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-lr | `faulttest` | |
 | node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
@@ -527,6 +527,141 @@ Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench EL
    `table_full=`. A keyed gateway with 16 nodes: a 17th node's packets count as `table_full` on the
    `"t":"gw"` line and arrive on the P4 as `forged_link` detail 6.
 8. Finish by flashing the normal node build (no `forgetest`) and checking `"bench":[]`.
+
+## Frame flood (node-wifi, 2026-11-18, compile-checked only)
+
+Branch `sec/p2-a`. Nothing here has run on hardware yet: the firmware is compile-checked (C5
+release builds for the wired and ESP-NOW nodes, `cargo check` for the other feature sets and the
+S3), the decisions are host-tested (`cargo test -p wifiwatch -p openlink`).
+
+**What a flood used to do.** Anyone in radio range can forge cheap frames that each became one hub
+frame: a beacon named `ESP_RIDS` / `pwned` / `GhostNet` (an attack-tool `Threat`), a drone maker's
+address block plus a drone network name (`WifiDrone`), a DJI DroneID element (`DjiWifi`), wfb-ng
+frames with more than 16 link ids (up to 16 `OpenLink` frames every 250 ms), a Remote ID beacon from
+a new random address (`Detection`). Per-address limits do not help against fresh random addresses.
+All of it shared one 8-frame hub queue that dropped the newest frame when full, so a real drone's
+Remote ID was lost whenever it met a full queue (most of the time over ESP-NOW, which drains only
+while the radio is on the gateway's channel). The USB stream was written with interrupts masked,
+an attacker-sized Remote ID line at a time.
+
+**What the node does now** (`wifiwatch::shed`, `report.rs`, `usb.rs`, `detect.rs`, `rx.rs`):
+
+* **Reserved room.** Of the 8 hub-queue slots, Remote ID from a *known* source may use all 8, the
+  node's own `Hello` / `Status` / `Stats` 6, Remote ID from a *new* source 5, every alarm kind 4.
+  A source is known once heard twice within 2.5 s; a random-address flood is heard once per address
+  and never becomes known, and the source table (32 slots, salted hash) never gives up a slot a known
+  source still uses. A known source is limited to 20 frames a second (bursts of 10).
+* **Budgets.** Token buckets: `Threat`, `WifiDrone`, `DjiWifi` 8 a second (burst 8), `OpenLink`
+  16 (burst 16), new-source Remote ID 8 (burst 8). A frame over its budget is not printed on USB
+  either. `open_links` takes at most as many due streams as there is room for, longest-waiting
+  first, so a full table goes out in turns.
+* **It says so.** The USB stats line has `shed` (frames turned away per kind), `rid_src` (known
+  sources), `usb_drop`, `alt`, `clamp`; `hub_drop` includes everything shed; the hub's `Stats`
+  frame's `dropped` is now receive-queue drops plus hub frames not sent. **No link wire format
+  changed**: the per-kind split is only on USB, because `Stats` has no field for it.
+* **Spoofed address.** DJI DroneID and Wi-Fi drone reports are limited per (address, content), at
+  most 2 contents per address a second, so frames forged from a drone's own address with a false
+  position no longer win every second. An address alternating between contents (A, B, A) is flagged:
+  `"alt":true` on its `dji` / `wifidrone` lines for a minute, `alt` counts in the stats line.
+* **USB.** An async writer; lines are dropped and counted (`usb_drop`) when the host does not keep
+  up, never written with interrupts off. The Remote ID line is formatted straight into the writer's
+  one 6 KB buffer.
+* **Receive length.** Every received frame is clamped to what one driver receive buffer (1.6 KB)
+  holds after its header before anything reads it (`clamp` counts frames whose `sig_len` claimed
+  more).
+
+RAM (C5 wired build, static `.data` + `.bss`): +3 976 bytes (84 KB to 87.8 KB). USB pipe 2 048,
+hub admission (`Shed`) ~900, DJI and Wi-Fi drone limiters 2 x ~600 (were 2 x ~260); the drain task's
+6 KB JSON buffer became the USB writer's Remote ID buffer (no change).
+
+**Known limits.** A drone that first appears *during* a random-address Remote ID flood is reported
+through the new-source budget (8 a second, shared with the flood) until its slot in the source table
+frees: seconds at 200 forged frames a second, longer at higher rates (host test
+`a_drone_that_starts_during_a_flood_becomes_known_eventually`). Within one alarm kind, real and
+forged reports share the kind's budget (a `flood dji` sheds the real DJI drone's reports too; Remote
+ID is never affected). A forger sending many *different* contents from a drone's address still takes
+most of that address's places (the address is flagged). The 32-slot receive pool in front of all
+this drops whatever the drain task cannot parse in time (`drop`), real frames included, as before.
+
+### The `floodtest` build
+
+`export ROTORSCOPE_BENCH=1` first (bench fence). Not with `faulttest` or `forgetest` (all read the
+USB console). It **transmits nothing**: it pushes synthetic frames into the node's own receive path
+(`rx::receive`, where the radio callback puts real ones), on the channel the hopper is tuned to. From
+`firmware/node-wifi/c5/`:
+
+| Node | Build |
+|---|---|
+| Wired (point-to-point), 5 GHz plan | `cargo build --release --features esp32c5,floodtest` |
+| Wired, 2.4 GHz plan | `cargo build --release --features esp32c5,band24,floodtest` |
+| ESP-NOW through the gateway | `cargo build --release --features esp32c5,band24,espnow,floodtest --target-dir ../target-espnow` |
+| Wired bus | `cargo build --release --features esp32c5,band24,wirebus,floodtest --target-dir ../target-bus` |
+
+The `hello` has `"bench":["floodtest"]` and the `bench_build` warning, then
+`{"t":"flood","note":"FLOOD TEST BUILD: ...","packs_ok":true,"drone_ok":true}` (both must be true).
+Type a whole line and Enter (`tools/dev-board.sh --log 20 c5a --send $'flood rid 500\r'`):
+
+| Command | Injects |
+|---|---|
+| `flood rid <n>` | `n` Remote ID beacons a second, each from a new random address, id `FLOODFAKE0000000001` |
+| `flood tool <n>` | beacons named `ESP_RIDS`, `pwned`, `GhostNet` in turn, random addresses |
+| `flood drone <n>` | beacons from DJI's first address block with random low bytes, named `MavicAir-FLOOD` |
+| `flood dji <n>` | beacons with a DJI DroneID element (serial `FLOODDJI00000001`), random addresses |
+| `flood wfb <n>` | wfb-ng data frames, link ids `0x7E57C0`.. (64 in turn) |
+| `flood spoof <n>` | DJI DroneID elements from the real drone's address, one fixed false position |
+| `flood real on` / `off` | the "real" drone at `02:52:45:41:4c:01`: one Remote ID beacon a second (id `FLOODREAL0000000001`) and one DJI DroneID element a second (serial `FLOODREAL0000001`, sequence moving on) |
+| `flood off` / `flood` | everything off / print the state |
+
+Rates are per second, up to 5 000 per kind; kinds mix. Each command answers, and every second while
+anything runs the node prints `{"t":"flood","rate":{...},"sent":{...},"real":{"on":true,"sent":N,
+"seen":N,"admitted":N,"queued":N,"dji_sent":N}}`: frames injected per kind (totals), and for the
+real drone's Remote ID: injected, reached the drain task (not lost in the receive pool), admitted,
+queued for the hub.
+
+### To check on hardware (not yet run)
+
+One `floodtest` node, wired to the P4 (or behind the gateway for step 5). Record the `stats`,
+`flood` and hub lines. "Rises by about X a second" means between two `stats` lines a second apart.
+
+1. **Real drone alone, 60 s.** `flood real on`. Every second `real.sent`, `real.seen`,
+   `real.admitted` and `real.queued` rise by 1 and stay equal; `rid_src` is 1 from the second
+   second on; `dji` rises by 1 a second; every `shed` count stays 0; `alt` stays [0,0]. On the hub
+   the node's detections rise by 1 a second and a track `FLOODREAL0000000001` is shown.
+2. **One flood at a time, 60 s each, real drone on, 500 a second.** In every case `real.queued`
+   equals `real.sent` (none lost) and `shed.rid_known` and `shed.health` stay 0:
+   * `flood tool 500`: `shed.threat` rises by about 490 a second; the hub gets at most 8 threats a
+     second (attack tool, beacon flood).
+   * `flood drone 500`: `wdrone` rises by about 8 a second, `shed.wdrone` by about 490 (`threat`
+     and `shed.threat` rise too: one drone network name from many transmitters reads as clones).
+   * `flood dji 500`: `dji` rises by about 8 a second, `shed.dji` by about 490 (the real DJI
+     element is mostly shed here: it shares the DJI budget).
+   * `flood wfb 500`: `open` rises by about 500 a second, `open_ev` rises (64 ids, 16-entry table),
+     the hub gets at most 16 open-link frames a second, `shed.open` stays near 0.
+   * `flood rid 500`: `rid` rises by about 500 a second, `shed.rid_new` by about 490, `rid_src`
+     stays 1; the hub's detections for the node rise by about 9 a second (8 forged, 1 real) and the
+     `FLOODREAL0000000001` track keeps updating every second.
+   * `flood spoof 100`: `dji` rises by about 2 a second (the forger's content and the real one),
+     `alt[0]` rises, the `dji` lines from `02:52:45:41:4c:01` say `"alt":true`, and the hub keeps
+     getting the real element (serial `FLOODREAL0000001`, moving sequence) every second.
+     (Before this change: the forger's every second, the real one almost never.)
+3. **Everything at once, 120 s.** `flood real on`, then `flood rid 300`, `flood tool 300`,
+   `flood drone 300`, `flood dji 300`, `flood wfb 300`. Expect: no restart (`up_us` keeps growing,
+   no new `hello`, never `"reset":"watchdog"`); every channel's `per_ch` visit count (third number)
+   keeps rising each second and `scout` keeps rising (the hopper keeps hopping); `real.queued`
+   equals `real.sent`; `shed.rid_known` and `shed.health` 0; the hub's `Stats` for the node keep
+   arriving every second and its dropped count grows by about the `shed` total. If `drop` (the
+   receive pool) rises and `real.seen` falls behind `real.sent`, the drain task cannot parse that
+   many frames a second: lower all rates together until `drop` stays flat and record that total
+   (the node's parse capacity, a separate limit from this work).
+4. **Step 3 at 1 000 a second per kind**, 60 s: the same, except `drop` may rise (record it); the
+   watchdog must still not fire and `per_ch` visits must keep rising.
+5. **ESP-NOW (2.4 GHz node behind a keyed gateway, P4 hub).** Step 3 again: `real.queued` equals
+   `real.sent`, and the hub's detections from this node include one a second from
+   `FLOODREAL0000000001` throughout. A 5 GHz plan (40 ms a second on channel 6) should give the
+   same result; try it if time allows.
+6. **USB not read.** Start step 3, close the serial monitor for 30 s, reopen: no restart, `usb_drop`
+   has risen, and the hub kept getting the node's frames meanwhile (its frame count kept rising).
+7. Finish by flashing the normal build (no `floodtest`) and checking `"bench":[]`.
 
 ## Bench results, 2026-11-18
 

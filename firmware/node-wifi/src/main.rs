@@ -42,9 +42,13 @@ compile_error!("`wirebus` and `espnow` are two ways to reach the hub; build one"
 compile_error!("`wirebus` pins are set for the XIAO ESP32-C5 only");
 #[cfg(all(feature = "forgetest", feature = "faulttest"))]
 compile_error!("`forgetest` and `faulttest` both read the USB console; build one");
+#[cfg(all(feature = "floodtest", any(feature = "faulttest", feature = "forgetest")))]
+compile_error!("`floodtest` reads the USB console, as `faulttest` and `forgetest` do; build one");
 
 mod chip;
 mod detect;
+#[cfg(feature = "floodtest")]
+mod flood;
 #[cfg(feature = "forgetest")]
 mod forge;
 mod report;
@@ -195,6 +199,8 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(faulttest(_usb_rx).expect("spawn faulttest"));
     #[cfg(feature = "forgetest")]
     spawner.spawn(forgetest(_usb_rx).expect("spawn forgetest"));
+    #[cfg(feature = "floodtest")]
+    spawner.spawn(floodtest(_usb_rx).expect("spawn floodtest"));
 
     node_common::fault::arm(WATCHDOG);
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
@@ -216,6 +222,14 @@ async fn faulttest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'stati
 #[embassy_executor::task]
 async fn forgetest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>) {
     forge::console(|b| rx.drain_rx_fifo(b)).await
+}
+
+/// Bench only: `flood <kind> <rate>` typed on USB injects synthetic frames
+/// into the receive path (docs/BENCH.md "Frame flood").
+#[cfg(feature = "floodtest")]
+#[embassy_executor::task]
+async fn floodtest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>) {
+    flood::console(|b| rx.drain_rx_fifo(b)).await
 }
 
 /// The wired-bus node: hub frames from `report::HUB_QUEUE`, `Assign`s to
@@ -402,7 +416,11 @@ async fn drain() {
         RID_FOUND.fetch_add(1, Relaxed);
         // Known source within its rate, or new source within the budget;
         // else shed (counted), on both outputs.
-        let Some(kind) = report::rid_admit(found.src) else { continue };
+        let Some(kind) = report::rid_admit(found.src) else {
+            #[cfg(feature = "floodtest")]
+            flood::note_rid(found.src, false, false);
+            continue;
+        };
 
         let mut messages = report::Messages::new();
         let error = match rid::message::raw_messages(found.payload) {
@@ -426,7 +444,9 @@ async fn drain() {
             error,
         };
         report::detection_json(&hit);
-        report::detection_hub(&hit, kind);
+        let _queued = report::detection_hub(&hit, kind);
+        #[cfg(feature = "floodtest")]
+        flood::note_rid(found.src, true, _queued);
     }
 }
 

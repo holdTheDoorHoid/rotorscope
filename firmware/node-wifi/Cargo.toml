@@ -66,6 +66,13 @@ faulttest = ["node-common/faulttest"]
 # originate, and see the gateway and the hub refuse it. Not with faulttest
 # (both read the USB console). Never in a normal build.
 forgetest = []
+# Bench only (docs/BENCH.md "Frame flood"): type `flood <kind> <rate>` on
+# USB to push synthetic frames (random-address Remote ID, attack-tool and
+# drone-maker beacons, DJI elements, wfb-ng links) into the node's own
+# receive path, with or without one steady "real" drone. Transmits nothing.
+# Not with faulttest or forgetest (all read the USB console). Never in a
+# normal build.
+floodtest = ["rid/encode", "openlink/build"]
 
 [dependencies]
 rid  = { path = "../../crates/rid", features = ["serde"] }
