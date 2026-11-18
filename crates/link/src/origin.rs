@@ -25,7 +25,10 @@
 //!   frame the hub refused is never passed on;
 //! - the wired bus (`wirebus::Attributor`) applies the node rule to every
 //!   bus node's frame and takes a node-supplied `Via` only from a bus address
-//!   registered as a gateway.
+//!   registered as a gateway;
+//! - the S3 web head sorts each of its links with a [`Sorter`] too, the one
+//!   from the P4 hub made with [`Sorter::hub_link`], which also takes the
+//!   hub's own (`Origin::Hub`) frames when no `Via` came before them.
 //!
 //! Refusals are counted where they happen and reported as a
 //! [`ThreatKind::ForgedLink`] threat with `detail` [`FORGED_ORIGIN`], at most
@@ -324,14 +327,27 @@ pub enum Sorted {
 /// its frame): it is refused, and the held `Via` is dropped with it, so a
 /// node batch that ends in `Via { X }` cannot lend `X` to whatever the
 /// gateway writes next (its own `Hello` or threat report).
+///
+/// [`Sorter::hub_link`] is the web head's reading of its link from a P4 hub:
+/// the same rules, except that the link's own end (the hub) may also write
+/// hub-origin frames (`HubFix`, `Csbee`, `Flags`, `AreaGnss`). Relayed, they
+/// are refused there too.
 #[derive(Debug, Default, Clone)]
 pub struct Sorter {
     via: Option<([u8; 6], i8)>,
+    /// The link's own end is a hub ([`Sorter::hub_link`]).
+    hub: bool,
 }
 
 impl Sorter {
+    /// A node link: its own end is a gateway or one wired node.
     pub const fn new() -> Self {
-        Self { via: None }
+        Self { via: None, hub: false }
+    }
+
+    /// A link whose own end is a hub feeding its web head.
+    pub const fn hub_link() -> Self {
+        Self { via: None, hub: true }
     }
 
     /// One decoded frame, in stream order.
@@ -349,6 +365,7 @@ impl Sorter {
             Some((node, rssi)) if node_may_send(f) => Sorted::Relayed { node, rssi },
             Some(from) => Sorted::Refused { from: Some(from), origin: origin(f) },
             None if link_may_send(f) => Sorted::Own,
+            None if self.hub && origin(f) == Origin::Hub => Sorted::Own,
             None => Sorted::Refused { from: None, origin: origin(f) },
         }
     }
@@ -797,6 +814,35 @@ mod tests {
                 _ => assert_eq!(got, Sorted::Refused { from: None, origin: want }, "{f:?}"),
             }
         }
+    }
+
+    /// The web head's link from the P4: the hub's own frames are taken
+    /// unrelayed, never behind a `Via`; everything else as on a node link.
+    #[test]
+    fn hub_link_takes_hub_frames_only_unrelayed() {
+        for (f, want) in table() {
+            if matches!(f, Frame::Via { .. }) {
+                continue;
+            }
+            let mut s = Sorter::hub_link();
+            s.sort(&via(3));
+            let got = s.sort(&f);
+            if want == Origin::Node {
+                assert_eq!(got, Sorted::Relayed { node: [2, 0, 0, 0, 0, 3], rssi: -40 });
+            } else {
+                assert_eq!(got, Sorted::Refused { from: Some(([2, 0, 0, 0, 0, 3], -40)), origin: want }, "{f:?}");
+            }
+            let got = Sorter::hub_link().sort(&f);
+            match want {
+                Origin::Node | Origin::Gateway | Origin::Hub => assert_eq!(got, Sorted::Own, "{f:?}"),
+                Origin::Bus => assert_eq!(got, Sorted::Refused { from: None, origin: want }, "{f:?}"),
+            }
+        }
+        // A Via after a Via is refused there too, and lends nothing.
+        let mut s = Sorter::hub_link();
+        s.sort(&via(1));
+        assert!(matches!(s.sort(&via(2)), Sorted::Refused { .. }));
+        assert_eq!(s.sort(&hub_fix()), Sorted::Own);
     }
 
     #[test]

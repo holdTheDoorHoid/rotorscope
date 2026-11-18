@@ -313,8 +313,15 @@ Where it is enforced:
 * **Web head feed** (`crates/link/src/forward.rs`): the same sort, so a
   frame refused at the hub is never passed on, and `HubFix`, `Csbee` and
   `Flags` reach the web head only as the hub's own (`refused=` on the
-  `hub-p4: webhead` line). The web head's own check is separate
-  (`firmware/hub`).
+  `hub-p4: webhead` line).
+* **Web head** (`firmware/hub/src/links.rs`, `link::origin::Sorter`), the
+  last line of defence: each link is sorted the same way, except that the
+  P4's link (`Sorter::hub_link`) also takes the hub-only frames when no
+  `Via` comes before them. Behind a `Via` they are refused, and so are a
+  relayed gateway `Hello` / `forged_link` and bus-control frames. In a
+  `webhead` build only link 0 is the P4's, so a node wired straight to
+  another link cannot send them; a build without `webhead` takes them on
+  any link. Refusals count in the `hub` line's `relay_refused`.
 
 What these codes mean on the hub: `forged_link` 5 is a board of this kit (or
 something with its key, or anything at all on an open kit) sending a frame

@@ -59,12 +59,15 @@ hub): `Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone
 P4's GPS (`HubFix`) becomes the own position and UTC when this board has no GPS of its own, and
 protocol 4 frames reach the tracker; `webhead` adds the aircraft table for forwarded ADS-B lines.
 
-**Web head trust.** `HubFix` (the kit's own position and clock), `Csbee` (aircraft) and `Flags` (FAA
-flags) describe the P4 itself, so they are applied only when they come from the relay itself, never
-when a `Via` marker says the relay passed them on for one of its nodes
-(`link::web_head_accepts`, host-tested). Refused ones count in the `hub` line's `relay_refused`.
-Not done: restricting them to the P4's link (link 0) in a `webhead` build; a node wired straight
-to this board could still send them.
+**Web head trust.** Each link reader sorts its frames by the one table of who may send what
+(`link::origin`, docs/ESPNOW.md "Who may send what"), as the P4 and the gateway do. `HubFix` (the
+kit's own position and clock), `Csbee` (aircraft) and `Flags` (FAA flags) describe the P4 itself,
+so they are applied only when they come from the relay itself, never when a `Via` marker says the
+relay passed them on for one of its nodes. A relayed frame must be one a node may send (a relayed
+gateway `Hello` or `ForgedLink` report, or a bus-control frame, is refused), and a `Via` straight
+after a `Via` is refused with the one it follows. In a `webhead` build the P4's frames are taken
+only on link 0 (node A RX), so a node wired straight to link 1 or 2 cannot send them; a build
+without `webhead` takes them on any link. Refused frames count in the `hub` line's `relay_refused`.
 
 Other features: `ili9341` (an ILI9341 panel instead of the default ST7789), `gps-uart` (GPS on
 UART2 instead of I2C; costs node link 2), `adsbee` (an ADSBee 1090 on UART2; costs node link 2;
@@ -385,8 +388,9 @@ start with `{` (bootloader text, panics).
 | `sta` | Station up, down or failed |
 | `warn`, `err`, `cmd`, `help`, `demo` | Messages |
 
-The `hub` line also counts `relay_refused` (the P4's own-position/clock, ADS-B and flag frames
-refused because they arrived relayed for a node: see "Web head trust") and `http_refused` (requests
+The `hub` line also counts `relay_refused` (frames refused because their sender may not originate
+them, such as the P4's own-position/clock, ADS-B and flag frames arriving relayed for a node: see
+"Web head trust") and `http_refused` (requests
 refused by the Host / Origin / Content-Type checks).
 
 The `hub` line also counts open FPV links: `open_links` (in the table) and `open_active` (heard in the

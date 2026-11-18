@@ -94,8 +94,10 @@ struct HubLine {
     /// each follows), and relayed frames from nodes that did not fit.
     relayed: usize,
     relayed_full: u32,
-    /// Hub-only frames (own position/clock, ADS-B, flags) refused because
-    /// they came relayed for a node rather than from the relay itself.
+    /// Frames the link readers refused because their sender may not
+    /// originate them (`link::origin`): hub-only frames relayed for a node
+    /// or, in a `webhead` build, off the P4's link; relayed gateway or bus
+    /// frames; a `Via` after a `Via`. All links together.
     relay_refused: u32,
     heap_used: usize,
     heap_free: usize,
@@ -246,7 +248,7 @@ pub async fn task(hub: &'static Hub, mut rtc: Rtc<'static>) {
                 .collect(),
             relayed: hub.relayed.borrow().len(),
             relayed_full: hub.relayed_full.get(),
-            relay_refused: hub.relay_refused.get(),
+            relay_refused: crate::links::STATS.iter().fold(0u32, |n, s| n.wrapping_add(s.refused.load(Relaxed))),
             heap_used: esp_alloc::HEAP.used(),
             heap_free,
             heap_min_free,

@@ -1053,24 +1053,6 @@ pub fn encode<'a>(frame: &Frame, buf: &'a mut [u8]) -> Result<&'a mut [u8], post
     postcard::to_slice_cobs(frame, buf)
 }
 
-/// Frames a hub sends its web head about *itself*: its own position and
-/// clock ([`Frame::HubFix`]), its own ADS-B receiver ([`Frame::Csbee`]) and
-/// its possible-violation flags ([`Frame::Flags`]). No node ever has a reason
-/// to send one.
-pub fn hub_only(frame: &Frame) -> bool {
-    matches!(frame, Frame::HubFix(_) | Frame::Csbee(_) | Frame::Flags(_))
-}
-
-/// Whether a web head should apply `frame`. `relayed` is true when a
-/// [`Frame::Via`] marker came before it, i.e. a relay (an ESP-NOW gateway or
-/// a P4 hub) passed it on for one of its nodes. A [`hub_only`] frame is
-/// believed only from the relay itself: otherwise any node the relay hears
-/// could move the kit's own position, set its clock, invent aircraft or
-/// raise flags. Everything else is accepted either way.
-pub fn web_head_accepts(frame: &Frame, relayed: bool) -> bool {
-    !(relayed && hub_only(frame))
-}
-
 /// Serialize a hub-to-node [`Command`] the same way as [`encode`].
 pub fn encode_command<'a>(cmd: &Command, buf: &'a mut [u8]) -> Result<&'a mut [u8], postcard::Error> {
     postcard::to_slice_cobs(cmd, buf)
@@ -1168,27 +1150,36 @@ mod tests {
         })
     }
 
+    /// The web head's rule for the hub-only frames (`HubFix`, `Csbee`,
+    /// `Flags`): taken from the P4 itself, never behind a `Via`, and never
+    /// from a link whose own end is not a hub (`origin::Sorter`).
     #[test]
     fn hub_only_frames_are_refused_when_relayed() {
+        use origin::{Origin, Sorted, Sorter};
         let csbee = Frame::Csbee(b"#A:x".iter().copied().collect());
+        let via = Frame::Via { node: [2; 6], rssi: -50 };
         for f in [hub_fix(), csbee, flags()] {
-            assert!(hub_only(&f));
-            assert!(web_head_accepts(&f, false), "from the relay itself: {f:?}");
-            assert!(!web_head_accepts(&f, true), "relayed for a node: {f:?}");
+            assert_eq!(origin::origin(&f), Origin::Hub);
+            assert_eq!(Sorter::hub_link().sort(&f), Sorted::Own, "from the hub itself: {f:?}");
+            let mut s = Sorter::hub_link();
+            assert_eq!(s.sort(&via), Sorted::Marker);
+            assert!(matches!(s.sort(&f), Sorted::Refused { .. }), "relayed for a node: {f:?}");
+            assert!(matches!(Sorter::new().sort(&f), Sorted::Refused { .. }), "from a node link: {f:?}");
         }
         // Node frames pass either way.
         let det = Frame::Detection(detection(1, 1));
-        assert!(!hub_only(&det));
-        assert!(web_head_accepts(&det, true) && web_head_accepts(&det, false));
-        let via = Frame::Via { node: [2; 6], rssi: -50 };
-        assert!(web_head_accepts(&via, false));
+        assert_eq!(Sorter::hub_link().sort(&det), Sorted::Own);
+        let mut s = Sorter::hub_link();
+        s.sort(&via);
+        assert_eq!(s.sort(&det), Sorted::Relayed { node: [2; 6], rssi: -50 });
     }
 
     /// The byte stream a web head reads: a node's forged `HubFix` arrives
-    /// behind a `Via`, the P4's own one without. Pair them the way the hub's
-    /// link reader does (a `Via` names exactly the next frame).
+    /// behind a `Via`, the P4's own one without. Sorted the way the web
+    /// head's link reader does (a `Via` names exactly the next frame).
     #[test]
     fn forged_hub_fix_behind_a_via_is_refused_in_a_stream() {
+        use origin::{Sorted, Sorter};
         let frames = [
             Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
             hub_fix(), // a node pretending to be the hub
@@ -1197,6 +1188,11 @@ mod tests {
             flags(),
             Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
             Frame::Detection(detection(3, 1)),
+            // A Via after a Via: refused, and the held one with it, so the
+            // hub's next own frame is still the hub's.
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            Frame::Via { node: [2, 0, 0, 0, 0, 8], rssi: -60 },
+            hub_fix(),
         ];
         let mut wire = std::vec::Vec::new();
         for f in &frames {
@@ -1204,17 +1200,16 @@ mod tests {
             wire.extend_from_slice(encode(f, &mut buf).unwrap());
         }
         let mut dec = Decoder::new();
-        let mut via = false;
+        let mut sorter = Sorter::hub_link();
         let mut verdicts = std::vec::Vec::new();
-        dec.feed(&wire, |r| match r.unwrap() {
-            Frame::Via { .. } => via = true,
-            f => {
-                let relayed = core::mem::take(&mut via);
-                verdicts.push((relayed, web_head_accepts(&f, relayed)));
-            }
+        dec.feed(&wire, |r| match sorter.sort(&r.unwrap()) {
+            Sorted::Marker => {}
+            Sorted::Relayed { .. } => verdicts.push((true, true)),
+            Sorted::Own => verdicts.push((false, true)),
+            Sorted::Refused { from, .. } => verdicts.push((from.is_some(), false)),
         });
-        // (relayed, accepted) for HubFix, HubFix, Flags, Detection.
-        assert_eq!(verdicts, [(true, false), (false, true), (true, false), (true, true)]);
+        // (relayed, accepted) for HubFix, HubFix, Flags, Detection, Via, HubFix.
+        assert_eq!(verdicts, [(true, false), (false, true), (true, false), (true, true), (true, false), (false, true)]);
     }
 
     fn detection(fill: u8, n: usize) -> Detection {
