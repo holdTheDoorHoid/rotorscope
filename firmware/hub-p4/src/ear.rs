@@ -45,6 +45,7 @@ pub const TAPE_OFFSET: usize = 16 << 20;
 /// Samples on the tape: 131 s at 16 kHz, 4 MB.
 pub const TAPE_SAMPLES: usize = 1 << 21;
 const _: () = assert!(crate::faa::PACK_OFFSET + crate::faa::PACK_MAX <= TAPE_OFFSET, "airspace pack overlaps the tape");
+const _: () = assert!(TAPE_OFFSET + 2 * TAPE_SAMPLES <= 32 << 20, "tape runs past the 32 MB PSRAM");
 
 /// The last two minutes of sound, going round in PSRAM, **only while audio
 /// clips are on**. It is what an audio clip is cut from (the seconds before
