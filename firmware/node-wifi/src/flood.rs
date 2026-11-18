@@ -5,7 +5,7 @@
 //! and Enter:
 //!
 //! - `flood rid <n>`: `n` Remote ID beacons a second, each from a new random
-//!   address (id `FLOODFAKE0000000001`);
+//!   address and with a new id (`FLOODFAKE` + ten digits);
 //! - `flood tool <n>`: beacons named `ESP_RIDS`, `pwned`, `GhostNet` in turn
 //!   (attack-tool signatures), random addresses;
 //! - `flood drone <n>`: beacons from a drone maker's address block (DJI)
@@ -217,6 +217,9 @@ struct Injector {
     real_next: Instant,
     fake_pack: [u8; 64],
     fake_len: usize,
+    /// Where the fake ID's ten digits sit in `fake_pack` (each forged
+    /// frame gets its own ID, as a fake-drone flood would).
+    fake_digits: Option<usize>,
     real_pack: [u8; 64],
     real_len: usize,
     drone_prefix: [u8; 3],
@@ -235,6 +238,14 @@ impl Injector {
             // Remote ID from a new random address each time.
             0 => {
                 let src = self.rng.mac(0x02);
+                // A new ID per frame: FLOODFAKE + the frame count, 10 digits.
+                if let Some(at) = self.fake_digits {
+                    let mut v = n;
+                    for d in self.fake_pack[at..at + 10].iter_mut().rev() {
+                        *d = b'0' + (v % 10) as u8;
+                        v /= 10;
+                    }
+                }
                 match encode::beacon_frame(src, b"FLOOD", 6, n as u8, &self.fake_pack[..self.fake_len], f) {
                     Ok(len) => len,
                     Err(_) => return,
@@ -394,6 +405,7 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
         real_next: Instant::now(),
         fake_pack: [0; 64],
         fake_len: 0,
+        fake_digits: None,
         real_pack: [0; 64],
         real_len: 0,
         drone_prefix,
@@ -402,6 +414,7 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
         hijack_next: Instant::now(),
     };
     inj.fake_len = rid_pack(b"FLOODFAKE0000000001", 40.0, -75.0, &mut inj.fake_pack).unwrap_or(0);
+    inj.fake_digits = inj.fake_pack[..inj.fake_len].windows(9).position(|w| w == b"FLOODFAKE").map(|i| i + 9);
     inj.real_len = rid_pack(b"FLOODREAL0000000001", 39.95, -75.16, &mut inj.real_pack).unwrap_or(0);
     let drone_ok = wifidrone::classify(&[drone_prefix[0], drone_prefix[1], drone_prefix[2], 1, 2, 3], b"MavicAir-FLOOD").is_some();
     let hijack_ok = wifidrone::classify(&HIJACK_MAC, HIJACK_SSID).is_some();
