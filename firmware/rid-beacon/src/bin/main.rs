@@ -109,6 +109,15 @@ const BLE_CODED_INTERVAL: Duration = Duration::from_millis(300);
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// After a panic (backtrace already printed to USB), reboot rather than sit
+/// halted, as every other Rotorscope board does (docs/BENCH.md "Crash
+/// recovery"); 500 ms first so the host can read the backtrace.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    esp_hal::delay::Delay::new().delay_millis(500);
+    esp_hal::system::software_reset()
+}
+
 fn uptime_s() -> f64 {
     Instant::now().as_micros() as f64 / 1e6
 }
