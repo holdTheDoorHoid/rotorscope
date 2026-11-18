@@ -585,8 +585,8 @@ fn main() -> ! {
                 r
             });
             println!(
-                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} nodes={} out_full={} tx={} tx_full={} cmds={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
-                s.bytes, s.frames, s.corrupt, s.uart_err, s.ring_full, s.direct, gw.nodes.len(), gw.out_full,
+                "hub-p4: link bytes={} frames={} corrupt={} uart_err={} ring_full={} direct={} refused={} nodes={} evicted={} table_full={} out_full={} tx={} tx_full={} cmds={} | tracks={} | lcd vsync={} dma_err={} drawn={} max_band={}us | loops={} max_gap={}us",
+                s.bytes, s.frames, s.corrupt, s.uart_err, s.ring_full, s.direct, s.refused, gw.nodes.len(), s.evicted, s.table_full, gw.out_full,
                 gw.tx_bytes, gw.tx_full, down.commands,
                 app.tracker.tracks().len(), vs, err, app.frames_drawn, app.max_band_us, loops, max_gap_us
             );
@@ -594,8 +594,8 @@ fn main() -> ! {
                 print_gps_adsb(&app, &gps, &adsbee, ms);
                 if let Some(f) = gw.feed.as_ref() {
                     println!(
-                        "hub-p4: webhead tx={} frames={} dropped={} queued={} csbee_err={} encode_err={}",
-                        f.tx_bytes, f.fwd.frames, f.fwd.dropped, f.fwd.len(), f.csbee_err, f.fwd.encode_err
+                        "hub-p4: webhead tx={} frames={} dropped={} refused={} queued={} csbee_err={} encode_err={}",
+                        f.tx_bytes, f.fwd.frames, f.fwd.dropped, f.fwd.refused, f.fwd.len(), f.csbee_err, f.fwd.encode_err
                     );
                 }
             }

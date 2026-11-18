@@ -19,6 +19,13 @@
 //! table, tracker, evidence log, coverage coordinator and web-head feed see
 //! each wired node under its own MAC with no change.
 //!
+//! **Who may send what** (`link::origin`, docs/WIREBUS.md): the attributor
+//! passes a bus node's frame only if a node may originate it, and never a
+//! node's own `Via` (no node is registered as a gateway: the ESP-NOW
+//! gateway has no bus mode). Refusals are counted (`refused` in the `bus`
+//! summary) and reported once a second through `links.rs` as a
+//! `ForgedLink` threat ([`drain_refusals`]).
+//!
 //! **Commands.** `GatewayLink::send` (the coverage coordinator's `To` +
 //! `Assign`) queues bytes here; they go out only between answers and join
 //! windows (a node that sees a newer command before it answers stays silent,
@@ -374,6 +381,16 @@ fn pump_commands(s: &mut Shared, uart: &mut Uart<'static, Blocking>, now: u64) {
     account(s, now, n);
 }
 
+/// Refusals by the bus attributor, once per `window_ms` per claimed node
+/// (main loop).
+pub fn drain_refusals(now_ms: u64, window_ms: u32, f: impl FnMut(link::origin::Refusal)) {
+    critical_section::with(|cs| {
+        if let Some(s) = BUS.borrow_ref_mut(cs).as_mut() {
+            s.attr.log.drain(now_ms, window_ms, f);
+        }
+    });
+}
+
 /// Log lines for bus events (main loop).
 pub fn print_notes() {
     while let Some(n) = critical_section::with(|cs| BUS.borrow_ref_mut(cs).as_mut().and_then(|s| s.notes.pop_front())) {
@@ -419,7 +436,7 @@ pub fn summary_json(w: &mut impl core::fmt::Write) {
         let up = now_us().max(1);
         let _ = write!(
             w,
-            "\"bus\":{{\"mode\":\"{}\",\"nodes\":{},\"present\":{},\"polls\":{},\"corrupt\":{},\"timeouts\":{},\"join_slots\":{},\"grants\":{},\"join_collisions\":{},\"stray\":{},\"busy_pct\":{},\"cmd_bytes\":{},\"ring_full\":{}}}",
+            "\"bus\":{{\"mode\":\"{}\",\"nodes\":{},\"present\":{},\"polls\":{},\"corrupt\":{},\"timeouts\":{},\"join_slots\":{},\"grants\":{},\"join_collisions\":{},\"stray\":{},\"busy_pct\":{},\"cmd_bytes\":{},\"ring_full\":{},\"refused\":{}}}",
             s.mode.name(),
             m.entries().len(),
             m.present(),
@@ -433,6 +450,7 @@ pub fn summary_json(w: &mut impl core::fmt::Write) {
             st.busy_us * 100 / up,
             s.cmd_bytes,
             s.ring_full,
+            s.attr.refused,
         );
     });
 }

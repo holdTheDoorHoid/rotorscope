@@ -416,6 +416,14 @@ impl Evidence {
             let i = match self.nodes.iter().position(|s| s.mac == n.mac) {
                 Some(i) => i,
                 None => {
+                    // Full: a node already logged as gone that the link's
+                    // table has since forgotten (`links::EVICT_AFTER_MS`)
+                    // makes room.
+                    if self.nodes.is_full()
+                        && let Some(j) = self.nodes.iter().position(|s| !s.alive && !nodes.iter().any(|m| m.mac == s.mac))
+                    {
+                        self.nodes.swap_remove(j);
+                    }
                     if self.nodes.push(NodeSeen { mac: n.mac, alive: false }).is_err() {
                         continue;
                     }
