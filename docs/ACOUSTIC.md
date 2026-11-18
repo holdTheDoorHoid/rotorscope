@@ -36,6 +36,20 @@ Contacts appear as `"t":"sound"` JSON lines and as `S<n>` rows in the SD log. Th
 check needs the hub's own position and uses distance only; matching the pitch curve to the
 aircraft's track and looking up its type are PLAN 15f and 15g.
 
+Both checks count only what has passed probation (docs/SPOOFING.md "Floods"): a drone track
+once **confirmed**, an aircraft once **established**. One forged ADS-B frame placing an
+"aircraft" overhead must not explain a drone's sound away (and so suppress its alert and its
+clip), and one forged Remote ID frame does not make a sound "with radio". (FPV, DJI-link and
+Wi-Fi-drone detections have no probation and count as before.)
+
+**Without trusted time** (no GPS receiver, or GPS time not yet trusted): nothing here needs the
+wall clock. Contacts, the alert's five seconds, the clip's rules and the six-an-hour limit all
+run on the hub's uptime (the hourly window restarts with the hub). Clip files are numbered, not
+dated (`Cnnnnnnn.WAV`, continuing from the highest on the card); their FAT date is 2026-01-01
+until there is trusted time. The `sound` and `sound_clip` evidence entries carry the record
+header's time source like every other record (UTC 0 and the uptime, or `untrusted`), and the
+clip is tied to its entry by number and SHA-256, not by time.
+
 ## On the hub (P4)
 
 - **Microphone.** The board's own PDM microphone (clock GPIO24, data GPIO25), 16 kHz, through

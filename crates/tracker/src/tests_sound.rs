@@ -58,6 +58,7 @@ fn a_radio_drone_makes_it_with_radio() {
     let mut tr: Tracker = Tracker::default();
     let d = det(Transport::WifiBeacon, WIFI_MAC, -60, &[serial("SN-1"), location(CITY_HALL.0, CITY_HALL.1, 60.0)]);
     tr.ingest(0, &d, 1_000);
+    tr.ingest(0, &d, 2_000);
     let id = listen(&mut tr, 2, 8, 200).unwrap();
     assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::WithRadio);
     assert_eq!(tr.take_new_sound(8_000), Some(id));
@@ -73,6 +74,7 @@ fn a_radio_drone_arriving_mid_contact_upgrades_it_and_it_never_downgrades() {
     assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::NoRadio);
     let d = det(Transport::WifiBeacon, WIFI_MAC, -60, &[serial("SN-1")]);
     tr.ingest(0, &d, 3_500);
+    tr.ingest(0, &d, 4_500);
     listen(&mut tr, 4, 30, 200);
     assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::WithRadio, "radio 26 s ago, same contact");
 }
@@ -83,6 +85,7 @@ fn a_tracked_helicopter_overhead_explains_the_sound_and_does_not_alert() {
     tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
     // 800 m north, about 300 m up.
     tr.ingest_aircraft(&heli(0xA1B2C3, 800.0, 1_000, 1_000, 7, 180.0, 80), 0);
+    tr.vouch_for_tests(0);
     let id = listen(&mut tr, 1, 10, 110).unwrap();
     let c = *tr.get_sound(id).unwrap();
     assert_eq!(c.kind, SoundKind::Aircraft);
@@ -105,6 +108,7 @@ fn a_distant_or_landed_aircraft_explains_nothing() {
     let mut tr: Tracker = Tracker::default();
     tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
     tr.ingest_aircraft(&heli(0x000001, 9_000.0, 1_000, 1_000, 7, 180.0, 80), 0);
+    tr.vouch_for_tests(0);
     let id = listen(&mut tr, 1, 8, 110).unwrap();
     assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::NoRadio);
     assert_eq!(tr.take_new_sound(8_000), Some(id));
@@ -114,7 +118,32 @@ fn a_distant_or_landed_aircraft_explains_nothing() {
 fn without_own_position_no_aircraft_is_assumed_audible() {
     let mut tr: Tracker = Tracker::default();
     tr.ingest_aircraft(&heli(0x000001, 500.0, 1_000, 1_000, 7, 180.0, 80), 0);
+    tr.vouch_for_tests(0);
     assert_eq!(tr.audible_aircraft(1_000), None);
+}
+
+/// Probation (WP-09) reaches the sound cross-check: one forged ADS-B frame
+/// overhead must not explain a drone's sound away (no alert, no clip), and
+/// one forged Remote ID frame does not make a sound "with radio".
+#[test]
+fn unproven_aircraft_and_unconfirmed_drones_explain_nothing() {
+    let mut tr: Tracker = Tracker::default();
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
+    tr.ingest_aircraft(&heli(0xBAD001, 300.0, 1_000, 1_000, 7, 180.0, 80), 500);
+    let d = det(Transport::WifiBeacon, WIFI_MAC, -60, &[serial("FORGED-1")]);
+    tr.ingest(0, &d, 600);
+    assert_eq!(tr.audible_aircraft(1_000), None, "unproven: not audible");
+    assert!(!tr.radio_drone_recent(1_000), "unconfirmed: not a radio drone");
+    let id = listen(&mut tr, 1, 8, 190).unwrap();
+    let c = tr.get_sound(id).unwrap();
+    assert_eq!(c.kind, SoundKind::NoRadio);
+    assert_eq!(c.aircraft, None);
+    assert_eq!(tr.take_new_sound(8_000), Some(id), "still alerts");
+    // Once established it explains a new contact, as before.
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 20_000);
+    tr.ingest_aircraft(&heli(0xBAD001, 300.0, 1_000, 1_000, 7, 180.0, 80), 20_000);
+    tr.vouch_for_tests(20_000);
+    assert!(tr.audible_aircraft(20_500).is_some());
 }
 
 #[test]

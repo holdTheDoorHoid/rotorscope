@@ -169,10 +169,11 @@ impl Default for SoundTable {
 
 impl<const N: usize, const A: usize> Tracker<N, A> {
     /// Whether anything that is (almost certainly) a drone was heard by
-    /// radio within [`RADIO_RECENT_MS`].
+    /// radio within [`RADIO_RECENT_MS`]. Drone tracks count only once
+    /// confirmed (`probation`): one forged frame is not a radio drone.
     pub fn radio_drone_recent(&self, now_ms: u64) -> bool {
         let recent = |last: u64| now_ms.saturating_sub(last) < RADIO_RECENT_MS;
-        self.tracks.iter().any(|t| recent(t.last_seen_ms))
+        self.tracks.iter().any(|t| t.confirmed() && recent(t.last_seen_ms))
             || self.open_links().iter().any(|l| recent(l.last_seen_ms))
             || self.emitters().iter().any(|e| rf_alerts(e.kind) && recent(e.last_seen_ms))
             || self.wifi_drones().iter().any(|w| recent(w.last_seen_ms))
@@ -180,12 +181,14 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
 
     /// The nearest airborne crewed aircraft within [`AIRCRAFT_AUDIBLE_M`]
     /// (slant range), heard from within [`RADIO_RECENT_MS`]. Needs the hub's
-    /// own position.
+    /// own position. Only established aircraft (`aircraft` "Standing"): an
+    /// unproven address, which one forged ADS-B frame can make, must not
+    /// explain a drone's sound away and so silence its alert and its clip.
     pub fn audible_aircraft(&self, now_ms: u64) -> Option<(AircraftKey, u32)> {
         let ctx = self.context(now_ms, None);
         let mut best: Option<(AircraftKey, u32)> = None;
         for a in self.aircraft() {
-            if !a.airborne || now_ms.saturating_sub(a.last_seen_ms) >= RADIO_RECENT_MS {
+            if !a.airborne || !a.established() || now_ms.saturating_sub(a.last_seen_ms) >= RADIO_RECENT_MS {
                 continue;
             }
             let g = ctx.aircraft_geometry(a);
