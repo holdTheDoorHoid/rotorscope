@@ -7,7 +7,7 @@ PLAN.md Phase 15. Status 2026-11-18:
 | Detector library, file tool | Built; tested on recordings (below) |
 | Hub tracker: sound contacts, alert, radio and aircraft cross-check | Built; laptop tests |
 | Hub firmware: microphone, detector, alert, clips to SD, evidence entries | **Running on the P4**; proven with a made-up rotor sound mixed in inside the chip |
-| A real sound through the real microphone | **Not yet tested.** No drone and no loudspeaker test so far |
+| A real sound through the real microphone | **Loudspeaker test passed 2026-11-18** (three drone recordings alerted, three non-drone ones did not; below). No real drone outdoors yet |
 | Outdoor microphone, windscreen, range | Not started |
 | Bearing pod, fly-past measurement, aircraft type table | Not started (PLAN 15e, 15f, 15g) |
 
@@ -150,9 +150,8 @@ median distance.
 
 ## Known limits
 
-- **Not yet heard a real sound on the hub.** The board's microphone records, and the detector
-  works on a sound mixed in inside the chip; a drone (or a loudspeaker playing one) in front of
-  the board is the next test.
+- **Not yet heard a real drone on the hub.** It hears recordings of drones played through a
+  loudspeaker (below); a drone outdoors, at measured distances, is the next test.
 - **Five-second warm-up** after power-up, and **about three seconds** to decide. A drone that
   passes in under three seconds is not reported.
 - **A hum that never changes pitch** is ignored after ten seconds (mains hum, a fan). A machine
@@ -167,6 +166,35 @@ median distance.
    to "heard in all of them".
 2. A better microphone and a windscreen. Most published range differences come from here.
 3. A small trained classifier as a second opinion. Needs our own outdoor recordings.
+
+## Through the real microphone: loudspeaker test (2026-11-18)
+
+Recordings played from a small USB loudspeaker on the bench into the P4 board's built-in
+microphone. Firmware on the board: branch `sec/wp07-audio` (this detector, clips off). The room
+read about -70 dBFS when silent.
+
+| Played | Level at the microphone | Hub |
+|---|---|---|
+| 1 kHz test tone | -43 dBFS | pitch 1000 Hz; alert after 5 s; turned to "steady hum" after 10 s, as designed |
+| Mavic Pro, field recording (4-22 m), as recorded | -67 median, -58 peak | **alert**, 190 Hz, large propellers (file scores 188 Hz on the computer); heard in 22 of 37 s reported |
+| Mini 4 Pro, field recording (23-27 m), as recorded | -68 median | missed: barely above the room |
+| Mini 4 Pro, same file 9x louder | -55 median | **alert**, 210 Hz, large propellers; heard 27 of 38 s |
+| 5-inch FPV, as recorded | -69 median | missed: barely above the room |
+| 5-inch FPV, same file 10x louder | -63 median, -44 peak | **alert**, 720 Hz, small propellers |
+| VolAnti two propellers (8 s) | -52 | heard, 543 Hz; too short for the 5 s alert |
+| Rural ambience, as recorded and 28x louder | -70 / about -53 | no alert (a few one-second candidates, none held) |
+| Fireworks | -56 median, -45 peak | no alert (candidates, none held) |
+| Wind | -70 | no alert |
+
+Capture stayed clean throughout: 0 DMA errors, 1 overrun (the known one at start-up),
+detector 4.4-4.6 ms per frame.
+
+What this does and does not show: the microphone, the capture and the detector work end to end
+on real sound, at the pitches the same files give on the computer. It is not a range
+measurement: a small loudspeaker has little output below about 200 Hz and the playback level
+was arbitrary. One Mavic file raised a second contact at 343 Hz late in the clip, not yet
+explained. Clips were not exercised: they are off by default and the card was waiting for a
+clock.
 
 ## Recordings and their terms
 
