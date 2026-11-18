@@ -36,8 +36,10 @@
 //!   the first `--rms` level, or 600 µs of white noise at that level, which needs no recording)
 //!   and replay it on the chip as N pulses GAP_MS apart, once through the decode budget and once
 //!   without (`nobudget`, the loop as it was). Prints both `hil_train` results.
-//! - `--forge SECS`: run the forged-session scenario on the live follower (the node hops its
-//!   DroneID plan meanwhile) and print the board's `forge` report and `follow` lines.
+//! - `--forge SECS[,CASE]`: run a forged-session scenario on the live follower (the node hops its
+//!   DroneID plan meanwhile; CASE `start` (default), `flood` or `late`, firmware
+//!   `radio/hilsim.rs`), print the board's `forge` report and `follow` lines, and one `expect`
+//!   line: the case's expectation (docs/BENCH.md step 4) and whether this run met it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc;
@@ -142,7 +144,7 @@ fn main() {
     let mut pre: Vec<String> = vec![];
     let mut train: Option<(u32, u32)> = None;
     let mut pulse = String::from("burst");
-    let mut forge: Option<u32> = None;
+    let mut forge: Option<(u32, String)> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -157,7 +159,12 @@ fn main() {
                 train = Some((n.parse().expect("N"), g.parse().expect("GAP_MS")));
             }
             "--pulse" => pulse = args.next().expect("--pulse burst|noise"),
-            "--forge" => forge = Some(args.next().expect("--forge SECS").parse().expect("SECS")),
+            "--forge" => {
+                let v = args.next().expect("--forge SECS[,start|flood|late]");
+                let (secs, case) = v.split_once(',').unwrap_or((&v, "start"));
+                assert!(["start", "flood", "late"].contains(&case), "--forge SECS[,start|flood|late]");
+                forge = Some((secs.parse().expect("SECS"), case.to_string()));
+            }
             _ => panic!("unknown argument {a}"),
         }
     }
@@ -305,7 +312,7 @@ fn noise_block(noise: f64, rms: f64, seed: u64) -> Vec<u8> {
 
 /// The hostile-signal scenarios (see the module docs).
 #[allow(clippy::too_many_arguments)]
-fn scenarios(port: &str, dir: &str, train: Option<(u32, u32)>, pulse: &str, forge: Option<u32>, noise: f64, rms: f64, pre: &[String]) {
+fn scenarios(port: &str, dir: &str, train: Option<(u32, u32)>, pulse: &str, forge: Option<(u32, String)>, noise: f64, rms: f64, pre: &[String]) {
     let st = std::process::Command::new("stty").args(["-F", port, "raw", "-echo", "115200"]).status().expect("stty");
     assert!(st.success(), "stty failed");
     let mut w = std::fs::OpenOptions::new().write(true).open(port).expect("open port for writing");
@@ -370,16 +377,56 @@ fn scenarios(port: &str, dir: &str, train: Option<(u32, u32)>, pulse: &str, forg
         }
         send(&mut w, "hop on");
     }
-    if let Some(secs) = forge {
+    if let Some((secs, case)) = forge {
         send(&mut w, "role droneid");
         std::thread::sleep(Duration::from_millis(300));
         send(&mut w, "hop on");
         std::thread::sleep(Duration::from_millis(300));
-        send(&mut w, &format!("hil forge {secs}"));
+        send(&mut w, &format!("hil forge {secs} {case}"));
         match wait("forge", "\"done\":true", secs as u64 + 20) {
-            Some(l) => println!("forge {secs} s: {l}"),
+            Some(l) => {
+                println!("forge {case} {secs} s: {l}");
+                println!("{}", forge_verdict(&case, &l));
+            }
             None => eprintln!("no forge report within {} s", secs + 20),
         }
         send(&mut w, "role auto");
     }
 }
+
+/// A field of a flat JSON line, arrays whole (`"real":[true,3,0]` -> `[true,3,0]`).
+fn jfield<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let at = line.find(&format!("\"{key}\":"))? + key.len() + 3;
+    let rest = &line[at..];
+    let end = if rest.starts_with('[') { rest.find(']')? + 1 } else { rest.find([',', '}'])? };
+    Some(&rest[..end])
+}
+
+/// The expectation for one `hil forge` case (docs/BENCH.md step 4; the host
+/// model `crates/rawcap/tests/follow_forge.rs` gives the odds) and whether
+/// the report meets it.
+fn forge_verdict(case: &str, line: &str) -> String {
+    let num = |k: &str| jfield(line, k).and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
+    let real = jfield(line, "real").unwrap_or("[]");
+    let followed = real.starts_with("[true");
+    let contra = jfield(line, "contra").unwrap_or("[]").trim_matches(['[', ']']).split(',').map(|v| v.parse::<i64>().unwrap_or(-1)).collect::<Vec<_>>();
+    let real_contra = real.trim_matches(['[', ']']).rsplit(',').next().and_then(|v| v.parse::<i64>().ok()).unwrap_or(-1);
+    let common = num("evicted") == 0 && num("active") <= 4 && num("share_permille") <= 550;
+    let ignored = contra.len() == 2 && contra[0] == contra[1] && contra[1] == real_contra;
+    let (want, ok) = match case {
+        "flood" => (
+            "real followed within ~60 s (host model: 95 % by 60 s) and at the end; evicted 0; every wrong-time packet ignored",
+            followed && (0..=90).contains(&num("followed_s")) && common && ignored,
+        ),
+        "late" => (
+            "real followed before the forgers arrive and still followed at the end (host model: 99.5 %); evicted 0; every wrong-time packet ignored",
+            followed && num("followed_s") >= 0 && common && ignored,
+        ),
+        _ => (
+            "real followed only if the plan confirmed it before the fourth forged session (host model: 46 % with these phases); otherwise blocked true; evicted 0",
+            (followed || jfield(line, "blocked") == Some("true") || num("followed_s") < 0) && common,
+        ),
+    };
+    format!("expect {case}: {want}: {}", if ok { "MET" } else { "NOT MET" })
+}
+

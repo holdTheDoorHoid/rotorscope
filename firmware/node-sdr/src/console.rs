@@ -20,7 +20,8 @@
 //!                           HIL: replay the staged burst as a pulse train on a
 //!                           simulated clock, through the decode budget
 //!                           (radio/hilsim.rs)
-//! hil forge [<secs>]        HIL: run the forged-session scenario on the live
+//! hil forge [<secs> [start|flood|late]]
+//!                           HIL: run a forged-session scenario on the live
 //!                           follower for <secs>; without a number, its report
 //! fault panic|hang          `faulttest` builds only: panic, or spin in the
 //!                           capture loop until the watchdog resets the chip
@@ -87,7 +88,7 @@ pub enum Local {
     #[cfg(feature = "bringup")]
     HilTrain { n: u32, gap_ms: u32, budget: bool, len: usize, crc: u32 },
     #[cfg(feature = "bringup")]
-    HilForge(Option<u32>),
+    HilForge(Option<(u32, crate::radio::ForgeCase)>),
     /// `faulttest` builds only: true = panic, false = hang.
     #[cfg(feature = "faulttest")]
     Fault(bool),
@@ -190,10 +191,18 @@ fn parse_any(line: &str) -> Result<Option<Cmd>, &'static str> {
             #[cfg(feature = "bringup")]
             Some("forge") => match w.next() {
                 None => Local::HilForge(None),
-                Some(v) => Local::HilForge(Some(v.parse().ok().filter(|&s: &u32| (1..=3600).contains(&s)).ok_or("hil forge [<secs> 1-3600]")?)),
+                Some(v) => {
+                    const USE: &str = "hil forge [<secs> 1-3600 [start|flood|late]]";
+                    let secs = v.parse().ok().filter(|&s: &u32| (1..=3600).contains(&s)).ok_or(USE)?;
+                    let case = match w.next() {
+                        None => crate::radio::ForgeCase::Start,
+                        Some(c) => crate::radio::ForgeCase::parse(c).ok_or(USE)?,
+                    };
+                    Local::HilForge(Some((secs, case)))
+                }
             },
             _ if !cfg!(feature = "bringup") => return Err(NEEDS_BRINGUP),
-            _ => return Err("hil run <len> <crc32 hex> | hil train ... | hil forge [<secs>]"),
+            _ => return Err("hil run <len> <crc32 hex> | hil train ... | hil forge [<secs> [<case>]]"),
         },
         #[cfg(feature = "faulttest")]
         Some("fault") => match w.next() {

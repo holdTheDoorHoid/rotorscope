@@ -28,6 +28,8 @@ mod dji;
 #[cfg(feature = "bringup")]
 mod hilsim;
 mod jam;
+#[cfg(feature = "bringup")]
+pub use hilsim::ForgeCase;
 
 /// Something for the hub, drained by `main` after every call into the radio.
 #[derive(Clone, Debug)]
@@ -805,7 +807,7 @@ impl Radio {
             self.follow_stats.misses,
             self.follow.tentative(),
             self.follow.contradictions,
-            self.follow.refused,
+            self.follow.evicted,
             self.follow.share.declined,
             esp_alloc::HEAP.free()
         );
@@ -1469,8 +1471,8 @@ impl Radio {
     }
 
     /// The follower's next window, when one is due before the plan's next
-    /// dwell would end: tune there and dwell over it. Returns the cap on
-    /// the plan dwell otherwise (µs from now), if a window is coming.
+    /// dwell would end: tune there and dwell over it. Returns when the plan
+    /// dwell must end otherwise (absolute µs), if a window is coming.
     fn follow_hop(&mut self) -> Result<(), Option<u64>> {
         if self.role != NodeRole::DroneId || !self.follow_on {
             return Err(None);
@@ -1482,7 +1484,7 @@ impl Radio {
             // Cut the plan dwell short only for a window the follower's
             // share of time can pay for (`droneid::follow::Share`).
             let depart = now + until_lead;
-            return Err(self.follow.affordable(&a, depart).then_some(until_lead));
+            return Err(self.follow.affordable(&a, depart).then_some(depart));
         }
         if !self.follow.grant(now, a.end_us.max(now + 5_000)) {
             // Over the share: the plan keeps the receiver (counted).
@@ -1505,9 +1507,9 @@ impl Radio {
             return;
         }
         self.close_visit();
-        let cap_us = match self.follow_hop() {
+        let depart_us = match self.follow_hop() {
             Ok(()) => return,
-            Err(c) => c,
+            Err(d) => d,
         };
         // FPV: after the last channel of a round, one channel outside the
         // main sweep (rotating), before the next round starts.
@@ -1533,8 +1535,14 @@ impl Radio {
             _ => ((f / 10) as u16, 0),
         };
         self.tune_quiet(lo, tol);
-        let dwell = (ms as u64 * 1000).min(cap_us.unwrap_or(u64::MAX));
-        self.hop_until_us = now_us() + dwell;
+        // A dwell cut short for a predicted window ends at the departure
+        // time `follow_hop` worked out before this retune. It used to be a
+        // length counted from after the retune (~22 ms with the DC
+        // calibration), so the visit's own retune ended inside the window:
+        // never settled, its misses never counted, and a session lost its
+        // way at every counter wrap (crates/rawcap/tests/follow_forge.rs;
+        // bench 2026-11-18: 90 silent visits, 2 counted as misses).
+        self.hop_until_us = (now_us() + ms as u64 * 1000).min(depart_us.unwrap_or(u64::MAX));
     }
 
     /// Retune without printing (one `phy` line per hop would flood the
@@ -1849,7 +1857,7 @@ fn help() {
         "dump [raw|c16] [b64|hex] | resend <first> [last] | resume",
         "role droneid|fpv | hop on|off | plan | assign droneid|fpv <id> [<f100k>:<ms> ...]",
         "fpv verbose on|off | uplink [now] | hil run <len> <crc32> (after @F lines)",
-        "hil train <n> <gap_ms> [nobudget] <len> <crc32> | hil forge [<secs>] (docs/BENCH.md)",
+        "hil train <n> <gap_ms> [nobudget] <len> <crc32> | hil forge [<secs> [start|flood|late]] (docs/BENCH.md)",
         "jam (jamming watch state) | edge on|off (FPV off-plan channel each round)",
     ] {
         println!(r#"{{"t":"help","l":"{l}"}}"#);

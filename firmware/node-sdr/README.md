@@ -115,7 +115,9 @@ below, +0.5 MHz off the DC spike; 5816.5 is above the measured 5800 MHz reach, u
 of the plan the DroneID job follows O4 drones: once three valid O4 packets of a session agree it
 retunes, 30 ms early, to each channel the published schedule predicts (`droneid::follow`,
 docs/DRONEID-O4.md, at most about half the time) and scans the plan in between; the stats line's
-`"follow":[followed,visits,hits,misses,tentative,contradictions,refused,declined]` counts it, and
+`"follow":[followed,visits,hits,misses,tentative,contradictions,evicted,declined]` counts it
+(`tentative` = key IDs heard but not followed, up to 128; `evicted` = those displaced by a newer
+one before they expired, which the decode budget keeps at 0 under any flood), and
 `"dec":[decodes,full,skipped,busy_ms]` the decode budget (docs/BENCH.md "node-sdr under hostile
 signals"); FPV every reachable channel of both bands (15 at 2.4 GHz, then 31 at
 5.8 GHz), 60 ms each. Entries outside the C5's reach

@@ -660,7 +660,7 @@ fn local(radio: &mut radio::Radio, hub: &mut hub::Hub, l: Local) {
             out::paced(&line, 128, || radio.probe());
         }
         #[cfg(feature = "bringup")]
-        Local::HilForge(Some(secs)) => radio.forge_start(secs),
+        Local::HilForge(Some((secs, case))) => radio.forge_start(secs, case),
         #[cfg(feature = "bringup")]
         Local::HilForge(None) => radio.forge_status(),
     }
