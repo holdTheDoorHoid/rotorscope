@@ -312,6 +312,18 @@ fn cold_start_without_gps_is_marked() {
     let rep = check(&l.bytes);
     assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
     assert!(rep.findings.iter().any(|f| f.what.contains("3 records have no UTC time")));
+
+    // A boot under suspected spoofing: records marked "untrusted" with no UTC
+    // are what the hub writes, so they verify (bench 2026-11-18, spoofboot).
+    let mut s = Log::new(10);
+    let untrusted = |t| Context { uptime_ms: t, time_source: TimeSource::Untrusted, gps_state: 3, ..Context::default() };
+    s.boot(&cold);
+    s.event(&untrusted(6_000), EventCode::Setting, "GPS spoofing");
+    s.checkpoint(&untrusted(60_000), CheckpointReason::Periodic);
+    let rep = check(&s.bytes);
+    assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
+    assert!(fails(&rep).is_empty(), "{:?}", fails(&rep));
+    assert!(rep.findings.iter().any(|f| f.what.contains("marked \"untrusted\"")));
     assert!(rep.findings.iter().any(|f| f.what.contains("no hub position")));
     let line = verify::describe(&r);
     assert!(line.contains("NO-UTC") && line.contains("NO-POSITION(gps searching)"), "{line}");
