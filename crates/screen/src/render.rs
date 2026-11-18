@@ -1519,6 +1519,20 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         text(d, &b, 70, y, F_BODY, p.accent)?;
         hint = false;
     }
+    // Attack and jamming alarms, sounding and silenced (WP-11b): the strip
+    // says what is muted and until when; this says what it is hiding.
+    let (t, q) = (s.threats, s.caveats.silenced);
+    if (t.active > 0 || t.muted > 0) && y + 17 + 14 <= HEIGHT {
+        y += 17;
+        text(d, "ALARMS", 4, y + 2, F_SMALL, p.dim)?;
+        let mut b: String<40> = String::new();
+        let _ = write!(b, "{} sounding, {} silenced", t.active, t.muted);
+        if q.snoozed > 0 {
+            let _ = b.push_str(" (snooze)");
+        }
+        text(d, &b, 70, y, F_BODY, if t.active > 0 { p.accent } else { p.fg })?;
+        hint = false;
+    }
     if hint {
         text(d, "UP/DN: pages", 4, HEIGHT - 12, F_SMALL, p.dim)?;
     }
@@ -1537,12 +1551,17 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
     let done = |row: usize| ui.done_row() == Some(row);
     let mut alarms: String<20> = String::new();
     let t = s.threats;
+    // Nuisance alarms first (muted for 2 h); safety-critical ones only when
+    // nothing else sounds, and only snoozed (5 min): one press never
+    // silences a jammer along with a nuisance.
     let _ = if done(4) {
         write!(alarms, "Done")
-    } else if t.active > 0 {
-        write!(alarms, "Mute {} now", t.active)
-    } else if t.muted > 0 {
-        write!(alarms, "Unmute {}", t.muted)
+    } else if t.mutable > 0 {
+        write!(alarms, "Mute {} (2h)", t.mutable)
+    } else if t.snoozable > 0 {
+        write!(alarms, "Snooze {} (5m)", t.snoozable)
+    } else if s.caveats.silenced.operator() > 0 {
+        write!(alarms, "Unmute {}", s.caveats.silenced.operator())
     } else {
         write!(alarms, "None sounding")
     };
@@ -1559,7 +1578,8 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
         // The hub learns where it stands and treats a GPS position far from
         // there as faked: after moving it on purpose, reset that.
         ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" }),
-        // Known false alarms (a venue's real open network...): mute them.
+        // Nuisance alarms: mute them for a while (a venue's known false
+        // alarm goes in the site file). Jamming and the like: snooze only.
         ("Alarms", alarms.as_str()),
         // A wired or bench kit: every node stands at the hub.
         ("Nodes at hub", if done(5) { "Placed" } else { "Place all here" }),

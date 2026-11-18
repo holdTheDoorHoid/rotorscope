@@ -360,7 +360,7 @@ fn list_flood() {
     }
     st.total_drones = 64;
     st.total_unconfirmed = 58;
-    st.threats = Threats { active: 1, jammed: false, muted: 0, flood_per_s: 230 };
+    st.threats = Threats { active: 1, jammed: false, muted: 0, flood_per_s: 230, ..Threats::default() };
     let order = st.order();
     assert!(order.iter().take(5).all(|&i| !st.drones[usize::from(i)].unconfirmed));
     shot("radar_flood", &Ui::default(), &st);
@@ -680,11 +680,14 @@ fn settings() {
 #[test]
 fn settings_actions() {
     let mut st = base(true);
-    st.threats = Threats { active: 2, jammed: false, muted: 1, flood_per_s: 0 };
+    st.threats = Threats { active: 2, jammed: false, muted: 1, flood_per_s: 0, mutable: 2, snoozable: 0 };
     let mut ui = Ui::default();
     // Settings page, edit, up to the last row (Nodes at hub), up to Alarms.
     press(&mut ui, &st, &[Button::Up, Button::Select, Button::Up, Button::Up]);
     shot("settings_actions", &ui, &st);
+    // Only a jammer sounds: the row snoozes it, it never mutes it.
+    st.threats = Threats { active: 1, jammed: true, muted: 2, flood_per_s: 0, mutable: 0, snoozable: 1 };
+    shot("settings_snooze", &ui, &st);
 }
 
 #[test]
@@ -693,7 +696,7 @@ fn threat_warnings() {
     // read as all clear.
     let mut st = base(true);
     st.gps.integrity = GpsIntegrity::Spoofing;
-    st.threats = Threats { active: 2, jammed: true, muted: 0, flood_per_s: 0 };
+    st.threats = Threats { active: 2, jammed: true, muted: 0, flood_per_s: 0, ..Threats::default() };
     let mut ui = Ui::default();
     press(&mut ui, &st, &[Button::Down]);
     shot("threat_warnings", &ui, &st);
@@ -704,7 +707,7 @@ fn health_conflict() {
     // A drone 240 m from a helicopter that is 30 m above it: the status bar
     // shows AIRCRAFT (ahead of jamming) and the health page says which.
     let mut st = with_aircraft();
-    st.threats = Threats { active: 0, jammed: true, muted: 0, flood_per_s: 0 };
+    st.threats = Threats { active: 0, jammed: true, muted: 0, flood_per_s: 0, ..Threats::default() };
     let mut name = heapless::String::new();
     name.push_str("N911PH").unwrap();
     st.conflict = Some(ConflictView { level: 3, drone: 1, aircraft: name, range_m: 240.0, dz_m: Some(30.0), count: 1 });
@@ -771,6 +774,7 @@ fn caveats_strip() {
         bench: true,
         link_open: true,
         evidence: Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 1234, dropped: 56 }),
+        ..Caveats::default()
     };
     st.sd = SdLog::Recording;
     shot("caveats_all", &Ui::default(), &st);
@@ -789,6 +793,19 @@ fn caveats_strip() {
     st.caveats.bench = true;
     st.caveats.link_open = true;
     shot("caveats_long", &Ui::default(), &st);
+    // Alarms silenced and collection switches on (WP-11b): a jammer
+    // snoozed, two nuisance alarms muted, the venue's guest network muted
+    // for good, control IDs and content read. The health page says what
+    // the silence hides.
+    let mut st = five_drones(true);
+    st.threats = Threats { active: 1, jammed: true, muted: 3, flood_per_s: 0, mutable: 1, snoozable: 0 };
+    st.caveats.silenced = Silenced { muted: 2, mute_left_s: 7_140, snoozed: 1, snooze_left_s: 245, site: 1 };
+    st.caveats.switches = Switches { control_ids: true, control_content: true, audio_clips: false };
+    shot("caveats_alarms", &Ui::default(), &st);
+    let mut ui = Ui::default();
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
+    ui.tick(NOW + 5_000);
+    shot("caveats_alarms_health", &ui, &st);
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +855,8 @@ fn banded_render_matches_full_frame() {
         bench: true,
         link_open: true,
         evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 7, dropped: 0 }),
+        silenced: Silenced { muted: 1, mute_left_s: 3_600, snoozed: 0, snooze_left_s: 0, site: 2 },
+        switches: Switches { control_ids: true, ..Switches::default() },
     };
     cases.push(("caveats", Ui::default(), st));
 

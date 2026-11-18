@@ -433,7 +433,7 @@ fn main() -> ! {
         let mut lines = Lines { note: &mut note, site: &mut site_line };
         if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut down, &mut lines, ms) {
             let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
-            site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev);
+            site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev, ms);
         }
         ev.tick(ms);
         if ms.saturating_sub(last_report) >= 1000 {
@@ -463,8 +463,9 @@ fn main() -> ! {
         app.touch(&mut i2c, ms);
         match app.take_request() {
             Some(screen::Request::HubMoved) => forget_gps_home(&mut gps, &mut ev, "screen"),
-            Some(screen::Request::MuteAlarms) => site.mute_active(&mut app, ms, &mut sdlog, &mut ev, site::From::Screen),
-            Some(screen::Request::UnmuteAlarms) => site.unmute_all(&mut app, &mut sdlog, &mut ev, site::From::Screen),
+            Some(screen::Request::MuteAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, false, ms, &mut ev),
+            Some(screen::Request::SnoozeAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, true, ms, &mut ev),
+            Some(screen::Request::UnmuteAlarms) => site.unmute_operator(&mut app, ms, &mut ev),
             Some(screen::Request::NodesAtHub) => {
                 let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
                 site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen);
@@ -489,8 +490,8 @@ fn main() -> ! {
             });
         }
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
-        if let Some(text) = sdlog.take_site() {
-            site.load(text, &mut app);
+        if let Some((st, facts)) = sdlog.take_site() {
+            site.load(&st, &facts, &mut app, &mut ev, ms);
         }
         if let Some(k) = sdlog.take_o4_key() {
             let fp = k.fingerprint();
@@ -624,6 +625,9 @@ fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -
         bench: !evlog::BENCH.is_empty(),
         link_open: gw.stats.gw_open(),
         evidence: sd.evidence_stop(ev),
+        // Silenced alarms and the site switches: filled by `App::fill_state`
+        // from the tracker and the control flags.
+        ..screen::Caveats::default()
     }
 }
 

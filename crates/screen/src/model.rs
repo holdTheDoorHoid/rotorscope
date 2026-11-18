@@ -409,6 +409,55 @@ pub struct Caveats {
     pub link_open: bool,
     /// Evidence records are not reaching the card; `None` while they are.
     pub evidence: Option<EvidenceStop>,
+    /// Alarms silenced right now (WP-11b): shown for as long as they are.
+    pub silenced: Silenced,
+    /// The legal / privacy switches the site file turned on.
+    pub switches: Switches,
+}
+
+/// Mute rules in force (tracker `threats::MuteCounts`), for the strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Silenced {
+    /// The operator's timed mutes, and seconds until the first one ends.
+    pub muted: u8,
+    pub mute_left_s: u32,
+    /// Snoozes of safety-critical alarms, and seconds until the first ends.
+    pub snoozed: u8,
+    pub snooze_left_s: u32,
+    /// The site file's mutes for good.
+    pub site: u8,
+}
+
+impl Silenced {
+    /// Rules the "Unmute" action drops (the operator's; not the site file's).
+    pub fn operator(&self) -> u8 {
+        self.muted.saturating_add(self.snoozed)
+    }
+}
+
+/// Switches that change what the unit collects (site file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Switches {
+    /// `control ids on`: control-link identifiers are read.
+    pub control_ids: bool,
+    /// `control content on`: control content is decoded and kept.
+    pub control_content: bool,
+    /// `audio clips on`: raw sound is kept (acoustic branch, WP-07).
+    pub audio_clips: bool,
+}
+
+/// `1h59`, `4m05`, `12s`: time left, short.
+fn left(s: u32) -> String<8> {
+    use core::fmt::Write;
+    let mut b = String::new();
+    let _ = if s >= 3600 {
+        write!(b, "{}h{:02}", s / 3600, s % 3600 / 60)
+    } else if s >= 60 {
+        write!(b, "{}m{:02}", s / 60, s % 60)
+    } else {
+        write!(b, "{s}s")
+    };
+    b
 }
 
 /// The evidence signing key's class, as far as the screen is concerned.
@@ -457,8 +506,10 @@ impl EvidenceStopWhy {
 impl Caveats {
     /// The bottom strip's lines, top to bottom (`None`: no line). The first
     /// is the evidence state (only while evidence is not being written),
-    /// the second the build marks (key class, bench build, open link).
-    pub fn lines(&self) -> [Option<String<64>>; 2] {
+    /// the second the build marks (key class, bench build, open link), the
+    /// third the alarms silenced (`MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES
+    /// 3`), the fourth the collection switches that are on.
+    pub fn lines(&self) -> [Option<String<64>>; 4] {
         use core::fmt::Write;
         let ev = self.evidence.map(|e| {
             let mut s = String::new();
@@ -486,7 +537,39 @@ impl Caveats {
         if self.link_open {
             add("OPEN LINK");
         }
-        [ev, (!marks.is_empty()).then_some(marks)]
+        let q = &self.silenced;
+        let mut sil: String<64> = String::new();
+        let mut put = |t: core::fmt::Arguments<'_>| {
+            if !sil.is_empty() {
+                let _ = sil.push_str("  ");
+            }
+            let _ = sil.write_fmt(t);
+        };
+        if q.muted > 0 {
+            put(format_args!("MUTED {} {}", q.muted, left(q.mute_left_s)));
+        }
+        if q.snoozed > 0 {
+            put(format_args!("SNOOZED {} {}", q.snoozed, left(q.snooze_left_s)));
+        }
+        if q.site > 0 {
+            put(format_args!("SITE MUTES {}", q.site));
+        }
+        let w = &self.switches;
+        let mut sw: String<64> = String::new();
+        let mut on = |t: &str| {
+            let _ = sw.push_str(if sw.is_empty() { "ON: " } else { ", " });
+            let _ = sw.push_str(t);
+        };
+        if w.control_ids {
+            on("control IDs");
+        }
+        if w.control_content {
+            on("control content");
+        }
+        if w.audio_clips {
+            on("audio clips");
+        }
+        [ev, (!marks.is_empty()).then_some(marks), (!sil.is_empty()).then_some(sil), (!sw.is_empty()).then_some(sw)]
     }
 }
 
@@ -743,8 +826,16 @@ pub struct Threats {
     /// A node is jammed or deaf: the detector may be missing drones, so an
     /// empty list must not read as "all clear".
     pub jammed: bool,
-    /// Alarms the operator muted (still logged).
+    /// Alarms sounding but silenced (muted, snoozed or muted by the site
+    /// file; still logged).
     pub muted: u8,
+    /// Of `active`: nuisance alarms the operator has seen, which the
+    /// "Alarms" row mutes (tracker `Tracker::alarm_counts`).
+    pub mutable: u8,
+    /// Of `active`: safety-critical alarms seen (jamming, blinded, area
+    /// GPS, ID flood, forged traffic), which the row only snoozes, and only
+    /// when there is nothing to mute.
+    pub snoozable: u8,
     /// A flood of forged drone identities (tracker `probation`): new IDs a
     /// second while its alarm is raised, 0 otherwise. Unconfirmed drones in
     /// the list are then mostly fakes.

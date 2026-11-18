@@ -212,12 +212,29 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     assert_eq!(ui.take_request(), None);
     let mut loud = s.clone();
     loud.threats.active = 2;
+    // Two alarms sound but neither has been announced yet: nothing to do.
     ui.button(Button::Select, &loud);
-    assert_eq!(ui.take_request(), Some(Request::MuteAlarms));
+    assert_eq!(ui.take_request(), None);
+    // A nuisance alarm and a jammer, both seen: Mute takes the nuisance
+    // only, carrying the frame the operator looked at.
+    loud.threats.mutable = 1;
+    loud.threats.snoozable = 1;
+    ui.button(Button::Select, &loud);
+    assert_eq!(ui.take_request(), Some(Request::MuteAlarms { seen_ms: s.now_ms }));
+    // Then only the jammer: Snooze, a separate press.
+    loud.threats.mutable = 0;
+    ui.button(Button::Select, &loud);
+    assert_eq!(ui.take_request(), Some(Request::SnoozeAlarms { seen_ms: s.now_ms }));
     let mut quiet = s.clone();
     quiet.threats.muted = 2;
+    quiet.caveats.silenced.muted = 1;
+    quiet.caveats.silenced.snoozed = 1;
     ui.button(Button::Select, &quiet);
     assert_eq!(ui.take_request(), Some(Request::UnmuteAlarms));
+    // Only the site file's mutes: the row cannot drop those.
+    quiet.caveats.silenced = Silenced { site: 3, ..Silenced::default() };
+    ui.button(Button::Select, &quiet);
+    assert_eq!(ui.take_request(), None);
     ui.button(Button::Down, &s);
     ui.button(Button::Select, &s); // nodes at hub
     assert_eq!(ui.take_request(), Some(Request::NodesAtHub));
@@ -447,7 +464,7 @@ fn ages() {
 
 #[test]
 fn caveat_lines() {
-    assert_eq!(Caveats::default().lines(), [None, None]);
+    assert_eq!(Caveats::default().lines(), [None, None, None, None]);
     let mut c = Caveats { key: EvidenceKey::Test, ..Caveats::default() };
     let l = c.lines();
     assert!(l[0].is_none());
@@ -462,4 +479,19 @@ fn caveat_lines() {
     assert!(c.lines()[1].is_none());
     c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 3, dropped: 9 });
     assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (file error): 3 waiting, 9 dropped"));
+    // Silenced alarms and the collection switches stay on screen.
+    c = Caveats {
+        silenced: Silenced { muted: 2, mute_left_s: 7_140, snoozed: 1, snooze_left_s: 245, site: 3 },
+        switches: Switches { control_ids: true, control_content: false, audio_clips: true },
+        ..Caveats::default()
+    };
+    let l = c.lines();
+    assert_eq!(l[2].as_deref(), Some("MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES 3"));
+    assert_eq!(l[3].as_deref(), Some("ON: control IDs, audio clips"));
+    // The longest of each still fits the panel's 52 columns.
+    c.silenced = Silenced { muted: 255, mute_left_s: 7_200, snoozed: 255, snooze_left_s: 300, site: 255 };
+    c.switches = Switches { control_ids: true, control_content: true, audio_clips: true };
+    let l = c.lines();
+    assert!(l[2].as_ref().unwrap().len() <= 52, "{:?}", l[2]);
+    assert!(l[3].as_ref().unwrap().len() <= 52, "{:?}", l[3]);
 }

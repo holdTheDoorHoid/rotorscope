@@ -162,9 +162,14 @@ pub struct Threat {
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
     pub reports: u32,
-    /// Matches one of the operator's mute rules: kept and logged, but no
-    /// alert, no badge and not counted as jamming.
+    /// Silenced: matches a mute rule (an operator's timed mute, a snooze,
+    /// or a site-file mute). Kept and logged, but no alert and no badge. It
+    /// still counts as jamming: [`Tracker::partly_blind`] ignores mutes.
     pub muted: bool,
+    /// Silenced by a snooze (a safety-critical kind, [`SNOOZE_MS`]).
+    pub snoozed: bool,
+    /// Hub uptime seconds the silence ends (0: not silenced, or for good).
+    pub silenced_until_s: u32,
     /// A flood kind kept as one entry per reporting node: `target` is the
     /// latest victim, `count` and `reports` add up every victim's.
     pub per_node: bool,
@@ -201,6 +206,11 @@ impl Threat {
     /// Still being reported.
     pub fn active(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.last_seen_ms) < THREAT_ACTIVE_MS
+    }
+
+    /// Hub ms the silence on it ends (`None`: not silenced, or for good).
+    pub fn silenced_until_ms(&self) -> Option<u64> {
+        (self.muted && self.silenced_until_s != 0).then(|| u64::from(self.silenced_until_s) * 1000)
     }
 
     fn same(&self, node: u8, by_hub: bool, per_node: bool, s: &ThreatSighting) -> bool {
@@ -243,66 +253,257 @@ impl Threat {
 
 // ----------------------------------------------------------------- mutes --
 
-/// Mute rules held. Each muted alarm takes one.
+/// Mute rules held: the operator's timed mutes and snoozes, and the site
+/// file's mutes for good.
 pub const MAX_MUTES: usize = 24;
+/// How long an operator's mute of a nuisance alarm lasts: two hours, about
+/// one session at a venue. Long enough that a nuisance silenced once stays
+/// quiet through the event; short enough that a mute tapped in a hurry (or
+/// under a burst of nuisance alarms raised to provoke it) does not outlive
+/// the shift. A mute never survives a reboot either. A false alarm the
+/// venue always has belongs in the site file instead (one explicit line).
+pub const OPERATOR_MUTE_MS: u64 = 2 * 60 * 60 * 1000;
+/// How long a snooze of a safety-critical alarm ([`is_safety_kind`]) lasts:
+/// five minutes, time to deal with it, short enough that a jammer that is
+/// still on is announced again. A snooze only stops the alert: the status
+/// bar still says JAMMED (and AREA / FLOOD), and [`Tracker::partly_blind`]
+/// still holds.
+pub const SNOOZE_MS: u64 = 5 * 60 * 1000;
+/// A snoozed jammer is the same one within this much of its centre
+/// frequency (100 kHz units: 10 MHz), not the whole band.
+pub const MUTE_JAM_TOL: u32 = 100;
+/// [`Mute::node`] of a rule that names no node.
+pub const NODE_ANY: u8 = 0xFF;
 
-/// An operator's "this alarm is a known false one" rule (for example a
-/// venue that really runs an open network named like its secured one).
-/// Zero / empty fields match anything.
+/// Kinds that say the hub may be missing drones, or that its picture is
+/// being forged: jamming and Blinded (a node is deaf), GPS interference in
+/// the area, a flood of fake IDs, forged node traffic. They can only be
+/// snoozed for [`SNOOZE_MS`], never muted, and never from the site file.
+pub fn is_safety_kind(kind: ThreatKind) -> bool {
+    kind.is_jamming() || matches!(kind, ThreatKind::AreaGnss | ThreatKind::IdFlood | ThreatKind::ForgedLink)
+}
+
+/// Which fields of a rule must equal the threat's (see [`key_of`]).
+pub mod key {
+    pub const NODE: u8 = 1;
+    pub const SSID: u8 = 2;
+    pub const SOURCE: u8 = 4;
+    pub const TARGET: u8 = 8;
+    /// Centre within [`super::MUTE_JAM_TOL`].
+    pub const FREQ: u8 = 16;
+    /// Same band (within [`super::SAME_JAM_BAND`]: 900 MHz vs 2.4 GHz).
+    pub const BAND: u8 = 32;
+    /// [`super::Mute::sub`]: the flood's table, the contested link's system.
+    pub const SUB: u8 = 64;
+}
+
+/// The fields that make one alarm of `kind` "this one" (`no_target`: the
+/// rule's target is all zero). Every field in the key must match exactly;
+/// zero means zero, never "any".
+///
+/// | kind | key |
+/// |---|---|
+/// | Blinded | node |
+/// | jamming | node, centre +/- 10 MHz |
+/// | AreaGnss | target (1 jamming, 2 spoofing) |
+/// | IdFlood | table |
+/// | ForgedLink | node, source |
+/// | EvilTwin, DroneNetClone, AttackTool | network name, source |
+/// | Karma, MavlinkAttack | source |
+/// | DroneDeauth, DroneTakeover | target (the drone's network) |
+/// | ControlContested | band, link ID; without IDs also node, handle, system |
+/// | floods | target; or, for a node's aggregate entry, the node |
+pub fn key_of(kind: ThreatKind, no_target: bool) -> u8 {
+    use key::*;
+    if kind == ThreatKind::Blinded {
+        return NODE;
+    }
+    if kind.is_jamming() {
+        return NODE | FREQ;
+    }
+    match kind {
+        ThreatKind::AreaGnss => TARGET,
+        ThreatKind::IdFlood => SUB,
+        ThreatKind::ForgedLink => NODE | SOURCE,
+        ThreatKind::EvilTwin | ThreatKind::DroneNetClone | ThreatKind::AttackTool => SSID | SOURCE,
+        ThreatKind::Karma | ThreatKind::MavlinkAttack => SOURCE,
+        ThreatKind::DroneDeauth | ThreatKind::DroneTakeover => TARGET,
+        ThreatKind::ControlContested if no_target => BAND | TARGET | NODE | SOURCE | SUB,
+        ThreatKind::ControlContested => BAND | TARGET,
+        _ if no_target => NODE,
+        _ => TARGET,
+    }
+}
+
+/// [`Mute::sub`] of a threat.
+fn sub_of(t: &Threat) -> u8 {
+    match t.kind {
+        ThreatKind::IdFlood => (t.detail >> 24) as u8,
+        ThreatKind::ControlContested => t.detail as u8,
+        _ => 0,
+    }
+}
+
+/// One silenced alarm: an operator's timed mute (nuisance kinds,
+/// [`OPERATOR_MUTE_MS`]) or snooze (safety kinds, [`SNOOZE_MS`]), or a
+/// site-file mute for good (a venue's known false alarm, one explicit line).
+/// It names one specific thing ([`key_of`]); there are no wildcards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mute {
     pub kind: ThreatKind,
     pub ssid: heapless::String<32>,
     pub source: [u8; 6],
     pub target: [u8; 6],
-    /// Jamming only: centre, 100 kHz units; matches within
-    /// [`SAME_JAM_BAND`]. 0 = any.
+    /// Centre, 100 kHz units.
     pub freq: u32,
+    /// The reporting node, for kinds keyed by node; [`NODE_ANY`] otherwise.
+    /// Site-file rules never name one (node numbers follow the gateway's
+    /// order and are not stable across boots).
+    pub node: u8,
+    /// `IdFlood`: the table; `ControlContested`: the system.
+    pub sub: u8,
+    /// Hub uptime seconds at which the rule ends; 0: for good (site file).
+    pub until_s: u32,
 }
 
+/// Why a site-file mute line is not honoured (every such reason starts
+/// with this, see [`crate::site::is_dropped_mute`]).
+pub const NOT_HONOURED: &str = "mute not honoured: ";
+
 impl Mute {
-    pub fn matches(&self, t: &Threat) -> bool {
-        let mac = |rule: &[u8; 6], v: &[u8; 6]| *rule == [0; 6] || rule == v;
-        self.kind == t.kind
-            && (self.ssid.is_empty() || self.ssid == t.ssid)
-            && mac(&self.source, &t.source)
-            && mac(&self.target, &t.target)
-            && (self.freq == 0 || self.freq.abs_diff(t.freq) <= SAME_JAM_BAND)
+    /// A rule for `kind` with every field empty (a starting point; on its
+    /// own it is too broad for [`Tracker::mute`] to take).
+    pub const fn empty(kind: ThreatKind) -> Self {
+        Mute { kind, ssid: heapless::String::new(), source: [0; 6], target: [0; 6], freq: 0, node: NODE_ANY, sub: 0, until_s: 0 }
     }
 
-    /// The narrowest rule that silences `t` and things exactly like it.
-    pub fn for_threat(t: &Threat) -> Self {
-        let mut m = Mute { kind: t.kind, ssid: heapless::String::new(), source: [0; 6], target: [0; 6], freq: 0 };
-        if t.kind.is_jamming() {
+    /// Which fields this rule must match ([`key_of`]).
+    pub fn key(&self) -> u8 {
+        key_of(self.kind, self.target == [0; 6])
+    }
+
+    /// For good: a site-file rule.
+    pub fn permanent(&self) -> bool {
+        self.until_s == 0
+    }
+
+    /// A snooze (a safety-critical kind, short).
+    pub fn snooze(&self) -> bool {
+        is_safety_kind(self.kind)
+    }
+
+    /// Hub ms the rule ends, `None` for good.
+    pub fn ends_ms(&self) -> Option<u64> {
+        (self.until_s != 0).then(|| u64::from(self.until_s) * 1000)
+    }
+
+    /// Still in force at `now_ms`.
+    pub fn live(&self, now_ms: u64) -> bool {
+        self.ends_ms().is_none_or(|e| now_ms < e)
+    }
+
+    /// Whether this rule names threat `t` (time not considered).
+    pub fn matches(&self, t: &Threat) -> bool {
+        use key::*;
+        if self.kind != t.kind {
+            return false;
+        }
+        let k = self.key();
+        (k & NODE == 0 || self.node == t.node)
+            && (k & SSID == 0 || self.ssid == t.ssid)
+            && (k & SOURCE == 0 || self.source == t.source)
+            && (k & TARGET == 0 || self.target == t.target)
+            && (k & FREQ == 0 || self.freq.abs_diff(t.freq) <= MUTE_JAM_TOL)
+            && (k & BAND == 0 || self.freq.abs_diff(t.freq) <= SAME_JAM_BAND)
+            && (k & SUB == 0 || self.sub == sub_of(t))
+            // A flood rule is either for a node's aggregate entry (no
+            // target) or for one victim's own entry.
+            && (!is_flood_kind(self.kind) || t.per_node == (self.target == [0; 6]))
+    }
+
+    /// The rule that silences `t` and nothing else, from `now_ms`: a snooze
+    /// for a safety-critical kind, otherwise an operator mute.
+    pub fn for_threat(t: &Threat, now_ms: u64) -> Self {
+        use key::*;
+        let mut m = Mute::empty(t.kind);
+        let k = key_of(t.kind, t.target == [0; 6] || (is_flood_kind(t.kind) && t.per_node));
+        if k & NODE != 0 {
+            m.node = t.node;
+        }
+        if k & SSID != 0 {
+            m.ssid = t.ssid.clone();
+        }
+        if k & SOURCE != 0 {
+            m.source = t.source;
+        }
+        if k & TARGET != 0 && !(is_flood_kind(t.kind) && t.per_node) {
+            m.target = t.target;
+        }
+        if k & (FREQ | BAND) != 0 {
             m.freq = t.freq;
-            return m;
         }
-        match t.kind {
-            // Named things: the name and the transmitter.
-            ThreatKind::EvilTwin | ThreatKind::Karma | ThreatKind::AttackTool | ThreatKind::DroneNetClone => {
-                m.ssid = t.ssid.clone();
-                m.source = t.source;
-            }
-            ThreatKind::ForgedLink => m.source = t.source,
-            // A control link: its identifier when known (all zero without
-            // `control ids`, so then every contested link) in that band
-            // (900 MHz or 2.4 GHz). Not the node's handle: it changes.
-            ThreatKind::ControlContested => {
-                m.target = t.target;
-                m.freq = t.freq;
-            }
-            // Hostile MAVLink: the sender (its system/component ID). The
-            // rule has no `detail`, so it silences every finding from that
-            // sender (the owner's own ground station using its console).
-            ThreatKind::MavlinkAttack => m.source = t.source,
-            // A flood kept per node: every victim (its `target` is only the
-            // latest one).
-            _ if t.per_node => {}
-            // Floods: the victim (random sources change all the time).
-            _ => m.target = t.target,
+        if k & SUB != 0 {
+            m.sub = sub_of(t);
         }
+        let dur = if is_safety_kind(t.kind) { SNOOZE_MS } else { OPERATOR_MUTE_MS };
+        m.until_s = until_s(now_ms, dur);
         m
     }
+
+    /// Whether this rule may be kept for good (a site-file line): not a
+    /// safety-critical kind, no node, and every field of its key given.
+    pub fn check_permanent(&self) -> Result<(), &'static str> {
+        use key::*;
+        if is_safety_kind(self.kind) {
+            return Err(concat!(
+                "mute not honoured: ",
+                "this alarm can mean the hub is missing drones; it can only be snoozed on the hub (5 min)"
+            ));
+        }
+        let k = self.key();
+        let missing = (k & NODE != 0)
+            || self.node != NODE_ANY
+            || (k & SSID != 0 && self.ssid.is_empty())
+            || (k & SOURCE != 0 && self.source == [0; 6])
+            || (k & TARGET != 0 && self.target == [0; 6])
+            || (k & (FREQ | BAND) != 0 && self.freq == 0);
+        if missing {
+            return Err(site_needs(self.kind));
+        }
+        Ok(())
+    }
+}
+
+/// What a site-file mute line of `kind` must name (the refusal text).
+pub fn site_needs(kind: ThreatKind) -> &'static str {
+    match kind {
+        ThreatKind::EvilTwin | ThreatKind::DroneNetClone | ThreatKind::AttackTool => {
+            "mute not honoured: too broad; name the transmitter and the network: source=.. ssid=.."
+        }
+        ThreatKind::Karma | ThreatKind::MavlinkAttack => "mute not honoured: too broad; name the transmitter: source=..",
+        ThreatKind::ControlContested => {
+            "mute not honoured: too broad; name the link and band: target=.. mhz=.. (needs control ids on)"
+        }
+        _ => "mute not honoured: too broad; name the victim: target=..",
+    }
+}
+
+/// Hub uptime seconds `dur_ms` after `now_ms`, rounded up (never 0).
+fn until_s(now_ms: u64, dur_ms: u64) -> u32 {
+    (now_ms.saturating_add(dur_ms).div_ceil(1000)).clamp(1, u64::from(u32::MAX)) as u32
+}
+
+/// Silenced alarms and rules in force, for the screen and the status line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MuteCounts {
+    /// Operator mutes in force (rules), and ms until the first one ends.
+    pub muted: u8,
+    pub mute_left_ms: u64,
+    /// Snoozes in force (rules), and ms until the first one ends.
+    pub snoozed: u8,
+    pub snooze_left_ms: u64,
+    /// Site-file mutes (for good).
+    pub site: u8,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -319,17 +520,19 @@ impl ThreatTable {
         Self { v: Vec::new(), next_id: 1, mutes: Vec::new(), dropped: 0 }
     }
 
-    /// Whether a mute rule matches what sighting `s` would be on its own
-    /// (per target).
-    fn sighting_muted(&self, s: &ThreatSighting) -> bool {
-        self.mutes.iter().any(|m| {
-            let mac = |rule: &[u8; 6], v: &[u8; 6]| *rule == [0; 6] || rule == v;
-            m.kind == s.kind
-                && (m.ssid.is_empty() || m.ssid == s.ssid)
-                && mac(&m.source, &s.source)
-                && mac(&m.target, &s.target)
-                && (m.freq == 0 || m.freq.abs_diff(s.freq) <= SAME_JAM_BAND)
-        })
+    /// Whether a flood sighting's victim has a rule of its own (then its
+    /// reports are kept apart from the node's aggregate entry, so the rule
+    /// silences that victim and nothing else).
+    fn sighting_muted(&self, s: &ThreatSighting, now_ms: u64) -> bool {
+        self.mutes
+            .iter()
+            .any(|m| m.kind == s.kind && m.target != [0; 6] && m.target == s.target && m.live(now_ms))
+    }
+
+    /// The rule silencing `t` now, if any (a snooze or timed mute before a
+    /// rule for good, so the screen shows when it ends).
+    fn rule_for(&self, t: &Threat, now_ms: u64) -> Option<&Mute> {
+        self.mutes.iter().filter(|m| m.live(now_ms) && m.matches(t)).max_by_key(|m| m.until_s != 0)
     }
 
     /// The entry a newcomer of `kind` may replace in a full table (see the
@@ -339,11 +542,12 @@ impl ThreatTable {
         let oldest = |f: &dyn Fn(&Threat) -> bool| {
             (0..v.len()).filter(|&i| f(&v[i])).min_by_key(|&i| v[i].last_seen_ms)
         };
-        let jamming_active = |t: &Threat| t.active(now_ms) && !t.muted && t.kind.is_jamming();
+        // A snoozed jammer is still a live jammer.
+        let jamming_active = |t: &Threat| t.active(now_ms) && t.kind.is_jamming();
         let live_jammers = v.iter().filter(|t| jamming_active(t)).count();
         oldest(&|t| !t.active(now_ms) && t.muted)
             .or_else(|| oldest(&|t| !t.active(now_ms)))
-            .or_else(|| oldest(&|t| t.muted))
+            .or_else(|| oldest(&|t| t.muted && !is_reserved_kind(t.kind)))
             .or_else(|| oldest(&|t| is_flood_kind(t.kind)))
             .or_else(|| {
                 // Anything else only for a newcomer that is not a flood,
@@ -365,9 +569,21 @@ impl ThreatTable {
             })
     }
 
-    fn remute(&mut self) {
-        for t in self.v.iter_mut() {
-            t.muted = self.mutes.iter().any(|m| m.matches(t) && (!t.per_node || m.target == [0; 6]));
+    /// Drop ended rules and recompute every threat's silence. One that
+    /// was silenced and no longer is, while still active, is announced
+    /// again ([`Tracker::take_new_threat`]): a snooze ends with an alarm.
+    fn remute(&mut self, now_ms: u64) {
+        self.mutes.retain(|m| m.live(now_ms));
+        for i in 0..self.v.len() {
+            let was = self.v[i].muted;
+            let rule = self.rule_for(&self.v[i], now_ms).map(|m| (m.snooze(), m.until_s));
+            let t = &mut self.v[i];
+            t.muted = rule.is_some();
+            t.snoozed = rule.is_some_and(|r| r.0);
+            t.silenced_until_s = rule.map_or(0, |r| r.1);
+            if was && !t.muted && t.active(now_ms) {
+                t.announced = false;
+            }
         }
     }
 
@@ -376,7 +592,7 @@ impl ThreatTable {
     }
 
     pub(crate) fn ingest(&mut self, node: u8, by_hub: bool, s: &ThreatSighting, now_ms: u64) -> Option<ThreatId> {
-        let per_node = is_flood_kind(s.kind) && !self.sighting_muted(s);
+        let per_node = is_flood_kind(s.kind) && !self.sighting_muted(s, now_ms);
         let i = match self.v.iter().position(|t| t.same(node, by_hub, per_node, s)) {
             Some(i) => i,
             None => {
@@ -423,6 +639,8 @@ impl ThreatTable {
                     last_seen_ms: now_ms,
                     reports: 0,
                     muted: false,
+                    snoozed: false,
+                    silenced_until_s: 0,
                     per_node,
                     announced: false,
                 });
@@ -455,14 +673,26 @@ impl ThreatTable {
         }
         t.last_seen_ms = t.last_seen_ms.max(now_ms);
         t.reports = t.reports.saturating_add(1);
-        // An aggregate is muted only by a rule for every target (a
-        // targeted rule keeps its reports apart instead, above).
-        t.muted = self.mutes.iter().any(|m| m.matches(t) && (!t.per_node || m.target == [0; 6]));
-        Some(t.id)
+        // An aggregate is muted only by its node's rule (a targeted rule
+        // keeps its reports apart instead, above).
+        let (id, was) = (t.id, t.muted);
+        let rule = self.rule_for(&self.v[i], now_ms).map(|m| (m.snooze(), m.until_s));
+        let t = &mut self.v[i];
+        if was && rule.is_none() {
+            // Its silence ended: announced again.
+            t.announced = false;
+        }
+        t.muted = rule.is_some();
+        t.snoozed = rule.is_some_and(|r| r.0);
+        t.silenced_until_s = rule.map_or(0, |r| r.1);
+        Some(id)
     }
 
     pub(crate) fn expire(&mut self, now_ms: u64, remove_after_ms: u64) {
         self.v.retain(|t| now_ms.saturating_sub(t.last_seen_ms) < remove_after_ms);
+        if self.mutes.iter().any(|m| !m.live(now_ms)) {
+            self.remute(now_ms);
+        }
     }
 }
 
@@ -596,6 +826,11 @@ impl DeafWatch {
     }
 }
 
+/// Announced, raised by `seen_ms`, sounding at `now_ms`, not silenced.
+fn seen_alarm(t: &Threat, seen_ms: u64, now_ms: u64) -> bool {
+    t.announced && !t.muted && t.first_seen_ms <= seen_ms && t.active(now_ms)
+}
+
 // --------------------------------------------------------------- tracker --
 
 impl<const N: usize, const A: usize> Tracker<N, A> {
@@ -637,51 +872,149 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.threats.all().iter().find(|t| t.id == id)
     }
 
-    /// Threats still being reported, muted ones left out.
+    /// Threats still being reported, silenced ones left out.
     pub fn active_threats(&self, now_ms: u64) -> impl Iterator<Item = &Threat> {
         self.threats.all().iter().filter(move |t| t.active(now_ms) && !t.muted)
     }
 
-    /// Add a mute rule (ignored if already there or the list is full;
-    /// returns whether it was added).
-    pub fn mute(&mut self, m: Mute) -> bool {
+    /// Add a rule. A rule for good (a site-file line) must name one
+    /// specific thing and may not be for a safety-critical kind
+    /// ([`Mute::check_permanent`]); a timed one is held to at most its
+    /// kind's length ([`SNOOZE_MS`], [`OPERATOR_MUTE_MS`]) from `now_ms`.
+    /// `Ok(false)`: already there, or the list is full.
+    pub fn mute(&mut self, mut m: Mute, now_ms: u64) -> Result<bool, &'static str> {
+        if m.permanent() {
+            m.check_permanent()?;
+        } else {
+            let most = until_s(now_ms, if m.snooze() { SNOOZE_MS } else { OPERATOR_MUTE_MS });
+            m.until_s = m.until_s.min(most);
+            if !m.live(now_ms) {
+                return Ok(false);
+            }
+        }
         let tt = &mut self.threats;
         let added = !tt.mutes.contains(&m) && tt.mutes.push(m).is_ok();
-        tt.remute();
-        added
+        tt.remute(now_ms);
+        Ok(added)
     }
 
-    /// Mute every alarm active right now; returns the rules added (for the
-    /// hub to save).
-    pub fn mute_active(&mut self, now_ms: u64) -> Vec<Mute, MAX_THREATS> {
-        let rules: Vec<Mute, MAX_THREATS> = self.active_threats(now_ms).map(Mute::for_threat).collect();
+    /// Silence one alarm: snooze it ([`SNOOZE_MS`]) when it is a
+    /// safety-critical kind, else mute it ([`OPERATOR_MUTE_MS`]). The rule
+    /// added (for the evidence log), or `None` when there is no such threat
+    /// or no room.
+    pub fn silence(&mut self, id: ThreatId, now_ms: u64) -> Option<Mute> {
+        let m = Mute::for_threat(self.get_threat(id)?, now_ms);
+        matches!(self.mute(m.clone(), now_ms), Ok(true)).then_some(m)
+    }
+
+    /// Alarms the operator has seen at `seen_ms` (announced, raised by
+    /// then, sounding now, not silenced): how many nuisance ones the
+    /// "Mute" action would silence and how many safety-critical ones the
+    /// "Snooze" action would.
+    pub fn alarm_counts(&self, seen_ms: u64, now_ms: u64) -> (u8, u8) {
+        let seen = self.threats.all().iter().filter(|t| seen_alarm(t, seen_ms, now_ms));
+        let (mut m, mut s) = (0u8, 0u8);
+        for t in seen {
+            if is_safety_kind(t.kind) {
+                s = s.saturating_add(1);
+            } else {
+                m = m.saturating_add(1);
+            }
+        }
+        (m, s)
+    }
+
+    /// Settings "Mute": mute every nuisance alarm the operator has seen
+    /// ([`Tracker::alarm_counts`]), each on its own rule, for
+    /// [`OPERATOR_MUTE_MS`]. Never a safety-critical one, never one raised
+    /// after `seen_ms`. Returns the rules added (for the evidence log).
+    pub fn mute_seen(&mut self, seen_ms: u64, now_ms: u64) -> Vec<Mute, MAX_THREATS> {
+        self.silence_seen(seen_ms, now_ms, false)
+    }
+
+    /// Settings "Snooze": snooze every safety-critical alarm the operator
+    /// has seen, for [`SNOOZE_MS`].
+    pub fn snooze_seen(&mut self, seen_ms: u64, now_ms: u64) -> Vec<Mute, MAX_THREATS> {
+        self.silence_seen(seen_ms, now_ms, true)
+    }
+
+    fn silence_seen(&mut self, seen_ms: u64, now_ms: u64, safety: bool) -> Vec<Mute, MAX_THREATS> {
+        let rules: Vec<Mute, MAX_THREATS> = self
+            .threats
+            .all()
+            .iter()
+            .filter(|t| seen_alarm(t, seen_ms, now_ms) && is_safety_kind(t.kind) == safety)
+            .map(|t| Mute::for_threat(t, now_ms))
+            .collect();
         let mut added = Vec::new();
         for m in rules {
-            if self.mute(m.clone()) {
+            if matches!(self.mute(m.clone(), now_ms), Ok(true)) {
                 let _ = added.push(m);
             }
         }
         added
     }
 
-    /// Drop every mute rule.
-    pub fn unmute_all(&mut self) {
+    /// Drop every rule (operator and site file); alarms still sounding are
+    /// announced again.
+    pub fn unmute_all(&mut self, now_ms: u64) {
         self.threats.mutes.clear();
-        self.threats.remute();
+        self.threats.remute(now_ms);
+    }
+
+    /// The site file's rules (for good) replace those of its last load;
+    /// the operator's timed mutes and snoozes stay. A rule that is not
+    /// specific, or is for a safety-critical kind, is refused
+    /// ([`Mute::check_permanent`]). Returns how many were refused.
+    pub fn set_site_mutes(&mut self, rules: &[Mute], now_ms: u64) -> usize {
+        self.threats.mutes.retain(|m| !m.permanent());
+        let mut refused = 0;
+        for m in rules {
+            if m.check_permanent().is_err() || !matches!(self.mute(m.clone(), now_ms), Ok(true) | Ok(false)) {
+                refused += 1;
+            }
+        }
+        self.threats.remute(now_ms);
+        refused
+    }
+
+    /// Drop the operator's mutes and snoozes, keep the site file's.
+    pub fn unmute_operator(&mut self, now_ms: u64) {
+        self.threats.mutes.retain(|m| m.permanent());
+        self.threats.remute(now_ms);
     }
 
     pub fn mutes(&self) -> &[Mute] {
         &self.threats.mutes
     }
 
-    /// Whether any node is jammed or blinded right now: the detector may be
-    /// missing drones, so "nothing seen" must not read as "all clear".
-    pub fn partly_blind(&self, now_ms: u64) -> bool {
-        self.active_threats(now_ms).any(|t| t.kind.is_jamming())
+    /// Rules in force by type, and when the first timed ones end.
+    pub fn mute_counts(&self, now_ms: u64) -> MuteCounts {
+        let mut c = MuteCounts::default();
+        for m in self.threats.mutes.iter().filter(|m| m.live(now_ms)) {
+            match m.ends_ms() {
+                None => c.site = c.site.saturating_add(1),
+                Some(e) => {
+                    let left = e.saturating_sub(now_ms);
+                    let (n, first) = if m.snooze() { (&mut c.snoozed, &mut c.snooze_left_ms) } else { (&mut c.muted, &mut c.mute_left_ms) };
+                    *first = if *n == 0 { left } else { (*first).min(left) };
+                    *n = n.saturating_add(1);
+                }
+            }
+        }
+        c
     }
 
-    /// The next threat to alert on, exactly once each.
-    /// Muted threats are never handed out.
+    /// Whether any node is jammed or blinded right now: the detector may be
+    /// missing drones, so "nothing seen" must not read as "all clear".
+    /// Mutes and snoozes do not change it.
+    pub fn partly_blind(&self, now_ms: u64) -> bool {
+        self.threats.all().iter().any(|t| t.active(now_ms) && t.kind.is_jamming())
+    }
+
+    /// The next threat to alert on, exactly once each (and once more when
+    /// a mute or snooze on it ends while it is still sounding). Silenced
+    /// threats are not handed out.
     pub fn take_new_threat(&mut self, _now_ms: u64) -> Option<ThreatId> {
         loop {
             let t = self.threats.v.iter_mut().find(|t| !t.announced)?;
@@ -709,6 +1042,14 @@ struct ThreatLine<'a> {
     jamming: bool,
     active: bool,
     muted: bool,
+    /// How it is silenced: `"snooze"` (a safety-critical kind, minutes),
+    /// `"timed"` (an operator's mute, hours) or `"site"` (the site file,
+    /// for good); absent when not silenced. Added with WP-11b.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mute: Option<&'static str>,
+    /// Hub ms the snooze or timed mute ends. Added with WP-11b.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mute_until_ms: Option<u64>,
     by_hub: bool,
     node: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -729,6 +1070,12 @@ struct ThreatLine<'a> {
     target: Option<Mac<'a>>,
     #[serde(skip_serializing_if = "str::is_empty")]
     ssid: &'a str,
+    /// Present (true) when `src`, `target` or `ssid` is shown: they are what
+    /// the attack frames say, not verified, and can name an innocent
+    /// device (docs/WIFI-ATTACKS.md "What a forged frame can make an alarm
+    /// say"). Added with WP-11b.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    claimed: bool,
     /// Contested control link: the system ("ExpressLRS"), how many
     /// transmitters the evidence needs, and the rule that fired.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -760,7 +1107,7 @@ struct ThreatLine<'a> {
 }
 
 /// A buffer this size always holds one threat line (see the test).
-pub const MAX_THREAT_LINE: usize = 576;
+pub const MAX_THREAT_LINE: usize = 640;
 const _: () = assert!(MAX_THREAT_LINE <= crate::json::MAX_LINE);
 
 /// Write one threat as a JSON object followed by `\n` (`"t":"threat"`).
@@ -775,6 +1122,14 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         jamming: t.kind.is_jamming(),
         active: t.active(ctx.now_ms),
         muted: t.muted,
+        mute: t.muted.then_some(if t.snoozed {
+            "snooze"
+        } else if t.silenced_until_s != 0 {
+            "timed"
+        } else {
+            "site"
+        }),
+        mute_until_ms: t.silenced_until_ms(),
         by_hub: t.by_hub,
         node: t.node,
         ch: (t.channel != 0).then_some(t.channel),
@@ -788,6 +1143,7 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         src: (show && known(&t.source)).then_some(Mac(&t.source)),
         target: (show && known(&t.target)).then_some(Mac(&t.target)),
         ssid: t.ssid.as_str(),
+        claimed: (show && (known(&t.source) || known(&t.target))) || !t.ssid.is_empty(),
         ctrl_system: t.contested().and_then(|d| d.system).map(|s| s.label()),
         transmitters: t.contested().map(|d| d.transmitters),
         rule: t.contested().map(|d| ctrlwatch::contested::rule_name(d.rules)),
@@ -876,7 +1232,7 @@ mod tests {
         }
         assert_eq!(new.len(), 4);
         // Muting a drone's takeover silences that drone only.
-        let m = Mute::for_threat(tr.get_threat(t1).unwrap());
+        let m = Mute::for_threat(tr.get_threat(t1).unwrap(), 4_000);
         assert_eq!((m.target, m.source), (drone, [0; 6]));
         // JSON line names the maker.
         let ctx = Context { now_ms: 4_000, utc_ms: None, own: None, config: crate::Config::default(), flood: None };
@@ -906,6 +1262,14 @@ mod tests {
         let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config, flood: None };
         let n = threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).unwrap();
         assert!(n > 512, "{n}: the reason MAX_THREAT_LINE grew from 512");
+        // Muted until as late as a hub uptime can say (u32 seconds).
+        let late = u64::from(u32::MAX - 10_000) * 1000;
+        let id = tr.ingest_threat(u8::MAX, &big, late).unwrap();
+        assert!(tr.silence(id, late).is_some());
+        let ctx = Context { now_ms: late, ..ctx };
+        let n = threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).unwrap();
+        assert!(n >= 576, "{n}: at the old limit, the reason it grew again, to 640 (WP-11b)");
+        assert!(core::str::from_utf8(&buf[..n]).unwrap().contains("\"mute\":\"timed\",\"mute_until_ms\":"));
         assert!(core::str::from_utf8(&buf[..n]).unwrap().contains("\"maker\":\"Holy Stone\""));
     }
 
@@ -1062,7 +1426,7 @@ mod tests {
         assert!(text.contains("\"kind\":\"mavlink_attack\"") && text.contains("\"detail\":13"), "{text}");
         assert!(text.contains("\"via\":\"radio\""), "{text}");
         // Muting the owner's own console silences that sender only.
-        assert!(tr.mute(Mute::for_threat(tr.get_threat(a).unwrap())));
+        assert_eq!(tr.mute(Mute::for_threat(tr.get_threat(a).unwrap(), 3_000), 3_000), Ok(true));
         assert_eq!(tr.active_threats(3_000).count(), 1);
     }
 
@@ -1126,10 +1490,11 @@ mod tests {
         assert!(tr.take_new_threat(1_000).is_some());
         assert!(tr.take_new_threat(1_000).is_some());
         assert!(tr.partly_blind(1_000));
-        let added = tr.mute_active(1_000);
-        assert_eq!(added.len(), 2);
+        let added = tr.mute_seen(1_000, 1_000);
+        assert_eq!(added.len(), 1, "the twin; the jammer is never in Mute");
+        assert_eq!(tr.snooze_seen(1_000, 1_000).len(), 1);
         assert_eq!(tr.active_threats(1_000).count(), 0);
-        assert!(!tr.partly_blind(1_000));
+        assert!(tr.partly_blind(1_000), "a snoozed jammer still blinds");
         assert_eq!(tr.threats().len(), 2, "kept for the record");
         // The same twin again: still muted, no new alert. A different name
         // or jamming on the other band is not.
@@ -1140,8 +1505,9 @@ mod tests {
         tr.ingest_threat(1, &other, 2_000);
         tr.ingest_threat(2, &sighting(ThreatKind::JamBroadband, 0, 58_000), 2_000);
         assert_eq!(tr.active_threats(2_000).count(), 2);
-        assert!(tr.mute_active(2_000).len() == 2 && tr.mute_active(2_000).is_empty(), "no duplicate rules");
-        tr.unmute_all();
+        while tr.take_new_threat(2_000).is_some() {}
+        assert!(tr.mute_seen(2_000, 2_000).len() == 1 && tr.mute_seen(2_000, 2_000).is_empty(), "no duplicate rules");
+        tr.unmute_all(2_000);
         assert_eq!(tr.active_threats(2_000).count(), 5, "the twin heard by node 3 too");
         assert!(tr.mutes().is_empty());
     }
@@ -1174,13 +1540,15 @@ mod tests {
         let n = threat_line(t, &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();
         assert!(text.contains("\"ctrl_system\":\"ExpressLRS\",\"transmitters\":2,\"rule\":\"interleaved timing\""), "{text}");
-        // Mute: the band (and the identifier, all zero here); a 2.4 GHz
-        // contested link is not muted by it.
-        let m = Mute::for_threat(t);
-        assert_eq!((m.freq, m.source, m.target), (9_155, [0; 6], [0; 6]));
+        // Mute: the band, and without an identifier the node's handle and
+        // the system too: that link only. A 2.4 GHz one, another handle or
+        // another system is not muted by it.
+        let m = Mute::for_threat(t, 2_000);
+        assert_eq!((m.freq, m.source, m.target, m.node), (9_155, [0, 0, 0, 0, 0, 1], [0; 6], 4));
         let mut far = t.clone();
         far.freq = 24_404;
-        assert!(m.matches(&tr.threats()[1]) && !m.matches(&far));
+        assert!(m.matches(t) && !m.matches(&far));
+        assert!(!m.matches(&tr.threats()[1]) && !m.matches(&tr.threats()[2]));
         // Other kinds carry no contested fields.
         let n = threat_line(&{
             let mut x = t.clone();
@@ -1206,6 +1574,7 @@ mod tests {
         let text = core::str::from_utf8(&buf[..n]).unwrap();
         assert!(text.contains("\"src\":\"02:01:02:03:04:05\""), "{text}");
         assert!(text.contains("\"kind\":\"evil_twin\""));
+        assert!(text.contains("\"claimed\":true"), "addresses are claims: {text}");
         let ctx = Context { config: Config::default(), ..ctx };
         let n = threat_line(&tr.threats()[0], &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();

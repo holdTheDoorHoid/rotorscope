@@ -280,8 +280,9 @@ impl App {
                 write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
             };
             if !t.ssid.is_empty() {
-                // From a link frame: never printed or logged as received.
-                let _ = write!(text, " \"{}\"", link::printable::Printable(&t.ssid));
+                // From a link frame: never printed or logged as received,
+                // and only what the frame claimed (WP-11b).
+                let _ = write!(text, " claimed \"{}\"", link::printable::Printable(&t.ssid));
             }
             if let Some(maker) = tracker::threats::drone_maker(t) {
                 let _ = write!(text, " ({maker})");
@@ -523,13 +524,33 @@ impl App {
         }
         self.state.sd = ext.sd;
         self.state.caveats = ext.caveats;
+        // WP-11b: what is silenced, and the site file's collection switches,
+        // stay on screen (the caveats strip).
+        let mc = self.tracker.mute_counts(now);
+        let secs = |ms: u64| ms.div_ceil(1000).min(u64::from(u32::MAX)) as u32;
+        self.state.caveats.silenced = screen::Silenced {
+            muted: mc.muted,
+            mute_left_s: secs(mc.mute_left_ms),
+            snoozed: mc.snoozed,
+            snooze_left_s: secs(mc.snooze_left_ms),
+            site: mc.site,
+        };
+        self.state.caveats.switches = screen::Switches {
+            control_ids: self.control_flags.0,
+            control_content: self.control_flags.1,
+            audio_clips: false,
+        };
         self.state.flags = ext.flags.clone();
+        // The "Alarms" row acts on what this frame shows (`seen` = now).
+        let (mutable, snoozable) = self.tracker.alarm_counts(now, now);
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
             // WP-09: a flood of forged drone IDs, shown as FLOOD in the bar.
             flood_per_s: self.tracker.flood_status(now).map_or(0, |f| f.new_per_s.min(u32::from(u16::MAX)) as u16),
             muted: self.tracker.threats().iter().filter(|t| t.muted && t.active(now)).count().min(255) as u8,
+            mutable,
+            snoozable,
         };
         // No battery sense on this board (the BAT connector's voltage is not
         // wired to a GPIO): report USB power, as a bench S3 does.

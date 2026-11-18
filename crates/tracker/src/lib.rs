@@ -1691,6 +1691,8 @@ mod tests_control;
 #[cfg(test)]
 mod tests_flood;
 #[cfg(test)]
+mod tests_mutes;
+#[cfg(test)]
 mod tests_openlinks;
 #[cfg(test)]
 mod tests_signals;

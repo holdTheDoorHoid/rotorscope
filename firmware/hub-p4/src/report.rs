@@ -128,16 +128,22 @@ fn hub_line(app: &App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd: &Lo
     let mut b = LineBuf::new();
     let mut w = W(&mut b);
     let t = &app.tracker;
+    // WP-11b: alarms silenced, and the rules in force by type.
+    let mc = t.mute_counts(now);
     let _ = write!(w.0, "{{\"t\":\"hub\",\"up_ms\":{now},\"utc_ms\":");
     w.opt(utc);
     let src = gps.time.map(|a| if a.pps { "\"gps_pps\"" } else { "\"gps\"" });
     let _ = write!(
         w.0,
-        ",\"utc_src\":{},\"conflicts\":{},\"threats\":{},\"blind\":{},\"tracks\":{},\"active\":{},\"open_links\":{},\"open_active\":{},\"aircraft\":{},\"aircraft_active\":{},\"own\":",
+        ",\"utc_src\":{},\"conflicts\":{},\"threats\":{},\"blind\":{},\"silenced\":{},\"mutes\":{{\"muted\":{},\"snoozed\":{},\"site\":{}}},\"tracks\":{},\"active\":{},\"open_links\":{},\"open_active\":{},\"aircraft\":{},\"aircraft_active\":{},\"own\":",
         src.unwrap_or("null"),
         t.conflicts(now).len(),
         t.active_threats(now).count(),
         t.partly_blind(now),
+        t.threats().iter().filter(|x| x.muted && x.active(now)).count(),
+        mc.muted,
+        mc.snoozed,
+        mc.site,
         t.tracks().len(),
         t.active_count(now),
         t.open_links().len(),

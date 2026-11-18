@@ -298,7 +298,7 @@ fn antipodal_positions_cost_a_bounded_number_of_iterations() {
 fn sizes() {
     use core::mem::size_of;
     std::println!(
-        "Tracker<64,32> {} B, Track {} B, Claims {} B, Tracker<32,0> {} B, AircraftTrack {} B, Threat {} B, ControlTable {} B",
+        "Tracker<64,32> {} B, Track {} B, Claims {} B, Tracker<32,0> {} B, AircraftTrack {} B, Threat {} B, ControlTable {} B, Mute {} B, ThreatTable {} B",
         size_of::<Tracker<64, 32>>(),
         size_of::<Track>(),
         size_of::<Claims>(),
@@ -306,6 +306,8 @@ fn sizes() {
         size_of::<AircraftTrack>(),
         size_of::<threats::Threat>(),
         size_of::<ctrllinks::ControlTable>(),
+        size_of::<threats::Mute>(),
+        size_of::<threats::ThreatTable>(),
     );
     // The P4 keeps the tracker in a 1 MiB PSRAM window.
     assert!(size_of::<Tracker<64, 32>>() < 1 << 20);
@@ -388,10 +390,11 @@ fn flood_threats_aggregate_per_node() {
     let deauths: std::vec::Vec<_> = tr.threats().iter().filter(|x| x.kind == Deauth).collect();
     assert_eq!(deauths.len(), 2);
     assert_eq!(deauths[0].count, 50 * 1_200);
-    let mut m = Mute::for_threat(deauths[0]);
-    assert_eq!(m.target, [0; 6], "muting an aggregate mutes every target");
+    let mut m = Mute::for_threat(deauths[0], t);
+    assert_eq!((m.target, m.node), ([0; 6], deauths[0].node), "muting an aggregate mutes that node's");
     m.target = [0x0a, 0, 0, 0, 1, 99];
-    assert!(tr.mute(m));
+    m.node = threats::NODE_ANY;
+    assert_eq!(tr.mute(m, t), Ok(true));
     tr.ingest_threat(1, &threat(Deauth, 99, 24_370), t);
     let muted: std::vec::Vec<_> = tr.threats().iter().filter(|x| x.kind == Deauth && x.muted).collect();
     assert_eq!(muted.len(), 1);

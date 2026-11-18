@@ -231,7 +231,7 @@ pub struct Logger {
     /// none / loaded / bad / error, for the status line.
     pub flarm_key_state: &'static str,
     /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
-    site: Option<tracker::site::SiteState>,
+    site: Option<(tracker::site::SiteState, crate::site::FileFacts)>,
 }
 
 /// Node positions and muted alarms (`tracker::site`). The hub only ever
@@ -307,14 +307,14 @@ impl Logger {
     }
 
     /// The site file read at mount, once.
-    pub fn take_site(&mut self) -> Option<tracker::site::SiteState> {
+    pub fn take_site(&mut self) -> Option<(tracker::site::SiteState, crate::site::FileFacts)> {
         self.site.take()
     }
 
     /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (it only
     /// grows, so it can be any length; later lines win).
     fn load_site(&mut self) {
-        use tracker::site::{Lines, SiteState, parse_line, read_into};
+        use tracker::site::{Lines, SiteState, finish_into, read_into};
         let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
         let f = match vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadOnly) {
             Ok(f) => f,
@@ -331,25 +331,27 @@ impl Logger {
         let refused = |n: u32, e: &str| println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
         let mut buf = [0u8; 256];
         let mut total = 0usize;
+        // The whole file is hashed as read, for the evidence log (WP-11b).
+        let mut sha = evidence::Sha256Stream::new();
         loop {
             match vm.read(f, &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(k) => {
                     total += k;
+                    sha.update(&buf[..k]);
                     read_into(&mut st, &mut lines, &buf[..k], refused);
                 }
             }
         }
         let _ = vm.close_file(f);
-        lines.finish(|n, r| match r.and_then(parse_line) {
-            Ok(l) => st.apply(l),
-            Err(e) => {
-                st.ignored += 1;
-                refused(n, e);
-            }
-        });
+        finish_into(&mut st, &mut lines, refused);
         println!("hub-p4: {DIR}/{SITE_NAME} read ({total} bytes, {} lines)", lines.number);
-        self.site = Some(st);
+        let facts = crate::site::FileFacts {
+            sha256: sha.finish(),
+            bytes: total.min(u32::MAX as usize) as u32,
+            lines: lines.number,
+        };
+        self.site = Some((st, facts));
     }
 
     /// Append `text` (whole lines) to `ROTORSCP/SITE.TXT`, creating it.
