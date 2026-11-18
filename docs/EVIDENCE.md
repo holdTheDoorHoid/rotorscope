@@ -98,6 +98,10 @@ names. So:
 - A log signed with the **published test key** (whose secret is in this
   repository) is a failure: anyone can produce one. Only the project's own
   tests accept it, with `--allow-test-key`.
+- A log whose boot event names bench features (the hub writes
+  `...; bench: fakedrone,faulttest`, or `bench: none`; docs/BENCH.md "Bench
+  builds") gets a NOTE saying a bench build wrote it: such a build can fake
+  detections, position or time. The note does not change the verdict.
 
 ## What is protected now
 

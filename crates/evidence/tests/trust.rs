@@ -16,12 +16,17 @@ fn ctx(t: u64) -> Context {
 
 /// One boot: boot event, notes, two checkpoints. Events only (no decode).
 fn log(boot: u8, signer: &mut SoftSigner) -> Vec<u8> {
+    log_text(boot, signer, b"hub-p4 test")
+}
+
+/// [`log`] with this boot event text.
+fn log_text(boot: u8, signer: &mut SoftSigner, text: &[u8]) -> Vec<u8> {
     let mut c = Chain::new([boot; 8], FW);
     let mut out = Vec::new();
     let mut b = [0u8; format::MAX_RECORD];
     let mut data = vec![signer.key_class() as u8];
     data.extend_from_slice(&signer.public_key());
-    let n = c.event(&ctx(1), EventCode::Boot, b"hub-p4 test", &data, &mut b).unwrap();
+    let n = c.event(&ctx(1), EventCode::Boot, text, &data, &mut b).unwrap();
     out.extend_from_slice(&b[..n]);
     c.commit();
     for i in 0..6u64 {
@@ -118,6 +123,26 @@ fn a_missing_middle_file_fails_by_default() {
     assert_eq!(rep.exit_code(), 3, "{:?}", rep.findings);
     assert!(rep.findings.iter().any(|f| f.level == Level::Gap && f.what.contains("may have been removed")), "{:?}", rep.findings);
     assert!(rep.verdict().contains("removed"), "{}", rep.verdict());
+}
+
+/// A boot event naming bench features (as the P4 hub writes it) gives a
+/// NOTE, never a failure or a pass of its own; `bench: none` gives none.
+#[test]
+fn a_bench_build_is_named_in_a_note() {
+    let mut s = SoftSigner::new(&[0x11; 32], KeyClass::DevelopmentSoftware).unwrap();
+    let key = Some(s.public_key());
+    let bench = log_text(1, &mut s, b"hub-p4 0.1.0 abc last reset: power-on; bench: fakedrone,faulttest");
+    let rep = one(bench, &Options { expect_key: key, ..Options::default() });
+    assert_eq!(rep.exit_code(), 0, "{:?}", rep.findings);
+    assert!(
+        rep.findings.iter().any(|f| f.level == Level::Note && f.what.contains("BENCH build") && f.what.contains("fakedrone,faulttest")),
+        "{:?}",
+        rep.findings
+    );
+    let normal = log_text(1, &mut s, b"hub-p4 0.1.0 abc last reset: power-on; bench: none");
+    let rep = one(normal, &Options { expect_key: key, ..Options::default() });
+    assert!(!rep.findings.iter().any(|f| f.what.contains("BENCH")), "{:?}", rep.findings);
+    assert_eq!(verify::boot_bench_list(b"hub-p4 test"), None);
 }
 
 #[test]

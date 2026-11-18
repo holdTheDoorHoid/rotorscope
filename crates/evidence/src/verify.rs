@@ -10,7 +10,7 @@
 //!   vouched for (records after the last signed checkpoint; records a
 //!   server never received; a file not supplied).
 //! - **Note**: worth knowing (the key class the log claims, records with no
-//!   GPS time).
+//!   GPS time, a boot event that names bench features).
 //!
 //! **Who signed.** A log names its own key (boot event, every checkpoint),
 //! so a log that checks against the key it names proves only that it is
@@ -288,6 +288,15 @@ struct ChainState {
     last_signed_end: Option<u64>,
     /// The key was refused (test key, or not an outside key): said once.
     key_refused: bool,
+}
+
+/// The bench features a boot event's text names (`...; bench: a,b`, as
+/// the P4 hub writes it), or `None` for a normal build (`bench: none`) or a
+/// text that names none.
+pub fn boot_bench_list(text: &[u8]) -> Option<&str> {
+    let text = core::str::from_utf8(text).ok()?;
+    let list = text.rsplit_once("bench: ")?.1.trim();
+    (!list.is_empty() && list != "none").then_some(list)
 }
 
 /// Check `inputs` in order. Card files should be given in file-number
@@ -579,6 +588,13 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
                     } else {
                         c.sum.key_class = Some(e.data[0]);
                         c.sum.key = Some(e.data[1..1 + format::PUBKEY_LEN].try_into().unwrap());
+                    }
+                    if let Some(list) = boot_bench_list(e.text) {
+                        rep.add(
+                            Level::Note,
+                            w.clone(),
+                            format!("the boot event says a BENCH build wrote this log (bench: {list}): such a build can fake detections, positions or time, and its records are not field evidence"),
+                        );
                     }
                 }
                 Some(EventCode::Clock) => c.clock_event_since = true,
