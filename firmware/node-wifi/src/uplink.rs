@@ -132,9 +132,9 @@ pub async fn run(mut now: EspNow) {
     let mut auth = auth::Key::kit().map(|k| auth::Node::new(k, rng));
     let mut rejects = auth::NodeRejects::default();
     if auth.is_some() {
-        esp_println::println!(r#"{{"t":"uplink","auth":"{}"}}"#, auth::KEY_TAG);
+        crate::usb::usb_line!(r#"{{"t":"uplink","auth":"{}"}}"#, auth::KEY_TAG);
     } else {
-        esp_println::println!(
+        crate::usb::usb_line!(
             r#"{{"t":"warn","what":"link_key","auth":"{}","note":"built WITHOUT a link key: ESP-NOW reports and hub commands are not authenticated (docs/ESPNOW.md 'Securing the link')"}}"#,
             auth::KEY_TAG
         );
@@ -146,7 +146,7 @@ pub async fn run(mut now: EspNow) {
     let mut last_stats = Instant::now();
     if RATE.is_some_and(|r| r.starts_with("LR")) {
         let e = enable_lr();
-        esp_println::println!(r#"{{"t":"uplink","lr_protocol":{}}}"#, e == 0);
+        crate::usb::usb_line!(r#"{{"t":"uplink","lr_protocol":{}}}"#, e == 0);
     }
     let mut pending: Option<heapless::Vec<u8, { link::MAX_FRAME }>> = None;
     let mut cmd_seq: Option<([u8; 6], u16)> = None;
@@ -198,7 +198,7 @@ pub async fn run(mut now: EspNow) {
                         if now.set_peer_rate(&mac, cfg).is_ok() { "set" } else { "refused" }
                     }
                 };
-                esp_println::println!(
+                crate::usb::usb_line!(
                     r#"{{"t":"uplink","gateway":"{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}","ch":{ch},"rate":"{}","rate_cfg":"{rate_ok}"}}"#,
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], RATE.unwrap_or("1M")
                 );
@@ -272,7 +272,7 @@ pub async fn run(mut now: EspNow) {
 
         if last_stats.elapsed() >= Duration::from_secs(1) {
             last_stats = Instant::now();
-            esp_println::println!(
+            crate::usb::usb_line!(
                 r#"{{"t":"uplink","gw":{},"beacons":{},"cmds":{},"cmd_dups":{},"pkts":{},"frames":{},"bytes":{},"failed":{},"dropped":{},"send_us":{}}}"#,
                 gateway.is_some(),
                 BEACONS.load(Relaxed),
@@ -287,7 +287,7 @@ pub async fn run(mut now: EspNow) {
             );
             if rejects != auth::NodeRejects::default() {
                 let r = rejects.by_reason;
-                esp_println::println!(
+                crate::usb::usb_line!(
                     r#"{{"t":"link_auth","bad_tag":{},"replay":{},"unauth":{},"stale":{},"dups":{}}}"#,
                     r[0], r[1], r[2], r[3], rejects.dups
                 );

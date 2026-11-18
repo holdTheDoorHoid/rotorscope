@@ -68,8 +68,18 @@ not start with `{`. Diagnostic logging is off (`LOG_LEVEL` in `src/main.rs`) to 
   `rid` Remote ID frames,
   `drop` frames lost to a full queue, `qmax` most queue slots in use in the last second (of 32),
   `other` callbacks that were neither management nor data (filter leaks), `trunc` frames over 512 bytes
-  (kept truncated), `ch_err` failed channel changes, `hub_drop` hub frames lost,
-  `per_ch` frames per channel, and `iefit` (below).
+  (kept truncated), `ch_err` failed channel changes, `hub_drop` hub frames not sent (everything in
+  `shed` plus encode / UART errors), `per_ch` frames per channel, and `iefit` (below).
+  Under a frame flood (docs/BENCH.md "Frame flood"): `shed` hub frames turned away per kind
+  (`rid_known`, `rid_new`, `health`, `threat`, `wdrone`, `dji`, `open`, `other`: over the kind's
+  budget, over a known Remote ID source's rate, or no room left for that kind in the 8-frame hub
+  queue; a frame shed by its budget is not printed on USB either), `rid_src` Remote ID sources known
+  now (their frames get the queue's reserved room), `usb_drop` USB lines dropped (host slow or not
+  reading), `alt` [DJI, Wi-Fi drone] report alternations (one address going back to an earlier
+  content after a different one: two transmitters on one address), `clamp` frames whose `sig_len`
+  claimed more than one receive buffer holds (clamped before reading).
+- USB output never blocks: lines go through an async writer (`src/usb.rs`) and are dropped (counted
+  in `usb_drop`) when the host does not keep up. Only a panic backtrace is written directly.
 - `err`: something the node could not do. A `set_channel` error is printed once per plan entry,
   then only counted in `ch_err`.
 
@@ -77,7 +87,9 @@ not start with `{`. Diagnostic logging is off (`LOG_LEVEL` in `src/main.rs`) to 
 
 postcard + COBS via `link::encode`, on UART1 TX at 921600 baud (`chip::HUB_BAUD`):
 S3 GPIO43, C5 GPIO11 (the boards' TX pins; see `hub_tx_pin!` in `src/chip.rs`). `Hello` every 5 s,
-`Stats` every second, `Detection` (raw messages) per hit, `OpenLink` per `open` line (protocol 2). On the S3 the ROM bootloader also prints
+`Stats` every second, `Detection` (raw messages) per hit, `OpenLink` per `open` line (protocol 2).
+`Stats::dropped` is everything the node lost: receive-queue drops (`drop`) plus hub frames not sent
+(`hub_drop`); the split by kind is only on USB (`shed`), since the frame has no field for it. On the S3 the ROM bootloader also prints
 on GPIO43 for a moment after reset; the hub's decoder discards that as a corrupt frame.
 
 ## Design notes
@@ -179,7 +191,11 @@ in `ota_2` when built) with `tools/flash-node.sh <board>`; layout in
   record, so it never prints a serial.
 - Beacons and probe responses whose address or network name matches the
   maker table (`wifidrone::classify`) go out as `Frame::WifiDrone`, USB `wifidrone`.
-- Both at most once a second per transmitter (16 tracked per kind).
+- Both at most once a second per transmitter *and content* (24 pairs tracked per kind, at most two
+  contents per transmitter a second; `wifiwatch::contentlimit`), so frames forged from a drone's own
+  address with another content cannot take the drone's place. An address whose reports alternate
+  between contents is flagged: `"alt":true` on its `dji` / `wifidrone` lines for a minute, and the
+  stats line's `alt` counts alternations. Then each kind's budget (8 a second) caps the total.
 - Neither has been seen from a real drone yet (no DJI Wi-Fi drone or listed
   maker's drone on the bench).
 

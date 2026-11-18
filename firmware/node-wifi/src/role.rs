@@ -162,7 +162,7 @@ pub async fn control(mut images: node_common::Images<'static>) {
                 Ok(p) => p,
                 Err(why) => {
                     REJECTED.fetch_add(1, Relaxed);
-                    esp_println::println!(r#"{{"t":"err","what":"assign","why":"{why}","plan":{}}}"#, a.id);
+                    crate::usb::usb_line!(r#"{{"t":"err","what":"assign","why":"{why}","plan":{}}}"#, a.id);
                     continue;
                 }
             };
@@ -194,6 +194,6 @@ pub async fn control(mut images: node_common::Images<'static>) {
         Timer::after(Duration::from_millis(50)).await;
         let err = images.switch(&a);
         REJECTED.fetch_add(1, Relaxed);
-        esp_println::println!(r#"{{"t":"err","what":"switch","role":"{:?}","why":"{}"}}"#, a.role, err.as_str());
+        crate::usb::usb_line!(r#"{{"t":"err","what":"switch","role":"{:?}","why":"{}"}}"#, a.role, err.as_str());
     }
 }

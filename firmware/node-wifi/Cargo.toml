@@ -103,6 +103,9 @@ embassy-time     = { version = "0.5.0" }
 embassy-sync     = { version = "0.7" }
 # `yield_now` in the drain task (already in the build through embassy-executor).
 embassy-futures  = "0.1"
+# The async USB writer's `write_all` / `flush` (`usb.rs`; already in the
+# build through esp-hal, which implements it for the USB-Serial-JTAG port).
+embedded-io-async = "0.7"
 critical-section = "1.2.0"
 log              = "0.4.27"
 

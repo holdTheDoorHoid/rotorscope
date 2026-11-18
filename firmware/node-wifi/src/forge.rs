@@ -69,7 +69,7 @@ fn frame(what: &str) -> Option<link::Frame> {
 pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
     let mut line: heapless::Vec<u8, 32> = heapless::Vec::new();
     let mut buf = [0u8; 32];
-    esp_println::println!(
+    crate::usb::usb_line!(
         r#"{{"t":"forge","note":"FORGE TEST BUILD: type 'forge hubfix|csbee|flags|via|hello|threat|join' + Enter"}}"#
     );
     loop {
@@ -97,12 +97,12 @@ pub async fn console(mut read: impl FnMut(&mut [u8]) -> usize) -> ! {
                                 by_transport: heapless::Vec::new(),
                             });
                         }
-                        esp_println::println!(r#"{{"t":"forge","sent":"{}"}}"#, what.trim());
+                        crate::usb::usb_line!(r#"{{"t":"forge","sent":"{}"}}"#, what.trim());
                     }
-                    None => esp_println::println!(r#"{{"t":"forge","err":"unknown; hubfix|csbee|flags|via|hello|threat|join"}}"#),
+                    None => crate::usb::usb_line!(r#"{{"t":"forge","err":"unknown; hubfix|csbee|flags|via|hello|threat|join"}}"#),
                 }
             } else if !cmd.is_empty() {
-                esp_println::println!(r#"{{"t":"forge","err":"type 'forge <what>'"}}"#);
+                crate::usb::usb_line!(r#"{{"t":"forge","err":"type 'forge <what>'"}}"#);
             }
             line.clear();
         }

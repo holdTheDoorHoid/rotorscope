@@ -10,65 +10,54 @@
 //!   or network name looks like a drone maker's (`crates/wifidrone`), sent as
 //!   `Frame::WifiDrone`, with the maker's index in that table.
 //!
-//! Both are rate-limited per transmitter ([`GAP_US`]), like open-link
-//! sightings: a beacon comes ten times a second, the hub needs one a second.
+//! Both are rate-limited per transmitter *and content*
+//! (`wifiwatch::contentlimit`, [`GAP_US`]): a beacon comes ten times a
+//! second, the hub needs one a second, but frames forged from a drone's own
+//! address with other contents (a false position) must not take the drone's
+//! place. The content is the element body (DJI) or the maker and network
+//! name (Wi-Fi drone). An address whose reports go back and forth between
+//! contents is flagged: `"alt":true` on its USB lines, and the stats line's
+//! `alt` counts the alternations. Then each kind's budget
+//! (`wifiwatch::shed`) caps the total, however many addresses send.
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+use wifiwatch::contentlimit::ContentLimit;
+use wifiwatch::shed::Kind;
+use wifiwatch::util::{hash, ms};
 
 use crate::report;
 use crate::rx::RxFrame;
 
-/// Shortest gap between two reports of one transmitter, per kind.
+/// Shortest gap between two reports of one transmitter's one content, per kind.
 pub const GAP_US: u64 = 1_000_000;
-/// Transmitters remembered per kind; the stalest is replaced when full.
-const TRACKED: usize = 16;
+/// (transmitter, content) pairs remembered per kind; the stalest is
+/// replaced when full. 20 bytes each.
+const TRACKED: usize = 24;
+/// Contents forwarded per transmitter per gap: a forger holding one place
+/// leaves the drone the other.
+const PER_SOURCE: u8 = 2;
 
 pub static DJI: AtomicU32 = AtomicU32::new(0);
 pub static WIFI_DRONES: AtomicU32 = AtomicU32::new(0);
+/// Report alternations (two transmitters on one address), per kind.
+pub static DJI_ALT: AtomicU32 = AtomicU32::new(0);
+pub static WIFI_DRONE_ALT: AtomicU32 = AtomicU32::new(0);
 
 const DJI_OUI: [u8; 3] = rid::dji::OUI;
 const SUBTYPE_PROBE_RESP: u8 = 5;
 const SUBTYPE_BEACON: u8 = 8;
 
-/// Last report time per transmitter.
-struct RateLimit {
-    seen: heapless::Vec<([u8; 6], u64), TRACKED>,
-}
-
-impl RateLimit {
-    const fn new() -> Self {
-        Self { seen: heapless::Vec::new() }
-    }
-
-    /// True (and remembered) if `mac` was not reported in the last `GAP_US`.
-    fn allow(&mut self, mac: [u8; 6], now: u64) -> bool {
-        if let Some(e) = self.seen.iter_mut().find(|e| e.0 == mac) {
-            if now.saturating_sub(e.1) < GAP_US {
-                return false;
-            }
-            e.1 = now;
-            return true;
-        }
-        if self.seen.is_full() {
-            // Replace the stalest.
-            if let Some(i) = (0..self.seen.len()).min_by_key(|&i| self.seen[i].1) {
-                self.seen.swap_remove(i);
-            }
-        }
-        let _ = self.seen.push((mac, now));
-        true
-    }
-}
-
 /// Per-task state (lives in the drain task, no locking).
 pub struct Detect {
-    dji: RateLimit,
-    drones: RateLimit,
+    dji: ContentLimit<TRACKED>,
+    drones: ContentLimit<TRACKED>,
 }
 
 impl Detect {
     pub const fn new() -> Self {
-        Self { dji: RateLimit::new(), drones: RateLimit::new() }
+        let gap = (GAP_US / 1000) as u32;
+        Self { dji: ContentLimit::new(gap, PER_SOURCE), drones: ContentLimit::new(gap, PER_SOURCE) }
     }
 
     /// Look at one management frame (`frame` = MPDU without FCS).
@@ -90,22 +79,30 @@ impl Detect {
             return;
         };
         // Vendor type, 2 bytes, subcommand: shorter is not a DroneID element.
-        if body.len() < 7 || !self.dji.allow(src, f.up_us) {
+        if body.len() < 7 {
+            return;
+        }
+        let v = self.dji.check(src, hash(body), ms(f.up_us));
+        DJI_ALT.store(self.dji.alternations, Relaxed);
+        if !v.send || !report::admit(Kind::DjiWifi) {
             return;
         }
         DJI.fetch_add(1, Relaxed);
-        report::dji_json(f, src, body);
+        report::dji_json(f, src, body, v.alternating);
         report::dji_hub(f, src, body);
     }
 
     fn wifi_drone(&mut self, f: &RxFrame, src: [u8; 6], ies: &[u8]) {
         let ssid = rid::wifi::elements(ies).find_map(|(id, b)| (id == 0).then_some(b)).unwrap_or(&[]);
         let Some(maker) = classify(&src, ssid) else { return };
-        if !self.drones.allow(src, f.up_us) {
+        let content = hash(ssid) ^ u32::from(maker).wrapping_mul(0x9E37_79B9);
+        let v = self.drones.check(src, content, ms(f.up_us));
+        WIFI_DRONE_ALT.store(self.drones.alternations, Relaxed);
+        if !v.send || !report::admit(Kind::WifiDrone) {
             return;
         }
         WIFI_DRONES.fetch_add(1, Relaxed);
-        report::wifi_drone_json(f, maker, src, ssid);
+        report::wifi_drone_json(f, maker, src, ssid, v.alternating);
         report::wifi_drone_hub(f, maker, src, ssid);
     }
 }

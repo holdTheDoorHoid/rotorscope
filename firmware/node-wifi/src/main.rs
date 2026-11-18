@@ -52,6 +52,9 @@ mod role;
 mod rx;
 #[cfg(feature = "espnow")]
 mod uplink;
+mod usb;
+
+use usb::usb_line;
 
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -85,7 +88,9 @@ const WATCHDOG: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(30)
 const DRAIN_SLICE: Duration = Duration::from_millis(2);
 
 /// Diagnostic log level. Off by default because USB carries machine-read JSON
-/// lines; raise it (e.g. `Warn`) when debugging esp-radio itself.
+/// lines; raise it (e.g. `Warn`) when debugging esp-radio itself. Those log
+/// lines go straight to the port through `esp_println`, beside the `usb`
+/// writer, so they can land inside a JSON line: a debugging aid only.
 const LOG_LEVEL: log::LevelFilter = log::LevelFilter::Off;
 
 /// Frames that carried Remote ID.
@@ -121,6 +126,11 @@ async fn main(spawner: Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
+
+    // USB: JSON lines out through an async writer (`usb`); the receive side
+    // is the bench console in bench builds.
+    let (_usb_rx, usb_tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async().split();
+    spawner.spawn(usb::writer(usb_tx).expect("spawn usb writer"));
 
     // Which images this board holds (OTA slots) and the job, if this image
     // was started by a role switch.
@@ -159,8 +169,11 @@ async fn main(spawner: Spawner) -> ! {
     if let Err(what) = chip::configure_radio(&mut wifi) {
         // Keep going: on the S3 a failed country/filter call costs efficiency,
         // not reception. The error line says which call to look at.
-        esp_println::println!(r#"{{"t":"err","what":"{what}"}}"#);
+        usb_line!(r#"{{"t":"err","what":"{what}"}}"#);
     }
+    // With the radio on, the hardware RNG is truly random: the salt that
+    // makes the Remote ID source table's slots unpredictable.
+    report::init_shed(esp_hal::rng::Rng::new().random());
 
     rx::init();
     let mut sniffer = wifi.sniffer();
@@ -179,16 +192,9 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     #[cfg(feature = "faulttest")]
-    {
-        let (rx, tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).split();
-        spawner.spawn(faulttest(rx, tx).expect("spawn faulttest"));
-    }
-
+    spawner.spawn(faulttest(_usb_rx).expect("spawn faulttest"));
     #[cfg(feature = "forgetest")]
-    {
-        let (rx, _tx) = esp_hal::usb::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).split();
-        spawner.spawn(forgetest(rx).expect("spawn forgetest"));
-    }
+    spawner.spawn(forgetest(_usb_rx).expect("spawn forgetest"));
 
     node_common::fault::arm(WATCHDOG);
     // `sniffer` must stay alive: dropping it turns promiscuous mode off.
@@ -198,18 +204,17 @@ async fn main(spawner: Spawner) -> ! {
 /// Bench only: `fault panic` / `fault hang` typed on USB (docs/BENCH.md).
 #[cfg(feature = "faulttest")]
 #[embassy_executor::task]
-async fn faulttest(
-    mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>,
-    _tx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Blocking>,
-) {
-    node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| esp_println::println!("{l}")).await
+async fn faulttest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>) {
+    // The console waits 200 ms after its `panic` / `hang` line, so the USB
+    // writer sends it before the fault.
+    node_common::fault::console(|b| rx.drain_rx_fifo(b), |l| usb_line!("{l}")).await
 }
 
 /// Bench only: `forge <what>` typed on USB sends a frame this node may not
 /// originate (docs/BENCH.md "Origin checks").
 #[cfg(feature = "forgetest")]
 #[embassy_executor::task]
-async fn forgetest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Blocking>) {
+async fn forgetest(mut rx: esp_hal::usb::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>) {
     forge::console(|b| rx.drain_rx_fifo(b)).await
 }
 
@@ -292,7 +297,7 @@ impl Tuner {
                 Ok(()) => self.band = Some(five),
                 Err(e) => {
                     BAND_ERRORS.fetch_add(1, Relaxed);
-                    esp_println::println!(r#"{{"t":"err","what":"set_band","ch":{ch},"e":"{e:?}"}}"#);
+                    usb_line!(r#"{{"t":"err","what":"set_band","ch":{ch},"e":"{e:?}"}}"#);
                 }
             }
         }
@@ -307,7 +312,7 @@ impl Tuner {
                 CHANNEL_ERRORS.fetch_add(1, Relaxed);
                 if let Some(seen @ false) = self.reported.get_mut(usize::from(ch)) {
                     *seen = true;
-                    esp_println::println!(r#"{{"t":"err","what":"set_channel","ch":{ch},"e":"{e:?}"}}"#);
+                    usb_line!(r#"{{"t":"err","what":"set_channel","ch":{ch},"e":"{e:?}"}}"#);
                 }
             }
         }
@@ -356,8 +361,6 @@ fn check_ie_fit(f: &rx::RxFrame) {
 
 #[embassy_executor::task]
 async fn drain() {
-    // Declared outside the loop so it lives in the task's static state.
-    let mut json = [0u8; report::JSON_BYTES];
     let mut detect = detect::Detect::new();
     // Beacon-side attack detection (~4.3 KB, in the task's static state).
     let mut watch = wifiwatch::beacons::Beacons::new();
@@ -384,7 +387,9 @@ async fn drain() {
         }
         detect.frame(&f, frame);
         // A drone's own beacon: let the callback's drone watch know it.
-        if let Some(d) = watch.frame(frame, f.rssi, f.channel, f.up_us, &mut |s| report::threat(&s)) {
+        if let Some(d) = watch.frame(frame, f.rssi, f.channel, f.up_us, &mut |s| {
+            report::threat(&s);
+        }) {
             critical_section::with(|cs| rx::DRONES.borrow_ref_mut(cs).learn(&d, f.up_us));
             rx::DRONES_ON.store(true, Relaxed);
         }
@@ -395,6 +400,9 @@ async fn drain() {
         }
         let Some(found) = rid::wifi::extract(frame) else { continue };
         RID_FOUND.fetch_add(1, Relaxed);
+        // Known source within its rate, or new source within the budget;
+        // else shed (counted), on both outputs.
+        let Some(kind) = report::rid_admit(found.src) else { continue };
 
         let mut messages = report::Messages::new();
         let error = match rid::message::raw_messages(found.payload) {
@@ -417,8 +425,8 @@ async fn drain() {
             messages: &messages,
             error,
         };
-        report::detection_json(&hit, &mut json);
-        report::detection_hub(&hit);
+        report::detection_json(&hit);
+        report::detection_hub(&hit, kind);
     }
 }
 
@@ -429,23 +437,34 @@ const OPEN_REPORT_GAP_US: u64 = 1_000_000;
 
 /// Report open-link streams that have new frames, each at most once per
 /// `OPEN_REPORT_GAP_US`. Checked four times a second, so a new link is
-/// reported within 250 ms of its first frame.
+/// reported within 250 ms of its first frame. Never more at once than the
+/// hub queue has room for open links and the open-link budget allows
+/// (`wifiwatch::shed`): with the table full (16 streams, e.g. injected
+/// wfb-ng frames with many link ids) they go out in turns, the
+/// longest-waiting first, instead of 16 at once into an 8-frame queue.
 #[embassy_executor::task]
 async fn open_links() {
+    use wifiwatch::shed::Kind;
     let mut ticker = Ticker::every(Duration::from_millis(250));
     loop {
         ticker.next().await;
         let now = Instant::now().as_micros();
+        let room = report::hub_room(Kind::OpenLink);
         // Copy out under the lock (the callback writes the table); format
         // and send after releasing it.
         let mut due: heapless::Vec<openlink::Sighting, { rx::OPEN_STREAMS }> = heapless::Vec::new();
         critical_section::with(|cs| {
-            rx::SIGHTINGS.borrow_ref_mut(cs).take_due(now, OPEN_REPORT_GAP_US, |s| {
+            rx::SIGHTINGS.borrow_ref_mut(cs).take_due_max(now, OPEN_REPORT_GAP_US, room, |s| {
                 // Cannot overflow: the table holds OPEN_STREAMS entries.
                 let _ = due.push(*s);
             })
         });
         for s in &due {
+            // Over budget: shed (counted). It was taken, so it waits a
+            // second like a reported one; its count keeps running.
+            if !report::admit(Kind::OpenLink) {
+                continue;
+            }
             report::open_json(s);
             report::open_hub(s);
         }
@@ -473,8 +492,10 @@ async fn mavlink() {
             continue;
         }
         scan.feed(&d.meta, d.payload(), &mut |s, e| {
-            report::threat(s);
-            report::mavlink_evidence(e);
+            // The evidence only with its threat (both shed together).
+            if report::threat(s) {
+                report::mavlink_evidence(e);
+            }
         });
         MAV_DATAGRAMS.store(scan.totals.datagrams, Relaxed);
         MAV_FINDINGS.store(scan.totals.findings, Relaxed);
@@ -535,6 +556,7 @@ async fn stats() {
             }
         }
         let floods = critical_section::with(|cs| rx::FLOODS.borrow_ref(cs).totals);
+        let (shed, rid_src, shed_total) = report::shed_counts();
         let drones = critical_section::with(|cs| rx::DRONES.borrow_ref(cs).totals);
         let line = report::StatsLine {
             t: "stats",
@@ -554,7 +576,12 @@ async fn stats() {
             other: rx::OTHER.load(Relaxed),
             trunc: TRUNCATED.load(Relaxed),
             ch_err: CHANNEL_ERRORS.load(Relaxed),
-            hub_drop: report::HUB_DROPPED.load(Relaxed),
+            hub_drop: report::HUB_DROPPED.load(Relaxed).wrapping_add(shed_total),
+            shed,
+            rid_src,
+            usb_drop: usb::DROPPED.load(Relaxed),
+            alt: [detect::DJI_ALT.load(Relaxed), detect::WIFI_DRONE_ALT.load(Relaxed)],
+            clamp: rx::CLAMPED.load(Relaxed),
             iefit: IE_FIT.each_ref().map(|c| c.load(Relaxed)),
             per_ch,
             band_err: BAND_ERRORS.load(Relaxed),
@@ -579,7 +606,7 @@ async fn stats() {
         report::stats_json(&line);
         report::stats_hub(&line);
         #[cfg(feature = "wirebus")]
-        esp_println::println!("{}", node_common::bus::json_line());
+        usb::line(node_common::bus::json_line().as_bytes());
         if tick.is_multiple_of(5) {
             report::hello_hub();
         }
