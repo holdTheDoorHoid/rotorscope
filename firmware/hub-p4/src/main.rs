@@ -421,7 +421,7 @@ fn main() -> ! {
         }
         ev.tick(ms);
         if let Some(e) = ear.as_mut() {
-            e.tick(app.tracker, ms);
+            e.tick(app.tracker, &mut ev, ms);
         }
         if ms.saturating_sub(last_report) >= 1000 {
             last_report = ms;
@@ -437,6 +437,15 @@ fn main() -> ! {
             app.aero.print(if app.aero.has_keys() { "loaded" } else { sdlog.flarm_key_state }, bus::syncs(), ms);
             site.apply(&mut app, &gw);
             control_settings(&site, &mut down, &mut app, &mut ev);
+            if let Some(e) = ear.as_mut() {
+                let on = site.audio_clips();
+                if e.clips_on != on {
+                    e.clips_on = on;
+                    let t: &[u8] = if on { b"audio clips on (SITE.TXT / console)" } else { b"audio clips off (SITE.TXT / console)" };
+                    ev.event(evidence::EventCode::Setting, t, &[on as u8]);
+                    println!("hub-p4: audio clips {}", if on { "on" } else { "off" });
+                }
+            }
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
@@ -475,6 +484,9 @@ fn main() -> ! {
             });
         }
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
+        if let Some(e) = ear.as_mut() {
+            sdlog.clip_tick(e, app.tracker, &mut ev, ms);
+        }
         if let Some(text) = sdlog.take_site() {
             site.load(text, &mut app);
         }

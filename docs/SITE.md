@@ -43,6 +43,17 @@ raises the ATTACK / JAMMED badge or counts as jamming.
   The kind names are the ones in the hub's `"t":"threat"` lines. `ssid=` takes
   the rest of the line, so put it last.
 
+## Sound clips
+
+```
+audio clips off     # the hub stores no sound at all (it still detects and alerts)
+audio clips on      # the default
+```
+
+While the hub believes it hears a drone it saves a clip under `ROTORSCP/AUDIO` (docs/ACOUSTIC.md).
+A microphone outdoors also hears people, and Pennsylvania requires everyone's consent to record
+a conversation: where that matters, post a notice or turn clips off.
+
 ## On the console
 
 Press `L`, type one line exactly as in the file, press Enter (Esc cancels).

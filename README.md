@@ -81,6 +81,13 @@ This project only listens. `rid-beacon` exists purely to test the receivers on t
 uses an obviously fake identity and the lowest transmit power, and must not be used to
 impersonate an aircraft.
 
+The hub also has a microphone, for drones that transmit nothing (PLAN.md Phase 15,
+docs/ACOUSTIC.md, on branch `acoustic`). It keeps only numbers (pitch, loudness) unless it
+believes it hears a drone; then it saves a short sound clip to its own SD card. A microphone
+outdoors also hears people. `audio clips off` in the site file stops all storing of sound.
+Recording conversations needs consent in many places (everyone's, in Pennsylvania): post a
+notice where the device listens, or turn clips off.
+
 ## Acknowledgements
 
 The C5 raw-radio work builds on findings from C5VRX by Twotoz and the C5VRX contributors

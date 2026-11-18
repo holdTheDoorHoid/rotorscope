@@ -88,6 +88,10 @@ modesloop = ["modes"]
 # as hex (src/ear.rs), to check the recorded sound on a laptop. Never in a
 # unit that is deployed: it sends room audio out of the USB port.
 eardump = []
+# Bench only: a made-up rotor sound is mixed into the microphone signal
+# inside the chip (20-45 s and 70-80 s after start-up), and every saved clip
+# is read back from the card and checked. See src/ear.rs.
+earfake = []
 
 [dependencies]
 link = { path = "../../crates/link" }
@@ -103,6 +107,8 @@ ctrlwatch = { path = "../../crates/ctrlwatch" }
 # Phase 15: the rotor-sound detector the microphone feeds (ear.rs).
 acoustic = { path = "../../crates/acoustic" }
 libm = "0.2"
+# SHA-256 of each saved audio clip, hashed as it is written (sd.rs).
+sha2 = { version = "0.10", default-features = false }
 # Phase 12: airspace pack lookups and the possible-violation rule engine.
 airspace = { path = "../../crates/airspace" }
 faarules = { path = "../../crates/faarules" }

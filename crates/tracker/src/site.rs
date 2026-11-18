@@ -24,6 +24,9 @@
 //! control ids on          # read link identifiers (ELRS UID bytes, SiK NET ID...)
 //! control content on      # decode sticks, telemetry, positions; keep raw packets
 //! control content off
+//!
+//! # Sound clips while a drone is heard (on unless a line says off):
+//! audio clips off
 //! ```
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
@@ -79,6 +82,9 @@ pub enum SiteLine {
     UnmuteAll,
     /// `control ids on|off`, `control content on|off` (protocol 12 opt-ins).
     Control { what: ControlSetting, on: bool },
+    /// `audio clips on|off`: whether the hub saves a sound clip while it
+    /// believes it hears a drone (PLAN.md Phase 15). On when never said.
+    AudioClips(bool),
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -166,6 +172,21 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::Control { what, on });
     }
+    if word.eq_ignore_ascii_case("audio") {
+        const HOW: &str = "say: audio clips on|off";
+        if !it.next().is_some_and(|w| w.eq_ignore_ascii_case("clips")) {
+            return Err(HOW);
+        }
+        let on = match it.next() {
+            Some(w) if w.eq_ignore_ascii_case("on") => true,
+            Some(w) if w.eq_ignore_ascii_case("off") => false,
+            _ => return Err(HOW),
+        };
+        if it.next().is_some() {
+            return Err(HOW);
+        }
+        return Ok(SiteLine::AudioClips(on));
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -200,7 +221,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, mute, unmute, control)")
+    Err("unknown line (node, mute, unmute, control, audio)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -217,6 +238,9 @@ pub struct SiteState {
     /// mentioned, which means off).
     pub control_ids: Option<bool>,
     pub control_content: Option<bool>,
+    /// `audio clips on|off` as the file last set it (`None`: never
+    /// mentioned, which means on).
+    pub audio_clips: Option<bool>,
     pub used: u32,
     pub ignored: u32,
 }
@@ -248,6 +272,7 @@ impl SiteState {
             SiteLine::UnmuteAll => self.mutes.clear(),
             SiteLine::Control { what: ControlSetting::Ids, on } => self.control_ids = Some(on),
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
+            SiteLine::AudioClips(on) => self.audio_clips = Some(on),
             SiteLine::AllNodesHere => {
                 self.ignored += 1;
                 return;
@@ -379,6 +404,10 @@ mod tests {
         let SiteLine::Mute(j) = parse_line("mute jam_broadband mhz=2437.0").unwrap() else { panic!() };
         assert_eq!(j.freq, 24_370);
         assert_eq!(parse_line("control ids on"), Ok(SiteLine::Control { what: ControlSetting::Ids, on: true }));
+        assert_eq!(parse_line("audio clips off"), Ok(SiteLine::AudioClips(false)));
+        assert_eq!(parse_line("Audio Clips ON # default"), Ok(SiteLine::AudioClips(true)));
+        assert!(parse_line("audio on").is_err());
+        assert!(parse_line("audio clips maybe").is_err());
         assert_eq!(parse_line("CONTROL Content OFF # not today"), Ok(SiteLine::Control { what: ControlSetting::Content, on: false }));
     }
 

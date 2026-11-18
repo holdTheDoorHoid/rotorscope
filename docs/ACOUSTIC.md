@@ -1,9 +1,15 @@
 # Hearing drones: the acoustic detector
 
-PLAN.md Phase 15. Status 2026-11-17: the detector library, the file tool and the hub tracker's
-sound-contact table are built and tested on a laptop. Nothing has run on the hub yet (the
-microphone driver is not written), and nothing has been tested with our own microphone or a
-real drone.
+PLAN.md Phase 15. Status 2026-11-18:
+
+| Piece | State |
+|---|---|
+| Detector library, file tool | Built; tested on recordings (below) |
+| Hub tracker: sound contacts, alert, radio and aircraft cross-check | Built; laptop tests |
+| Hub firmware: microphone, detector, alert, clips to SD, evidence entries | **Running on the P4**; proven with a made-up rotor sound mixed in inside the chip |
+| A real sound through the real microphone | **Not yet tested.** No drone and no loudspeaker test so far |
+| Outdoor microphone, windscreen, range | Not started |
+| Bearing pod, fly-past measurement, aircraft type table | Not started (PLAN 15e, 15f, 15g) |
 
 ## What it does
 
@@ -28,6 +34,42 @@ each one:
 Contacts appear as `"t":"sound"` JSON lines and as `S<n>` rows in the SD log. The aircraft
 check needs the hub's own position and uses distance only; matching the pitch curve to the
 aircraft's track and looking up its type are PLAN 15f and 15g.
+
+## On the hub (P4)
+
+- **Microphone.** The board's own PDM microphone (clock GPIO24, data GPIO25), 16 kHz, through
+  a driver of our own (`firmware/hub-p4/src/mic.rs`): esp-hal has no audio input for this chip.
+- **Detector.** `ear.rs` runs it on every 32 ms of sound: about 4.4 ms of work, 14% of one
+  core. The hub's loop still runs about 450 times a second.
+- **Tape.** The last two minutes of sound go round in PSRAM. Nothing reads them unless a drone
+  is heard, and they are gone at power-off.
+- **Alert.** A contact that has lasted five seconds and is not a tracked aircraft prints
+  `hub-p4: SOUND ...` and writes a `sound` entry to the evidence log.
+- **Clip.** While a drone is heard the hub saves `ROTORSCP/AUDIO/Cnnnnnnn.WAV`: from five
+  seconds before the detection to two seconds after it ends, sixty seconds at most, one clip
+  per contact. The evidence log gets a `sound_clip` entry with the clip's SHA-256. The clip is
+  written a little slower than real time so the hub keeps working.
+- **Turning clips off.** `audio clips off` in `ROTORSCP/SITE.TXT` or typed at the console
+  (`L`). Detection and alerts continue; no sound is stored.
+
+### Proof on the board (2026-11-18)
+
+Built with `--features earfake`, the firmware mixes a made-up quadcopter sound (four rotors
+near 210 Hz) into the microphone signal inside the chip, 20–45 s and 70–80 s after start-up,
+and reads every saved clip back from the card.
+
+| Check | Result |
+|---|---|
+| Microphone capture | 31.25 buffers a second, 0 DMA errors over several minutes |
+| Sound lost | one buffer while the SD card mounts at boot; none after, including while a clip is written |
+| Detection | Candidate, then Heard, at 206–215 Hz ("Large propellers"), confidence 100 |
+| Alert | `SOUND Possible drone heard, no radio` 5 s after the contact began, once per contact |
+| Clips | two saved (31.2 s and 9.0 s); read back from the card: length, header and SHA-256 match; 0 samples lost |
+| Rest of the hub meanwhile | gateway link 0 corrupt, 0 overflow, 2 nodes throughout; loop 220–255 passes a second while a clip is written |
+
+The bench read-back blocks the loop for several seconds and loses sound while it runs; it is
+not in the normal firmware. `--features eardump` adds console `w`, which prints the last six
+seconds of the tape as hex for checking on a laptop; it must never be in a deployed unit.
 
 ## Trying it on recordings
 
@@ -71,7 +113,7 @@ median distance.
 | Fireworks (Bat Ear, 11 files) | 11 min | 0% |
 | Wind only (VolAnti, 2 files) | 1 min | 0% |
 | Same session as the drone flights, labelled "no drone in photos" (10 files) | 10 min | 3 files, 4–12% each, at 149–209 Hz |
-| Al-Emadi "unknown" set, every clip end to end | 2 h 59 min | 6.1% |
+| Al-Emadi "unknown" set, every clip end to end | 2 h 59 min | 5.9% |
 
 - The three hits in the "no drone" files are at the drone's own pitch, minutes before or after
   logged flights. They are probably the drone flying without taking photos (the distance log
@@ -101,13 +143,16 @@ median distance.
 
 | Recording | Result |
 |---|---|
-| Al-Emadi drone clips, end to end (22 min, indoor, Bebop and Mambo) | heard 60% of the time, median pitch 465 Hz |
+| Al-Emadi drone clips, end to end (22 min, indoor, Bebop and Mambo) | heard 58% of the time, median pitch 476 Hz |
 | Al-Emadi drone clips one at a time (1 s each; frame-level ladder check only) | 77% rotor-like |
-| Bat Ear 5-inch FPV (11 short files) | heard in 2; most files are a few seconds long, shorter than warm-up plus decision |
+| Bat Ear 5-inch FPV (11 short files) | heard in 3; most files are a few seconds long, shorter than warm-up plus decision |
 | VolAnti rotor rig (3 files of 8–16 s) | heard in 1; the other two end before a decision is possible |
 
 ## Known limits
 
+- **Not yet heard a real sound on the hub.** The board's microphone records, and the detector
+  works on a sound mixed in inside the chip; a drone (or a loudspeaker playing one) in front of
+  the board is the next test.
 - **Five-second warm-up** after power-up, and **about three seconds** to decide. A drone that
   passes in under three seconds is not reported.
 - **A hum that never changes pitch** is ignored after ten seconds (mains hum, a fan). A machine

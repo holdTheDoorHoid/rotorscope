@@ -236,6 +236,17 @@ pub enum EventCode {
     /// `adsb::Source` index). Text: the pair, distance, height difference
     /// and predicted closest approach.
     AircraftConflict = 22,
+    /// The hub's microphone heard a rotor-like sound long enough to alert
+    /// (tracker `sound`), once per contact. Data: contact id (u32), kind
+    /// (1: 0 no radio, 1 aircraft, 2 with radio), pitch Hz (u16),
+    /// confidence 0-100 (1). Text: what was heard.
+    Sound = 23,
+    /// An audio clip of a sound contact was saved to the card. Data: clip
+    /// number (u32), contact id (u32, 0 unknown), sample rate (u32),
+    /// samples (u32), samples that were no longer in memory and are
+    /// silence in the file (u32), SHA-256 of the file's sample bytes (32).
+    /// Text: the file name.
+    SoundClip = 24,
 }
 
 impl EventCode {
@@ -264,6 +275,8 @@ impl EventCode {
             20 => SpoofSuspect,
             21 => LinkForgery,
             22 => AircraftConflict,
+            23 => Sound,
+            24 => SoundClip,
             _ => return None,
         })
     }
@@ -292,6 +305,8 @@ impl EventCode {
             SpoofSuspect => "spoof_suspect",
             LinkForgery => "link_forgery",
             AircraftConflict => "aircraft_conflict",
+            Sound => "sound",
+            SoundClip => "sound_clip",
         }
     }
 }

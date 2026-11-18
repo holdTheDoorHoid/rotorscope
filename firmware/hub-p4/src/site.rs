@@ -25,6 +25,11 @@ impl Site {
     pub fn control(&self) -> (bool, bool) {
         (self.st.control_ids.unwrap_or(false), self.st.control_content.unwrap_or(false))
     }
+
+    /// `audio clips on|off`: on unless the file or the operator said off.
+    pub fn audio_clips(&self) -> bool {
+        self.st.audio_clips.unwrap_or(true)
+    }
 }
 
 /// Where a change came from.
@@ -81,6 +86,7 @@ impl Site {
         self.st.nodes = st.nodes;
         self.st.control_ids = st.control_ids;
         self.st.control_content = st.control_content;
+        self.st.audio_clips = st.audio_clips;
     }
 
     fn apply_line(&mut self, l: SiteLine, app: &mut App) {
@@ -89,7 +95,7 @@ impl Site {
             SiteLine::NodeClear { mac } => self.st.nodes.retain(|n| n.0 != mac),
             SiteLine::Mute(m) => drop(app.tracker.mute(m)),
             SiteLine::UnmuteAll => app.tracker.unmute_all(),
-            l @ SiteLine::Control { .. } => self.st.apply(l),
+            l @ (SiteLine::Control { .. } | SiteLine::AudioClips(_)) => self.st.apply(l),
             SiteLine::AllNodesHere | SiteLine::Nothing => {}
         }
     }

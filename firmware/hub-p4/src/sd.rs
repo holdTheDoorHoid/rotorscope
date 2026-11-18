@@ -164,6 +164,20 @@ struct EvFile {
     flushed_at: u64,
 }
 
+/// The audio clip being written (Phase 15d): `ROTORSCP/AUDIO/Cnnnnnnn.WAV`.
+struct ClipFile {
+    dir: RawDirectory,
+    file: RawFile,
+    no: u32,
+    name: heapless::String<12>,
+    /// Samples written so far.
+    written: u64,
+    /// Samples that had already left the tape and were written as silence.
+    lost: u32,
+    hash: sha2::Sha256,
+    last_write: u64,
+}
+
 /// Console `r`: the current evidence file, re-streamed from the start.
 struct Replay {
     pos: u32,
@@ -202,6 +216,11 @@ pub struct Logger {
     pack_writing: Option<u32>,
     shown_flag_row: bool,
     ev_file: Option<EvFile>,
+    clip: Option<ClipFile>,
+    /// The last clip number used on this card (0: folder not read yet).
+    clip_no: u32,
+    pub clips: u32,
+    pub clip_errors: u32,
     replay: Option<Replay>,
     pub ev_flushes: u32,
     pub ev_errors: u32,
@@ -220,6 +239,12 @@ pub struct Logger {
     /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
     site: Option<tracker::site::SiteState>,
 }
+
+/// Audio clips of sound contacts, under the log folder.
+const CLIP_DIR: &str = "AUDIO";
+/// At most one clip block per this long: 512 bytes every 20 ms is 25.6 kB/s
+/// (the sound arrives at 32 kB/s) for about a quarter of the loop's time.
+const CLIP_GAP_MS: u64 = 20;
 
 /// Node positions and muted alarms (`tracker::site`). The hub only ever
 /// appends to it, so hand edits are never lost.
@@ -268,6 +293,10 @@ impl Logger {
             pack_writing: None,
             shown_flag_row: false,
             ev_file: None,
+            clip: None,
+            clip_no: 0,
+            clips: 0,
+            clip_errors: 0,
             replay: None,
             ev_flushes: 0,
             ev_errors: 0,
@@ -617,6 +646,8 @@ impl Logger {
     fn close_all(&mut self) {
         self.open = None;
         self.ev_file = None;
+        self.clip = None;
+        self.clip_no = 0;
         self.replay = None;
         self.pack_file = None;
         #[cfg(feature = "embedpack")]
@@ -1117,6 +1148,192 @@ impl Logger {
     }
 
     /// A write failed while recording: the card is taken to be gone.
+    /// One step of saving an audio clip, if one is due (Phase 15d). Call
+    /// every main-loop pass, after [`Logger::tick`].
+    ///
+    /// The clip is cut from the ear's tape in PSRAM and written one 512-byte
+    /// block at a time, at most one block every [`CLIP_GAP_MS`], so the hub
+    /// keeps doing everything else. That is a little slower than the sound
+    /// arrives; the tape holds two minutes, so a one-minute clip is always
+    /// still there when its turn comes.
+    pub fn clip_tick(&mut self, ear: &mut crate::ear::Ear, tracker: &mut HubTracker, ev: &mut Evidence, now: u64) {
+        let Some(job) = ear.clip else { return };
+        if self.state != State::Recording || self.open.is_none() {
+            // No card: the clip cannot be kept. (Detection carries on.)
+            if job.end.is_some() {
+                println!("hub-p4: sd audio clip dropped: no card");
+                ear.clip = None;
+            }
+            return;
+        }
+        if self.clip.as_ref().is_some_and(|c| now.saturating_sub(c.last_write) < CLIP_GAP_MS) {
+            return;
+        }
+        if self.vm.as_ref().is_some_and(|vm| vm.device(|d| d.card.borrow_mut().is_busy())) {
+            return;
+        }
+        match self.clip_step(&job, ear, now) {
+            Ok(None) => {}
+            Ok(Some((clip, digest))) => {
+                self.clips += 1;
+                ear.clip = None;
+                if let Some(id) = job.contact {
+                    tracker.set_sound_clip(id, clip.no as u16);
+                }
+                let mut data = [0u8; 52];
+                data[0..4].copy_from_slice(&clip.no.to_le_bytes());
+                data[4..8].copy_from_slice(&job.contact.map_or(0, |c| c.0).to_le_bytes());
+                data[8..12].copy_from_slice(&crate::mic::RATE.to_le_bytes());
+                data[12..16].copy_from_slice(&(clip.written as u32).to_le_bytes());
+                data[16..20].copy_from_slice(&clip.lost.to_le_bytes());
+                data[20..52].copy_from_slice(&digest);
+                let mut text: heapless::String<48> = heapless::String::new();
+                let _ = write!(text, "{DIR}/{CLIP_DIR}/{}", clip.name);
+                ev.event(evidence::EventCode::SoundClip, text.as_bytes(), &data);
+                println!(
+                    "hub-p4: sd audio clip {text} saved: {:.1} s, {} samples lost, sha256 {:02x}{:02x}{:02x}{:02x}..",
+                    clip.written as f32 / crate::mic::RATE as f32, clip.lost, digest[0], digest[1], digest[2], digest[3]
+                );
+            }
+            Err(e) => {
+                self.clip_errors += 1;
+                println!("hub-p4: sd audio clip failed: {e:?}");
+                if let (Some(vm), Some(c)) = (self.vm.as_ref(), self.clip.take()) {
+                    let _ = vm.close_file(c.file);
+                    let _ = vm.close_dir(c.dir);
+                }
+                ear.clip = None;
+            }
+        }
+    }
+
+    /// Open the clip file, write its next block, or finish it. `Some` when
+    /// the clip is complete.
+    fn clip_step(&mut self, job: &crate::ear::ClipJob, ear: &crate::ear::Ear, now: u64) -> Result<Option<(ClipFile, [u8; 32])>, FsError> {
+        use sha2::Digest;
+        let vm = self.vm.as_ref().unwrap();
+        let Some(parent) = self.open.as_ref().map(|o| o.dir) else { return Ok(None) };
+        let Some(c) = self.clip.as_mut() else {
+            let dir = match vm.open_dir(parent, CLIP_DIR) {
+                Ok(d) => d,
+                Err(embedded_sdmmc::Error::NotFound) => {
+                    println!("hub-p4: sd creating folder {DIR}/{CLIP_DIR}");
+                    vm.make_dir_in_dir(parent, CLIP_DIR)?;
+                    vm.open_dir(parent, CLIP_DIR)?
+                }
+                Err(e) => return Err(e),
+            };
+            if self.clip_no == 0 {
+                let mut max = 0u32;
+                let r = vm.iterate_dir(dir, |e| {
+                    let base = e.name.base_name();
+                    if e.name.extension() == b"WAV" && base.len() == 8 && base.starts_with(b"C") {
+                        let n = base[1..].iter().try_fold(0u32, |acc, &d| d.is_ascii_digit().then(|| acc * 10 + u32::from(d - b'0')));
+                        if let Some(n) = n {
+                            max = max.max(n);
+                        }
+                    }
+                    ControlFlow::Continue(())
+                });
+                if let Err(e) = r {
+                    let _ = vm.close_dir(dir);
+                    return Err(e);
+                }
+                self.clip_no = max;
+            }
+            self.clip_no += 1;
+            let mut name: heapless::String<12> = heapless::String::new();
+            let _ = write!(name, "C{:07}.WAV", self.clip_no);
+            // ReadWriteCreate refuses a name that exists: never rewrites a clip.
+            let file = match vm.open_file_in_dir(dir, name.as_str(), Mode::ReadWriteCreate) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = vm.close_dir(dir);
+                    return Err(e);
+                }
+            };
+            // Length unknown yet: the header is rewritten when the clip ends.
+            self.clip = Some(ClipFile { dir, file, no: self.clip_no, name, written: 0, lost: 0, hash: sha2::Sha256::new(), last_write: now });
+            vm.write(file, &acoustic::wav::header(crate::mic::RATE, 0))?;
+            self.last_io = now;
+            return Ok(None);
+        };
+        // Whole blocks only (the first one is short, after the 44-byte
+        // header), except at the very end of the clip.
+        let next = job.from + c.written;
+        let block = if c.written == 0 { (512 - acoustic::wav::HEADER_LEN) / 2 } else { 256 } as u64;
+        let ready = job.end.unwrap_or(u64::MAX).min(ear.tape.head);
+        let n = match job.end {
+            Some(end) if end - next < block => end.saturating_sub(next).min(ready.saturating_sub(next)),
+            _ if ready.saturating_sub(next) >= block => block,
+            _ => 0,
+        } as usize;
+        if n > 0 {
+            let mut buf = [0u8; 512];
+            for i in 0..n {
+                let v = ear.tape.get(next + i as u64).unwrap_or_else(|| {
+                    c.lost += 1;
+                    0
+                });
+                buf[2 * i..2 * i + 2].copy_from_slice(&v.to_le_bytes());
+            }
+            vm.write(c.file, &buf[..2 * n])?;
+            c.hash.update(&buf[..2 * n]);
+            c.written += n as u64;
+            c.last_write = now;
+            self.last_io = now;
+            return Ok(None);
+        }
+        if job.end != Some(next) {
+            return Ok(None);
+        }
+        // Done: the real length into the header, then close (which writes
+        // the directory entry).
+        vm.file_seek_from_start(c.file, 0)?;
+        vm.write(c.file, &acoustic::wav::header(crate::mic::RATE, c.written as u32))?;
+        let c = self.clip.take().unwrap();
+        let closed = vm.close_file(c.file);
+        let _ = vm.close_dir(c.dir);
+        closed?;
+        self.last_io = now;
+        let digest: [u8; 32] = c.hash.clone().finalize().into();
+        // Bench only: read the file back and check the header and the hash.
+        #[cfg(feature = "earfake")]
+        {
+            let dir = vm.open_dir(parent, CLIP_DIR)?;
+            let f = vm.open_file_in_dir(dir, c.name.as_str(), Mode::ReadOnly)?;
+            let len = vm.file_length(f)?;
+            let mut h = sha2::Sha256::new();
+            let mut head = [0u8; acoustic::wav::HEADER_LEN];
+            let mut buf = [0u8; 512];
+            let mut at = 0usize;
+            loop {
+                let r = vm.read(f, &mut buf)?;
+                if r == 0 {
+                    break;
+                }
+                for &b in &buf[..r] {
+                    if at < head.len() {
+                        head[at] = b;
+                    } else {
+                        h.update([b]);
+                    }
+                    at += 1;
+                }
+            }
+            vm.close_file(f)?;
+            let _ = vm.close_dir(dir);
+            let back: [u8; 32] = h.finalize().into();
+            let data_len = u32::from_le_bytes([head[40], head[41], head[42], head[43]]);
+            println!(
+                "hub-p4: sd audio clip read-back {}: file {} bytes, header says {} data bytes, expected {}, hash {}",
+                c.name, len, data_len, 2 * c.written,
+                if back == digest && data_len as u64 == 2 * c.written && len as u64 == 44 + 2 * c.written { "MATCH" } else { "MISMATCH" }
+            );
+        }
+        Ok(Some((c, digest)))
+    }
+
     fn lost(&mut self, ev: &mut Evidence, e: &FsError, now: u64) -> &'static str {
         let rows_lost = self.pending.len();
         if self.ev_file.is_some() {
@@ -1155,6 +1372,10 @@ impl Logger {
         }
         for w in tracker.wifi_drones().iter().filter(|w| ctx.wifi_drone_state(w) == TrackState::Active) {
             let r = csv::wifi_drone_row(w, &ctx, &mut row).map(|n| with_flags(&mut row, n, None, pack));
+            self.push_row(&row, r);
+        }
+        for c in tracker.sounds().iter().filter(|c| c.active(now)) {
+            let r = csv::sound_row(c, &ctx, &mut row).map(|n| with_flags(&mut row, n, None, pack));
             self.push_row(&row, r);
         }
         for a in tracker.aircraft().iter().filter(|a| ctx.aircraft_state(a) == TrackState::Active) {

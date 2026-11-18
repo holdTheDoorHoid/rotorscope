@@ -87,6 +87,8 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
 | 21 | link_forgery | claimed station address (6), count (u32) (reserved; forged ESP-NOW packets currently arrive as `threat` kind 15) |
 | 22 | aircraft_conflict | level (1: 1 advisory, 2 caution, 3 warning), drone track id (u32), aircraft address (u32), aircraft source (1); text: the pair, distance, height difference, predicted closest approach |
+| 23 | sound | sound contact id (u32), kind (1: 0 no radio, 1 aircraft, 2 with radio), pitch Hz (u16), confidence 0-100 (1); text: what the microphone heard |
+| 24 | sound_clip | clip number (u32), sound contact id (u32, 0 unknown), sample rate (u32), samples (u32), samples lost and written as silence (u32), SHA-256 of the WAV file's sample bytes (32); text: the file name under `ROTORSCP/AUDIO` |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 

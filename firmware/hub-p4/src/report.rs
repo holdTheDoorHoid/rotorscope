@@ -92,6 +92,15 @@ pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd:
             return;
         }
     }
+    // Phase 15: one {"t":"sound"} line per sound contact.
+    let mut sl = [0u8; tracker::sound::MAX_SOUND_LINE];
+    for c in app.tracker.sounds() {
+        if let Ok(n) = tracker::sound::sound_line(c, &ctx, &mut sl)
+            && !console::json(&sl[..n])
+        {
+            return;
+        }
+    }
     // One {"t":"conflict"} line per drone close to a crewed aircraft.
     let mut cl = [0u8; tracker::conflict::MAX_CONFLICT_LINE];
     for c in app.tracker.conflicts(now) {

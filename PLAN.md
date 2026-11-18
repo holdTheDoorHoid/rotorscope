@@ -831,6 +831,10 @@ SD card, and are never sent to nodes or the web head. `SITE.TXT` line `audio cli
 turns recording off entirely (detection continues). Pennsylvania requires all-party consent to
 record conversations: a site that uses clips should post a notice. This is in the README note.
 
+**Status 2026-11-18.** 15a–15d are built. 15d runs on the P4 with the board's own microphone and
+is proven with a rotor sound mixed in inside the chip (alert, clip on the card, evidence entry);
+it has not yet heard a real sound. 15e–15g are not started.
+
 **Measured so far (recordings only, 2026-11-17; docs/ACOUSTIC.md).** Heard a DJI Mini 4 Pro
 and a Mavic Pro in every flying recording out to about 40 m, none past 50 m, on another
 project's field recordings with measured distances. No false "heard" in 23 minutes of rural and

@@ -1136,6 +1136,7 @@ dependencies = [
  "rid",
  "screen",
  "sdnative",
+ "sha2",
  "tracker",
  "uat",
  "wirebus",
