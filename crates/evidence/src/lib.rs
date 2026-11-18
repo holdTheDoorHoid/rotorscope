@@ -5,7 +5,8 @@
 //! event that could matter later (boot, clock and GPS changes, SD card,
 //! nodes, settings, operator notes). Records are **hash-chained**: each
 //! carries the SHA-256 of the one before it, so changing, removing or
-//! reordering any record breaks every later link. About once a minute the
+//! reordering any record breaks every later link (removing records from the
+//! end leaves no later link to break: completeness is not proven). About once a minute the
 //! hub adds a **checkpoint**: the chain head, the record count and the time,
 //! signed with ECDSA P-256. A checkpoint vouches for every record before it.
 //!

@@ -27,6 +27,14 @@ use core::fmt;
 
 use crate::crc32::crc32;
 
+/// The largest dump the node makes: the decoder's 16,384 `c16` samples of 4
+/// bytes (the Path A snapshot is 4 x 16,380 and the Path B ring grab 53,760).
+pub const MAX_DUMP_BYTES: usize = 4 * 16_384;
+
+/// Dump ids a [`Collector`] holds at once. A long log has a few dozen; each
+/// can hold up to [`MAX_DUMP_BYTES`], so this bounds memory at a few MB.
+pub const MAX_DUMPS: usize = 64;
+
 /// Payload bytes per `@D` line: 64 base64 characters or 96 hex digits.
 pub const CHUNK: usize = 48;
 
@@ -264,7 +272,7 @@ mod host {
     use std::string::{String, ToString};
     use std::vec::Vec;
 
-    use super::{CHUNK, Enc, Kind, Meta};
+    use super::{CHUNK, Enc, Kind, MAX_DUMP_BYTES, MAX_DUMPS, Meta};
     use crate::crc32::crc32;
 
     pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
@@ -327,6 +335,11 @@ mod host {
     pub fn parse_meta(json: &str) -> Option<Meta> {
         let m = flat_json(json)?;
         let n = |k: &str| m.get(k)?.parse::<u64>().ok();
+        // A log can come from anywhere: a header claiming more than the node
+        // can hold would make the collector size its tables by that claim.
+        if n("bytes")? > MAX_DUMP_BYTES as u64 {
+            return None;
+        }
         Some(Meta {
             id: n("id")? as u32,
             kind: Kind::parse(m.get("kind")?)?,
@@ -403,6 +416,8 @@ mod host {
     #[derive(Default, Debug)]
     pub struct Collector {
         pub dumps: BTreeMap<u32, Partial>,
+        /// Headers refused because [`MAX_DUMPS`] ids were already held.
+        pub refused: u32,
         /// Data lines for an id whose header was never seen.
         pub orphans: u32,
     }
@@ -415,6 +430,10 @@ mod host {
             let line = &line[at..];
             if let Some(json) = line.strip_prefix("@H ") {
                 if let Some(meta) = parse_meta(json) {
+                    if !self.dumps.contains_key(&meta.id) && self.dumps.len() >= MAX_DUMPS {
+                        self.refused += 1;
+                        return;
+                    }
                     // A re-sent header for the same capture keeps what arrived.
                     let e = self.dumps.entry(meta.id).or_insert_with(|| Partial {
                         meta,
@@ -451,7 +470,12 @@ mod host {
                         p.bad.retain(|&s| s != seq);
                     }
                     _ => {
-                        if !p.chunks.contains_key(&seq) && !p.bad.contains(&seq) {
+                        // Only a line number the dump has can be missing; an
+                        // arbitrary one would grow `bad` without bound.
+                        if seq < p.meta.lines()
+                            && !p.chunks.contains_key(&seq)
+                            && !p.bad.contains(&seq)
+                        {
                             p.bad.push(seq);
                         }
                     }
@@ -523,6 +547,36 @@ mod tests {
 
     fn sample(n: usize) -> Vec<u8> {
         (0..n).map(|k| (k * 7 + k / 13) as u8).collect()
+    }
+
+    #[test]
+    fn hostile_headers_do_not_size_the_collector() {
+        let hdr = |id: u32, bytes: u64| {
+            let m = meta(1, 1, Enc::B64);
+            format!("@H {m}")
+                .replace("\"bytes\":1,", &format!("\"bytes\":{bytes},"))
+                .replace("\"id\":7", &format!("\"id\":{id}"))
+        };
+        let mut c = Collector::default();
+        c.feed(&hdr(1, 4_294_967_295));
+        assert!(c.dumps.is_empty());
+        c.feed(&hdr(1, MAX_DUMP_BYTES as u64 + 1));
+        assert!(c.dumps.is_empty());
+        c.feed(&hdr(1, MAX_DUMP_BYTES as u64));
+        assert_eq!(c.dumps.len(), 1);
+        // Many ids: the table stops at the cap, and a known id still updates.
+        for id in 2..1000 {
+            c.feed(&hdr(id, 48));
+        }
+        assert_eq!(c.dumps.len(), MAX_DUMPS);
+        assert_eq!(c.refused, 1000 - 1 - MAX_DUMPS as u32);
+        c.feed(&hdr(1, MAX_DUMP_BYTES as u64));
+        assert_eq!(c.refused, 1000 - 1 - MAX_DUMPS as u32);
+        // Bad-line numbers outside the dump are not remembered.
+        for seq in 0..5000u32 {
+            c.feed(&format!("@D 1 {} 00000000 AAAA", 100_000 + seq));
+        }
+        assert!(c.dumps[&1].bad.is_empty());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Hub on an ESP32-S3. Build from this directory; cargo finds ../Cargo.toml.
 #   cargo fw                       -> ../target/xtensa-esp32s3-none-elf/release/hub
-#   cargo fw --features demo       (two synthetic drones, no nodes needed)
+#   ROTORSCOPE_BENCH=1 cargo fw --features demo   (two synthetic drones; a bench build)
 [alias]
 fw = "build --release --features esp32s3"
 

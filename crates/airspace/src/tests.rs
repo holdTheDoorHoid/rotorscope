@@ -4,6 +4,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::format::*;
 use crate::sun::{self, Light};
 use crate::write::*;
 use crate::*;
@@ -305,4 +306,119 @@ fn point_in_polygon_edges() {
     assert!(pip(5, 15));
     assert!(!pip(15, 15), "in the notch");
     assert!(pip(15, 5));
+}
+
+/// The size maths must not wrap on a 32-bit hub: 65536 x 65536 one-byte
+/// cells is 4 GiB, which is 0 in a u32/usize product.
+#[test]
+fn grid_size_does_not_wrap() {
+    use crate::pack::grid_bytes_needed;
+    assert_eq!(grid_bytes_needed(65536, 65536, 8), Some(1u64 << 32));
+    assert_eq!(grid_bytes_needed(16384, 65536, 16), Some(1u64 << 31));
+    assert_eq!(grid_bytes_needed(65536, 65536, 16), Some(1u64 << 33));
+    assert_eq!(grid_bytes_needed(3, 3, 1), Some(2));
+    assert_eq!(
+        grid_bytes_needed(u32::MAX, u32::MAX, 1),
+        Some((u32::MAX as u64).pow(2).div_ceil(8))
+    );
+    assert_eq!(grid_bytes_needed(u32::MAX, u32::MAX, 8), None);
+    assert_eq!(grid_bytes_needed(u32::MAX, u32::MAX, u64::MAX), None);
+    // Truncated to 32 bits, the wrapped cases above would all read 0.
+    assert_eq!((1u64 << 32) as u32, 0);
+}
+
+fn grid_pack(rows: u32, cols: u32) -> Vec<u8> {
+    // Build a valid pack with a tiny urban grid, then rewrite the header's
+    // rows/cols (and the CRC) so the grid claims more than it holds.
+    let b = PackBuilder {
+        urban: Some(GridDef {
+            lat0: 39.0,
+            lon0: -75.0,
+            dlat: 0.01,
+            dlon: 0.01,
+            rows: 2,
+            cols: 4,
+            values: vec![true; 8],
+        }),
+        ..Default::default()
+    };
+    let mut bytes = b.to_bytes();
+    let off = Pack::parse(&bytes)
+        .unwrap()
+        .section(Section::Urban)
+        .unwrap()
+        .as_ptr() as usize
+        - bytes.as_ptr() as usize;
+    bytes[off + 16..off + 20].copy_from_slice(&rows.to_le_bytes());
+    bytes[off + 20..off + 24].copy_from_slice(&cols.to_le_bytes());
+    let crc = crc32(&bytes[HEADER_LEN..]);
+    bytes[36..40].copy_from_slice(&crc.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn oversized_grid_is_refused_not_read() {
+    let bytes = grid_pack(65536, 65536);
+    let p = Pack::parse(&bytes).unwrap();
+    // The grid claims 512 MiB of bits; the file holds one byte.
+    assert!(p.urban(39.005, -74.995).is_none());
+    assert!(p.urban_grid().is_none());
+}
+
+#[test]
+fn out_of_range_grid_reads_do_not_panic() {
+    let bytes = grid_pack(2, 4);
+    let p = Pack::parse(&bytes).unwrap();
+    let g = p.urban_grid().unwrap();
+    assert!(g.bit_at(1, 3));
+    assert!(!g.bit_at(1_000_000, 1_000_000));
+    assert!(!g.bit_at(u32::MAX, u32::MAX));
+    assert_eq!(g.u8_at(u32::MAX, u32::MAX), UASFM_NONE);
+    assert_eq!(g.i16_at(u32::MAX, u32::MAX), TERRAIN_NONE);
+    // Reading 16-bit cells off an 8-cell bit grid must not panic either.
+    assert_eq!(g.i16_at(1, 3), TERRAIN_NONE);
+}
+
+/// A pack whose first area claims ring lengths summing past its points.
+fn ring_pack(fake_len: u16) -> Vec<u8> {
+    let mut b = PackBuilder::default();
+    b.areas.push(area(
+        AreaKind::ClassB,
+        vec![square(39.9, -75.2, 0.05)],
+        (AltRef::Agl, 0),
+        (AltRef::Msl, 7000),
+    ));
+    let mut bytes = b.to_bytes();
+    let off = Pack::parse(&bytes)
+        .unwrap()
+        .section(Section::Areas)
+        .unwrap()
+        .as_ptr() as usize
+        - bytes.as_ptr() as usize;
+    // Area record: 4 bytes of count, 44 head, name padded to 4, then rings.
+    let rings_at = off + 4 + AREA_HEAD_LEN + "TEST AREA".len().next_multiple_of(4);
+    bytes[rings_at..rings_at + 2].copy_from_slice(&fake_len.to_le_bytes());
+    let crc = crc32(&bytes[HEADER_LEN..]);
+    bytes[36..40].copy_from_slice(&crc.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn ring_longer_than_points_is_refused() {
+    assert!(Pack::parse(&ring_pack(4)).is_ok());
+    assert_eq!(Pack::parse(&ring_pack(5)).unwrap_err(), PackError::Bounds);
+    assert_eq!(
+        Pack::parse(&ring_pack(60000)).unwrap_err(),
+        PackError::Bounds
+    );
+}
+
+#[test]
+fn point_out_of_range_does_not_panic() {
+    let bytes = ring_pack(4);
+    let p = Pack::parse(&bytes).unwrap();
+    let a = p.areas().next().unwrap();
+    assert_eq!(a.n_points(), 4);
+    assert_eq!(a.point(4), (0, 0));
+    assert_eq!(a.point(usize::MAX), (0, 0));
 }

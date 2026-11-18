@@ -7,3 +7,6 @@ publish = false
 
 [dependencies]
 evidence = { workspace = true, features = ["verify"] }
+
+[dev-dependencies]
+evidence = { workspace = true, features = ["verify", "soft-signer"] }

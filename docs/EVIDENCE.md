@@ -6,6 +6,43 @@ P4 bench hub with a **development key**. Not yet evidence-grade.
 **Whether a court accepts any of this is the court's decision. Have a lawyer
 review the method and these documents before relying on them.**
 
+## What this log proves today, and what it does not
+
+The goal is a log that can stand up in court. Today it is well short of
+that.
+
+**It proves:** the records have not changed since they were signed, by
+whoever holds the signing key. Today that key can be read out of the
+unit's flash, and it is also in the key file and the firmware file on the
+laptop that built the firmware.
+
+**It does not prove:**
+
+- **which unit made the log.** Anyone with the key (see above) can write a
+  log that checks out exactly like this unit's. A log also names its own key,
+  so a log checked only against the key it names proves nothing about who
+  made it: the verifier says **VERIFIED** only when you give it the unit's
+  key from outside the log (`--key` or `--keys`, see "Who signed" below).
+- **that the log is complete.** Nothing records, across power-cycles or
+  card changes, how much was written. A log cut off at a checkpoint, the
+  newest card files deleted, a reformatted card, or a whole boot never
+  uploaded leave no trace in what is left. The verifier says so on every run.
+- **that the times are true.** Times come from the unit's own GPS receiver
+  and clock; nothing outside the unit vouches for them unless someone asked
+  the server for an outside time-stamp, and that only shows the records
+  existed by the time of the stamp.
+
+**Still missing before it could be court-grade:**
+
+1. a signing key held in hardware, which software cannot read (design
+   below, nothing burned yet);
+2. a counter that survives reboots and card changes, written into every
+   boot, so missing boots and missing newest files show;
+3. outside time-stamping as a matter of course, not on request;
+4. reproducible firmware builds, plus secure boot, so the firmware hash in
+   each record can be matched to published source and only that firmware
+   can run.
+
 ## In plain words
 
 Every time the hub receives a detection from a node, it writes a record of
@@ -18,9 +55,11 @@ being set or corrected, the SD card going in or out, nodes appearing or
 going quiet, the airspace data version, settings changes, operator notes.
 
 Each record contains a fingerprint (SHA-256) of the record before it. Change
-one letter anywhere, remove a record or swap two, and every fingerprint
-after that point stops matching. Once a minute the hub **signs** the latest
-fingerprint with its key. A signature covers everything before it.
+one letter anywhere, remove a record from the middle or swap two, and every
+fingerprint after that point stops matching. Once a minute the hub **signs**
+the latest fingerprint with its key. A signature covers everything before
+it. Removing records from the **end** changes nothing that comes before, so
+it does not show (see above).
 
 The records go to the SD card in their own folder (`ROTORSCP/EVIDENCE/`),
 separate from the everyday CSV log, and stream out of the USB port. A laptop
@@ -33,18 +72,62 @@ An **export bundle** is one file with everything: the records exactly as
 uploaded, the unit's public key, the firmware fingerprints, the server's
 access log for them, and any outside time-stamps. The **verifier**
 (`evidence-verify`, open source, runs on any laptop) checks all of it and
-says, for any problem, exactly which file, record and byte.
+says, for any problem it can see, which file, record and byte. It does not
+check the time-stamp token itself (use `openssl ts -verify`, see
+EVIDENCE-FORMAT.md).
+
+## Who signed: give the verifier the key
+
+Every log names its own key, in the boot event and in every checkpoint.
+Anyone can generate a key, write records naming it, and set the key class
+byte to "hardware key": the signatures will check against the key the log
+names. So:
+
+- `evidence-verify` says **VERIFIED** only when the signing key comes from
+  outside the log: `--key <130 hex digits>`, or `--keys <file>` with one key
+  per line (hex, then a label; `#` starts a comment). Take the key from the
+  unit itself when it is set up (the hub prints `hub-p4: evidence public
+  key ...` at boot) and write its fingerprint on the custody record. Do not
+  take it from the log or from an export bundle: a bundle's device key is
+  only the server's record of what was registered.
+- Without a key the verifier still checks everything else, but its verdict
+  is **SELF-CONSISTENT, SIGNER NOT CHECKED: anyone could have made this
+  log** (exit code 4).
+- The key class is printed as what the log **claims** ("log claims: ...").
+  It is a byte the signer writes and proves nothing by itself.
+- A log signed with the **published test key** (whose secret is in this
+  repository) is a failure: anyone can produce one. Only the project's own
+  tests accept it, with `--allow-test-key`.
 
 ## What is protected now
 
-- **Changing, removing, reordering or cutting records** after the hub wrote
-  them: caught, on the card, in an upload, on the server's disk and in a
-  bundle (host tests, and on the bench 2026-11-15; see "Tested").
+Each item below assumes the verifier was given the unit's key from outside
+the log (see "Who signed").
+
+- **Changing, reordering or adding records, and removing records from the
+  middle** after the hub wrote them: caught, on the card, in an upload, on
+  the server's disk and in a bundle (host tests, and on the bench
+  2026-11-15; see "Tested"). **Cutting records off the end is not caught**
+  when the cut falls at a checkpoint: what is left is a shorter, valid log.
+  A cut between checkpoints shows only as records "not covered by a
+  signature".
 - **Changing the server's access log**: caught (it is chained the same way).
+  The access log is not signed, so whoever runs the server can rewrite it
+  whole; signing it is later work.
 - **A batch altered on the way to the server**: refused on arrival.
-- **Records the hub wrote to the card but that were removed later**: each
-  new card file names the previous file's exact length and last record, so
-  a shortened or extended earlier file shows.
+- **An earlier card file shortened or extended** after the hub moved on:
+  each new card file names the previous file's exact length and last
+  record, so this shows, provided the newer file is there. **A missing file
+  between two supplied files** is a failure unless `--allow-gaps` is given;
+  with it, it is reported as a gap that may hide removed records. **The
+  newest files deleted** do not show at all: nothing later names them, and
+  the hub will reuse their numbers.
+- **Signature malleability**: an ECDSA signature has two valid forms; the
+  hub writes only the "low-S" form and the verifier refuses the other, so
+  two genuine copies of a log cannot be made to differ in their signatures.
+  Logs written by firmware built before 2026-11-18 have the other form on
+  about half their checkpoints and now fail those checks; rebuild the hub
+  firmware.
 - **No GPS**: records made without GPS time say "time source: none" and
   carry only time since power-on; records without a GPS position say so. The
   verifier counts and prints them. A typed-in position is marked "manual".
@@ -59,17 +142,20 @@ says, for any problem, exactly which file, record and byte.
    the firmware. Anyone with the firmware file, the laptop, or the unit
    (reading its flash) can sign records that look like this unit's. Every
    checkpoint says "DEVELOPMENT KEY, NOT EVIDENCE-GRADE", and the verifier
-   repeats it. So today the signatures show the records **have not changed
-   since they were signed**; they do not show **only this unit** could have
-   signed them.
+   shows the class the log claims. So today the signatures show the records
+   **have not changed since they were signed**; they do not show **only this
+   unit** could have signed them. A class byte saying "hardware" would not
+   show that either: it is written by whoever signs.
 2. **No secure boot or flash encryption.** Someone with the unit could load
    firmware that writes false records. The firmware fingerprint in each
    record shows *which* firmware ran, but without secure boot nothing stops
    a different one from running.
-3. **The last minute.** Records after the newest signature are chained but
-   not yet signed. If someone cut those off the end of the last file, only
-   the missing signature would show. The verifier reports them as "not
-   covered by a signature".
+3. **The end of the log.** Records after the newest signature are chained
+   but not yet signed; the verifier reports them as "not covered by a
+   signature". Cutting the log back to any checkpoint, or deleting the
+   newest card files, leaves no trace at all. There is no counter that
+   survives a reboot or a card change, so a whole boot that was never
+   uploaded, or a reformatted card, does not show either.
 4. **Time-stamps are not automatic.** Someone has to ask the server for one
    (button/API), and only while it is online.
 5. **The re-decode shares our decoder.** The verifier decodes the raw bytes
@@ -79,8 +165,11 @@ says, for any problem, exactly which file, record and byte.
    decode them with an independent decoder (e.g. opendroneid-core-c). A
    fully independent decoder in the verifier is future work.
 6. **Laptop link.** The P4 has no network; a laptop carries the records.
-   The laptop cannot forge them (it does not have the key), but it could
-   withhold some; the server shows any gap.
+   A laptop that only uploads does not have the key, so it cannot forge
+   records, but it could withhold some: the server shows a gap in the
+   middle, not records withheld from the end. The laptop that **built** the
+   firmware does hold the key (the key file and the firmware ELF it is built
+   into) and can sign records that check out like the unit's.
 7. **Bench transport.** Plain HTTP on one laptop is fine for the bench. Use
    the server's TLS option anywhere else.
 8. **Access control on the server is a shared token**, and the name in the
@@ -126,28 +215,48 @@ cd firmware/hub-p4 && ROTORSCOPE_DEV_KEY=$(cat ~/p4-dev.evkey) cargo fw   # then
 # a ROTORSCOPE_DEV_KEY that is set but not exactly 64 hex digits (or is zero) stops the
 #   build (it used to fall back to the test key silently); the value is never printed
 
+# Registering a unit needs the token: without --token the server refuses it.
+# (--open-registration lifts that, for a bench laptop nobody else can reach.)
+export EVIDENCE_TOKEN=<a long random string>   # the server and the uploader both read it
 target/release/evidence-server serve --data ~/evidence-data          # http://127.0.0.1:8650
 target/release/evidence-upload --server http://127.0.0.1:8650 \
     --serial /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --replay --register "bench P4"
 #  check that the fingerprint it registers matches the one the hub prints at boot
 #  ("hub-p4: evidence key ... fingerprint xxxx-xxxx-xxxx-xxxx")
-curl -o bundle.json http://127.0.0.1:8650/api/devices/<fingerprint>/export
-target/release/evidence-verify bundle.json
+curl -H "Authorization: Bearer $EVIDENCE_TOKEN" -o bundle.json http://127.0.0.1:8650/api/devices/<fingerprint>/export
+# the key as the hub printed it at boot ("hub-p4: evidence public key ..."):
+target/release/evidence-verify --key <130 hex digits> bundle.json
 # or straight from the card in a card reader:
-target/release/evidence-verify /media/<card>/ROTORSCP/EVIDENCE/
+target/release/evidence-verify --key <130 hex digits> /media/<card>/ROTORSCP/EVIDENCE/
+# or with a file of known units, one per line: <hex> <label>
+target/release/evidence-verify --keys ~/rotorscope-units.keys bundle.json
 ```
 
-The map and list page is at the server's address. Every view, export and
+With a token set, every call except an upload needs it (the page asks for
+it). The map and list page is at the server's address. Every view, export and
 note is written to the access log with the name you type.
 
-Verifier exit codes: **0** verified (every record linked and signed),
-**1** failed (it names the file, byte, chain and record), **2** could not
-run, **3** nothing contradicts the log but some records are unsigned or
-missing (listed).
+Verifier verdicts and exit codes:
+
+| exit | verdict | meaning |
+|---:|---|---|
+| 0 | VERIFIED | every record links, every signature checks against a key you supplied, a signature covers every record checked |
+| 1 | FAILED | the log is not what its signer wrote, or it is signed by a key you did not supply or by the published test key, or a file is missing (without `--allow-gaps`); it names the file, byte, chain and record |
+| 2 | (could not run) | bad arguments, unreadable input or keys file |
+| 3 | SIGNER CHECKED, WITH GAPS | the signer is a key you supplied and nothing contradicts the log, but some records are not covered by a signature, or (with `--allow-gaps`) are missing; missing records may have been removed |
+| 4 | SELF-CONSISTENT, SIGNER NOT CHECKED | no key was supplied: anyone could have made this log |
+
+Every run also prints: "NOT PROVEN: that the log is complete."
 
 ## Tested
 
-- Host: `cargo test -p evidence -p evidence-server` (16 tests): editing any of
+- Host: `cargo test -p evidence -p evidence-server -p evidence-verify`:
+  a log forged from scratch with a made-up "hardware" key (not VERIFIED
+  without an outside key; VERIFIED with the forger's key passed; FAILED with
+  another key; the same for a bundle), the published test key refused unless
+  allowed, a missing middle file failing by default, a checkpoint signature
+  turned into its high-S form failing, the verifier's exit codes and verdict
+  words; editing any of
   a spread of bytes in every record, deleting any record, swapping any two
   neighbours, cutting a record, rewriting the chain after an edit, files
   shortened or extended after the next file opened, missing files, batches
@@ -158,7 +267,10 @@ missing (listed).
 - Bench, 2026-11-15, P4 CrowPanel (chip v1.3) with the `fakedrone` build,
   two real nodes via the gateway, no GPS attached: detections went hub ->
   USB -> laptop uploader -> server -> export bundle -> verifier: **VERIFIED**
-  (255 records, 2 boots, 5 signed checkpoints). Copies of the bundle with a
+  (255 records, 2 boots, 5 signed checkpoints). That run used the verifier
+  before 2026-11-18, which checked the signatures against the device key
+  named in the bundle itself; it showed the records were self-consistent
+  and unchanged since signing, not who signed them. Copies of the bundle with a
   digit of a drone latitude changed, a record removed, two records swapped,
   an access-log name changed, or the last checkpoint removed: all
   **FAILED**, each naming the batch and record. Console replay of the card

@@ -10,7 +10,7 @@
 //! | `GET /` | map + list page | (the data call below is logged) |
 //! | `POST /api/devices` `{public_key, name}` | register a unit by its public key | register |
 //! | `GET /api/devices` | units, stored ranges | - |
-//! | `GET /api/devices/{id}` | one unit: next record number per boot (for uploaders) | - |
+//! | `GET /api/devices/{id}` | one unit: next record number per boot (for uploaders; needs the token) | - |
 //! | `POST /api/devices/{id}/batches` (octet-stream) | records back to back, ending in a signed checkpoint | upload |
 //! | `GET /api/devices/{id}/detections` | detections for the map and list | view |
 //! | `GET /api/devices/{id}/audit` | the unit's audit chain | view |
@@ -19,9 +19,10 @@
 //! | `POST /api/devices/{id}/timestamp` | outside time-stamp of the newest checkpoint | timestamp |
 //!
 //! Who: the `X-Actor` header names the person (bench: not authenticated).
-//! With `--token`, every call except uploads and the uploader's status call
-//! needs `Authorization: Bearer <token>`. Uploads are authenticated by the
-//! unit's own signatures, not by the uploader.
+//! With `--token`, every call except uploads needs
+//! `Authorization: Bearer <token>`. Uploads are authenticated by the unit's
+//! own signatures, not by the uploader. Without `--token`, registering a unit
+//! is refused unless the server was started with `--open-registration`.
 
 pub mod store;
 pub mod tsa;
@@ -40,9 +41,21 @@ use store::{Store, StoreError};
 pub struct App {
     pub store: Mutex<Store>,
     pub token: Option<String>,
+    /// Let anyone register a unit when there is no `--token`. Off by
+    /// default: without a token, registration is refused.
+    pub open_registration: bool,
     /// Name written into bundles (e.g. the server's URL).
     pub server_name: String,
     pub tsa_url: Option<String>,
+}
+
+impl App {
+    /// The store. A handler that panicked while holding the lock poisons it;
+    /// every later request would panic too, so one bad request would take the
+    /// server down. The store's writes are appends, so carrying on is safe.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 pub type Shared = Arc<App>;
@@ -107,7 +120,7 @@ async fn list_devices(State(app): State<Shared>, h: HeaderMap) -> Response {
     if let Err(r) = authorized(&app, &h) {
         return r;
     }
-    let s = app.store.lock().unwrap();
+    let s = app.lock();
     let v: Vec<_> = s
         .devices
         .values()
@@ -126,16 +139,26 @@ async fn register(State(app): State<Shared>, c: Conn, h: HeaderMap, Json(r): Jso
     if let Err(r) = authorized(&app, &h) {
         return r;
     }
+    if app.token.is_none() && !app.open_registration {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "registration is disabled: start the server with --token (and send it), or with --open-registration on a bench network" })),
+        )
+            .into_response();
+    }
     let who = actor(&h, c.0);
-    match app.store.lock().unwrap().register(&r.public_key, &r.name, &who) {
+    match app.lock().register(&r.public_key, &r.name, &who) {
         Ok(info) => (StatusCode::CREATED, Json(info)).into_response(),
         Err(e) => err(e),
     }
 }
 
 /// Status for uploaders: what the server already has (no record contents).
-async fn device(State(app): State<Shared>, Path(id): Path<String>) -> Response {
-    let s = app.store.lock().unwrap();
+async fn device(State(app): State<Shared>, Path(id): Path<String>, h: HeaderMap) -> Response {
+    if let Err(r) = authorized(&app, &h) {
+        return r;
+    }
+    let s = app.lock();
     match s.device(&id) {
         Ok(d) => Json(serde_json::json!({ "key_id": d.info.key_id, "name": d.info.name, "next_seq": d.next_seq(), "ranges": d.ranges(), "batches": d.batches.len() })).into_response(),
         Err(e) => err(e),
@@ -144,7 +167,7 @@ async fn device(State(app): State<Shared>, Path(id): Path<String>) -> Response {
 
 async fn upload(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: HeaderMap, body: Bytes) -> Response {
     let who = actor(&h, c.0);
-    let mut s = app.store.lock().unwrap();
+    let mut s = app.lock();
     let r = s.device_mut(&id).and_then(|d| d.upload(&body, &who));
     match r {
         Ok(res) => (StatusCode::CREATED, Json(res)).into_response(),
@@ -157,7 +180,7 @@ async fn detections(State(app): State<Shared>, Path(id): Path<String>, c: Conn, 
         return r;
     }
     let who = actor(&h, c.0);
-    let mut s = app.store.lock().unwrap();
+    let mut s = app.lock();
     let d = match s.device_mut(&id) {
         Ok(d) => d,
         Err(e) => return err(e),
@@ -173,7 +196,7 @@ async fn audit(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: He
         return r;
     }
     let who = actor(&h, c.0);
-    let mut s = app.store.lock().unwrap();
+    let mut s = app.lock();
     let d = match s.device_mut(&id) {
         Ok(d) => d,
         Err(e) => return err(e),
@@ -196,7 +219,7 @@ async fn annotate(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h:
         return r;
     }
     let who = actor(&h, c.0);
-    let mut s = app.store.lock().unwrap();
+    let mut s = app.lock();
     let d = match s.device_mut(&id) {
         Ok(d) => d,
         Err(e) => return err(e),
@@ -218,7 +241,7 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: H
         return r;
     }
     let who = actor(&h, c.0);
-    let mut s = app.store.lock().unwrap();
+    let mut s = app.lock();
     let d = match s.device_mut(&id) {
         Ok(d) => d,
         Err(e) => return err(e),
@@ -253,7 +276,7 @@ async fn timestamp(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h
         return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({ "error": "no time-stamp authority configured (start with --tsa URL); see docs/EVIDENCE.md" }))).into_response();
     };
     let head = {
-        let s = app.store.lock().unwrap();
+        let s = app.lock();
         match s.device(&id) {
             Ok(d) => d.latest_checkpoint(),
             Err(e) => return err(e),
@@ -278,7 +301,7 @@ async fn timestamp(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h
         head: evidence::verify::hex(&hash),
         token: evidence::b64::encode_vec(&token),
     };
-    let mut s = app.store.lock().unwrap();
+    let mut s = app.lock();
     let d = match s.device_mut(&id) {
         Ok(d) => d,
         Err(e) => return err(e),

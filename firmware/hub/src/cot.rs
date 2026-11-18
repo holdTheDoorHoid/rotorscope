@@ -12,6 +12,13 @@
 //! counted in `NO_UTC`; see `clock.rs`.
 //!
 //! Runtime toggle: USB `m`, or `POST /api/cot {"on":bool}`. On by default.
+//! The phone page shows the state (`"cot"` in `/api/state`).
+//!
+//! The datagrams leave with an IP hop limit (TTL) of 1: they reach the
+//! phones and laptops on the same network and no further. On the hotspot
+//! there is no router anyway; in station mode smoltcp's default of 64 would
+//! let a multicast-routing LAN carry the drone and operator positions
+//! beyond the network the hub joined.
 
 use core::net::{Ipv4Addr, SocketAddrV4};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
@@ -58,6 +65,8 @@ pub async fn task(stack: Stack<'static>, hub: &'static Hub) {
     let mut tx_meta = [PacketMetadata::EMPTY; 4];
     let mut tx_buf = [0u8; 2 * MAX_EVENT];
     let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buf, &mut tx_meta, &mut tx_buf);
+    // Same-network only (see the module docs).
+    socket.set_hop_limit(Some(1));
     // Any local port: we only send.
     if socket.bind(0).is_err() {
         crate::usb::msg("err", "cot bind");

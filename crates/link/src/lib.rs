@@ -1053,6 +1053,24 @@ pub fn encode<'a>(frame: &Frame, buf: &'a mut [u8]) -> Result<&'a mut [u8], post
     postcard::to_slice_cobs(frame, buf)
 }
 
+/// Frames a hub sends its web head about *itself*: its own position and
+/// clock ([`Frame::HubFix`]), its own ADS-B receiver ([`Frame::Csbee`]) and
+/// its possible-violation flags ([`Frame::Flags`]). No node ever has a reason
+/// to send one.
+pub fn hub_only(frame: &Frame) -> bool {
+    matches!(frame, Frame::HubFix(_) | Frame::Csbee(_) | Frame::Flags(_))
+}
+
+/// Whether a web head should apply `frame`. `relayed` is true when a
+/// [`Frame::Via`] marker came before it, i.e. a relay (an ESP-NOW gateway or
+/// a P4 hub) passed it on for one of its nodes. A [`hub_only`] frame is
+/// believed only from the relay itself: otherwise any node the relay hears
+/// could move the kit's own position, set its clock, invent aircraft or
+/// raise flags. Everything else is accepted either way.
+pub fn web_head_accepts(frame: &Frame, relayed: bool) -> bool {
+    !(relayed && hub_only(frame))
+}
+
 /// Serialize a hub-to-node [`Command`] the same way as [`encode`].
 pub fn encode_command<'a>(cmd: &Command, buf: &'a mut [u8]) -> Result<&'a mut [u8], postcard::Error> {
     postcard::to_slice_cobs(cmd, buf)
@@ -1130,6 +1148,74 @@ impl<T: for<'de> Deserialize<'de>> StreamDecoder<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hub_fix() -> Frame {
+        Frame::HubFix(HubFix {
+            state: GnssState::Fix3d,
+            sats: Some(9),
+            position: Some(HubPosition { lat_e7: 399_526_000, lon_e7: -751_652_000, alt_hae_mm: None, age_ms: 0 }),
+            utc_ms: Some(1_700_000_000_000),
+            utc_pps: false,
+        })
+    }
+
+    fn flags() -> Frame {
+        Frame::Flags(FlagReport {
+            who: heapless::String::try_from("X").unwrap(),
+            level: 3,
+            items: Vec::new(),
+            pack_date: 0,
+        })
+    }
+
+    #[test]
+    fn hub_only_frames_are_refused_when_relayed() {
+        let csbee = Frame::Csbee(b"#A:x".iter().copied().collect());
+        for f in [hub_fix(), csbee, flags()] {
+            assert!(hub_only(&f));
+            assert!(web_head_accepts(&f, false), "from the relay itself: {f:?}");
+            assert!(!web_head_accepts(&f, true), "relayed for a node: {f:?}");
+        }
+        // Node frames pass either way.
+        let det = Frame::Detection(detection(1, 1));
+        assert!(!hub_only(&det));
+        assert!(web_head_accepts(&det, true) && web_head_accepts(&det, false));
+        let via = Frame::Via { node: [2; 6], rssi: -50 };
+        assert!(web_head_accepts(&via, false));
+    }
+
+    /// The byte stream a web head reads: a node's forged `HubFix` arrives
+    /// behind a `Via`, the P4's own one without. Pair them the way the hub's
+    /// link reader does (a `Via` names exactly the next frame).
+    #[test]
+    fn forged_hub_fix_behind_a_via_is_refused_in_a_stream() {
+        let frames = [
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            hub_fix(), // a node pretending to be the hub
+            hub_fix(), // the hub itself
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            flags(),
+            Frame::Via { node: [2, 0, 0, 0, 0, 7], rssi: -60 },
+            Frame::Detection(detection(3, 1)),
+        ];
+        let mut wire = std::vec::Vec::new();
+        for f in &frames {
+            let mut buf = [0u8; MAX_FRAME];
+            wire.extend_from_slice(encode(f, &mut buf).unwrap());
+        }
+        let mut dec = Decoder::new();
+        let mut via = false;
+        let mut verdicts = std::vec::Vec::new();
+        dec.feed(&wire, |r| match r.unwrap() {
+            Frame::Via { .. } => via = true,
+            f => {
+                let relayed = core::mem::take(&mut via);
+                verdicts.push((relayed, web_head_accepts(&f, relayed)));
+            }
+        });
+        // (relayed, accepted) for HubFix, HubFix, Flags, Detection.
+        assert_eq!(verdicts, [(true, false), (false, true), (true, false), (true, true)]);
+    }
 
     fn detection(fill: u8, n: usize) -> Detection {
         let mut messages = Vec::new();

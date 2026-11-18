@@ -88,8 +88,10 @@ aircraft table for forwarded ADS-B (an `adsbee` build has one anyway).
   exactly as lines from an ADSBee on a UART. The phone page shows the
   aircraft and the ADSBee's health.
 - **Hotspot.** Unchanged: channel 11 (never 6), WPA2 with the unit's own
-  derived password (printed on USB at boot), `open-hotspot` only for bench
-  builds. Station mode and CoT unchanged.
+  password (from a random salt stored in its flash; read it on this board's
+  USB with BOOT held and `h`, see `firmware/hub/README.md`), `open-hotspot`
+  only for bench builds (`ROTORSCOPE_BENCH=1`). Station mode is read-only
+  by default and CoT leaves with hop limit 1 (`firmware/hub/README.md`).
 
 ### One way
 

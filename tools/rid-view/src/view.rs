@@ -128,6 +128,14 @@ fn age(ms: u64) -> String {
     }
 }
 
+/// Text from the air or a board, made safe to print: control characters
+/// (ESC starts a terminal escape sequence) become `?`.
+pub(crate) fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 /// Cut to `n` chars, so one long Self-ID cannot wrap the table.
 fn fit(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
@@ -193,7 +201,7 @@ impl View {
     }
 
     pub fn note(&mut self, clock: &str, msg: String) {
-        self.log.push_back(format!("{clock}  {msg}"));
+        self.log.push_back(format!("{clock}  {}", clean(&msg)));
         while self.log.len() > 6 {
             self.log.pop_front();
         }
@@ -219,12 +227,12 @@ impl View {
             "rid-view  {clock}  drones: {active} active, {total} total  |  {own}{eol}"
         );
         for (n, info) in &self.nodes {
-            let mut line = format!("  node {n} {}", info.source);
+            let mut line = format!("  node {n} {}", clean(&info.source));
             if let Some(h) = &info.hello {
-                let _ = write!(line, "  [{h}]");
+                let _ = write!(line, "  [{}]", clean(h));
             }
             if let Some(st) = &info.stats {
-                let _ = write!(line, "  stats: {st}");
+                let _ = write!(line, "  stats: {}", clean(st));
             }
             let _ = write!(line, "  rid lines: {}", info.rid_lines);
             if info.open_lines > 0 {
@@ -240,14 +248,15 @@ impl View {
                 let _ = write!(line, ", unparsed: {}", info.bad_lines);
             }
             if let Some(e) = &info.ended {
-                let _ = write!(line, "  ({e})");
+                let _ = write!(line, "  ({})", clean(e));
             }
             let _ = writeln!(s, "{line}{eol}");
         }
         if let Some(a) = &self.adsb {
             let mut line = format!(
                 "  adsbee {}  aircraft lines: {}",
-                a.source, a.aircraft_lines
+                clean(&a.source),
+                a.aircraft_lines
             );
             if let Some(st) = &a.stats {
                 let _ = write!(
@@ -266,7 +275,7 @@ impl View {
                 let _ = write!(line, ", other text: {}", a.other_lines);
             }
             if let Some(e) = &a.ended {
-                let _ = write!(line, "  ({e})");
+                let _ = write!(line, "  ({})", clean(e));
             }
             let _ = writeln!(s, "{line}{eol}");
         }
@@ -325,7 +334,7 @@ impl View {
             let self_id = t
                 .self_id
                 .as_ref()
-                .and_then(|s| s.value.description.as_str().map(str::to_string))
+                .and_then(|s| s.value.description.as_str().map(clean))
                 .unwrap_or_default();
             let _ = writeln!(
                 s,
@@ -693,5 +702,52 @@ mod tests {
         let tr: Tracker = Tracker::default();
         let text = View::new(false).render(&tr, &tr.context(0, None), "00:00:00Z");
         assert!(!text.contains("OPEN FPV LINKS"));
+    }
+
+    #[test]
+    fn air_and_board_text_cannot_inject_escapes() {
+        use rid::message::{BasicId, DescType, FixedStr, IdType, Message, SelfId};
+        let mut tr: Tracker = Tracker::default();
+        let obs = tracker::Observation {
+            node: 1,
+            transport: Transport::BleLegacy,
+            channel: 37,
+            rssi: -60,
+            mac: [1, 2, 3, 4, 5, 6],
+            counter: 0,
+            rx_ms: 1_000,
+        };
+        let msgs = [
+            Message::BasicId(BasicId {
+                id_type: IdType::SerialNumber,
+                ua_type: UaType::HelicopterOrMultirotor,
+                uas_id: FixedStr::new(b"SN1").unwrap(),
+            }),
+            Message::SelfId(SelfId {
+                desc_type: DescType::Text,
+                description: FixedStr::new(b"\x1b]0;pwn\x07\x1b[2Jhi\x7f").unwrap(),
+            }),
+        ];
+        tr.ingest_messages(&obs, &msgs, 0);
+        let mut view = View::new(false);
+        view.nodes.insert(
+            1,
+            NodeInfo {
+                source: "src\x1b[31m".into(),
+                hello: Some("hi\x1b[2J".into()),
+                stats: Some("st\x07".into()),
+                ended: Some("end\x1bc".into()),
+                ..NodeInfo::default()
+            },
+        );
+        view.note("00:00:00", "new Wi-Fi drone: X \x1b[2J".into());
+        let text = view.render(&tr, &tr.context(1_500, None), "00:00:00Z");
+        assert!(text.contains("hi?"), "{text}");
+        let bad: Vec<char> = text
+            .chars()
+            .filter(|c| c.is_control() && *c != '\n')
+            .collect();
+        assert!(bad.is_empty(), "{bad:?} in {text:?}");
+        assert_eq!(clean("a\u{9b}b\tc"), "a?b?c");
     }
 }
