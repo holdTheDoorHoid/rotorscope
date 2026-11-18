@@ -1,14 +1,14 @@
-//! MAVLink v1/v2 frame scanner and the handful of messages worth decoding
+//! MAVLink v1/v2 frames and the handful of messages worth decoding
 //! (common.xml): HEARTBEAT, SYS_STATUS, GPS_RAW_INT, GLOBAL_POSITION_INT,
-//! RC_CHANNELS, HOME_POSITION. Frames are found anywhere in a byte slice and
-//! accepted only when their X.25 CRC (with the message's CRC_EXTRA) checks.
-//! Signed MAVLink 2 frames are parsed (signing authenticates, it does not
-//! encrypt); the signature is not checked.
+//! RC_CHANNELS, HOME_POSITION. The scanner itself is `mavwatch::frame`
+//! (shared with the hostile-MAVLink detector): frames are found anywhere in
+//! a byte slice and accepted only when their X.25 CRC (with the message's
+//! CRC_EXTRA) checks. Signed MAVLink 2 frames are parsed (signing
+//! authenticates, it does not encrypt); the signature is not checked.
 
 use crate::content::{
     AltRef, Channels, ControlContent, Position, PositionKind, PositionSource, Telemetry,
 };
-use crate::crc::{x25_accumulate, x25_continue};
 
 pub const MSG_HEARTBEAT: u32 = 0;
 pub const MSG_SYS_STATUS: u32 = 1;
@@ -17,19 +17,16 @@ pub const MSG_GLOBAL_POSITION_INT: u32 = 33;
 pub const MSG_RC_CHANNELS: u32 = 65;
 pub const MSG_HOME_POSITION: u32 = 242;
 
-/// (message ID, CRC_EXTRA, full payload length).
-const KNOWN: [(u32, u8, usize); 6] = [
-    (MSG_HEARTBEAT, 50, 9),
-    (MSG_SYS_STATUS, 124, 31),
-    (MSG_GPS_RAW_INT, 24, 30),
-    (MSG_GLOBAL_POSITION_INT, 104, 28),
-    (MSG_RC_CHANNELS, 118, 42),
-    (MSG_HOME_POSITION, 104, 52),
+/// The messages this module decodes. (`mavwatch` knows more; their frames
+/// are skipped here, as before.)
+const DECODED: [u32; 6] = [
+    MSG_HEARTBEAT,
+    MSG_SYS_STATUS,
+    MSG_GPS_RAW_INT,
+    MSG_GLOBAL_POSITION_INT,
+    MSG_RC_CHANNELS,
+    MSG_HOME_POSITION,
 ];
-
-fn known(id: u32) -> Option<(u8, usize)> {
-    KNOWN.iter().find(|k| k.0 == id).map(|k| (k.1, k.2))
-}
 
 /// One frame found in a buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,73 +40,18 @@ pub struct Frame<'a> {
     pub len: usize,
 }
 
-/// Find CRC-valid frames of the known messages in `buf`, in order. Unknown
-/// message IDs cannot be CRC-checked (no CRC_EXTRA) and are skipped.
+/// Find CRC-valid frames of the decoded messages in `buf`, in order.
+/// Unknown message IDs cannot be CRC-checked (no CRC_EXTRA) and are skipped.
 pub fn frames(buf: &[u8]) -> impl Iterator<Item = Frame<'_>> {
-    let mut i = 0;
-    core::iter::from_fn(move || {
-        while i < buf.len() {
-            if let Some(f) = frame_at(&buf[i..]) {
-                i += f.len;
-                return Some(f);
-            }
-            i += 1;
-        }
-        None
-    })
-}
-
-fn frame_at(b: &[u8]) -> Option<Frame<'_>> {
-    match *b.first()? {
-        0xFD => {
-            let plen = *b.get(1)? as usize;
-            let incompat = *b.get(2)?;
-            if incompat & !0x01 != 0 {
-                return None;
-            }
-            let msgid = u32::from_le_bytes([*b.get(7)?, *b.get(8)?, *b.get(9)?, 0]);
-            let (extra, full) = known(msgid)?;
-            if plen > full {
-                return None;
-            }
-            let crc_at = 10 + plen;
-            let crc = u16::from_le_bytes([*b.get(crc_at)?, *b.get(crc_at + 1)?]);
-            let c = x25_accumulate(x25_continue(0xFFFF, &b[1..crc_at]), extra);
-            if c != crc {
-                return None;
-            }
-            let sig = if incompat & 1 != 0 { 13 } else { 0 };
-            Some(Frame {
-                sysid: b[5],
-                compid: b[6],
-                msgid,
-                payload: &b[10..crc_at],
-                len: crc_at + 2 + sig,
-            })
-        }
-        0xFE => {
-            let plen = *b.get(1)? as usize;
-            let msgid = *b.get(5)? as u32;
-            let (extra, full) = known(msgid)?;
-            if plen != full {
-                return None;
-            }
-            let crc_at = 6 + plen;
-            let crc = u16::from_le_bytes([*b.get(crc_at)?, *b.get(crc_at + 1)?]);
-            let c = x25_accumulate(x25_continue(0xFFFF, &b[1..crc_at]), extra);
-            if c != crc {
-                return None;
-            }
-            Some(Frame {
-                sysid: b[3],
-                compid: b[4],
-                msgid,
-                payload: &b[6..crc_at],
-                len: crc_at + 2,
-            })
-        }
-        _ => None,
-    }
+    mavwatch::frames(buf)
+        .filter(|f| DECODED.contains(&f.msgid))
+        .map(|f| Frame {
+            sysid: f.sysid,
+            compid: f.compid,
+            msgid: f.msgid,
+            payload: f.payload,
+            len: f.len(),
+        })
 }
 
 /// Decode one frame's payload into content.
@@ -211,23 +153,16 @@ pub fn decode_all(buf: &[u8], mut out: impl FnMut(ControlContent)) -> usize {
 /// Test-only encoder for a MAVLink 2 frame (no signing, no truncation).
 #[cfg(test)]
 pub fn encode_v2(seq: u8, sysid: u8, compid: u8, msgid: u32, payload: &[u8]) -> std::vec::Vec<u8> {
-    let (extra, _) = known(msgid).expect("known msg");
-    let mut f = std::vec![0xFD, payload.len() as u8, 0, 0, seq, sysid, compid];
-    f.extend_from_slice(&msgid.to_le_bytes()[..3]);
-    f.extend_from_slice(payload);
-    let c = x25_accumulate(x25_continue(0xFFFF, &f[1..]), extra);
-    f.extend_from_slice(&c.to_le_bytes());
-    f
+    let mut b = [0u8; mavwatch::frame::MAX_FRAME_LEN];
+    let n = mavwatch::frame::encode::v2_raw(&mut b, seq, sysid, compid, msgid, payload, None, false);
+    b[..n].to_vec()
 }
 
 #[cfg(test)]
 pub fn encode_v1(seq: u8, sysid: u8, compid: u8, msgid: u32, payload: &[u8]) -> std::vec::Vec<u8> {
-    let (extra, _) = known(msgid).expect("known msg");
-    let mut f = std::vec![0xFE, payload.len() as u8, seq, sysid, compid, msgid as u8];
-    f.extend_from_slice(payload);
-    let c = x25_accumulate(x25_continue(0xFFFF, &f[1..]), extra);
-    f.extend_from_slice(&c.to_le_bytes());
-    f
+    let mut b = [0u8; mavwatch::frame::MAX_FRAME_LEN];
+    let n = mavwatch::frame::encode::v1(&mut b, seq, sysid, compid, msgid, payload);
+    b[..n].to_vec()
 }
 
 /// Test helper: a GLOBAL_POSITION_INT payload.

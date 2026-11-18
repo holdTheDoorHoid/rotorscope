@@ -318,6 +318,24 @@ pub fn recognise(bytes: &[u8], rx: &RxConfig, meta: RxMeta, cfg: &Config) -> Opt
     }
 }
 
+/// The bytes a packet carries for a MAVLink stream (SiK serial data, an
+/// mLRS payload), with the direction when the system tells, for
+/// `mavwatch`'s hostile-MAVLink scan. `None` for other systems, packets that
+/// do not check, command packets and encrypted payloads. Call it only when
+/// [`Config::decode_content`] is set: it reads content.
+pub fn serial_bytes<'a>(bytes: &[u8], rx: &RxConfig, out: &'a mut [u8; 258]) -> Option<(&'a [u8], Direction)> {
+    match rx.probe {
+        Probe::Sik { .. } => sik::serial_bytes(bytes, out).map(|b| (b, Direction::Unknown)),
+        Probe::Mlrs(_) => {
+            let (p, d) = mlrs::serial_bytes(bytes)?;
+            let n = p.len().min(out.len());
+            out[..n].copy_from_slice(&p[..n]);
+            Some((&out[..n], d))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn sighting(
     system: System,
     rx: &RxConfig,

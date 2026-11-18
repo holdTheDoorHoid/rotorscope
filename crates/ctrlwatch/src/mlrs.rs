@@ -249,6 +249,31 @@ pub fn recognise(f: &[u8], rx: &RxConfig, meta: RxMeta, cfg: &Config) -> Option<
     Some(r)
 }
 
+/// The MAVLink-carrying payload of one mLRS frame and its direction
+/// (unencrypted frames only; `None` for a frame that does not check, an
+/// encrypted uplink, or no payload). For `mavwatch`; only called with
+/// content decoding on.
+pub fn serial_bytes(f: &[u8]) -> Option<(&[u8], Direction)> {
+    if f.len() != FRAME_LEN || x25(&f[..89]) != u16::from_le_bytes([f[89], f[90]]) {
+        return None;
+    }
+    let st = status(&f[2..7]);
+    let rc1_len = if st.is_32channels { 11 } else { 6 };
+    let crc1_at = HEADER_LEN + rc1_len;
+    let p = match st.frame_type {
+        0 | 3 if st.payload_len <= 64 => {
+            let crc1 = u16::from_le_bytes([f[crc1_at], f[crc1_at + 1]]);
+            if x25(&f[..crc1_at]) != crc1 {
+                return None;
+            }
+            (&f[HEADER_LEN + 18..HEADER_LEN + 18 + st.payload_len as usize], Direction::Uplink)
+        }
+        1 if st.payload_len <= 82 => (&f[HEADER_LEN..HEADER_LEN + st.payload_len as usize], Direction::Downlink),
+        _ => return None,
+    };
+    (!p.0.is_empty()).then_some(p)
+}
+
 fn push_mavlink(r: &mut Recognised, payload: &[u8]) {
     if payload.is_empty() {
         return;
@@ -357,6 +382,24 @@ mod tests {
         assert_eq!(c.get(1), Some(1000));
         assert_eq!(c.get(2), Some(2000));
         assert_eq!(c.get(5), Some(2100));
+    }
+
+    #[test]
+    fn serial_bytes_both_directions() {
+        let hb = crate::mavlink::encode_v2(4, 1, 1, crate::mavlink::MSG_HEARTBEAT, &crate::mavlink::heartbeat_payload());
+        let f = testenc::rx_frame(0xBEEF, 2, &hb);
+        let mut out = [0u8; 258];
+        let (b, d) = crate::serial_bytes(&f, &rx(), &mut out).unwrap();
+        assert_eq!((b, d), (&hb[..], Direction::Downlink));
+        let f = testenc::tx_frame(0xBEEF, 3, [1024; 8], &hb);
+        let (b, d) = crate::serial_bytes(&f, &rx(), &mut out).unwrap();
+        assert_eq!((b, d), (&hb[..], Direction::Uplink));
+        let mut bad = f.clone();
+        bad[40] ^= 1;
+        assert!(crate::serial_bytes(&bad, &rx(), &mut out).is_none());
+        // No payload: nothing to scan.
+        let f = testenc::tx_frame(0xBEEF, 3, [1024; 8], &[]);
+        assert!(crate::serial_bytes(&f, &rx(), &mut out).is_none());
     }
 
     #[test]
