@@ -1,17 +1,25 @@
 [package]
 name = "webui"
-description = "The phone web page (web/index.html), gzipped at build time for the hub's flash"
+description = "The phone web page (web/index.html), gzipped at build time for the hub's flash, and the pure rules around serving it"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 build = "build.rs"
 
 [dependencies]
+# Hotspot password derivation and the salt record's check (src/hotspot.rs).
+# Same crate and version the hub firmware already uses for it.
+sha2 = { version = "0.11", default-features = false }
 
 [dev-dependencies]
 # Tests inflate the page to check it round-trips.
 flate2 = "1"
+# Tests drive the hub's DHCP server type with the hub's pool (src/dhcp.rs).
+# The hub firmware's own dependency; no I/O features needed for the server.
+edge-dhcp = { version = "0.8", default-features = false }
 
 [build-dependencies]
 # Host-only: gzip the page once at build time. Nothing of it reaches the hub.
 flate2 = "1"
+# Host-only: SHA-256 of the page's inline script and style for the CSP.
+sha2 = "0.11"
