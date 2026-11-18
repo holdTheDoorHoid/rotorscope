@@ -80,6 +80,15 @@ pub struct Grid<'a> {
     data: &'a [u8],
 }
 
+/// Bytes a `rows` x `cols` grid of `elem_bits`-wide cells needs. Done in u64
+/// (the hub's usize is 32 bits, where 65536 x 65536 wraps to 0).
+pub(crate) fn grid_bytes_needed(rows: u32, cols: u32, elem_bits: u64) -> Option<u64> {
+    u64::from(rows)
+        .checked_mul(u64::from(cols))?
+        .checked_mul(elem_bits)
+        .map(|bits| bits.div_ceil(8))
+}
+
 impl<'a> Grid<'a> {
     fn parse(d: &'a [u8], elem_bits: usize) -> Option<Self> {
         if d.len() < GRID_HEAD_LEN {
@@ -94,8 +103,9 @@ impl<'a> Grid<'a> {
             cols: u32_at(d, 20),
             data: &d[GRID_HEAD_LEN..],
         };
-        let need = (g.rows as usize * g.cols as usize * elem_bits).div_ceil(8);
-        (g.dlat > 0 && g.dlon > 0 && g.data.len() >= need).then_some(g)
+        // The file is hostile: a size that overflows is a size it cannot hold.
+        let need = grid_bytes_needed(g.rows, g.cols, elem_bits as u64)?;
+        (g.dlat > 0 && g.dlon > 0 && g.data.len() as u64 >= need).then_some(g)
     }
 
     /// Fractional (row, col) of a position, posts at integer values.
@@ -114,21 +124,40 @@ impl<'a> Grid<'a> {
         Some((r as u32, c as u32))
     }
 
-    fn idx(&self, r: u32, c: u32) -> usize {
-        r as usize * self.cols as usize + c as usize
+    /// Cell index, `None` outside the grid (u64: no wrap on a 32-bit usize).
+    fn idx(&self, r: u32, c: u32) -> Option<u64> {
+        if r >= self.rows || c >= self.cols {
+            return None;
+        }
+        Some(u64::from(r) * u64::from(self.cols) + u64::from(c))
     }
 
+    /// Outside the grid, or past the data: [`UASFM_NONE`], never a panic.
     pub fn u8_at(&self, r: u32, c: u32) -> u8 {
-        self.data[self.idx(r, c)]
+        let at = self.idx(r, c).and_then(|i| usize::try_from(i).ok());
+        at.and_then(|i| self.data.get(i))
+            .copied()
+            .unwrap_or(UASFM_NONE)
     }
 
+    /// Outside the grid, or past the data: [`TERRAIN_NONE`], never a panic.
     pub fn i16_at(&self, r: u32, c: u32) -> i16 {
-        i16_at(self.data, 2 * self.idx(r, c))
+        let at = self
+            .idx(r, c)
+            .and_then(|i| usize::try_from(i.checked_mul(2)?).ok());
+        at.and_then(|i| self.data.get(i..i.checked_add(2)?))
+            .map_or(TERRAIN_NONE, |b| i16::from_le_bytes([b[0], b[1]]))
     }
 
+    /// Outside the grid, or past the data: false, never a panic.
     pub fn bit_at(&self, r: u32, c: u32) -> bool {
-        let i = self.idx(r, c);
-        self.data[i / 8] & (1 << (i % 8)) != 0
+        let Some(i) = self.idx(r, c) else {
+            return false;
+        };
+        usize::try_from(i / 8)
+            .ok()
+            .and_then(|b| self.data.get(b))
+            .is_some_and(|&b| b & (1 << (i % 8)) != 0)
     }
 
     /// Bilinear between the four i16 posts around a position, scaled by
@@ -196,8 +225,19 @@ impl<'a> Area<'a> {
         self.points.len() / 8
     }
 
+    /// Point `i` as (lat, lon); (0, 0) past the end. Parsing rejects areas
+    /// whose rings claim more points than they hold, so that is unreachable
+    /// for a pack that passed [`Pack::parse`]; this keeps it a wrong answer
+    /// rather than a panic if it ever is reached.
     pub fn point(&self, i: usize) -> (i32, i32) {
-        (i32_at(self.points, 8 * i), i32_at(self.points, 8 * i + 4))
+        i.checked_mul(8)
+            .and_then(|o| self.points.get(o..o.checked_add(8)?))
+            .map_or((0, 0), |b| {
+                (
+                    i32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                    i32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+                )
+            })
     }
 
     fn ring_lens(&self) -> impl Iterator<Item = usize> + '_ {
@@ -544,7 +584,7 @@ impl<'a> Pack<'a> {
             .and_then(|s| Grid::parse(s, 16))
     }
 
-    fn urban_grid(&self) -> Option<Grid<'a>> {
+    pub(crate) fn urban_grid(&self) -> Option<Grid<'a>> {
         self.section(Section::Urban).and_then(|s| Grid::parse(s, 1))
     }
 
@@ -557,8 +597,10 @@ impl<'a> Pack<'a> {
     /// edge outside it: the geoid changes by centimetres per kilometre.
     pub fn geoid_m(&self, lat: f64, lon: f64) -> Option<f64> {
         let g = self.geoid()?;
-        let lat_max = (f64::from(g.lat0) + f64::from(g.dlat) * f64::from(g.rows - 1)) * 1e-7;
-        let lon_max = (f64::from(g.lon0) + f64::from(g.dlon) * f64::from(g.cols - 1)) * 1e-7;
+        let lat_max =
+            (f64::from(g.lat0) + f64::from(g.dlat) * f64::from(g.rows.saturating_sub(1))) * 1e-7;
+        let lon_max =
+            (f64::from(g.lon0) + f64::from(g.dlon) * f64::from(g.cols.saturating_sub(1))) * 1e-7;
         let lat = lat.clamp(f64::from(g.lat0) * 1e-7, lat_max);
         let lon = lon.clamp(f64::from(g.lon0) * 1e-7, lon_max);
         g.bilinear_i16(lat, lon, 0.01).map(f64::from)
@@ -667,8 +709,17 @@ fn area_end(s: &[u8], o: usize) -> Option<usize> {
     let n_points = usize::from(u16_at(s, o + 36));
     let n_rings = usize::from(u16_at(s, o + 38));
     let name_len = usize::from(s[o + 40]).min(MAX_NAME);
-    let end = o + AREA_HEAD_LEN + pad4(name_len) + pad4(2 * n_rings) + 8 * n_points;
-    (end <= s.len()).then_some(end)
+    let rings_at = o + AREA_HEAD_LEN + pad4(name_len);
+    let end = rings_at + pad4(2 * n_rings) + 8 * n_points;
+    if end > s.len() {
+        return None;
+    }
+    // Ring lengths index into the points; a sum past the count would read
+    // beyond them.
+    let claimed: usize = (0..n_rings)
+        .map(|i| usize::from(u16_at(s, rings_at + 2 * i)))
+        .sum();
+    (claimed <= n_points).then_some(end)
 }
 
 /// Iterator over the areas section.
