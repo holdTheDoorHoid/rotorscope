@@ -575,6 +575,16 @@ fn check_checkpoint(rep: &mut Report, c: &mut ChainState, cp: &CheckpointBody<'_
     ok
 }
 
+/// Text from a record, safe to print: invalid UTF-8 and control characters
+/// (an ESC would drive the terminal) become `?`/U+FFFD and `?`. The summary
+/// and event text come off the air.
+fn printable(b: &[u8]) -> String {
+    String::from_utf8_lossy(b)
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 /// One line per record, for `evidence-verify --list`.
 pub fn describe(r: &Record<'_>) -> String {
     let h = &r.header;
@@ -605,7 +615,7 @@ pub fn describe(r: &Record<'_>) -> String {
                 s,
                 " EVENT {} {}",
                 EventCode::from_u16(e.code).map_or("?", |c| c.name()),
-                String::from_utf8_lossy(e.text)
+                printable(e.text)
             );
         }
         Body::Detection(d) => {
@@ -613,7 +623,7 @@ pub fn describe(r: &Record<'_>) -> String {
                 s,
                 " DETECTION node={} {}",
                 hex(&d.node),
-                String::from_utf8_lossy(d.summary)
+                printable(d.summary)
             );
         }
         Body::Checkpoint(c) => {
@@ -623,7 +633,7 @@ pub fn describe(r: &Record<'_>) -> String {
                 format::CheckpointReason::name(c.reason),
                 c.count,
                 std::str::from_utf8(&crate::fingerprint(&c.pubkey)).unwrap_or("?"),
-                String::from_utf8_lossy(c.note)
+                printable(c.note)
             );
         }
     }

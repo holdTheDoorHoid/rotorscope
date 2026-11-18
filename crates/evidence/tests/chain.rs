@@ -586,3 +586,24 @@ fn mavlink_evidence_is_logged_raw() {
     let link::Frame::MavlinkEvidence(m) = f2 else { panic!() };
     assert_eq!(m.frame, frame);
 }
+
+#[test]
+fn describe_does_not_pass_control_characters() {
+    // Event text and detection summaries come off the air; `--list` prints
+    // them to a terminal.
+    let mut l = Log::new(3);
+    l.boot(&Context::default());
+    l.event(
+        &Context {
+            uptime_ms: 10,
+            ..Context::default()
+        },
+        EventCode::Boot,
+        "x\x1b]0;pwn\x07\x1b[2Jy\u{9b}z",
+    );
+    let r = format::parse(&l.bytes[l.spans[1].0..]).unwrap();
+    let line = verify::describe(&r);
+    let bad: Vec<char> = line.chars().filter(|c| c.is_control()).collect();
+    assert!(bad.is_empty(), "{bad:?} in {line:?}");
+    assert!(line.contains("x?]0;pwn?"), "{line:?}");
+}
