@@ -40,6 +40,21 @@ pub const fn drone_link(subtype: u8) -> bool {
     matches!(subtype, ASSOC_REQ | ASSOC_RESP | REASSOC_REQ | REASSOC_RESP | DISASSOC | AUTH | DEAUTH)
 }
 
+/// One Wi-Fi driver receive buffer (ESP-IDF Wi-Fi guide, "Wi-Fi Buffer
+/// Usage": each RX buffer is 1.6 KB). It holds the receive-control header
+/// and then the frame, so no frame the driver hands over can be longer
+/// than this minus that header.
+pub const RX_BUFFER: usize = 1600;
+
+/// The bytes of a received frame that may be read: `sig_len` as the driver
+/// reports it (the slice the sniffer builds), clamped to `max` (the most a
+/// receive buffer can hold after its header, see [`RX_BUFFER`]). A wrong
+/// `sig_len` (14 bits, up to 16 383 on the C5) then never reads past the
+/// buffer.
+pub fn rx_frame(data: &[u8], max: usize) -> &[u8] {
+    &data[..data.len().min(max)]
+}
+
 /// A management frame's header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
@@ -513,5 +528,31 @@ mod tests {
                 let _ = action_csa(&h, &f);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rx_len_tests {
+    use super::*;
+
+    #[test]
+    fn rx_frame_never_exceeds_the_buffer() {
+        // The callback's slice is as long as sig_len says, whatever the
+        // buffer holds. 14 bits: up to 16 383.
+        let max = RX_BUFFER - 48;
+        let backing = std::vec![0u8; 16_383];
+        for sig_len in [0usize, 24, 512, max, max + 1, 4095, 16_383] {
+            let got = rx_frame(&backing[..sig_len], max);
+            assert_eq!(got.len(), sig_len.min(max), "sig_len {sig_len}");
+            assert!(got.len() <= max);
+        }
+    }
+
+    #[test]
+    fn rx_frame_keeps_every_real_frame_whole() {
+        // The longest 802.11 frames an ESP32 receives fit a buffer.
+        let max = RX_BUFFER - 48;
+        let f = std::vec![0x80u8; 1540];
+        assert_eq!(rx_frame(&f, max), &f[..]);
     }
 }
