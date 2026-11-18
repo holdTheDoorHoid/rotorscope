@@ -73,7 +73,7 @@ const PACK_READ: usize = 1024;
 #[cfg(feature = "embedpack")]
 static EMBEDDED: &[u8] = include_bytes!(env!("AIRSPACE_PAK"));
 
-const DIR: &str = "ROTORSCP";
+pub(crate) const DIR: &str = "ROTORSCP";
 /// Evidence files, inside `DIR`.
 const EV_DIR: &str = "EVIDENCE";
 /// Bytes of the previous evidence file read at mount to find its last record.
@@ -282,9 +282,9 @@ const SITE_NAME: &str = "SITE.TXT";
 /// Loop-back bench builds keep their own, so a bench run never moves the
 /// real one.
 #[cfg(not(feature = "gpsloop"))]
-const GPS_MEM_NAME: &str = "GPSMEM.TXT";
+pub(crate) const GPS_MEM_NAME: &str = "GPSMEM.TXT";
 #[cfg(feature = "gpsloop")]
-const GPS_MEM_NAME: &str = "GPSLOOP.TXT";
+pub(crate) const GPS_MEM_NAME: &str = "GPSLOOP.TXT";
 
 
 /// The owner's O4 DroneID private key (64 hex digits) in the log folder.

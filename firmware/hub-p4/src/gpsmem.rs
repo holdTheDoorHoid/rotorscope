@@ -43,7 +43,9 @@ impl GpsMem {
     pub fn loaded(&mut self, gps: &mut Gps, ev: &mut Evidence, m: Option<Memory>) {
         self.loaded = true;
         let Some(m) = m else {
-            setting(ev, format_args!("GPS memory: none on the card (no remembered home or time yet)"));
+            // Written first when home is learned (15 min of steady fixes
+            // with integrity ok), so a short run leaves none behind.
+            setting(ev, format_args!("GPS memory: none on the card (no {}/{} yet: written once home is learned)", crate::sd::DIR, crate::sd::GPS_MEM_NAME));
             return;
         };
         if let Some((lat, lon, alt)) = m.home {
