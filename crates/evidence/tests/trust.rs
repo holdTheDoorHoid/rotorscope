@@ -143,6 +143,12 @@ fn a_bench_build_is_named_in_a_note() {
     let rep = one(normal, &Options { expect_key: key, ..Options::default() });
     assert!(!rep.findings.iter().any(|f| f.what.contains("BENCH")), "{:?}", rep.findings);
     assert_eq!(verify::boot_bench_list(b"hub-p4 test"), None);
+    // The text as the P4 hub writes it since the audio note (WP-07).
+    assert_eq!(verify::boot_bench_list(b"hub-p4 0.1.0  last reset: power_on; bench: none; audio clips off at boot"), None);
+    assert_eq!(
+        verify::boot_bench_list(b"hub-p4 0.1.0  last reset: watchdog; bench: faulttest; audio clips off at boot"),
+        Some("faulttest")
+    );
 }
 
 #[test]
