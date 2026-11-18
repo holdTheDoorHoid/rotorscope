@@ -446,7 +446,10 @@ impl ControlTable {
             ControlContent::Opaque(ctrlwatch::content::Opaque::Encrypted) => l.encrypted = true,
             ControlContent::Opaque(_) => {}
             ControlContent::Position(p) if p.is_plausible() => {
-                let id = tracker.control_position(l.track, node, p, now_ms);
+                let key = crate::probation::hash(&[b"ctrl", &l.id.0.to_le_bytes()]);
+                let Some(id) = tracker.control_position(l.track, key, node, p, now_ms) else {
+                    return;
+                };
                 l.track = Some(id);
                 if p.kind == PositionKind::Aircraft {
                     self.positions = self.positions.saturating_add(1);
@@ -526,18 +529,22 @@ impl ControlTable {
 
 impl<const N: usize, const A: usize> Tracker<N, A> {
     /// A position decoded from a control link: the drone track `want` (or a
-    /// new one, if it has none or that track expired). Returns its id.
+    /// new one for link identity `key`, if it has none or that track
+    /// expired, and the table admits it: [`crate::probation`]). Returns its
+    /// id.
     pub(crate) fn control_position(
         &mut self,
         want: Option<TrackId>,
+        key: u32,
         node: u8,
         p: &ctrlwatch::content::Position,
         now_ms: u64,
-    ) -> TrackId {
+    ) -> Option<TrackId> {
         let ti = match want.and_then(|id| self.tracks.iter().position(|t| t.id == id)) {
             Some(ti) => ti,
-            None => self.create(now_ms),
+            None => self.admit(key, now_ms)?,
         };
+        self.heard(ti, now_ms);
         let t = &mut self.tracks[ti];
         if node < 8 {
             t.nodes |= 1 << node;
@@ -569,6 +576,6 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 })
             }
         }
-        t.id
+        Some(t.id)
     }
 }

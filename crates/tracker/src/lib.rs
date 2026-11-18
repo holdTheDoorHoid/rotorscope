@@ -71,6 +71,7 @@ pub mod dji;
 pub mod geo;
 pub mod json;
 pub mod openlinks;
+pub mod probation;
 pub mod signals;
 pub mod spoof;
 mod text;
@@ -405,6 +406,11 @@ pub struct Track {
     /// Link to the track this one probably continues (see [`continuity`]).
     pub continuity: Continuity,
     announced: bool,
+    /// Frames counted towards standing ([`probation`]): every decoded frame
+    /// once it has a track, and the sightings that earned it one.
+    heard: u32,
+    /// When it was confirmed ([`probation`]); `None` while unconfirmed.
+    confirmed_ms: Option<u64>,
 }
 
 impl Track {
@@ -429,6 +435,8 @@ impl Track {
             spoof: SpoofState::default(),
             continuity: Continuity::default(),
             announced: false,
+            heard: 0,
+            confirmed_ms: None,
         }
     }
 
@@ -496,6 +504,36 @@ impl Track {
     /// True once the "new drone" event has been handed out for this track.
     pub fn announced(&self) -> bool {
         self.announced
+    }
+
+    /// Heard again at least [`probation::CONFIRM_SPAN_MS`] after it was
+    /// first heard ([`probation`]). Unconfirmed tracks are shown quietly,
+    /// never announced, never sent to TAK and the first to make room.
+    pub fn confirmed(&self) -> bool {
+        self.confirmed_ms.is_some()
+    }
+
+    /// Hub time it was confirmed.
+    pub fn confirmed_ms(&self) -> Option<u64> {
+        self.confirmed_ms
+    }
+
+    /// Frames (or, before it had a track, sightings) counted towards its
+    /// standing.
+    pub fn frames_heard(&self) -> u32 {
+        self.heard
+    }
+
+    /// One more frame from this drone: count it, and confirm the track
+    /// once it has been heard long enough.
+    fn heard_at(&mut self, now_ms: u64) {
+        self.heard = self.heard.saturating_add(1);
+        if self.confirmed_ms.is_none()
+            && self.heard >= probation::CONFIRM_MIN_FRAMES
+            && now_ms.saturating_sub(self.first_seen_ms) >= probation::CONFIRM_SPAN_MS
+        {
+            self.confirmed_ms = Some(now_ms);
+        }
     }
 
     /// No two IDs of the same type disagree, so `other` may be the same drone.
@@ -661,6 +699,11 @@ impl Track {
         self.continuity.absorb(&other.continuity);
         // Whoever was alerted on already, the drone has been announced.
         self.announced |= other.announced;
+        self.heard = self.heard.saturating_add(other.heard);
+        self.confirmed_ms = match (self.confirmed_ms, other.confirmed_ms) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
     }
 }
 
@@ -727,6 +770,9 @@ pub struct Context {
     /// `None` when there is no recent fix.
     pub own: Option<OwnFix>,
     pub config: Config,
+    /// A flood of new drone identities, while its alarm is raised
+    /// ([`probation`]); `"flood"` in `/api/state`.
+    pub flood: Option<probation::FloodStatus>,
 }
 
 impl Context {
@@ -802,6 +848,10 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     conflict_watch: conflict::ConflictWatch,
     /// UTC and node positions for the spoofing checks.
     spoof_cfg: spoof::SpoofConfig,
+    /// Identities heard while the table was full ([`probation`]).
+    candidates: probation::Candidates<N>,
+    /// New drone identities a second, for the flood alarm.
+    flood: probation::FloodWatch,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -829,6 +879,8 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 utc_offset_ms: None,
                 nodes: [None; spoof::MAX_NODE_POS],
             },
+            candidates: probation::Candidates::new(),
+            flood: probation::FloodWatch::new(),
             next_id: 1,
             own: None,
             config,
@@ -868,7 +920,18 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             utc_ms,
             own: self.own_position(now_ms),
             config: self.config,
+            flood: self.flood.status(now_ms),
         }
+    }
+
+    /// A flood of new drone identities, while its alarm is raised.
+    pub fn flood_status(&self, now_ms: u64) -> Option<probation::FloodStatus> {
+        self.flood.status(now_ms)
+    }
+
+    /// Tracks confirmed ([`Track::confirmed`]).
+    pub fn confirmed_count(&self) -> usize {
+        self.tracks.iter().filter(|t| t.confirmed()).count()
     }
 
     pub fn len(&self) -> usize {
@@ -897,8 +960,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             .count()
     }
 
-    /// The closest active drone with a known position (for the screen, O2).
-    /// `None` without an own fix.
+    /// The closest active drone with a known position (for the screen, O2),
+    /// confirmed ones before unconfirmed ones (an unconfirmed track's
+    /// position is the cheapest thing to forge). `None` without an own fix.
     pub fn nearest(&self, now_ms: u64) -> Option<(&Track, Geometry)> {
         let ctx = self.context(now_ms, None);
         self.tracks
@@ -908,7 +972,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
                 let g = ctx.geometry(t);
                 g.drone.map(|d| (t, g, d.distance_m))
             })
-            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .min_by(|a, b| (!a.0.confirmed()).cmp(&!b.0.confirmed()).then(a.2.total_cmp(&b.2)))
             .map(|(t, g, _)| (t, g))
     }
 
@@ -1007,7 +1071,22 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         let created = primary.is_none();
         let primary = match primary {
             Some(p) => self.merge_into(p, by_id.iter().copied().chain(by_mac), &ids),
-            None => self.create(now),
+            None => {
+                // A new identity: the transmitter address and the frame's
+                // first ID (a fake with a fixed address and random IDs is
+                // still one identity per ID).
+                let medium = [u8::from(same_medium(obs.transport, Transport::WifiBeacon))];
+                let key = match ids.first() {
+                    Some(id) => probation::hash(&[&medium, &obs.mac, &[id.id_type.code()], id.id.as_bytes()]),
+                    None => probation::hash(&[&medium, &obs.mac]),
+                };
+                match self.admit(key, now) {
+                    Some(i) => i,
+                    // The table is busy and this identity has not earned a
+                    // slot yet (see `probation`): remembered, not tracked.
+                    None => return Ingested::Ignored,
+                }
+            }
         };
 
         let env = self.spoof_env(now);
@@ -1018,6 +1097,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         for m in msgs {
             t.apply(m, now);
         }
+        t.heard_at(now);
         let id = t.id;
         spoof::after_frame(&mut self.tracks, primary, &env, now);
         Ingested::Track(id)
@@ -1065,37 +1145,85 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         primary
     }
 
-    pub(crate) fn create(&mut self, now_ms: u64) -> usize {
-        if self.tracks.is_full() {
-            self.evict(now_ms);
+    /// A track for a new identity `key` (a [`probation::hash`]), or `None`
+    /// when the table is busy and it has not earned a slot yet. See
+    /// [`probation`] for the rule:
+    /// - a free slot, or a stale track (not heard for `stale_after_ms`):
+    ///   taken at once;
+    /// - otherwise the identity must have been heard again (the bar rises
+    ///   as the admission bucket drains), and then it replaces the weakest
+    ///   unconfirmed track (fewest frames, then heard longest ago), or a
+    ///   confirmed one not heard for [`probation::QUIET_EVICT_MS`], never
+    ///   another confirmed one.
+    ///
+    /// The new track's history starts at the identity's first sighting.
+    pub(crate) fn admit(&mut self, key: u32, now_ms: u64) -> Option<usize> {
+        let s = self.candidates.sight(key, now_ms);
+        if s.new {
+            self.flood.note(now_ms);
         }
-        let id = TrackId(self.next_id);
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        // Cannot fail: evict() just made room (N > 0).
-        let _ = self.tracks.push(Track::new(id, now_ms));
-        self.tracks.len() - 1
-    }
-
-    /// Make room: the oldest stale track if there is one, else the
-    /// least-recently-heard. A full table of active drones is the worst
-    /// case, and then the quietest one is the least useful to keep.
-    fn evict(&mut self, now_ms: u64) {
-        let ctx = self.context(now_ms, None);
-        let victim = self
+        let stale_after = self.config.stale_after_ms;
+        let victim = if !self.tracks.is_full() {
+            None
+        } else if let Some((i, _)) = self
             .tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| ctx.state(t) == TrackState::Stale)
+            .filter(|(_, t)| now_ms.saturating_sub(t.last_seen_ms) >= stale_after)
             .min_by_key(|(_, t)| t.last_seen_ms)
-            .or_else(|| {
+        {
+            Some(i)
+        } else {
+            let earned = self.candidates.bar(now_ms).is_some_and(|bar| s.count >= bar);
+            let weakest = || {
                 self.tracks
                     .iter()
                     .enumerate()
-                    .min_by_key(|(_, t)| t.last_seen_ms)
-            })
-            .map(|(i, _)| i);
+                    .filter(|(_, t)| !t.confirmed())
+                    .min_by_key(|(_, t)| (t.heard, t.last_seen_ms))
+                    .or_else(|| {
+                        self.tracks
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| now_ms.saturating_sub(t.last_seen_ms) >= probation::QUIET_EVICT_MS)
+                            .min_by_key(|(_, t)| t.last_seen_ms)
+                    })
+                    .map(|(i, _)| i)
+            };
+            match earned.then(weakest).flatten() {
+                Some(i) => {
+                    self.candidates.spend();
+                    Some(i)
+                }
+                None => {
+                    if s.new {
+                        self.flood.refused = self.flood.refused.saturating_add(1);
+                    }
+                    return None;
+                }
+            }
+        };
         if let Some(i) = victim {
             self.tracks.remove(i);
+        }
+        self.candidates.forget(key);
+        let id = TrackId(self.next_id);
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let mut t = Track::new(id, s.first_ms.min(now_ms));
+        t.last_seen_ms = now_ms;
+        // The sightings that earned it the slot count towards its standing;
+        // the caller counts this frame.
+        t.heard = s.count.saturating_sub(1);
+        // Cannot fail: there was room, or a victim was just removed.
+        self.tracks.push(t).ok()?;
+        Some(self.tracks.len() - 1)
+    }
+
+    /// Count one frame (or DJI / control-link report) for track `i` towards
+    /// its standing ([`probation`]).
+    pub(crate) fn heard(&mut self, i: usize, now_ms: u64) {
+        if let Some(t) = self.tracks.get_mut(i) {
+            t.heard_at(now_ms);
         }
     }
 
@@ -1172,20 +1300,29 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.emitters.expire(now_ms, &self.config);
         self.wifi_drones.expire(now_ms, &self.config);
         self.threats.expire(now_ms, self.config.remove_after_ms);
+        if let Some(s) = self.flood.check(now_ms, probation::FLOOD_NEW_PER_S, probation::FloodTable::Drones) {
+            let _ = self.threats.ingest(0, true, &s, now_ms);
+        }
         let before = self.tracks.len();
         let limit = self.config.remove_after_ms;
-        self.tracks
-            .retain(|t| now_ms.saturating_sub(t.last_seen_ms) < limit);
+        // Unconfirmed tracks leave sooner (`probation`).
+        let unconfirmed = probation::UNCONFIRMED_REMOVE_MS.min(limit);
+        self.tracks.retain(|t| {
+            now_ms.saturating_sub(t.last_seen_ms) < if t.confirmed() { limit } else { unconfirmed }
+        });
         before - self.tracks.len()
     }
 
-    /// The next drone to alert on (buzzer, screen), exactly once per track.
-    /// Call after ingesting, and periodically (a track without a Basic ID
-    /// becomes due [`Config::announce_grace_ms`] after it was first heard).
+    /// The next drone to alert on (buzzer, screen), exactly once per track,
+    /// when it is **confirmed** ([`probation`]: heard again at least a
+    /// second after it was first heard). Call after ingesting, and
+    /// periodically (a track without a Basic ID also waits
+    /// [`Config::announce_grace_ms`] after it was first heard).
     pub fn take_new_drone(&mut self, now_ms: u64) -> Option<TrackId> {
         let grace = self.config.announce_grace_ms;
         let t = self.tracks.iter_mut().find(|t| {
             !t.announced
+                && t.confirmed()
                 && (!t.uas_ids.is_empty() || now_ms.saturating_sub(t.first_seen_ms) >= grace)
         })?;
         t.announced = true;
@@ -1203,6 +1340,8 @@ mod tests_area_gnss;
 mod tests_conflict;
 #[cfg(test)]
 mod tests_control;
+#[cfg(test)]
+mod tests_flood;
 #[cfg(test)]
 mod tests_openlinks;
 #[cfg(test)]

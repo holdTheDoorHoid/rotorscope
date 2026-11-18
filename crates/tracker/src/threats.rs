@@ -74,6 +74,7 @@ pub const fn threat_label(kind: ThreatKind) -> &'static str {
         ThreatKind::ControlContested => "Second controller on a link",
         ThreatKind::MavlinkAttack => "Hostile drone telemetry",
         ThreatKind::AreaGnss => "GPS interference nearby",
+        ThreatKind::IdFlood => "Flood of fake IDs",
     }
 }
 
@@ -131,6 +132,9 @@ impl Threat {
     pub fn label(&self) -> &'static str {
         if self.mavlink_over_wifi() {
             return "Hostile drone telemetry over Wi-Fi";
+        }
+        if let Some(t) = crate::probation::flood_table(self) {
+            return t.label();
         }
         threat_label(self.kind)
     }
@@ -272,7 +276,7 @@ impl ThreatTable {
         &self.v
     }
 
-    fn ingest(&mut self, node: u8, by_hub: bool, s: &ThreatSighting, now_ms: u64) -> ThreatId {
+    pub(crate) fn ingest(&mut self, node: u8, by_hub: bool, s: &ThreatSighting, now_ms: u64) -> ThreatId {
         let i = match self.v.iter().position(|t| t.same(node, by_hub, s)) {
             Some(i) => i,
             None => {
@@ -735,7 +739,7 @@ mod tests {
         let m = Mute::for_threat(tr.get_threat(t1).unwrap());
         assert_eq!((m.target, m.source), (drone, [0; 6]));
         // JSON line names the maker.
-        let ctx = Context { now_ms: 4_000, utc_ms: None, own: None, config: crate::Config::default() };
+        let ctx = Context { now_ms: 4_000, utc_ms: None, own: None, config: crate::Config::default(), flood: None };
         let mut buf = [0u8; MAX_THREAT_LINE];
         let n = threat_line(tr.get_threat(t1).unwrap(), &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();
@@ -759,7 +763,7 @@ mod tests {
         big.level = i8::MIN;
         let id = tr.ingest_threat(u8::MAX, &big, u64::MAX / 4);
         let config = crate::Config { show_link_ids: true, ..Default::default() };
-        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config };
+        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config, flood: None };
         let n = threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).unwrap();
         assert!(n > 512, "{n}: the reason MAX_THREAT_LINE grew from 512");
         assert!(core::str::from_utf8(&buf[..n]).unwrap().contains("\"maker\":\"Holy Stone\""));
@@ -900,7 +904,7 @@ mod tests {
         let c = tr.ingest_threat(4, &mav(1, 100, 1), 3_000);
         assert!(a != b && b != c && a != c);
         assert_eq!(tr.get_threat(a).unwrap().label(), "Hostile drone telemetry");
-        let ctx = Context { now_ms: 3_000, utc_ms: None, own: None, config: Config::default() };
+        let ctx = Context { now_ms: 3_000, utc_ms: None, own: None, config: Config::default(), flood: None };
         let mut buf = [0u8; MAX_THREAT_LINE];
         let n = threat_line(tr.get_threat(a).unwrap(), &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();
@@ -926,7 +930,7 @@ mod tests {
         let t = tr.get_threat(a).unwrap();
         assert!(t.mavlink_over_wifi());
         assert_eq!(t.label(), "Hostile drone telemetry over Wi-Fi");
-        let ctx = Context { now_ms: 2_000, utc_ms: None, own: None, config: Config::default() };
+        let ctx = Context { now_ms: 2_000, utc_ms: None, own: None, config: Config::default(), flood: None };
         let mut buf = [0u8; MAX_THREAT_LINE];
         let n = threat_line(t, &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();
@@ -957,7 +961,7 @@ mod tests {
         big.level = i8::MIN;
         let id = tr.ingest_threat(u8::MAX, &big, u64::MAX / 4);
         let config = crate::Config { show_link_ids: true, ..Default::default() };
-        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config };
+        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config, flood: None };
         assert!(threat_line(tr.get_threat(id).unwrap(), &ctx, &mut buf).is_ok());
     }
 
@@ -1014,7 +1018,7 @@ mod tests {
         let t = &tr.threats()[0];
         let d = t.contested().unwrap();
         assert_eq!((d.system, d.transmitters), (Some(System::ExpressLrs), 2));
-        let ctx = Context { now_ms: 2_000, utc_ms: None, own: None, config: Config::default() };
+        let ctx = Context { now_ms: 2_000, utc_ms: None, own: None, config: Config::default(), flood: None };
         let mut buf = [0u8; MAX_THREAT_LINE];
         let n = threat_line(t, &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();
@@ -1045,7 +1049,7 @@ mod tests {
         s.level = i8::MIN;
         tr.ingest_threat(u8::MAX, &s, u64::MAX / 4);
         let config = Config { show_link_ids: true, ..Default::default() };
-        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config };
+        let ctx = Context { now_ms: u64::MAX / 2, utc_ms: None, own: None, config, flood: None };
         let mut buf = [0u8; MAX_THREAT_LINE];
         let n = threat_line(&tr.threats()[0], &ctx, &mut buf).unwrap();
         let text = core::str::from_utf8(&buf[..n]).unwrap();

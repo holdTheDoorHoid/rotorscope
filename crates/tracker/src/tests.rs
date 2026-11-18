@@ -356,79 +356,85 @@ fn undecodable_frames_never_start_a_track() {
 #[test]
 fn stale_then_removed() {
     let mut tr: Tracker = Tracker::default();
+    // Heard twice, a second apart: confirmed (see `probation`).
+    for t in [0, 1_000] {
+        tr.ingest(
+            0,
+            &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-H")]),
+            t,
+        );
+    }
+    assert!(tr.tracks()[0].confirmed());
+    let state = |tr: &Tracker, now| tr.context(now, None).state(&tr.tracks()[0]);
+    assert_eq!(state(&tr, 60_999), TrackState::Active);
+    assert_eq!(state(&tr, 61_000), TrackState::Stale);
+    assert_eq!(tr.active_count(61_000), 0);
+    assert_eq!(tr.expire(600_999), 0);
+    assert_eq!(tr.expire(601_000), 1);
+    assert!(tr.is_empty());
+    // Heard once: unconfirmed, and gone after 30 s instead of 10 min.
     tr.ingest(
         0,
-        &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-H")]),
-        0,
+        &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-H2")]),
+        700_000,
     );
-    let state = |tr: &Tracker, now| tr.context(now, None).state(&tr.tracks()[0]);
-    assert_eq!(state(&tr, 59_999), TrackState::Active);
-    assert_eq!(state(&tr, 60_000), TrackState::Stale);
-    assert_eq!(tr.active_count(60_000), 0);
-    assert_eq!(tr.expire(599_999), 0);
-    assert_eq!(tr.expire(600_000), 1);
-    assert!(tr.is_empty());
+    assert!(!tr.tracks()[0].confirmed());
+    assert_eq!(tr.expire(700_000 + probation::UNCONFIRMED_REMOVE_MS - 1), 0);
+    assert_eq!(tr.expire(700_000 + probation::UNCONFIRMED_REMOVE_MS), 1);
 }
 
 #[test]
 fn eviction_at_capacity() {
     let mut tr: Tracker<4> = Tracker::default();
+    let ingest = |tr: &mut Tracker<4>, i: u8, t: u64| {
+        let mac = [2, 0, 0, 0, 0, i];
+        let sn = std::format!("SN-{i}");
+        tr.ingest(0, &det(Transport::WifiBeacon, mac, -50, &[serial(&sn)]), t)
+            .track()
+    };
+    // Four drones, each heard twice a second apart: confirmed.
     let ids: std::vec::Vec<_> = (0..4u8)
         .map(|i| {
-            let mac = [2, 0, 0, 0, 0, i];
-            let sn = std::format!("SN-{i}");
-            tr.ingest(
-                0,
-                &det(Transport::WifiBeacon, mac, -50, &[serial(&sn)]),
-                u64::from(i) * 1_000,
-            )
-            .track()
-            .unwrap()
+            ingest(&mut tr, i, u64::from(i) * 100);
+            ingest(&mut tr, i, 1_000 + u64::from(i) * 100).unwrap()
         })
         .collect();
-    // All active: the least-recently-heard (SN-0) goes.
-    let mut t = 10_000;
-    tr.ingest(
-        0,
-        &det(Transport::WifiBeacon, [3; 6], -50, &[serial("SN-X")]),
-        t,
-    );
-    assert_eq!(tr.len(), 4);
+    assert!(tr.tracks().iter().all(|t| t.confirmed()));
+    // All active and confirmed: a new drone is remembered, not tracked,
+    // and never pushes one of them out (`probation`)...
+    assert_eq!(ingest(&mut tr, 9, 10_000), None);
+    assert_eq!(ingest(&mut tr, 9, 11_000), None, "heard again, but no room");
+    assert!(ids.iter().all(|&id| tr.get(id).is_some()));
+    // ...until one of them has been quiet for QUIET_EVICT_MS: the
+    // quietest (SN-0, last heard at 1 s) makes room.
+    for i in 1..4u8 {
+        ingest(&mut tr, i, 15_000);
+    }
+    let x = ingest(&mut tr, 9, 16_000).expect("admitted in place of a quiet one");
     assert!(tr.get(ids[0]).is_none());
+    assert_eq!(tr.len(), 4);
+    // The new track's history starts at its first sighting.
+    assert_eq!(tr.get(x).unwrap().first_seen_ms, 10_000);
+    assert!(tr.get(x).unwrap().confirmed(), "heard over 6 s");
 
-    // Refresh SN-1 and SN-X; SN-2 and SN-3 are now stale. A new drone
-    // evicts the oldest stale one (SN-2), not an active one.
-    t = 70_000;
-    tr.ingest(
-        0,
-        &det(
-            Transport::WifiBeacon,
-            [2, 0, 0, 0, 0, 1],
-            -50,
-            &[serial("SN-1")],
-        ),
-        t,
-    );
-    tr.ingest(
-        0,
-        &det(Transport::WifiBeacon, [3; 6], -50, &[serial("SN-X")]),
-        t,
-    );
-    tr.ingest(
-        0,
-        &det(Transport::WifiBeacon, [4; 6], -50, &[serial("SN-Y")]),
-        t + 1,
-    );
+    // A stale track (not heard for a minute) makes room at once, for a
+    // drone heard only once. SN-2 and SN-3 were last heard at 15 s.
+    let t = 80_000;
+    for i in [1u8, 9] {
+        ingest(&mut tr, i, t);
+    }
+    let y = ingest(&mut tr, 7, t + 1).expect("a stale track makes room");
     assert_eq!(tr.len(), 4);
     assert!(tr.get(ids[1]).is_some(), "fresh track kept");
-    assert!(tr.get(ids[2]).is_none(), "oldest stale track evicted");
-    assert!(tr.get(ids[3]).is_some());
+    assert!(tr.get(ids[2]).is_none() ^ tr.get(ids[3]).is_none(), "one stale track evicted");
+    assert!(!tr.get(y).unwrap().confirmed());
 }
 
 #[test]
 fn new_drone_alert_exactly_once() {
     let mut tr: Tracker = Tracker::default();
-    // With an ID: due at once, and only once.
+    // With an ID: due once confirmed (heard again a second later), and only
+    // once.
     let a = tr
         .ingest(
             0,
@@ -437,16 +443,22 @@ fn new_drone_alert_exactly_once() {
         )
         .track()
         .unwrap();
-    assert_eq!(tr.take_new_drone(0), Some(a));
-    assert_eq!(tr.take_new_drone(0), None);
+    assert_eq!(tr.take_new_drone(0), None, "one frame is not enough");
     tr.ingest(
         0,
         &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-I")]),
-        100,
+        1_000,
     );
-    assert_eq!(tr.take_new_drone(100), None);
+    assert_eq!(tr.take_new_drone(1_000), Some(a));
+    assert_eq!(tr.take_new_drone(1_000), None);
+    tr.ingest(
+        0,
+        &det(Transport::WifiBeacon, WIFI_MAC, -50, &[serial("SN-I")]),
+        1_100,
+    );
+    assert_eq!(tr.take_new_drone(1_100), None);
 
-    // Without an ID: held back for the grace period...
+    // Without an ID: held back...
     let m = tr
         .ingest(
             1,
@@ -456,21 +468,21 @@ fn new_drone_alert_exactly_once() {
                 -70,
                 &[location(1.0, 1.0, 1.0)],
             ),
-            200,
+            1_200,
         )
         .track()
         .unwrap();
-    assert_eq!(tr.take_new_drone(500), None);
+    assert_eq!(tr.take_new_drone(1_500), None);
     // ...and if its ID arrives in time and merges it, no second alert.
     tr.ingest(
         1,
         &det(Transport::BleLegacy, BLE_MAC, -70, &[serial("SN-I")]),
-        600,
+        1_600,
     );
     assert_eq!(tr.take_new_drone(5_000), None);
     assert!(tr.get(m).is_none());
 
-    // A drone that never sends an ID is still announced after the grace.
+    // A drone that never sends an ID is still announced once confirmed.
     let n = tr
         .ingest(
             1,
@@ -485,6 +497,12 @@ fn new_drone_alert_exactly_once() {
         .track()
         .unwrap();
     assert_eq!(tr.take_new_drone(10_999), None);
+    assert_eq!(tr.take_new_drone(11_000), None, "heard only once");
+    tr.ingest(
+        1,
+        &det(Transport::BleLegacy, BLE_MAC2, -70, &[location(1.0, 1.0, 1.0)]),
+        11_000,
+    );
     assert_eq!(tr.take_new_drone(11_000), Some(n));
     // Its later ID does not re-announce it.
     tr.ingest(

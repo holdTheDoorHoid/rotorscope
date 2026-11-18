@@ -78,7 +78,7 @@ fn json_of(t: &Track, ctx: &Context) -> serde_json::Value {
 fn droneid_flight_is_scaled_like_the_droneid_crate() {
     let mut tr: Tracker = Tracker::default();
     let sighting = flight(SN);
-    let id = tr.ingest_droneid(4, &sighting, 1_000);
+    let id = tr.ingest_droneid(4, &sighting, 1_000).unwrap();
     let t = tr.get(id).unwrap();
     assert_eq!(t.primary_id().unwrap().id.as_str(), Some(SN));
     assert_eq!(
@@ -140,8 +140,11 @@ fn droneid_flight_is_scaled_like_the_droneid_crate() {
     assert_eq!(t.dji.freq_mhz(), Some(5756.5));
     assert_eq!(t.latest_rssi(), Some(-71));
     assert_eq!(t.nodes, 1 << 4);
-    // A drone with an ID is announced at once.
-    assert_eq!(tr.take_new_drone(1_000), Some(id));
+    // A drone with an ID is announced once confirmed: heard again a
+    // second later (`probation`).
+    assert_eq!(tr.take_new_drone(1_000), None);
+    assert_eq!(tr.ingest_droneid(4, &sighting, 2_000), Some(id));
+    assert_eq!(tr.take_new_drone(2_000), Some(id));
 
     // Geometry works from the DroneID position: ~300 m north.
     tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 1_000);
@@ -168,7 +171,7 @@ fn zero_positions_mean_unknown() {
     {
         (*lat_raw, *lon_raw, *pilot_lat_raw, *pilot_lon_raw) = (0, 0, 0, 0);
     }
-    let id = tr.ingest_droneid(0, &f, 10);
+    let id = tr.ingest_droneid(0, &f, 10).unwrap();
     let t = tr.get(id).unwrap();
     assert_eq!(t.location.as_ref().unwrap().value.position, None);
     assert!(t.system.is_none());
@@ -244,7 +247,7 @@ fn hidden_droneid_identity_still_merges() {
         hide_droneid_ids: true,
         ..Config::default()
     });
-    let id = tr.ingest_droneid(0, &flight(SN), 100);
+    let id = tr.ingest_droneid(0, &flight(SN), 100).unwrap();
     let ctx = tr.context(100, None);
     let t = tr.get(id).unwrap();
     assert!(t.uas_ids.is_empty());
@@ -255,9 +258,10 @@ fn hidden_droneid_identity_still_merges() {
     let n = csv::row(t, &ctx, &mut buf).unwrap();
     assert!(!s(&buf, n).contains(SN));
     assert_eq!(cot::uid_base(t), std::format!("dji-t{}", id.0).as_str());
-    // A hidden-ID drone is announced after the grace period, like a
-    // MAC-only Remote ID track.
+    // A hidden-ID drone is announced once confirmed (heard again a second
+    // later), like any other.
     assert_eq!(tr.take_new_drone(100), None);
+    assert_eq!(tr.ingest_droneid(0, &flight(SN), 1_100), Some(id));
     assert_eq!(tr.take_new_drone(1_100), Some(id));
 
     // The drone also broadcasts it in Remote ID: same track, now shown.
@@ -275,7 +279,7 @@ fn hidden_droneid_identity_still_merges() {
     assert_eq!(tr.tracks()[0].primary_id().unwrap().id.as_str(), Some(SN));
 
     // O4 key IDs are hidden too.
-    let k = tr.ingest_droneid(0, &encrypted([0xde, 0xad, 0xbe, 0xef], 24145), 300);
+    let k = tr.ingest_droneid(0, &encrypted([0xde, 0xad, 0xbe, 0xef], 24145), 300).unwrap();
     let v = json_of(tr.get(k).unwrap(), &tr.context(300, None));
     assert_eq!(v["dji"]["key_id"], serde_json::Value::Null);
     assert_eq!(v["dji"]["encrypted"], true);
@@ -296,7 +300,7 @@ fn o4_cryp_and_infp_share_a_session_track_with_a_state() {
     use crate::O4State;
     let mut tr: Tracker = Tracker::default();
     let k = [0xde, 0xad, 0xbe, 0xef];
-    let a = tr.ingest_droneid(0, &o4(link::O4Kind::Cryp, k), 100);
+    let a = tr.ingest_droneid(0, &o4(link::O4Kind::Cryp, k), 100).unwrap();
     let t = tr.get(a).unwrap();
     assert_eq!(t.dji.o4.state(), Some(O4State::GpsLocked));
     let ctx = tr.context(100, None);
@@ -305,11 +309,11 @@ fn o4_cryp_and_infp_share_a_session_track_with_a_state() {
     assert_eq!(v["dji"]["o4"]["model_dependent"], true);
     assert_eq!(v["dji"]["key_id"], "deadbeef");
     // INFP of the same session joins the track and moves the state on.
-    let b = tr.ingest_droneid(0, &o4(link::O4Kind::Infp10, k), 740);
-    let c = tr.ingest_droneid(0, &o4(link::O4Kind::Infp11, k), 1380);
+    let b = tr.ingest_droneid(0, &o4(link::O4Kind::Infp10, k), 740).unwrap();
+    let c = tr.ingest_droneid(0, &o4(link::O4Kind::Infp11, k), 1380).unwrap();
     assert_eq!((a, a), (b, c));
     // An older node's `Encrypted` record of the same session joins too.
-    assert_eq!(tr.ingest_droneid(0, &encrypted(k, 57565), 1400), a);
+    assert_eq!(tr.ingest_droneid(0, &encrypted(k, 57565), 1400), Some(a));
     let t = tr.get(a).unwrap();
     assert_eq!((t.dji.o4.cryp, t.dji.o4.infp10, t.dji.o4.infp11), (1, 1, 1));
     assert_eq!(t.dji.o4.state(), Some(O4State::ProbablyFlying));
@@ -323,7 +327,7 @@ fn o4_cryp_and_infp_share_a_session_track_with_a_state() {
     assert!(s(&buf, n).contains(",deadbeef,O4Session,"), "{}", s(&buf, n));
     // Hidden IDs: no key in JSON or CSV, the state still shown.
     let mut tr2: Tracker = Tracker::new(crate::Config { hide_droneid_ids: true, ..crate::Config::default() });
-    let h = tr2.ingest_droneid(0, &o4(link::O4Kind::Infp10, k), 5);
+    let h = tr2.ingest_droneid(0, &o4(link::O4Kind::Infp10, k), 5).unwrap();
     let ctx = tr2.context(5, None);
     let v = json_of(tr2.get(h).unwrap(), &ctx);
     assert_eq!(v["dji"]["key_id"], serde_json::Value::Null);
@@ -335,9 +339,9 @@ fn o4_cryp_and_infp_share_a_session_track_with_a_state() {
 #[test]
 fn o4_records_are_presence_tracks_keyed_by_key_id() {
     let mut tr: Tracker = Tracker::default();
-    let a = tr.ingest_droneid(0, &encrypted([1, 2, 3, 4], 24145), 100);
-    let b = tr.ingest_droneid(0, &encrypted([1, 2, 3, 4], 57565), 200);
-    let c = tr.ingest_droneid(0, &encrypted([9, 9, 9, 9], 57565), 300);
+    let a = tr.ingest_droneid(0, &encrypted([1, 2, 3, 4], 24145), 100).unwrap();
+    let b = tr.ingest_droneid(0, &encrypted([1, 2, 3, 4], 57565), 200).unwrap();
+    let c = tr.ingest_droneid(0, &encrypted([9, 9, 9, 9], 57565), 300).unwrap();
     assert_eq!(a, b);
     assert_ne!(a, c);
     let t = tr.get(a).unwrap();
@@ -374,8 +378,8 @@ fn undecoded_bursts_share_one_presence_track() {
         uptime_us: 0,
         record: DroneIdRecord::Detected,
     };
-    let a = tr.ingest_droneid(0, &burst(24145), 100);
-    let b = tr.ingest_droneid(1, &burst(57765), 200);
+    let a = tr.ingest_droneid(0, &burst(24145), 100).unwrap();
+    let b = tr.ingest_droneid(1, &burst(57765), 200).unwrap();
     assert_eq!(a, b);
     assert_eq!(tr.len(), 1);
     let t = tr.get(a).unwrap();
@@ -383,14 +387,14 @@ fn undecoded_bursts_share_one_presence_track() {
     assert_eq!(t.dji.freq_mhz(), Some(5776.5));
     assert_eq!(t.nodes, 0b11);
     // A real drone does not join it.
-    let c = tr.ingest_droneid(0, &flight(SN), 300);
+    let c = tr.ingest_droneid(0, &flight(SN), 300).unwrap();
     assert_ne!(a, c);
     // Garbage in the serial field: no identity, so it is presence too.
     let mut bad = flight(SN);
     if let DroneIdRecord::Flight { serial, .. } = &mut bad.record {
         *serial = [0xff; 16];
     }
-    assert_eq!(tr.ingest_droneid(0, &bad, 400), a);
+    assert_eq!(tr.ingest_droneid(0, &bad, 400), Some(a));
     // Expires like any track.
     tr.expire(400 + Config::default().remove_after_ms);
     assert!(tr.is_empty());
@@ -993,7 +997,7 @@ fn decrypted_o4_joins_its_serial_and_gets_positions() {
     assert_eq!(tr.len(), 2, "session track apart until decrypted");
     let p = infp10_plain(SN);
     tr.ingest_droneid(2, &o4(link::O4Kind::Infp10, k), 1_640);
-    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_640);
+    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_640).unwrap();
     assert_eq!(tr.len(), 1, "session folded into the serial's track");
     let t = tr.get(id).unwrap();
     assert!(t.dji.o4_decrypted);
@@ -1021,7 +1025,7 @@ fn decrypted_o4_without_a_known_serial_track_keeps_the_session_track() {
     let mut tr: Tracker = Tracker::default();
     tr.ingest_droneid(2, &o4(link::O4Kind::Cryp, k), 1_000);
     let p = infp10_plain(SN);
-    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_100);
+    let id = tr.ingest_o4_decrypted(k, crate::O4Decrypted::Infp10(&p), 1_100).unwrap();
     assert_eq!(tr.len(), 1);
     let t = tr.get(id).unwrap();
     assert!(t.dji.serial.is_some() && t.dji.o4_decrypted);
