@@ -249,6 +249,10 @@ pub struct Gps {
     pub untrusted_time: bool,
     /// Optional configuration steps the module refused.
     pub cfg_skipped: u8,
+    /// The previous epoch was trusted, and the console has said why the
+    /// current hold started (once per hold).
+    was_trusted: bool,
+    hold_said: bool,
 }
 
 impl Gps {
@@ -284,6 +288,8 @@ impl Gps {
             untrusted_pos: false,
             untrusted_time: false,
             cfg_skipped: 0,
+            was_trusted: false,
+            hold_said: false,
         }
     }
 
@@ -618,6 +624,22 @@ impl Gps {
         self.status = GpsStatus { state, sats: Some(f.sats_used) };
         // The monitor has already seen this epoch (on_event runs it first).
         let integrity = *self.integrity.status();
+        // A trusted run broken by an epoch that raised no finding (a check
+        // fired once, e.g. a message read late while the main loop paused):
+        // position and time are held until trust is earned again, which the
+        // integrity line does not say because the state did not change.
+        // Once per hold.
+        if integrity.trusted {
+            self.hold_said = false;
+        } else if self.was_trusted && !self.hold_said && integrity.state == gnss::integrity::State::Ok {
+            self.hold_said = true;
+            crate::println!(
+                "hub-p4: gps epoch not clean (a check fired once, no finding; time step {} ms): holding position and time until {} clean epochs",
+                integrity.metrics.time_step_ms.unwrap_or(0),
+                gnss::integrity::TRUST_EPOCHS,
+            );
+        }
+        self.was_trusted = integrity.trusted;
         let live_fix = if f.is_usable()
             && let Some((lat, lon)) = f.position()
         {
