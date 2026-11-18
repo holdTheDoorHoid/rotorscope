@@ -167,7 +167,13 @@ bus protocol is bit-banged:
 Never formats, never deletes, never writes outside its folder; exFAT (or any
 non-FAT16/32 card) is reported and left alone (`embedded-sdmmc` reads FAT16/32
 only). No card: a ~1 ms probe every 3 s. Bench: `--features fakedrone`
-injects a made-up Remote ID drone once a second so the log has rows.
+injects a made-up Remote ID drone once a second so the log has rows. Every
+bench feature of this firmware (`fakedrone`, `fakenode`, `benchlog`,
+`gpsloop`, `gpsloop-m10`, `webheadloop`, `modesloop`, `embedpack`,
+`selftest`, `faulttest`, `testpoint`) needs `ROTORSCOPE_BENCH=1` in the
+environment, or the build stops; such a build shows `BENCH BUILD` on the
+screen and lists itself in the hello line and the evidence boot event
+(docs/BENCH.md "Bench builds").
 
 ## GPS, ADS-B and the console (2026-11-15, branch `p4-parity`)
 

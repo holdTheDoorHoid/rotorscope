@@ -139,10 +139,10 @@ hub's console with a bench-only build (below), not from the node.
 
 * **One role at a time.** With one listener node the coordinator always gives it Wi-Fi 2.4. A bench
   build switch makes the node offer only one role, so the hub assigns that role:
-  `ROTORSCOPE_BENCH_CAN=wifi24|wifi5|ble tools/flash-node.sh c5a` (`node_common::bench_can_mask`;
+  `ROTORSCOPE_BENCH=1 ROTORSCOPE_BENCH_CAN=wifi24|wifi5|ble tools/flash-node.sh c5a` (`node_common::bench_can_mask`;
   both images get the same mask; any other value stops the build; unset = no restriction). Never
   for a deployed node.
-* **Hub evidence.** `cargo build --release --features benchlog` in `firmware/hub-p4`
+* **Hub evidence.** `ROTORSCOPE_BENCH=1 cargo build --release --features benchlog` in `firmware/hub-p4`
   (`src/bench.rs`): a `bench new-slot` / `new-link` / `new-rf` / `new-wifidrone` line the moment the
   tracker gets a new drone slot (transport and band), open-link stream, RF emitter or Wi-Fi drone,
   a table summary every 5 s, and at boot a count by kind of every row in the previous SD log file.
@@ -300,7 +300,9 @@ the P4, which tests its PSRAM first).
 
 To trigger the faults on purpose, build with the feature `faulttest`. It is in no `default` list, so
 a normal build cannot be made to panic or hang from the console; its `hello` line says
-`"faulttest":true` (P4: `FAULT TEST BUILD`). Type a whole line and Enter:
+`"faulttest":true` and `"bench":["faulttest"]` (P4: `FAULT TEST BUILD`, and `BENCH BUILD` on the
+screen). It is a bench feature: `export ROTORSCOPE_BENCH=1` in the shell first, or the build
+stops (see "Bench builds" below). Type a whole line and Enter:
 
 * `fault panic`: the board panics (backtrace on USB) and must come back on its own.
 * `fault hang`: the board stops feeding the watchdog (spins without yielding) and must come back
@@ -310,7 +312,7 @@ Nodes and the gateway read it on their USB-Serial-JTAG port (the same port their
 of); node-sdr through its normal console; the P4 hub on the USB-C (CH340) console, where `f`
 starts the line (Esc cancels).
 
-| Board | Build (from the firmware's folder, as usual, plus the feature) |
+| Board | Build (from the firmware's folder, as usual, plus the feature; `ROTORSCOPE_BENCH=1` exported) |
 |---|---|
 | gateway | `cargo build --release --features faulttest` |
 | node-wifi C5 | in `c5/`: `cargo build --release --features esp32c5,faulttest` (add `band24`, `espnow` as for `fw24` / `fw24-now`) |
@@ -347,9 +349,87 @@ so the first `hello` after flashing says `"usb"` or `"power_on"`, not a fault.
    `last reset: watchdog` (console `r` replays it, or read the card on the laptop).
 7. **P4 only: panic at start-up.** Not testable from the console; it is covered by the 5 s wait in
    `fault.rs`. If you ever see a P4 boot-looping, the panic message repeats every ~5 s plus boot.
-8. Finish by flashing the normal build again (no `faulttest`) and checking its `hello` has
-   `"faulttest":false`.
+8. Finish by flashing the normal build again (no `faulttest`, in a shell without
+   `ROTORSCOPE_BENCH`) and checking its `hello` has `"faulttest":false` and `"bench":[]`.
 
 Under a Wi-Fi frame flood, `node-wifi` must not reset: the drain task now yields to the hopper
 every 2 ms. If a busy bench (many access points, a `rid-beacon` at 10 Hz) ever shows
 `"reset":"watchdog"` on a node-wifi without `fault hang`, that is a FAIL worth reporting.
+
+## Bench builds (2026-11-18, compile-checked only)
+
+Some cargo features and build switches exist only for the bench: they fake data (a made-up drone
+whose frames are written to the **signed** evidence log, a made-up GPS fix), loop the board's own
+pins back, or open debug doors on the console (panic on request, inject samples, un-redact serial
+numbers, drop to the ROM loader). Nothing in an image used to tell such a build from a field build.
+Now:
+
+* **The build refuses** unless the environment has `ROTORSCOPE_BENCH=1`. Each firmware's `build.rs`
+  checks its own list (`crates/link/src/benchfence.rs`) and stops with a message naming what is on.
+  For a bench session: `export ROTORSCOPE_BENCH=1` in that shell only. `tools/bench/run.py` sets it
+  for its own runs.
+* **The image says so.** Every hello line has `"bench":[...]` (`[]` for a normal build), and a bench
+  image prints `{"t":"warn","what":"bench_build","tag":"bench-build:<list>",...}` after it. The P4
+  hub lists them in its `hub-p4: hello` line and in the evidence log's boot event
+  (`...; bench: fakedrone,faulttest`, or `bench: none`), and shows **BENCH BUILD** on the screen
+  for as long as it runs.
+* **The flashing tools check.** `tools/dev-board.sh` and `tools/flash-node.sh` find the
+  `bench-build:` tag in an ELF and refuse to flash it without `ROTORSCOPE_BENCH=1` (and warn with it).
+
+| Firmware | Bench features | Bench build switches (environment at build time) |
+|---|---|---|
+| gateway | `faulttest` | |
+| node-wifi | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
+| node-lr | `faulttest` | |
+| node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
+| hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` (console `p`: own position to a fixed test point) | (`AIRSPACE_PAK` only with `embedpack`) |
+
+Not fenced, on purpose: `rid-beacon` (it is the test transmitter; nothing fields it), hub-p4
+`show-link-ids` (an operator privacy choice, not a bench aid), `modes` (a field feature), node-wifi
+`ROTORSCOPE_ESPNOW_RATE` (a radio tuning). The S3 web head (`firmware/hub`) is fenced by its own
+package.
+
+**Link key (since the same date).** A firmware build with ESP-NOW and no `tools/link.key` stops
+(docs/ESPNOW.md "Securing the link"); `ROTORSCOPE_LINK_KEY_FILE=none` builds an open kit on purpose,
+and `tools/flash-node.sh` then wants `--open`. The bench tests in `tools/bench/run.py` build only
+wired images (no key needed).
+
+### To check on hardware (not yet run)
+
+Everything in this section, and the hub-p4 screen and evidence changes below, is compile-checked
+only (2026-11-18, branch `sec/lane-a`). On the bench:
+
+1. **Normal builds**: each board's hello has `"bench":[]` and no `bench_build` warning; the P4's
+   hello says `evidence key: public_test (...)` (or `development_software`) and `bench: []`.
+2. **A bench build** (e.g. node-wifi with `faulttest`): `"bench":["faulttest"]` plus the warning
+   line; `tools/dev-board.sh <elf>` without `ROTORSCOPE_BENCH=1` refuses it before touching the
+   board, with it flashes and warns.
+3. **P4 screen, test key**: a strip at the bottom edge reads `TEST KEY: log not evidence` on every
+   page (with a dev key: `DEV KEY: not evidence-grade`); a bench build adds `BENCH BUILD`. Check it
+   is readable in both themes and does not hide anything needed (it covers the bottom 11 px).
+4. **Open gateway**: flash the gateway with `ROTORSCOPE_LINK_KEY_FILE=none`; the P4 shows
+   `OPEN LINK` within a few seconds of the gateway's Hello, and it goes away after the keyed gateway
+   is back (its next Hello).
+5. **Evidence not written**: (a) boot the P4 with no card: the strip shows
+   `NO EVIDENCE (no SD): N waiting` with N growing; insert a card: the line goes away and REC shows.
+   (b) On a spare card, create a *file* `ROTORSCP/EVIDENCE/EV000005.EVL` (any content) and a
+   *folder* `ROTORSCP/EVIDENCE/EV000006.EVL`: the next boot writes `EV000007.EVL` (the folder's
+   name is skipped) and links it to `EV000005.EVL`. Then add a *file* `EV999999.EVL`: the next
+   mount uses the lowest free number (console: `using the lowest free number 1`) and evidence
+   keeps recording.
+   (c) Make `ROTORSCP/EVIDENCE` a *file* instead of a folder: the CSV still records, the status
+   bar shows a boxed `NO EVID` instead of `REC`, the health page says `CSV only - NO EVIDENCE`,
+   the strip says `NO EVIDENCE (file error): N waiting`, and the console prints a retry every
+   15 s with the same `ev_errors` growing (no `TooManyOpenDirs` after many retries). Pull the
+   card, delete the file on a laptop, put the card back: evidence records again (into the same
+   new file chain, the queued records first).
+6. **Console `p`** on a normal P4 build answers `p (test position) is in bench builds only`; a
+   `testpoint` build sets the test position and logs the Setting event as before.
+7. **node-sdr**: a normal build answers `freq 5756`, `reveal on`, `bootloader` and an `@F` line
+   with `"e":"bring-up command: needs a bringup build (BRINGUP.md)"`; `stats`, `phy`, `plan` still
+   work. A `bringup` build runs BRINGUP.md as before, and `tools/droneid-hil` passes on it.
+   `@F fffffff8 AAAA` must be counted as a feed error (`hil` counters) and change nothing.
+8. **Over-the-air text**: with `rid-beacon` or a fake open network whose SSID holds a control
+   character (if the beacon can send one), the P4's `THREAT` console line and evidence text show
+   `?` in its place.

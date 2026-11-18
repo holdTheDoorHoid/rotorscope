@@ -118,11 +118,14 @@ only commands that carry a good tag and echo its own random session (see
   ESP-NOW node and the gateway (its beacons) can be seen by anyone scanning,
   and their MAC addresses are fixed. That is why this is a build option, not
   the default.
-* **Authenticated only with a kit key.** Without one (the default until you
-  make a key), anyone nearby can send packets that the gateway relays as a
-  fake node (a fake track, or a real node's reports drowned out), or send a
-  node a fake assignment (blind it). Boards built without a key say so at
-  boot, and the gateway tells the hub in its `Hello` ("gw OPEN no key").
+* **Authenticated only with a kit key.** Without one, anyone nearby can send
+  packets that the gateway relays as a fake node (a fake track, or a real
+  node's reports drowned out), or send a node a fake assignment (blind it).
+  So a firmware build with no key **stops** (since 2026-11-18): make the key
+  (below), or build an open kit on purpose with `ROTORSCOPE_LINK_KEY_FILE=none`
+  (`tools/flash-node.sh --open`). Open boards say so at boot, the gateway
+  tells the hub in its `Hello` ("gw OPEN no key"), and the P4 hub keeps
+  `OPEN LINK` on its screen while it does.
   With a key, every packet both ways carries a 96-bit HMAC-SHA256 tag and a
   freshness stamp in our own trailer; forged and replayed packets are dropped
   and the gateway reports them to the hub as an attack (`ForgedLink`). This
@@ -185,9 +188,12 @@ itself and prints `ESP-NOW link key <ID>` while compiling.
 **WARNING** if an image has no key or a different one from `tools/link.key`.
 
 Builds in another checkout of the repository need the file there too, or
-`ROTORSCOPE_LINK_KEY_FILE=/path/to/link.key` in front of the command.
+`ROTORSCOPE_LINK_KEY_FILE=/path/to/link.key` in front of the command. A
+firmware build that finds no key **stops** with how to make one (host builds,
+such as `cargo test` in a fresh clone, do not need a key).
 `ROTORSCOPE_LINK_KEY_FILE=none` builds an open (unauthenticated) image on
-purpose.
+purpose; `tools/flash-node.sh` wants `--open` for that and otherwise exits
+with an error when there is no key.
 
 ### 3. Check it worked
 

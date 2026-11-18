@@ -120,7 +120,11 @@ Laptop (from the repository):
 # once: a development key for this unit (keep it off git)
 target/release/evidence-server keygen --out ~/p4-dev.evkey
 cd firmware/hub-p4 && ROTORSCOPE_DEV_KEY=$(cat ~/p4-dev.evkey) cargo fw   # then flash as usual
-# without ROTORSCOPE_DEV_KEY the hub uses the published test key (class "public test")
+# without ROTORSCOPE_DEV_KEY the hub uses the published test key (class "public test"),
+#   and its screen says "TEST KEY: log not evidence" for as long as it runs (a dev key:
+#   "DEV KEY: not evidence-grade"); the hello line names the class too
+# a ROTORSCOPE_DEV_KEY that is set but not exactly 64 hex digits (or is zero) stops the
+#   build (it used to fall back to the test key silently); the value is never printed
 
 target/release/evidence-server serve --data ~/evidence-data          # http://127.0.0.1:8650
 target/release/evidence-upload --server http://127.0.0.1:8650 \
