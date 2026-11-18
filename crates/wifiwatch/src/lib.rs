@@ -21,14 +21,20 @@
 //!   frames: beacon floods, Karma / Pineapple, evil twins, channel-switch
 //!   abuse and known tools' signatures ([`tools::TOOLS`]).
 //!
+//! - [`drones::DroneLinks`] follows the drone networks the node has
+//!   recognised (`crates/wifidrone`) and reports someone kicking the pilot
+//!   off one or joining it in the pilot's place, also from headers alone
+//!   (and data-frame addresses); [`drones::Clones`], inside
+//!   [`beacons::Beacons`], reports copies of a drone's network.
+//!
 //! [`ble::BleWatch`] does the same for Bluetooth pairing pop-up spam.
 //! [`Watch`] bundles the Wi-Fi halves for callers (and tests) that have
 //! every frame in one place.
 //!
 //! Each kind reports at most about once a second per target while it lasts
 //! (`count` and `window_ms` say how much was seen). Every table is fixed
-//! size; all of it together is about 5 KB ([`Watch`]), plus ~200 bytes for
-//! [`ble::BleWatch`].
+//! size; all of it together is about 6 KB ([`Watch`]; [`drones::DroneLinks`]
+//! ~440 bytes of it), plus ~360 bytes for [`ble::BleWatch`].
 //!
 //! # What the numbers mean (beyond `link::ThreatKind`'s doc)
 //!
@@ -52,10 +58,12 @@
 //! - `AttackTool`: `detail` = index into [`tools::TOOLS`].
 //! - `BleSpam`: `detail` = new addresses in the window, `ssid` = the
 //!   pairing family with the most ([`ble::Family::name`]).
+//! - `DroneDeauth`, `DroneTakeover`, `DroneNetClone`: see [`drones`].
 #![cfg_attr(not(test), no_std)]
 
 pub mod beacons;
 pub mod ble;
+pub mod drones;
 pub mod floods;
 pub mod mac;
 pub mod tools;
@@ -101,10 +109,12 @@ pub(crate) fn sighting(
     }
 }
 
-/// Both Wi-Fi halves together. A node that splits them (callback / task)
-/// uses [`floods::Floods`] and [`beacons::Beacons`] directly instead.
+/// Every Wi-Fi part together. A node that splits them (callback / task)
+/// uses [`floods::Floods`], [`drones::DroneLinks`] and [`beacons::Beacons`]
+/// directly instead.
 pub struct Watch {
     pub floods: floods::Floods,
+    pub drones: drones::DroneLinks,
     pub beacons: beacons::Beacons,
 }
 
@@ -116,22 +126,32 @@ impl Default for Watch {
 
 impl Watch {
     pub const fn new() -> Self {
-        Self { floods: floods::Floods::new(), beacons: beacons::Beacons::new() }
+        Self { floods: floods::Floods::new(), drones: drones::DroneLinks::new(), beacons: beacons::Beacons::new() }
     }
 
     /// One management frame: MPDU without FCS, RSSI (dBm), the channel it
     /// was heard on, node time (µs). Sightings that are due go to `emit`.
     pub fn frame(&mut self, mpdu: &[u8], rssi: i8, channel: u8, now_us: u64, emit: &mut impl FnMut(ThreatSighting)) {
+        self.drones.frame(mpdu, rssi, channel, now_us);
         if self.floods.frame(mpdu, rssi, channel, now_us) {
             return;
         }
-        self.beacons.frame(mpdu, rssi, channel, now_us, emit);
+        if let Some(d) = self.beacons.frame(mpdu, rssi, channel, now_us, emit) {
+            self.drones.learn(&d, now_us);
+        }
+    }
+
+    /// One data frame (MPDU, FCS or not): only its addresses are read, to
+    /// see who is attached to a drone's network.
+    pub fn data(&mut self, mpdu: &[u8], rssi: i8, channel: u8, now_us: u64) {
+        self.drones.data(mpdu, rssi, channel, now_us);
     }
 
     /// Close windows that are due and report what they held. Call a few
     /// times a second (every frame is fine too).
     pub fn poll(&mut self, now_us: u64, emit: &mut impl FnMut(ThreatSighting)) {
         self.floods.poll(now_us, emit);
+        self.drones.poll(now_us, emit);
         self.beacons.poll(now_us, emit);
     }
 }
@@ -143,7 +163,9 @@ mod size {
         let w = core::mem::size_of::<super::Watch>();
         let f = core::mem::size_of::<super::floods::Floods>();
         let b = core::mem::size_of::<super::ble::BleWatch>();
-        std::println!("Watch {w} B (Floods {f} B), BleWatch {b} B");
+        let d = core::mem::size_of::<super::drones::DroneLinks>();
+        std::println!("Watch {w} B (Floods {f} B, DroneLinks {d} B), BleWatch {b} B");
+        assert!(d <= 512, "DroneLinks is {d} bytes");
         assert!(w <= 6 * 1024, "Watch is {w} bytes");
         assert!(f <= 1536, "Floods is {f} bytes");
         assert!(b <= 512, "BleWatch is {b} bytes");

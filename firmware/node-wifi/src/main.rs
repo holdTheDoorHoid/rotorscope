@@ -9,7 +9,10 @@
 //! `open_links` reports each stream at most once a second. Attack detection
 //! (`wifiwatch`, Frame::Threat) is split the same way: deauth / auth / probe
 //! floods are counted in the callback and judged by `threats`; beacons,
-//! probe responses and action frames are checked in `drain`. The hopper
+//! probe responses and action frames are checked in `drain`. Drone
+//! hijacking (`wifiwatch::drones`) is split the same way: `drain` learns
+//! drones' networks from their beacons, the callback follows deauths,
+//! joins and data addresses on them, `threats` reports. The hopper
 //! also leaves its plan now and then to scout a channel the plan skips
 //! (`coverage::plans::scout_channel`). Receive-only:
 //! nothing here transmits on the air, except with the `espnow` feature, where
@@ -311,7 +314,11 @@ async fn drain() {
             continue;
         }
         detect.frame(&f, frame);
-        watch.frame(frame, f.rssi, f.channel, f.up_us, &mut |s| report::threat(&s));
+        // A drone's own beacon: let the callback's drone watch know it.
+        if let Some(d) = watch.frame(frame, f.rssi, f.channel, f.up_us, &mut |s| report::threat(&s)) {
+            critical_section::with(|cs| rx::DRONES.borrow_ref_mut(cs).learn(&d, f.up_us));
+            rx::DRONES_ON.store(true, Relaxed);
+        }
         BEACON_CSA.store(watch.totals.csa, Relaxed);
         BEACON_THREATS.store(watch.totals.threats, Relaxed);
         if !maybe_rid(frame) {
@@ -376,13 +383,16 @@ async fn open_links() {
     }
 }
 
-/// Judge the flood counters the receive callback fills (`rx::FLOODS`) four
-/// times a second; each flood is reported at most once per one-second window.
+/// Judge the flood counters the receive callback fills (`rx::FLOODS`) and
+/// the drone-link watch (`rx::DRONES`) four times a second; each flood is
+/// reported at most once per one-second window, each drone kind at most
+/// once a second per drone.
 #[embassy_executor::task]
 async fn threats() {
     let mut ticker = Ticker::every(Duration::from_millis(250));
     // Copied out under the lock, reported after releasing it.
-    let mut due: heapless::Vec<link::ThreatSighting, { wifiwatch::floods::TABLE + 1 }> = heapless::Vec::new();
+    const DUE: usize = wifiwatch::floods::TABLE + 1 + 2 * wifiwatch::drones::NETS;
+    let mut due: heapless::Vec<link::ThreatSighting, DUE> = heapless::Vec::new();
     loop {
         ticker.next().await;
         let now = Instant::now().as_micros();
@@ -391,7 +401,13 @@ async fn threats() {
             rx::FLOODS.borrow_ref_mut(cs).poll(now, &mut |s| {
                 // Cannot overflow: one per table entry plus the probe counter.
                 let _ = due.push(s);
-            })
+            });
+            let mut drones = rx::DRONES.borrow_ref_mut(cs);
+            drones.poll(now, &mut |s| {
+                // Cannot overflow: at most two per drone network.
+                let _ = due.push(s);
+            });
+            rx::DRONES_ON.store(!drones.is_empty(), Relaxed);
         });
         for s in &due {
             report::threat(s);
@@ -421,6 +437,7 @@ async fn stats() {
             }
         }
         let floods = critical_section::with(|cs| rx::FLOODS.borrow_ref(cs).totals);
+        let drones = critical_section::with(|cs| rx::DRONES.borrow_ref(cs).totals);
         let line = report::StatsLine {
             t: "stats",
             up_us: Instant::now().as_micros(),
@@ -449,7 +466,7 @@ async fn stats() {
             auth: floods.auth,
             probe: floods.probe,
             csa: BEACON_CSA.load(Relaxed),
-            threat: floods.threats.wrapping_add(BEACON_THREATS.load(Relaxed)),
+            threat: floods.threats.wrapping_add(BEACON_THREATS.load(Relaxed)).wrapping_add(drones.threats),
             scout: (SCOUT_VISITS.load(Relaxed), SCOUT_LAST.load(Relaxed)),
         };
         last_seen = seen;

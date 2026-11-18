@@ -18,9 +18,13 @@
 //!   channel, name an impossible channel, go on far longer than a real
 //!   switch, never count down, or arrive as a flood of action frames.
 //! - **Attack tools**: [`crate::tools`].
+//! - **Copies of drone networks** ([`crate::drones::Clones`]); and which
+//!   beacons are drones' own, returned by [`Beacons::frame`] for
+//!   [`crate::drones::DroneLinks::learn`].
 
 use crate::mac::{self, ACTION, BEACON, BssInfo, PROBE_RESP, Security};
 use crate::util::{BROADCAST, Bits, Ms, NONE, RateLimit, Recent, Warmth, elapsed, hash, ms};
+use crate::drones::{Clones, Heard};
 use crate::{ThreatKind, ThreatSighting, sighting, tools};
 
 /// Beacon-flood and action-CSA counting window.
@@ -161,6 +165,7 @@ pub struct Beacons {
     suspects: heapless::Vec<Suspect, SUSPECTS>,
     nets: [Net; NETS],
     csa: heapless::Vec<Csa, CSA_TABLE>,
+    clones: Clones,
     limit: RateLimit<16>,
     pub totals: Totals,
 }
@@ -206,13 +211,24 @@ impl Beacons {
                 last: 0,
             }; NETS],
             csa: heapless::Vec::new(),
+            clones: Clones::new(),
             limit: RateLimit::new(1000),
             totals: Totals { frames: 0, csa: 0, threats: 0 },
         }
     }
 
     /// One management frame (MPDU without FCS). Other subtypes are ignored.
-    pub fn frame(&mut self, mpdu: &[u8], rssi: i8, channel: u8, now_us: u64, emit: &mut impl FnMut(ThreatSighting)) {
+    /// Returns the drone network a beacon or probe response comes from, if
+    /// it is one (`wifidrone`), for [`crate::drones::DroneLinks::learn`].
+    pub fn frame<'a>(
+        &mut self,
+        mpdu: &'a [u8],
+        rssi: i8,
+        channel: u8,
+        now_us: u64,
+        emit: &mut impl FnMut(ThreatSighting),
+    ) -> Option<Heard<'a>> {
+        let mut heard = None;
         let now = ms(now_us);
         let mut sent = 0u32;
         let mut e = |s: ThreatSighting| {
@@ -225,7 +241,7 @@ impl Beacons {
                 BEACON | PROBE_RESP => {
                     if let Some(info) = mac::bss_info(&h, mpdu) {
                         self.totals.frames = self.totals.frames.wrapping_add(1);
-                        self.bss(&h, &info, rssi, channel, now, now_us, &mut e);
+                        heard = self.bss(&h, &info, rssi, channel, now, now_us, &mut e);
                     }
                 }
                 ACTION => {
@@ -242,6 +258,7 @@ impl Beacons {
             }
         }
         self.totals.threats = self.totals.threats.wrapping_add(sent);
+        heard
     }
 
     /// Close the counting window if due. Called by `frame` too; call it
@@ -309,16 +326,16 @@ impl Beacons {
     }
 
     #[allow(clippy::too_many_arguments, reason = "internal; all from one frame")]
-    fn bss(
+    fn bss<'a>(
         &mut self,
         h: &mac::Header,
-        info: &BssInfo<'_>,
+        info: &BssInfo<'a>,
         rssi: i8,
         channel: u8,
         now: Ms,
         now_us: u64,
         emit: &mut impl FnMut(ThreatSighting),
-    ) {
+    ) -> Option<Heard<'a>> {
         let bssid = h.addr3;
         // Known tools.
         if let Some(tool) = tools::match_tool(&h.addr2, info)
@@ -344,6 +361,7 @@ impl Beacons {
             self.karma(bssid, info.ssid, rssi, channel, now, now_us, emit);
             self.twin(bssid, info, rssi, channel, now, now_us, emit);
         }
+        let heard = self.clones.bss(bssid, info, rssi, channel, now, now_us, &mut self.limit, emit);
 
         match info.csa {
             Some((new_ch, count)) => {
@@ -353,6 +371,7 @@ impl Beacons {
             None if h.subtype == BEACON => self.plain_beacon(bssid, channel, now, now_us, emit),
             None => {}
         }
+        heard
     }
 
     #[allow(clippy::too_many_arguments, reason = "internal; all from one frame")]
