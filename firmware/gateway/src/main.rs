@@ -253,14 +253,23 @@ async fn main(spawner: Spawner) -> ! {
     // The radio is on, so the hardware RNG is a true RNG: a fresh epoch.
     let gw_auth = auth::Key::kit().map(|k| auth::Gateway::new(k, esp_hal::rng::Rng::new().random()));
     println!(
-        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}","reset":"{}","faulttest":{}}}"#,
+        r#"{{"t":"hello","fw":"gateway","ver":"{}","ch":{CHANNEL},"espnow":{version},"lr":{},"mac":"{}","key":"{}","reset":"{}","faulttest":{},"bench":{}}}"#,
         env!("CARGO_PKG_VERSION"),
         lr == 0,
         Mac(mac),
         auth::KEY_TAG,
         node_common::fault::reset_reason(),
-        cfg!(feature = "faulttest")
+        cfg!(feature = "faulttest"),
+        env!("ROTORSCOPE_BENCH_JSON")
     );
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/dev-board.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        println!(
+            r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: never leave it on a fielded unit"}}"#,
+            env!("ROTORSCOPE_BENCH_TAG")
+        );
+    }
     if gw_auth.is_none() {
         println!(
             r#"{{"t":"warn","what":"link_key","note":"built WITHOUT a link key: anyone nearby can inject or replay node packets and commands. See docs/ESPNOW.md 'Securing the link'."}}"#

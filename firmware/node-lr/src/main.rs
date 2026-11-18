@@ -105,14 +105,23 @@ async fn main(spawner: Spawner) -> ! {
     let lr = lr::Lr::new(spi, nss, busy, rst, irq);
 
     out::line(format_args!(
-        r#"{{"t":"hello","node":"lr","fw":"{FIRMWARE}","chip":"{}","proto":{},"espnow":{},"wirebus":{},"tx":"never on the LR2021","reset":"{}","faulttest":{}}}"#,
+        r#"{{"t":"hello","node":"lr","fw":"{FIRMWARE}","chip":"{}","proto":{},"espnow":{},"wirebus":{},"tx":"never on the LR2021","reset":"{}","faulttest":{},"bench":{}}}"#,
         board::CHIP,
         link::PROTOCOL_VERSION,
         cfg!(feature = "espnow"),
         cfg!(feature = "wirebus"),
         node_common::fault::reset_reason(),
         cfg!(feature = "faulttest"),
+        env!("ROTORSCOPE_BENCH_JSON"),
     ));
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/dev-board.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        out::line(format_args!(
+            r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: never leave it on a fielded unit"}}"#,
+            env!("ROTORSCOPE_BENCH_TAG")
+        ));
+    }
 
     // The hub link.
     #[cfg(not(any(feature = "espnow", feature = "wirebus")))]

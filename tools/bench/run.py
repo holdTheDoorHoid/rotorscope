@@ -403,6 +403,12 @@ def evidence_str(r: dict) -> str:
 
 
 def main(argv=None) -> int:
+    # This is the bench: allow bench builds (docs/BENCH.md "Bench builds").
+    # The images built here have no bench feature; the switch only lets
+    # tools/dev-board.sh flash one a bench session made (it refuses bench
+    # images otherwise), and lets a bench build switch such as
+    # ROTORSCOPE_BENCH_CAN, if the caller set one, through the build fence.
+    os.environ.setdefault("ROTORSCOPE_BENCH", "1")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tests", nargs="*", help="test ids (see --list)")
     ap.add_argument("--all", action="store_true", help="every test")

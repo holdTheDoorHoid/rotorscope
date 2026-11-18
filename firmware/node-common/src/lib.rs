@@ -162,6 +162,18 @@ fn flash_read(flash: &mut FlashStorage<'_>, at: u32, buf: &mut [u8]) -> Result<(
     flash.read(at, buf).map_err(|_| ())
 }
 
+/// The bench features and build switches an image was built with, for its
+/// hello line. Pass `env!("ROTORSCOPE_BENCH_LIST")` (set by the image's own
+/// build.rs, crates/link/src/benchfence.rs; comma separated, empty for a
+/// normal build). Serializes as a JSON array, `[]` for a normal build.
+pub fn bench_list(list: &'static str) -> heapless::Vec<&'static str, 8> {
+    let mut v = heapless::Vec::new();
+    for s in list.split(',').filter(|s| !s.is_empty()) {
+        let _ = v.push(s);
+    }
+    v
+}
+
 /// Bench only: the `can` mask a `ROTORSCOPE_BENCH_CAN` build reports, so
 /// that the hub's coordinator can be steered to one role with a single node.
 /// Pass `option_env!("ROTORSCOPE_BENCH_CAN")` (evaluated in the image's own

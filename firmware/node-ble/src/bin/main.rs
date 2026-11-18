@@ -69,6 +69,7 @@ fn hello_line<'a>(images: &'a [Option<&'static str>]) -> HelloLine<'a> {
         plan_id: role::PLAN_ID.load(core::sync::atomic::Ordering::Relaxed),
         reset: node_common::fault::reset_reason(),
         faulttest: cfg!(feature = "faulttest"),
+        bench: node_common::bench_list(env!("ROTORSCOPE_BENCH_LIST")),
     }
 }
 
@@ -159,6 +160,17 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut line = [0u8; 512];
     out::json_line(&hello_line(&names), &mut line);
+    // Bench features compiled in (build.rs): say so, with the tag
+    // tools/flash-node.sh looks for in the ELF.
+    if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
+        let warn = concat!(
+            r#"{"t":"warn","what":"bench_build","tag":""#,
+            env!("ROTORSCOPE_BENCH_TAG"),
+            r#"","note":"BENCH BUILD: never leave it on a fielded unit"}"#,
+            "\n"
+        );
+        out::emit(&out::USB, warn.as_bytes(), &COUNTERS.usb_drops);
+    }
     out::hub_frame(&hello_frame());
     out::hub_frame(&role::status_frame());
 

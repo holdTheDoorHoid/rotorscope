@@ -217,6 +217,9 @@ pub struct HelloLine<'a> {
     /// this is a `faulttest` bench build.
     pub reset: &'static str,
     pub faulttest: bool,
+    /// Bench features and build switches compiled in (`[]`: a normal build;
+    /// build.rs, docs/BENCH.md "Bench builds").
+    pub bench: heapless::Vec<&'static str, 8>,
 }
 
 /// `assign`: a new plan id from the hub; `switch`: leaving for another image.
