@@ -113,12 +113,15 @@ tape); it must never be in a deployed unit. Both features are bench-only and fen
 refuses them without `ROTORSCOPE_BENCH=1`, and the hello line, the boot event and the screen's
 `BENCH BUILD` mark name them (docs/BENCH.md "Bench builds").
 
-### Bench checks (WP-07, not yet run)
+### Bench checks (WP-07, only the default-off part of step 1 run)
 
-Everything WP-07 changed is compile-checked and laptop-tested only. On the bench, one board,
-with a spare FAT32 card:
+Everything WP-07 changed is compile-checked and laptop-tested only, except the default-off part of
+step 1 (run 2026-11-18). On the bench, one board, with a spare FAT32 card:
 
-1. **Default off.** Normal build, card without an `audio` line in `SITE.TXT`. Boot: the evidence
+1. **Default off.** (Default-off part RUN 2026-11-18: the site line ends `audio clips off`, the
+   `hub-p4: ear` status line says `clips off tape 0 s not_saved 0`, no clip files were created, and
+   the boot event text was `audio clips off at boot`. The console `L` / `audio clips on` / `off`
+   part below was NOT run.) Normal build, card without an `audio` line in `SITE.TXT`. Boot: the evidence
    boot event ends `audio clips off at boot`; no audio line on the screen; the `hub-p4: ear`
    status line says `clips off tape 0 s`. Console `L`, `audio clips on`: within a second
    `hub-p4: audio clips ON (from the console)`, the screen shows `AUDIO CLIPS ON: sound may be
