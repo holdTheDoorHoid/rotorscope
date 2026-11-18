@@ -2,10 +2,13 @@
 //! none. The key never lives in the repository (it is public): it is a local,
 //! git-ignored file of 64 hex digits, made with `cargo run -p link-key -- new`.
 //!
-//! Which file:
+//! Which file (`src/keysrc.rs`, unit-tested):
 //! - `ROTORSCOPE_LINK_KEY_FILE=<path>`: that file (it must exist);
-//! - `ROTORSCOPE_LINK_KEY_FILE=none`: no key, even if `tools/link.key` exists;
-//! - unset: `tools/link.key` at the repository root if it exists, else no key.
+//! - `ROTORSCOPE_LINK_KEY_FILE=none`: no key, even if `tools/link.key` exists
+//!   (an open kit, on purpose);
+//! - unset: `tools/link.key` at the repository root if it exists; else a
+//!   firmware build (target OS `none`) STOPS with how to make a key, and a
+//!   host build (tests, host tools) builds without one.
 //!
 //! Output (in `OUT_DIR`, inside the git-ignored target directory):
 //! `KIT_KEY: Option<[u8; 32]>` and `KEY_ID` (8 hex digits of
@@ -16,39 +19,41 @@
 
 #[path = "src/hmac.rs"]
 mod hmac;
+#[path = "src/keysrc.rs"]
+mod keysrc;
 
 use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=ROTORSCOPE_LINK_KEY_FILE");
     println!("cargo:rerun-if-changed=src/hmac.rs");
+    println!("cargo:rerun-if-changed=src/keysrc.rs");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let tools = manifest.join("../../tools");
     let default = tools.join("link.key");
-    let path = match std::env::var("ROTORSCOPE_LINK_KEY_FILE") {
-        Ok(v) if v == "none" => None,
-        Ok(v) if !v.is_empty() => {
-            let p = PathBuf::from(v);
-            if !p.is_file() {
-                panic!("ROTORSCOPE_LINK_KEY_FILE={}: no such file", p.display());
+    let env = std::env::var("ROTORSCOPE_LINK_KEY_FILE").ok();
+    if env.as_deref().map_or(true, str::is_empty) && tools.is_dir() {
+        // Notice a key file appearing or disappearing (the directory's
+        // own timestamp changes then).
+        println!("cargo:rerun-if-changed={}", tools.display());
+    }
+    let firmware = keysrc::is_firmware(std::env::var("CARGO_CFG_TARGET_OS").ok().as_deref());
+    let path = match keysrc::choose(env.as_deref(), default.is_file().then_some(default), firmware) {
+        Ok(keysrc::Choice::File(p)) => Some(p),
+        Ok(keysrc::Choice::OpenOnPurpose) => {
+            if firmware {
+                println!(
+                    "cargo:warning=airlink: OPEN KIT (ROTORSCOPE_LINK_KEY_FILE=none): this build's ESP-NOW link is NOT authenticated. See docs/ESPNOW.md \"Securing the link\"."
+                );
             }
-            Some(p)
+            None
         }
-        _ => {
-            // Notice a key file appearing or disappearing (the directory's
-            // own timestamp changes then).
-            if tools.is_dir() {
-                println!("cargo:rerun-if-changed={}", tools.display());
-            }
-            default.is_file().then_some(default)
-        }
+        Ok(keysrc::Choice::OpenHost) => None,
+        Err(msg) => panic!("{msg}"),
     };
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("link_key.rs");
     let code = match &path {
         None => {
-            println!(
-                "cargo:warning=airlink: no link key (tools/link.key): this build's ESP-NOW link is NOT authenticated. See docs/ESPNOW.md \"Securing the link\"."
-            );
             "/// No key: unauthenticated ESP-NOW (docs/ESPNOW.md).\npub const KIT_KEY: Option<[u8; 32]> = None;\n/// See [`KIT_KEY`].\npub const KEY_ID: &str = \"none\";\n/// Printed at boot; `tools/dev-board.sh` finds it in an ELF.\npub const KEY_TAG: &str = \"link-key:none\";\n".to_string()
         }
         Some(p) => {
