@@ -852,6 +852,8 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     candidates: probation::Candidates<N>,
     /// New drone identities a second, for the flood alarm.
     flood: probation::FloodWatch,
+    /// Unproven aircraft replaced a second, for the aircraft flood alarm.
+    aircraft_flood: probation::FloodWatch,
     next_id: u32,
     own: Option<OwnFix>,
     config: Config,
@@ -881,6 +883,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             },
             candidates: probation::Candidates::new(),
             flood: probation::FloodWatch::new(),
+            aircraft_flood: probation::FloodWatch::new(),
             next_id: 1,
             own: None,
             config,
@@ -1219,6 +1222,17 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         Some(self.tracks.len() - 1)
     }
 
+    /// Tests about something other than standing: every drone track held
+    /// is confirmed and every aircraft established, as if heard for long
+    /// enough.
+    #[cfg(test)]
+    pub(crate) fn vouch_for_tests(&mut self, now_ms: u64) {
+        for t in self.tracks.iter_mut() {
+            t.confirmed_ms.get_or_insert(now_ms);
+        }
+        self.aircraft.vouch_for_tests();
+    }
+
     /// Count one frame (or DJI / control-link report) for track `i` towards
     /// its standing ([`probation`]).
     pub(crate) fn heard(&mut self, i: usize, now_ms: u64) {
@@ -1258,7 +1272,12 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// the table is full of nearer ones).
     pub fn ingest_aircraft(&mut self, report: &adsb::Aircraft, now_ms: u64) -> Option<AircraftKey> {
         let own = self.own_position(now_ms);
-        self.aircraft.ingest(report, now_ms, own.as_ref())
+        let before = self.aircraft.replaced();
+        let r = self.aircraft.ingest(report, now_ms, own.as_ref());
+        for _ in before..self.aircraft.replaced() {
+            self.aircraft_flood.note(now_ms);
+        }
+        r
     }
 
     /// Aircraft, in table order (the order `json::state` lists them).
@@ -1271,7 +1290,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     }
 
     /// Drones close to crewed aircraft, most serious first (see
-    /// [`conflict`]).
+    /// [`conflict`]). Only confirmed drone tracks and established aircraft
+    /// take part ([`probation`]): a single forged frame of either cannot
+    /// raise the warning.
     pub fn conflicts(&self, now_ms: u64) -> heapless::Vec<conflict::Conflict, { conflict::MAX_CONFLICTS }> {
         let ctx = self.context(now_ms, None);
         conflict::find(self.tracks.iter(), self.aircraft.all(), &ctx)
@@ -1301,6 +1322,11 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.wifi_drones.expire(now_ms, &self.config);
         self.threats.expire(now_ms, self.config.remove_after_ms);
         if let Some(s) = self.flood.check(now_ms, probation::FLOOD_NEW_PER_S, probation::FloodTable::Drones) {
+            let _ = self.threats.ingest(0, true, &s, now_ms);
+        }
+        if let Some(s) =
+            self.aircraft_flood.check(now_ms, probation::AIRCRAFT_FLOOD_PER_S, probation::FloodTable::Aircraft)
+        {
             let _ = self.threats.ingest(0, true, &s, now_ms);
         }
         let before = self.tracks.len();

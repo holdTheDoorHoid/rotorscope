@@ -438,3 +438,103 @@ fn flood_threat_json_line() {
         assert!(threats::threat_line(t, &ctx, &mut buf).is_ok(), "{kind:?}");
     }
 }
+
+/// An ADS-B report (as the ADSBee or the hub's own decoder gives it),
+/// heard this second, `north_m` north of the hub.
+fn plane(icao: u32, north_m: f64, ft: i32) -> adsb::Aircraft {
+    adsb::Aircraft {
+        source: adsb::Source::ModeS,
+        icao,
+        flags: 0xff | (1 << adsb::flag::UPDATED_POSITION),
+        callsign: adsb::Callsign::new("TEST").unwrap(),
+        squawk: Some(0o1200),
+        category: 7,
+        lat_deg: CITY_HALL.0 + north_m / 111_000.0,
+        lon_deg: CITY_HALL.1,
+        baro_alt_ft: ft,
+        gnss_alt_ft: ft + 100,
+        direction_deg: 0.0,
+        speed_kt: 100,
+        baro_vrate_fpm: 0,
+        gnss_vrate_fpm: 0,
+        uat_emergency: 0,
+        nicnac: 0,
+        acdims: 0,
+        version: 2,
+        signal_dbm: -60,
+        signal_quality: 9,
+        frames_per_s: 3,
+        es_frames_per_s: 4,
+    }
+}
+
+/// Two real aircraft with a history, then 40 forged addresses a second, each
+/// "heard" once right at the hub, for 60 s: the real ones keep their
+/// entries and history, no fake ever makes the drone-near-aircraft warning,
+/// a new real aircraft still gets in and establishes itself, and the
+/// operator is told about the flood.
+#[test]
+fn aircraft_survive_a_flood_of_forged_addresses() {
+    let mut tr: Tracker = Tracker::default();
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
+    // A real, confirmed drone at the hub at 120 m: any aircraft "at the
+    // hub" would be a conflict.
+    tr.ingest(1, &real(9), 0);
+    tr.ingest(1, &real(9), 1_000);
+    let mut t = 0;
+    // 100 kt north: 51 m a second.
+    let fly = |t: u64, from: f64| from + 51.0 * t as f64 / 1000.0;
+    while t < 5_000 {
+        tr.ingest_aircraft(&plane(0xA11111, fly(t, -20_000.0), 3_000), t);
+        tr.ingest_aircraft(&plane(0xA22222, fly(t, 15_000.0), 6_000), t);
+        t += 1_000;
+    }
+    let firsts: std::vec::Vec<u64> = tr.aircraft().iter().map(|a| a.first_seen_ms).collect();
+    assert!(tr.aircraft().iter().all(|a| a.established()));
+    let mut fake = 0u32;
+    while t < 65_000 {
+        tr.ingest(1, &real(9), t);
+        tr.ingest_aircraft(&plane(0xA11111, fly(t, -20_000.0), 3_000), t);
+        tr.ingest_aircraft(&plane(0xA22222, fly(t, 15_000.0), 6_000), t);
+        if t >= 30_000 {
+            tr.ingest_aircraft(&plane(0xA33333, fly(t, 8_000.0), 4_000), t);
+        }
+        for _ in 0..40 {
+            tr.ingest_aircraft(&plane(0xC00000 + fake, 0.0, 500), t);
+            fake += 1;
+        }
+        tr.expire(t);
+        for (i, icao) in [0xA11111u32, 0xA22222].into_iter().enumerate() {
+            let a = tr.aircraft().iter().find(|a| a.key.icao == icao).expect("never displaced");
+            assert_eq!(a.first_seen_ms, firsts[i]);
+            assert!(a.established());
+        }
+        assert!(tr.conflicts(t).iter().all(|c| c.aircraft.icao < 0xC00000), "a fake raised a conflict at {t}");
+        t += 1_000;
+    }
+    let late = tr.aircraft().iter().find(|a| a.key.icao == 0xA33333).expect("a new real aircraft gets in");
+    assert!(late.established());
+    let flood = tr
+        .active_threats(t)
+        .find(|x| probation::flood_table(x) == Some(probation::FloodTable::Aircraft))
+        .expect("aircraft flood alarm");
+    assert!(probation::flood_rate(flood) >= probation::AIRCRAFT_FLOOD_PER_S);
+}
+
+/// A busy real sky (50 aircraft, more than the table holds, all heard every
+/// second) does not raise the aircraft flood alarm.
+#[test]
+fn a_busy_real_sky_is_not_an_aircraft_flood() {
+    let mut tr: Tracker = Tracker::default();
+    tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
+    let mut t = 0;
+    while t < 60_000 {
+        for k in 0..50u32 {
+            tr.ingest_aircraft(&plane(0xA00000 + k, 2_000.0 * f64::from(k) + 51.0 * t as f64 / 1000.0, 5_000), t);
+        }
+        tr.expire(t);
+        t += 1_000;
+    }
+    assert_eq!(tr.aircraft().len(), 32);
+    assert!(tr.threats().iter().all(|x| x.kind != link::ThreatKind::IdFlood));
+}

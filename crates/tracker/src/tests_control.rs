@@ -243,6 +243,8 @@ fn control_link_drone_near_aircraft_warns() {
         &crate::tests_conflict::heli(0xA1B2C3, 50.0, 400, 500, 7, 270.0, 60),
         0,
     );
+    // Standing is tested elsewhere (`tests_flood`).
+    tr.vouch_for_tests(0);
     let c = tr.take_new_conflict(100).expect("conflict");
     assert_eq!(c.level, crate::conflict::Level::Warning);
     let drone = tr.get(c.drone).unwrap();

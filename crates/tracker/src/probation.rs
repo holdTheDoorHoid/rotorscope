@@ -101,9 +101,13 @@ pub const PROMOTE_PER_S: u32 = 4;
 pub const FLOOD_WINDOW_S: u64 = 5;
 /// New drone identities a second (averaged over the window) that raise it.
 pub const FLOOD_NEW_PER_S: u32 = 20;
-/// New aircraft addresses a second that were refused or thrown out before
-/// they established themselves, averaged over the window: raise it for ADS-B.
-pub const AIRCRAFT_FLOOD_PER_S: u32 = 10;
+/// Unproven aircraft, still being reported, thrown out a second for newer
+/// ones (averaged over the window): raise it for ADS-B. A real sky does not
+/// do this (real aircraft are heard every second, so never quiet enough to
+/// be replaced); a forged-address flood replaces up to about
+/// `A / 2 / 1.5 s` (10 a second for 32 entries), so the line sits at half
+/// of that.
+pub const AIRCRAFT_FLOOD_PER_S: u32 = 5;
 /// New control links a second (the table holds 8), averaged: raise it.
 pub const CONTROL_FLOOD_PER_S: u32 = 2;
 

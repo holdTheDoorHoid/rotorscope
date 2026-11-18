@@ -215,29 +215,30 @@ fn full_table_keeps_the_nearest() {
         alt_m: None,
         fix_ms: 0,
     };
-    let mut t: AircraftTable<3> = AircraftTable::new();
+    // Four entries: at most three established, at most two unproven.
+    let mut t: AircraftTable<4> = AircraftTable::new();
+    let est = |t: &mut AircraftTable<4>, icao: u32, d: f64, from: u64| {
+        let mut r = None;
+        for k in 0..3 {
+            r = t.ingest(&report(icao, d, 5_000, 3), from + k * 1_000, Some(&own));
+        }
+        r
+    };
     for (icao, d) in [(1, 10_000.0), (2, 20_000.0), (3, 30_000.0)] {
-        assert!(
-            t.ingest(&report(icao, d, 5_000, 3), 0, Some(&own))
-                .is_some()
-        );
+        assert!(est(&mut t, icao, d, 0).is_some());
     }
-    // Nearer than the farthest: the farthest goes.
-    assert!(
-        t.ingest(&report(4, 5_000.0, 5_000, 3), 0, Some(&own))
-            .is_some()
-    );
+    assert!(t.all().iter().all(|a| a.established()));
+    // A nearer one, once established, pushes out the farthest.
+    assert!(est(&mut t, 4, 5_000.0, 3_000).is_some());
     let mut icaos: std::vec::Vec<u32> = t.all().iter().map(|a| a.key.icao).collect();
     icaos.sort();
     assert_eq!(icaos, [1, 2, 4]);
-    // Farther than everyone: not added.
-    assert_eq!(
-        t.ingest(&report(5, 50_000.0, 5_000, 3), 0, Some(&own)),
-        None
-    );
+    // Farther than every established one: it may prove itself, then goes.
+    assert_eq!(est(&mut t, 5, 50_000.0, 6_000), None);
+    assert!(t.get(AircraftKey { icao: 5, source: Source::ModeS }).is_none());
     // An update to an aircraft already held always lands.
     assert!(
-        t.ingest(&report(2, 60_000.0, 5_000, 3), 1, Some(&own))
+        t.ingest(&report(2, 60_000.0, 5_000, 3), 9_000, Some(&own))
             .is_some()
     );
 
