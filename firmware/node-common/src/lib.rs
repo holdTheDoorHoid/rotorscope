@@ -19,6 +19,7 @@
 
 #[cfg(feature = "wirebus")]
 pub mod bus;
+pub mod fault;
 
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
