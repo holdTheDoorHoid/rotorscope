@@ -272,3 +272,84 @@ beacons than the 0.4/s with the controller stop, but commands still arrive). Eac
 | Wi-Fi drone makers (Tello, Parrot, ...) | a real one; we never imitate a maker's network |
 | China GB 46750 Remote ID | a test-beacon mode or a DJI on 2026 firmware |
 | wfb-ng's real LDPC/STBC video | OpenIPC hardware |
+
+## Crash recovery (2026-11-18, not yet run on hardware)
+
+Every board now reboots after a panic, and every board except `rid-beacon` has a hang watchdog
+(the chip's RTC watchdog) that resets it if its main work stops. After any restart the board's
+`hello` line says why it last reset: `"reset":"power_on"`, `"software"` (a panic, or a restart the
+firmware chose: image switch, BLE host restart, gateway epoch roll-over), `"watchdog"`, `"usb"`
+(the flasher or a monitor reset it), `"brownout"`. The P4 hub says `last reset: ...` in its
+`hub-p4: hello` line and in the evidence log's boot event.
+
+| Board | Watchdog fed by | Timeout | Panic: back after | Hang: back after |
+|---|---|---|---|---|
+| `gateway` | relay loop, only while the beacon loop is alive (5 s) | 10 s | ~0.5 s + boot | ~10 s |
+| `node-wifi` (S3, C5, `band24`, `espnow`, `wirebus`) | channel hopper, every hop | 30 s (a hub plan may dwell 10 s) | ~0.5 s + boot | ~30 s |
+| `node-sdr` | capture loop, every pass, and every dump line | 10 s | ~0.5 s + boot | ~10 s |
+| `node-ble` (S3, C5) | stats task, once a second | 10 s | ~0.5 s + boot | ~10 s |
+| `node-lr` | stats loop in `main`, once a second | 10 s | ~0.5 s + boot | ~10 s |
+| `hub-p4` | main loop, every pass | 30 s | 0.5 s (5 s within 10 s of boot) + boot | ~30 s |
+| `rid-beacon` | (no watchdog) | | ~0.5 s + boot | |
+
+The RTC watchdog runs from the chip's internal slow oscillator, so "10 s" may come out a few
+percent either way. "Boot" is the board's normal start-up (a second or two for the nodes; longer for
+the P4, which tests its PSRAM first).
+
+### The `faulttest` build
+
+To trigger the faults on purpose, build with the feature `faulttest`. It is in no `default` list, so
+a normal build cannot be made to panic or hang from the console; its `hello` line says
+`"faulttest":true` (P4: `FAULT TEST BUILD`). Type a whole line and Enter:
+
+* `fault panic`: the board panics (backtrace on USB) and must come back on its own.
+* `fault hang`: the board stops feeding the watchdog (spins without yielding) and must come back
+  after the timeout above.
+
+Nodes and the gateway read it on their USB-Serial-JTAG port (the same port their JSON comes out
+of); node-sdr through its normal console; the P4 hub on the USB-C (CH340) console, where `f`
+starts the line (Esc cancels).
+
+| Board | Build (from the firmware's folder, as usual, plus the feature) |
+|---|---|
+| gateway | `cargo build --release --features faulttest` |
+| node-wifi C5 | in `c5/`: `cargo build --release --features esp32c5,faulttest` (add `band24`, `espnow` as for `fw24` / `fw24-now`) |
+| node-wifi S3 | in `s3/`: `cargo build --release --features esp32s3,faulttest` |
+| node-sdr | in `c5/`: `cargo build --release --features faulttest` |
+| node-ble S3 / C5 | `cargo build --release --features faulttest` / `cargo +stable build --release --no-default-features --features esp32c5,faulttest --target riscv32imac-unknown-none-elf` |
+| node-lr | `cargo build --release --features faulttest` |
+| hub-p4 | `cargo build --release --features faulttest` (flash as in firmware/hub-p4/BRINGUP.md) |
+
+### The checklist (one board at a time)
+
+Flash the `faulttest` build with the board's usual tool (`tools/dev-board.sh <elf> 90 <board>` for
+the S3 and C5 boards; the P4 as in its BRINGUP.md). Note: opening the serial port resets the board,
+so the first `hello` after flashing says `"usb"` or `"power_on"`, not a fault.
+
+1. **First boot.** The `hello` line has `"faulttest":true` and a `reset` field. P4: the boot log
+   also has `hub-p4: watchdog on: resets the chip if the main loop stops for N s`, with N close
+   to 30 (between 15 and 60 is accepted; anything else prints `watchdog LEFT OFF` and is a FAIL to
+   report with the numbers it shows).
+2. **Normal running, 5 minutes.** No restart (`up_us` / uptime keeps growing, no second `hello`).
+   This is the important one on the P4: run it with the SD card in, an airspace pack on the card
+   (so the pack's load and check happen during the run) and the screen on. A restart here means
+   the timeout is too short for something legitimate: record the last lines before it.
+3. **Panic.** Type `fault panic` (for example
+   `tools/dev-board.sh --log 40 c5b --send $'fault panic\r'`). Expect the `PANIC` banner with
+   `faulttest: panic requested on the console`, a backtrace, then a fresh `hello` with
+   `"reset":"software"` within the time in the table.
+4. **Hang.** Type `fault hang` (`--send $'fault hang\r'`, reading for at least the timeout + 20 s).
+   Expect the `faulttest ... hang` line, silence for about the timeout, then a fresh `hello` with
+   `"reset":"watchdog"`. Time it: it should match the table within ~20 %.
+5. **Hub view (nodes behind a hub).** During 3 and 4 the hub shows the node going quiet, then its
+   Hello again; nothing else on the hub changes.
+6. **P4 only: evidence.** After step 4, the evidence file's boot event for the new boot ends with
+   `last reset: watchdog` (console `r` replays it, or read the card on the laptop).
+7. **P4 only: panic at start-up.** Not testable from the console; it is covered by the 5 s wait in
+   `fault.rs`. If you ever see a P4 boot-looping, the panic message repeats every ~5 s plus boot.
+8. Finish by flashing the normal build again (no `faulttest`) and checking its `hello` has
+   `"faulttest":false`.
+
+Under a Wi-Fi frame flood, `node-wifi` must not reset: the drain task now yields to the hopper
+every 2 ms. If a busy bench (many access points, a `rid-beacon` at 10 Hz) ever shows
+`"reset":"watchdog"` on a node-wifi without `fault hang`, that is a FAIL worth reporting.
