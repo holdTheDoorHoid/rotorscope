@@ -52,6 +52,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
         },
     }
     status_bar(s, p, d)?;
+    caveats(s, p, d)?;
     if let Some(a) = ui.alert() {
         alert(a.key, a.more, s, p, d)?;
     } else if ui.page_toast() {
@@ -188,6 +189,12 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
 
     match s.sd {
         SdLog::Off => {}
+        // The CSV log records but evidence does not reach the card: never
+        // show REC for that.
+        SdLog::Recording if s.caveats.evidence.is_some() => {
+            let w = width("NO EVID", F_BAR) + 4;
+            text_boxed(d, "NO EVID", rx - w, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        }
         SdLog::Recording => {
             let l = text_right(d, "REC", rx, y, F_BAR, p.fg)?;
             circle(d, Point::new(l - 7, BAR_H / 2), 4, p.rec, true, 1)?;
@@ -203,6 +210,26 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     }
     let _ = x;
     hline(d, 0, WIDTH, BAR_H, p.grid)
+}
+
+/// Height of one caveat line at the bottom edge.
+const CAVEAT_H: i32 = 11;
+
+/// The caveats strip (`Caveats::lines`): inverse lines along the bottom
+/// edge, on every page, for as long as they hold.
+fn caveats<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
+    let lines = s.caveats.lines();
+    let n = lines.iter().flatten().count() as i32;
+    let mut y = HEIGHT - n * CAVEAT_H;
+    // Whole characters that fit (the lines are ASCII).
+    let (cw, sp) = (F_SMALL.character_size.width as i32, F_SMALL.character_spacing as i32);
+    let fits = ((WIDTH - 6 + sp) / (cw + sp)) as usize;
+    for l in lines.iter().flatten() {
+        fill(d, 0, y, WIDTH, CAVEAT_H, p.accent)?;
+        text(d, &l[..l.len().min(fits)], 3, y + 1, F_SMALL, p.accent_ink)?;
+        y += CAVEAT_H;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,6 +1351,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             let mut b = String::new();
             let _ = b.push_str(match s.sd {
                 SdLog::Off => "off",
+                SdLog::Recording if s.caveats.evidence.is_some() => "CSV only - NO EVIDENCE",
                 SdLog::Recording => "recording",
                 SdLog::NoCard => "no card",
                 SdLog::Error => "ERROR - not recording",

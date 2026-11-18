@@ -374,6 +374,104 @@ pub enum SdLog {
     Error,
 }
 
+/// Facts about this unit that must stay on screen for as long as they hold
+/// (P4 hub): what its evidence signatures are worth, a bench build, an open
+/// (unauthenticated) node link, evidence not being written. Drawn as a strip
+/// along the bottom edge on every page. The default shows nothing, so hubs
+/// that do not fill it (the S3 hub) are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Caveats {
+    /// The key the evidence log is signed with.
+    pub key: EvidenceKey,
+    /// The firmware was built with bench-only features (fake data, debug
+    /// doors).
+    pub bench: bool,
+    /// The gateway reports an open link: no ESP-NOW key, so anyone nearby
+    /// can inject node reports and commands.
+    pub link_open: bool,
+    /// Evidence records are not reaching the card; `None` while they are.
+    pub evidence: Option<EvidenceStop>,
+}
+
+/// The evidence signing key's class, as far as the screen is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvidenceKey {
+    /// Nothing to say (no evidence log, or a hardware key).
+    #[default]
+    NotShown,
+    /// The published test key: anyone can sign with it.
+    Test,
+    /// A development key in the firmware image: not evidence-grade.
+    Development,
+}
+
+/// Why evidence is not being written, and how much is waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvidenceStop {
+    pub why: EvidenceStopWhy,
+    /// Records queued in RAM, not yet safely on the card.
+    pub waiting: u32,
+    /// Records that could not even be queued (counted since boot).
+    pub dropped: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceStopWhy {
+    /// No card answering.
+    NoCard,
+    /// The card answered but failed (full, write error, not FAT).
+    CardError,
+    /// The card works (the CSV log may be recording) but the evidence
+    /// folder or file could not be opened; retried.
+    FileError,
+}
+
+impl EvidenceStopWhy {
+    pub fn text(self) -> &'static str {
+        match self {
+            EvidenceStopWhy::NoCard => "no SD",
+            EvidenceStopWhy::CardError => "SD error",
+            EvidenceStopWhy::FileError => "file error",
+        }
+    }
+}
+
+impl Caveats {
+    /// The bottom strip's lines, top to bottom (`None`: no line). The first
+    /// is the evidence state (only while evidence is not being written),
+    /// the second the build marks (key class, bench build, open link).
+    pub fn lines(&self) -> [Option<String<64>>; 2] {
+        use core::fmt::Write;
+        let ev = self.evidence.map(|e| {
+            let mut s = String::new();
+            let _ = write!(s, "NO EVIDENCE ({}): {} waiting", e.why.text(), e.waiting);
+            if e.dropped > 0 {
+                let _ = write!(s, ", {} dropped", e.dropped);
+            }
+            s
+        });
+        let mut marks: String<64> = String::new();
+        let mut add = |t: &str| {
+            if !marks.is_empty() {
+                let _ = marks.push_str("  ");
+            }
+            let _ = marks.push_str(t);
+        };
+        match self.key {
+            EvidenceKey::NotShown => {}
+            EvidenceKey::Test => add("TEST KEY: log not evidence"),
+            EvidenceKey::Development => add("DEV KEY: not evidence-grade"),
+        }
+        if self.bench {
+            add("BENCH BUILD");
+        }
+        if self.link_open {
+            add("OPEN LINK");
+        }
+        [ev, (!marks.is_empty()).then_some(marks)]
+    }
+}
+
 /// The nearest aircraft, for the health page.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NearestAircraft {
@@ -579,6 +677,9 @@ pub struct UiState {
     /// GPS jamming or spoofing in the area, seen through aircraft and
     /// drones (tracker `area_gnss`); `None` when neither is raised.
     pub area_gnss: Option<AreaGnssView>,
+    /// Build and evidence facts kept on screen (P4 hub); the default
+    /// shows nothing.
+    pub caveats: Caveats,
 }
 
 /// GPS interference in the area (tracker `area_gnss`), for the status bar

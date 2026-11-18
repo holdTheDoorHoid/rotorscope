@@ -444,3 +444,22 @@ fn ages() {
     assert_eq!(draw::age(185_000).as_str(), "3m");
     assert_eq!(draw::uptime(3_725).as_str(), "1h02m");
 }
+
+#[test]
+fn caveat_lines() {
+    assert_eq!(Caveats::default().lines(), [None, None]);
+    let mut c = Caveats { key: EvidenceKey::Test, ..Caveats::default() };
+    let l = c.lines();
+    assert!(l[0].is_none());
+    assert_eq!(l[1].as_deref(), Some("TEST KEY: log not evidence"));
+    c.bench = true;
+    c.link_open = true;
+    assert_eq!(c.lines()[1].as_deref(), Some("TEST KEY: log not evidence  BENCH BUILD  OPEN LINK"));
+    c.key = EvidenceKey::Development;
+    assert_eq!(c.lines()[1].as_deref(), Some("DEV KEY: not evidence-grade  BENCH BUILD  OPEN LINK"));
+    c = Caveats { evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 12, dropped: 0 }), ..Caveats::default() };
+    assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (no SD): 12 waiting"));
+    assert!(c.lines()[1].is_none());
+    c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 3, dropped: 9 });
+    assert_eq!(c.lines()[0].as_deref(), Some("NO EVIDENCE (file error): 3 waiting, 9 dropped"));
+}
