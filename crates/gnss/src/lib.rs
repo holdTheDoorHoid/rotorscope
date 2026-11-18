@@ -29,6 +29,8 @@ mod parser;
 pub mod quectel;
 pub mod sats;
 pub mod sky;
+pub mod timeguard;
+pub mod trust;
 mod ubx;
 
 pub use config::{
@@ -41,7 +43,7 @@ pub use sky::{Band, ConstellationView, SkyView, System};
 pub use parser::{Event, Events, Parser, Stats, MAX_NMEA_LEN, MAX_UBX_PAYLOAD};
 pub use ubx::{build_frame, fletcher, MonRf, MonVer, NavClock, NavStatus, RfBlock, ValGet, ValGetItem};
 pub use sats::{Sat, SatTable};
-pub use integrity::{Monitor, State as IntegrityState, Status as IntegrityStatus};
+pub use integrity::{HomeEvent, HomeOrigin, Monitor, State as IntegrityState, Status as IntegrityStatus};
 
 #[cfg(test)]
 extern crate std;
