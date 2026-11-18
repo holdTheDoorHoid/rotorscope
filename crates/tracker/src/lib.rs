@@ -1721,6 +1721,8 @@ mod tests_claims;
 #[cfg(test)]
 mod tests_conflict;
 #[cfg(test)]
+mod tests_deaf;
+#[cfg(test)]
 mod tests_control;
 #[cfg(test)]
 mod tests_flood;

@@ -717,37 +717,127 @@ impl ThreatTable {
 
 /// Nodes watched for going deaf.
 pub const MAX_WATCHED: usize = 16;
-/// A node must have been heard this long before its normal rate is trusted.
+/// A node must have been heard this long (by its own uptime) before its
+/// normal rate is trusted. Until then the normal is a plain average.
 pub const DEAF_LEARN_MS: u64 = 60_000;
 /// Below this normal rate (frames/s) a node is too quiet to judge: a quiet
-/// place, not a jammer, can explain a drop.
+/// place, not a jammer, can explain a drop. Also the floor under which
+/// re-learning downward never takes a normal that was above it.
 pub const DEAF_MIN_NORMAL: f32 = 20.0;
 /// Deaf: hearing less than this fraction of its normal rate...
 pub const DEAF_FRACTION: f32 = 0.10;
 /// ...for at least this long.
 pub const DEAF_HOLD_MS: u64 = 10_000;
-/// The normal rate follows the measured one with this weight per Stats
-/// report (about a 30 s memory at one report a second), and only while the
-/// node is not deaf, so a jammer is never learned as normal.
-const DEAF_ALPHA: f32 = 1.0 / 30.0;
+/// After learning, the normal rises towards a higher rate with this time
+/// constant (node uptime)...
+pub const DEAF_UP_TAU_MS: u64 = 600_000;
+/// ...and one report counts as at most this multiple of the normal, so a
+/// flood or a busy minute barely moves it (a raw flood of any size for
+/// 3 minutes: at most x1.35).
+pub const DEAF_UP_CAP: f32 = 2.0;
+/// The normal sinks towards a lower rate with this time constant, also
+/// while the node reads deaf (never frozen), but not under
+/// [`DEAF_MIN_NORMAL`] once it was above it.
+pub const DEAF_DOWN_TAU_MS: u64 = 180_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Watched {
     node: u8,
-    /// Node uptime and running frame count at the previous Stats report.
+    /// Node uptime and running counters at the previous Stats report.
     last_uptime_us: u64,
     last_frames: u32,
-    /// Hub time the current baseline started learning.
-    since_ms: u64,
+    last_dropped: u32,
+    /// Node uptime spent learning the current baseline, ms (stops counting
+    /// at [`DEAF_LEARN_MS`]).
+    learned_ms: u64,
     normal: f32,
-    /// Latest measured rate.
+    /// Latest measured rate (frames seen a second).
     rate: f32,
     /// Hub time the rate first fell below the deaf line (cleared on recovery).
     low_since: Option<u64>,
+    /// The normal when this low spell's alarm was raised (`None`: not raised).
+    raised_at: Option<f32>,
+    /// A re-learn notice waiting for [`DeafWatch::take_relearned`].
+    notice: Option<Relearned>,
+}
+
+impl Watched {
+    fn new(node: u8, uptime_us: u64, frames: u32, dropped: u32) -> Self {
+        Self {
+            node,
+            last_uptime_us: uptime_us,
+            last_frames: frames,
+            last_dropped: dropped,
+            learned_ms: 0,
+            normal: 0.0,
+            rate: 0.0,
+            low_since: None,
+            raised_at: None,
+            notice: None,
+        }
+    }
+
+    fn learned(&self) -> bool {
+        self.learned_ms >= DEAF_LEARN_MS
+    }
+
+    /// Move the normal towards `kept` (frames/s) over `dt_ms` of node time.
+    fn learn(&mut self, kept: f32, dt_ms: u64) {
+        if !self.learned() {
+            // A plain time-weighted average of the first minute.
+            let total = self.learned_ms + dt_ms;
+            self.normal += (kept - self.normal) * (dt_ms as f32 / total.max(1) as f32);
+            self.learned_ms = total.min(DEAF_LEARN_MS);
+            return;
+        }
+        if kept > self.normal {
+            let k = (dt_ms as f32 / DEAF_UP_TAU_MS as f32).min(1.0);
+            let s = kept.min(self.normal * DEAF_UP_CAP);
+            self.normal += (s - self.normal) * k;
+        } else {
+            let k = (dt_ms as f32 / DEAF_DOWN_TAU_MS as f32).min(1.0);
+            let floor = self.normal.min(DEAF_MIN_NORMAL);
+            self.normal = (self.normal + (kept - self.normal) * k).max(floor);
+        }
+    }
+}
+
+/// A deaf-node alarm that ended because what is normal for the node was
+/// re-learned (a lasting lower level accepted), not because it recovered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Relearned {
+    pub node: u8,
+    /// Frames a second the node hears now, and its normal when the alarm
+    /// was raised.
+    pub rate: f32,
+    pub was: f32,
 }
 
 /// Watches each node's own "frames seen" counter (from its Stats reports)
 /// and notices when it collapses: the hub-side [`ThreatKind::Blinded`].
+///
+/// - **Normal rate.** Learned by the node's uptime, not per report: a plain
+///   average over the first [`DEAF_LEARN_MS`], then slowly: up with
+///   [`DEAF_UP_TAU_MS`] (each report capped at [`DEAF_UP_CAP`] times the
+///   normal), down with [`DEAF_DOWN_TAU_MS`]. It learns from frames
+///   **kept**: seen minus the node's `dropped` total (receive-pool drops,
+///   which `frames_seen` includes, and hub frames shed), so a flood the
+///   node sheds, such as a forged Remote ID flood, is not learned as
+///   normal. A flood the node does not shed (header-only frames are only
+///   counted) is held back by the cap instead.
+/// - **Deaf.** Frames *seen* under [`DEAF_FRACTION`] of the normal for
+///   [`DEAF_HOLD_MS`], once learned and with a normal of at least
+///   [`DEAF_MIN_NORMAL`]. Judged on seen, never kept: `dropped` also counts
+///   hub frames not made from management frames, so kept can undercount,
+///   and a node hearing a flood is not deaf.
+/// - **Never frozen.** While deaf the normal keeps sinking (after the hold,
+///   so the alarm itself is judged against the old normal), floored at
+///   [`DEAF_MIN_NORMAL`]: a node down to a lasting fraction `p` of its
+///   normal is accepted as the new normal after about
+///   `DEAF_HOLD_MS + DEAF_DOWN_TAU_MS * ln((1 - p) / 9p)` (5 %: ~145 s,
+///   2 %: ~5 min, 1 %: ~7 min) and the alarm then ends
+///   ([`THREAT_ACTIVE_MS`] later), with a [`Relearned`] notice. A node
+///   that hears under a tenth of the floor (2 frames/s) stays raised.
 ///
 /// A role or plan change, or a node reboot, restarts the learning, since
 /// what is normal depends on what the node listens to.
@@ -767,78 +857,86 @@ impl DeafWatch {
     }
 
     /// Normal and current rate of `node`, frames/s, once learned.
-    pub fn rates(&self, node: u8, now_ms: u64) -> Option<(f32, f32)> {
+    pub fn rates(&self, node: u8, _now_ms: u64) -> Option<(f32, f32)> {
         let w = self.v.iter().find(|w| w.node == node)?;
-        (now_ms.saturating_sub(w.since_ms) >= DEAF_LEARN_MS).then_some((w.normal, w.rate))
+        w.learned().then_some((w.normal, w.rate))
     }
 
-    /// One Stats report. Returns the sighting to raise when the node has
-    /// been deaf long enough (again every report while it stays deaf).
-    pub fn stats(&mut self, node: u8, uptime_us: u64, frames_seen: u32, now_ms: u64) -> Option<ThreatSighting> {
+    /// The next alarm that ended because the node's normal was re-learned.
+    pub fn take_relearned(&mut self) -> Option<Relearned> {
+        self.v.iter_mut().find_map(|w| w.notice.take())
+    }
+
+    /// One Stats report: the node's uptime and running totals of
+    /// management frames seen and of frames dropped. Returns the sighting
+    /// to raise when the node has been deaf long enough (again every report
+    /// while it stays deaf).
+    pub fn stats(
+        &mut self,
+        node: u8,
+        uptime_us: u64,
+        frames_seen: u32,
+        dropped: u32,
+        now_ms: u64,
+    ) -> Option<ThreatSighting> {
         let Some(i) = self.v.iter().position(|w| w.node == node) else {
             if self.v.is_full() {
                 self.v.remove(0);
             }
-            let _ = self.v.push(Watched {
-                node,
-                last_uptime_us: uptime_us,
-                last_frames: frames_seen,
-                since_ms: now_ms,
-                normal: 0.0,
-                rate: 0.0,
-                low_since: None,
-            });
+            let _ = self.v.push(Watched::new(node, uptime_us, frames_seen, dropped));
             return None;
         };
         let w = &mut self.v[i];
         // Rebooted (uptime went back) or counter reset: start again.
-        if uptime_us <= w.last_uptime_us || frames_seen < w.last_frames {
-            *w = Watched {
-                node,
-                last_uptime_us: uptime_us,
-                last_frames: frames_seen,
-                since_ms: now_ms,
-                normal: 0.0,
-                rate: 0.0,
-                low_since: None,
-            };
+        if uptime_us <= w.last_uptime_us || frames_seen < w.last_frames || dropped < w.last_dropped {
+            *w = Watched::new(node, uptime_us, frames_seen, dropped);
             return None;
         }
-        let dt_s = (uptime_us - w.last_uptime_us) as f32 / 1e6;
-        let rate = (frames_seen - w.last_frames) as f32 / dt_s.max(0.001);
+        let dt_us = uptime_us - w.last_uptime_us;
+        let dt_s = (dt_us as f32 / 1e6).max(0.001);
+        let seen = frames_seen - w.last_frames;
+        let kept = seen.saturating_sub(dropped - w.last_dropped);
+        let rate = seen as f32 / dt_s;
+        let kept = kept as f32 / dt_s;
         w.last_uptime_us = uptime_us;
         w.last_frames = frames_seen;
+        w.last_dropped = dropped;
         w.rate = rate;
-        let learned = now_ms.saturating_sub(w.since_ms) >= DEAF_LEARN_MS;
+        let dt_ms = dt_us / 1000;
         let deaf_line = w.normal * DEAF_FRACTION;
-        if learned && w.normal >= DEAF_MIN_NORMAL && rate < deaf_line {
+        if w.learned() && w.normal >= DEAF_MIN_NORMAL && rate < deaf_line {
             let since = *w.low_since.get_or_insert(now_ms);
-            if now_ms.saturating_sub(since) >= DEAF_HOLD_MS {
-                let pct = ((rate / w.normal) * 100.0).clamp(0.0, 100.0) as u32;
-                return Some(ThreatSighting {
-                    kind: ThreatKind::Blinded,
-                    channel: 0,
-                    freq: 0,
-                    width_khz: 0,
-                    level: 0,
-                    count: 0,
-                    window_ms: DEAF_HOLD_MS as u32,
-                    source: [0; 6],
-                    target: [0; 6],
-                    detail: pct,
-                    ssid: heapless::String::new(),
-                    uptime_us,
-                });
+            if now_ms.saturating_sub(since) < DEAF_HOLD_MS {
+                return None;
             }
-            return None;
+            w.raised_at.get_or_insert(w.normal);
+            let pct = ((rate / w.normal) * 100.0).clamp(0.0, 100.0) as u32;
+            // Keep learning (downward) while raised: never frozen.
+            w.learn(kept, dt_ms);
+            return Some(ThreatSighting {
+                kind: ThreatKind::Blinded,
+                channel: 0,
+                freq: 0,
+                width_khz: 0,
+                level: 0,
+                count: 0,
+                window_ms: DEAF_HOLD_MS as u32,
+                source: [0; 6],
+                target: [0; 6],
+                detail: pct,
+                ssid: heapless::String::new(),
+                uptime_us,
+            });
         }
         w.low_since = None;
-        // Learn: quickly at first (plain average), then slowly.
-        if w.normal == 0.0 {
-            w.normal = rate;
-        } else {
-            w.normal += (rate - w.normal) * DEAF_ALPHA;
+        if let Some(was) = w.raised_at.take() {
+            // Over the line again: back to what it heard when raised, or
+            // the line came down to it (re-learned)?
+            if rate < was * DEAF_FRACTION {
+                w.notice = Some(Relearned { node, rate, was });
+            }
         }
+        w.learn(kept, dt_ms);
         None
     }
 }
@@ -877,7 +975,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         now_ms: u64,
     ) -> Option<ThreatId> {
         self.shed.stats(node, uptime_us, dropped, now_ms);
-        let s = self.deaf.stats(node, uptime_us, frames_seen, now_ms)?;
+        let s = self.deaf.stats(node, uptime_us, frames_seen, dropped, now_ms)?;
         self.expire(now_ms);
         self.threats.ingest(node, true, &s, now_ms)
     }
@@ -1058,6 +1156,13 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// Normal and current frame rate of a node (frames/s), once learned.
     pub fn node_rates(&self, node: u8, now_ms: u64) -> Option<(f32, f32)> {
         self.deaf.rates(node, now_ms)
+    }
+
+    /// The next "node blinded" alarm that ended because the node's lower
+    /// rate was accepted as its new normal (not because it recovered): the
+    /// hub says so on its console and in the evidence log.
+    pub fn take_deaf_relearn(&mut self) -> Option<Relearned> {
+        self.deaf.take_relearned()
     }
 }
 
