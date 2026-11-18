@@ -383,12 +383,14 @@ Now:
 | node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-lr | `faulttest` | |
 | node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
+| hub (S3/C5 web head) | `demo` (fake drones, a made-up position, the build machine's clock), `open-hotspot` (no hotspot password) | |
 | hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` (console `p`: own position to a fixed test point) | (`AIRSPACE_PAK` only with `embedpack`) |
 
 Not fenced, on purpose: `rid-beacon` (it is the test transmitter; nothing fields it), hub-p4
 `show-link-ids` (an operator privacy choice, not a bench aid), `modes` (a field feature), node-wifi
-`ROTORSCOPE_ESPNOW_RATE` (a radio tuning). The S3 web head (`firmware/hub`) is fenced by its own
-package.
+`ROTORSCOPE_ESPNOW_RATE` (a radio tuning). The S3 web head (`firmware/hub`) has `"bench"` in its
+`boot` line (it has no `hello` line) and in `/api/state`, where the phone page shows a striped
+**BENCH BUILD, NOT FOR USE** banner.
 
 **Link key (since the same date).** A firmware build with ESP-NOW and no `tools/link.key` stops
 (docs/ESPNOW.md "Securing the link"); `ROTORSCOPE_LINK_KEY_FILE=none` builds an open kit on purpose,

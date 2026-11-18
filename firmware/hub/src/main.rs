@@ -90,15 +90,16 @@ compile_error!("`adsbee` and `gps-uart` both need the S3's third UART; use the I
 
 const CHIP: &str = if cfg!(feature = "esp32s3") { "esp32s3" } else { "esp32c5" };
 
-/// Bench-only features compiled in (`build.rs` refuses them without
-/// `ROTORSCOPE_BENCH=1`). Listed in the boot line and in `/api/state`
-/// (`bench`), where the phone page shows a banner.
-pub const BENCH: &[&str] = match (cfg!(feature = "demo"), cfg!(feature = "open-hotspot")) {
-    (true, true) => &["demo", "open-hotspot"],
-    (true, false) => &["demo"],
-    (false, true) => &["open-hotspot"],
-    (false, false) => &[],
-};
+/// Bench-only features compiled in, comma separated, empty for a deployable
+/// build: the shared fence (`build.rs`, crates/link/src/benchfence.rs)
+/// refuses them without `ROTORSCOPE_BENCH=1`. Listed in the boot line and in
+/// `/api/state` (`bench`), where the phone page shows a banner.
+pub const BENCH_LIST: &str = env!("ROTORSCOPE_BENCH_LIST");
+
+/// [`BENCH_LIST`], one feature at a time.
+pub fn bench() -> impl Iterator<Item = &'static str> {
+    BENCH_LIST.split(',').filter(|s| !s.is_empty())
+}
 
 /// Heap in RAM that the second-stage bootloader used and gives back (the
 /// largest block that is otherwise wasted), plus a block of ordinary DRAM.
@@ -148,7 +149,7 @@ struct BootLine {
     chip: &'static str,
     proto: u8,
     /// Bench-only features in this build (empty for a deployable one).
-    bench: &'static [&'static str],
+    bench: heapless::Vec<&'static str, 4>,
     demo: bool,
     station: bool,
     open_hotspot: bool,
@@ -173,6 +174,15 @@ struct BootLine {
     show_link_ids: bool,
     heap_free: usize,
     pins: &'static [(&'static str, u8)],
+}
+
+/// `{"t":"warn","what":"bench_build","tag":"bench-build:<list>",...}`.
+#[derive(Serialize)]
+struct BenchWarn {
+    t: &'static str,
+    what: &'static str,
+    tag: &'static str,
+    note: &'static str,
 }
 
 static HUB: StaticCell<Hub> = StaticCell::new();
@@ -215,7 +225,7 @@ async fn main(spawner: Spawner) -> ! {
         ver: env!("CARGO_PKG_VERSION"),
         chip: CHIP,
         proto: link::PROTOCOL_VERSION,
-        bench: BENCH,
+        bench: bench().take(4).collect(),
         demo: cfg!(feature = "demo"),
         station: cfg!(hub_station),
         open_hotspot: hotspot::OPEN,
@@ -232,6 +242,16 @@ async fn main(spawner: Spawner) -> ! {
         heap_free: esp_alloc::HEAP.free(),
         pins: pins::TABLE,
     });
+    // Bench features compiled in: say so, with the tag tools/dev-board.sh
+    // looks for in the ELF (as every other firmware does).
+    if !BENCH_LIST.is_empty() {
+        usb::line(&BenchWarn {
+            t: "warn",
+            what: "bench_build",
+            tag: env!("ROTORSCOPE_BENCH_TAG"),
+            note: "BENCH BUILD: never leave it on a fielded unit",
+        });
+    }
 
     // ---- Node links, on the interrupt executor (see links.rs) ----
     let uart_exec = UART_EXECUTOR.init(InterruptExecutor::new(peripherals.FROM_CPU_INTR2));

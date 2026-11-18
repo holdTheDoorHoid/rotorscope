@@ -69,7 +69,7 @@ const HUB_FIELDS_MAX: usize = 64;
 fn hub_fields() -> heapless::String<HUB_FIELDS_MAX> {
     let mut f = heapless::String::new();
     let _ = f.push_str("\"bench\":[");
-    for (i, b) in crate::BENCH.iter().enumerate() {
+    for (i, b) in crate::bench().enumerate() {
         if i > 0 {
             let _ = f.push(',');
         }

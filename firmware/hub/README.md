@@ -41,10 +41,13 @@ cd firmware/hub/c5 && cargo fw
 
 **Bench builds are fenced off.** `demo` (fake drones, a made-up own position, the build machine's
 clock) and `open-hotspot` (no password) make a unit unfit for use, so `build.rs` stops any build with
-either of them unless the environment has `ROTORSCOPE_BENCH=1` (the convention every Rotorscope
-firmware follows). Such a build says so three times: a cargo warning, `"bench":["demo",...]` in the
-USB boot line, and `"bench"` in `/api/state`, which the phone page shows as a striped
-**BENCH BUILD, NOT FOR USE** banner at the top of every view.
+either of them unless the environment has `ROTORSCOPE_BENCH=1` (the shared fence every Rotorscope
+firmware uses, `crates/link/src/benchfence.rs`). Such a build says so: a cargo warning,
+`"bench":["demo",...]` in the USB boot line followed by a
+`{"t":"warn","what":"bench_build","tag":"bench-build:demo",...}` line, `"bench"` in `/api/state`,
+which the phone page shows as a striped **BENCH BUILD, NOT FOR USE** banner at the top of every
+view, and the `bench-build:` tag in the ELF, for which `tools/dev-board.sh` refuses to flash it
+without `ROTORSCOPE_BENCH=1`.
 
 Flash and watch through the shared lock. Never call espflash directly:
 

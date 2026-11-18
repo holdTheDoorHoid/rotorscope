@@ -4,8 +4,10 @@
 //! Bench-only features (`demo`: fake drones, a fixed position and the build
 //! machine's clock; `open-hotspot`: no hotspot password) must never reach a
 //! deployed unit by accident, so a build with any of them fails unless the
-//! environment says `ROTORSCOPE_BENCH=1` (the convention every Rotorscope
-//! firmware follows). The boot line and `/api/state` list them (`bench`).
+//! environment says `ROTORSCOPE_BENCH=1`: the shared fence every Rotorscope
+//! firmware uses (crates/link/src/benchfence.rs). The boot line and
+//! `/api/state` list them (`bench`), and the image carries the
+//! `bench-build:<list>` tag tools/dev-board.sh looks for.
 //!
 //! Station mode (PLAN.md O5) is compiled in only when the owner has created
 //! `wifi.local.toml` next to this file. That file is gitignored and holds the
@@ -15,6 +17,9 @@
 //! join anything.
 
 use std::path::Path;
+
+#[path = "../../crates/link/src/benchfence.rs"]
+mod benchfence;
 
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
@@ -36,7 +41,8 @@ fn main() {
         check_xtensa_linker(&target);
     }
 
-    bench_fence();
+    println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
+    benchfence::run("hub", &["demo", "open-hotspot"], &[]);
 
     station_mode();
     build_time();
@@ -53,28 +59,6 @@ fn check_xtensa_linker(target: &str) {
     if std::process::Command::new(&linker).arg("--version").output().is_err() {
         panic!("`{linker}` not on PATH: run `. ~/export-esp.sh` first (installed by `espup install`)");
     }
-}
-
-/// Features that make a unit unfit for use (see the module docs).
-const BENCH_FEATURES: &[(&str, &str)] = &[("DEMO", "demo"), ("OPEN_HOTSPOT", "open-hotspot")];
-
-fn bench_fence() {
-    println!("cargo:rerun-if-env-changed=ROTORSCOPE_BENCH");
-    let on: Vec<&str> = BENCH_FEATURES
-        .iter()
-        .filter(|(env, _)| std::env::var_os(format!("CARGO_FEATURE_{env}")).is_some())
-        .map(|(_, name)| *name)
-        .collect();
-    if on.is_empty() {
-        return;
-    }
-    if std::env::var("ROTORSCOPE_BENCH").as_deref() != Ok("1") {
-        panic!(
-            "bench-only feature(s) {on:?}: such a unit must never be deployed. \
-             Build with ROTORSCOPE_BENCH=1 to confirm this is a bench build."
-        );
-    }
-    println!("cargo:warning=BENCH build ({}): not for deployment", on.join(", "));
 }
 
 #[derive(serde::Deserialize)]
