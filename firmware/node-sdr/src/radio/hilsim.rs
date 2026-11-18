@@ -13,21 +13,31 @@
 //!   simulated 700 ms dwell's pressure goes through the jamming watch's own
 //!   rule (`jamwatch::ProbeStats::pressure`). `nobudget` shows the loop as it
 //!   was before the budget.
-//! - **`hil forge <secs>`**: a virtual attacker and a virtual drone inside
-//!   the live radio. The node hops its real plan and follows on the real
-//!   follower; a publication counts as heard only if the node is tuned to
-//!   its channel when it falls due (checked every pass of the capture loop,
-//!   so within ~1 ms). Streams: one "real" O4 drone; four forged sessions
-//!   that follow the published schedule exactly (the strongest forger, who
-//!   read `droneid::follow`); a new forged key ID every 700 ms on whatever
-//!   O4 channel the node is on; and, once the real session is followed, a
-//!   packet with the real key ID every 1.3 s on the node's channel at an
-//!   arbitrary time (a contradiction). At the end (or on `hil forge` with no
-//!   argument) one `forge` line says what the follower did.
+//! - **`hil forge <secs> [start|flood|late]`**: a virtual attacker and a
+//!   virtual drone inside the live radio. The node hops its real plan and
+//!   follows on the real follower; a publication counts as heard only if
+//!   the node is tuned to its channel when it falls due (checked every pass
+//!   of the capture loop, so within ~1 ms). Nothing costs a decode (the
+//!   host model `crates/rawcap/tests/follow_forge.rs` adds that). Streams:
+//!   one "real" O4 drone; four forged sessions that follow the published
+//!   schedule exactly (the strongest forger, who read `droneid::follow`); a
+//!   new forged key ID every 700 ms on whatever O4 channel the node is on;
+//!   and, once the real session is followed, a packet with the real key ID
+//!   every 1.3 s on the node's channel at an arbitrary time (a
+//!   contradiction). The case says who is there when:
+//!   - `start` (the 2026-11-18 scenario): everything from the start. Who is
+//!     followed depends on who the plan confirms first: with all four slots
+//!     taken by forged sessions the drone is not followed (`blocked`).
+//!   - `flood`: no forged sessions; the new key IDs and the wrong-time
+//!     packets only. The drone must be followed as if alone.
+//!   - `late`: the drone alone until it is followed, then all the forgers.
+//!     It must stay followed.
+//!   The follower's sessions are cleared at the start. At the end (or on
+//!   `hil forge` with no argument) one `forge` line says what it did.
 
 use core::fmt::Write as _;
 
-use droneid::follow::{CHANNELS, PERIOD_US, channel};
+use droneid::follow::{CHANNELS, CONFIRM_HITS, MAX_SESSIONS, PERIOD_US, channel};
 use esp_println::println;
 use link::NodeRole;
 use rawcap::budget::{self, Budget, Pressure};
@@ -76,6 +86,34 @@ const FORGED_ID: u32 = 0xF0F0_0001;
 const NEW_ID: u32 = 0xF1E5_0000;
 const NEW_EVERY_US: u64 = 700_000;
 const CONTRA_EVERY_US: u64 = 1_300_000;
+/// Not yet (a stream or event that has not started).
+const NEVER: u64 = u64::MAX / 2;
+
+/// Which forgers a `hil forge` run has, and when (module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgeCase {
+    Start,
+    Flood,
+    Late,
+}
+
+impl ForgeCase {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "start" => Some(ForgeCase::Start),
+            "flood" => Some(ForgeCase::Flood),
+            "late" => Some(ForgeCase::Late),
+            _ => None,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            ForgeCase::Start => "start",
+            ForgeCase::Flood => "flood",
+            ForgeCase::Late => "late",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Stream {
@@ -97,13 +135,16 @@ struct Base {
     declined: u32,
     used_us: u64,
     contradictions: u32,
-    refused: u32,
+    evicted: u32,
 }
 
 /// The forged-session scenario's state (see the module docs).
 #[derive(Clone, Copy, Debug)]
 pub struct Forge {
+    case: ForgeCase,
     t0_us: u64,
+    /// When the real drone was first followed.
+    followed_us: Option<u64>,
     until_us: u64,
     /// 0: the real drone; 1..=4: forged, schedule-perfect.
     streams: [Stream; 5],
@@ -125,7 +166,7 @@ impl Radio {
             declined: f.share.declined,
             used_us: f.share.used_us,
             contradictions: f.contradictions,
-            refused: f.refused,
+            evicted: f.evicted,
         }
     }
 
@@ -212,31 +253,35 @@ impl Radio {
         out
     }
 
-    /// `hil forge <secs>`: start the forged-session scenario.
-    pub fn forge_start(&mut self, secs: u32) {
+    /// `hil forge <secs> <case>`: start a forged-session scenario.
+    pub fn forge_start(&mut self, secs: u32, case: ForgeCase) {
         let now = now_us();
+        self.follow.clear();
         let mut streams = [Stream { id: REAL_ID, c0: 17, t0: now + 1_000_000, k: 0, heard: 0 }; 5];
         for (j, s) in streams.iter_mut().enumerate().skip(1) {
             *s = Stream {
                 id: FORGED_ID + j as u32 - 1,
                 c0: (60 * j as u32 + 3) as u8,
-                t0: now + 1_000_000 + j as u64 * 160_000,
+                t0: if case == ForgeCase::Start { now + 1_000_000 + j as u64 * 160_000 } else { NEVER },
                 k: 0,
                 heard: 0,
             };
         }
         self.forge = Some(Forge {
+            case,
             t0_us: now,
+            followed_us: None,
             until_us: now + secs as u64 * 1_000_000,
             streams,
-            next_new_us: now + 2_000_000,
+            next_new_us: if case == ForgeCase::Late { NEVER } else { now + 2_000_000 },
             new_ids: 0,
             next_contra_us: 0,
             contra: 0,
             base: self.follow_base(),
         });
         println!(
-            r#"{{"t":"ok","forge":{secs},"role":"{}","hop":{},"follow":{},"note":"virtual streams only; nothing is transmitted"}}"#,
+            r#"{{"t":"ok","forge":{secs},"case":"{}","role":"{}","hop":{},"follow":{},"note":"virtual streams only; nothing is transmitted"}}"#,
+            case.name(),
             crate::hub::role_name(self.role),
             self.hopping,
             self.follow_on
@@ -253,7 +298,7 @@ impl Radio {
         for j in 0..f.streams.len() {
             loop {
                 let s = f.streams[j];
-                let at = s.t0 + s.k * PERIOD_US;
+                let at = s.t0.saturating_add(s.k * PERIOD_US);
                 if at > now {
                     break;
                 }
@@ -273,7 +318,19 @@ impl Radio {
                 f.new_ids += 1;
             }
         }
-        if now >= f.next_contra_us && self.follow.session(REAL_ID).is_some_and(|s| s.confirmed) {
+        let followed = self.follow.session(REAL_ID).is_some();
+        if followed && f.followed_us.is_none() {
+            f.followed_us = Some(now);
+            if f.case == ForgeCase::Late {
+                // The forgers arrive: sessions at the bench's phases from
+                // the next publication on, and the flood.
+                for (j, s) in f.streams.iter_mut().enumerate().skip(1) {
+                    s.t0 = now + 100_000 + j as u64 * 160_000;
+                }
+                f.next_new_us = now + 100_000;
+            }
+        }
+        if now >= f.next_contra_us && followed {
             f.next_contra_us = now + CONTRA_EVERY_US;
             if on_o4 {
                 self.follow_observe_at(REAL_ID, now);
@@ -301,14 +358,18 @@ impl Radio {
         let elapsed = now.saturating_sub(f.t0_us).max(1);
         let used = b.used_us - f.base.used_us;
         let real = self.follow.session(REAL_ID);
-        let forged = (1..=4u32).filter(|j| self.follow.session(FORGED_ID + j - 1).is_some_and(|s| s.confirmed)).count();
+        let cand = self.follow.candidate(REAL_ID).map_or(0, |c| c.hits as u32);
+        let blocked = real.is_none() && cand >= CONFIRM_HITS && self.follow.active() >= MAX_SESSIONS;
+        let followed_s = f.followed_us.map(|t| (t.saturating_sub(f.t0_us) / 1_000_000) as i64).unwrap_or(-1);
+        let forged = (1..=4u32).filter(|j| self.follow.session(FORGED_ID + j - 1).is_some()).count();
         let mut line = Line::new();
         let _ = write!(
             line,
-            r#"{{"t":"forge","done":{done},"s":{},"real":[{},{},{}],"heard":[{},{},{},{},{}],"forged_followed":{forged},"active":{},"tentative":{},"visits":{},"hits":{},"misses":{},"granted":{},"declined":{},"share_permille":{},"contra":[{},{}],"refused":{},"new_ids":{}}}"#,
+            r#"{{"t":"forge","done":{done},"case":"{}","s":{},"real":[{},{},{}],"followed_s":{followed_s},"blocked":{blocked},"heard":[{},{},{},{},{}],"forged_followed":{forged},"active":{},"tentative":{},"visits":{},"hits":{},"misses":{},"granted":{},"declined":{},"share_permille":{},"contra":[{},{}],"evicted":{},"new_ids":{}}}"#,
+            f.case.name(),
             elapsed / 1_000_000,
-            real.is_some_and(|s| s.confirmed),
-            real.map_or(0, |s| s.hits),
+            real.is_some(),
+            real.map_or(cand, |s| s.hits),
             real.map_or(0, |s| s.contradictions),
             f.streams[0].heard,
             f.streams[1].heard,
@@ -325,7 +386,7 @@ impl Radio {
             used * 1000 / elapsed,
             f.contra,
             b.contradictions - f.base.contradictions,
-            b.refused - f.base.refused,
+            b.evicted - f.base.evicted,
             f.new_ids
         );
         // Over the ~300 bytes the ring tolerates in one print: in pieces.
