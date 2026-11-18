@@ -46,13 +46,18 @@ raises the ATTACK / JAMMED badge or counts as jamming.
 ## Sound clips
 
 ```
-audio clips off     # the hub stores no sound at all (it still detects and alerts)
-audio clips on      # the default
+audio clips on      # keep sound and save a clip when a drone-like sound alerts
+audio clips off     # the default: the hub keeps no sound at all (it still detects and alerts)
 ```
 
-While the hub believes it hears a drone it saves a clip under `ROTORSCP/AUDIO` (docs/ACOUSTIC.md).
-A microphone outdoors also hears people, and Pennsylvania requires everyone's consent to record
-a conversation: where that matters, post a notice or turn clips off.
+Off unless a line says on (owner decision 2026-11-18). With clips on, the hub keeps the last
+two minutes of sound in memory and, when a sound contact raises a drone alert, saves a clip of
+up to a minute under `ROTORSCP/AUDIO` (at most six an hour and 256 MiB in all, never into the
+last 1 GiB of the card; docs/ACOUSTIC.md). The screen shows `AUDIO CLIPS ON` for as long as
+they are on, and `RECORDING SOUND` while a clip is made. Turning clips on or off is logged in
+the evidence log, from the file or the console. A microphone outdoors also hears people, and
+Pennsylvania requires everyone's consent to record a conversation: turn clips on only where
+that is settled, and post a notice.
 
 ## On the console
 

@@ -72,7 +72,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 
 | code | name | data |
 |---:|---|---|
-| 1 | boot | key class (1), public key (65), chip revision major (1), minor (1). Always and only record #0. |
+| 1 | boot | key class (1), public key (65), chip revision major (1), minor (1). Always and only record #0. P4 hub text: version, git, last reset, bench features, and `audio clips off at boot` (clips always start off; turning them on is a `setting` event) |
 | 2 | card_mounted | this file number (u32), previous file number (u32, 0 none), previous file length at mount (u32), SHA-256 of the previous file's last whole record (32), previous file status (1): 0 none, 1 ends on a whole record, 2 ends inside an incomplete record, 3 unreadable |
 | 3 | card_lost | queued bytes that go to the next file (u32) |
 | 4 | setting | new value (1); text says which setting |
@@ -95,7 +95,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 21 | link_forgery | claimed station address (6), count (u32) (reserved; forged ESP-NOW packets currently arrive as `threat` kind 15) |
 | 22 | aircraft_conflict | level (1: 1 advisory, 2 caution, 3 warning), drone track id (u32), aircraft address (u32), aircraft source (1); text: the pair, distance, height difference, predicted closest approach |
 | 23 | sound | sound contact id (u32), kind (1: 0 no radio, 1 aircraft, 2 with radio), pitch Hz (u16), confidence 0-100 (1); text: what the microphone heard |
-| 24 | sound_clip | clip number (u32), sound contact id (u32, 0 unknown), sample rate (u32), samples (u32), samples lost and written as silence (u32), SHA-256 of the WAV file's sample bytes (32); text: the file name under `ROTORSCP/AUDIO` |
+| 24 | sound_clip | clip number (u32), sound contact id (u32, 0 unknown), sample rate (u32), samples (u32), samples lost and written as silence (u32), SHA-256 of the WAV file's sample bytes (32); text: the file name under `ROTORSCP/AUDIO`, then ` (cut short: <why>)` when the clip was ended early (audio clips switched off, or the card's space or audio limit) |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 

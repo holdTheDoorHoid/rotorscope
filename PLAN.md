@@ -760,7 +760,8 @@ drone we already see by radio is close: a small drone is only audible within abo
 - **Detection first** with one microphone (15a–15d). A **4-microphone bearing pod** follows (15e).
 - Use: a **fixed site**. Targets: **camera drones** (low pitch, quiet) and **large FPV drones**.
 - The hub **may store raw audio while it believes it hears a drone** (and a few seconds before).
-  It stores no audio at any other time.
+  It stores no audio at any other time. (2026-11-18: and only where the owner has turned audio
+  clips on; see "Privacy" below.)
 - The Al-Emadi drone audio set may be used for tuning and testing. It is fetched by script into
   `testdata/` and never committed; so is every other recording.
 
@@ -789,8 +790,9 @@ drone we already see by radio is close: a small drone is only audible within abo
 - **15c. Tracker** (`tracker::sound`): the sound-contact table, fusion with radio tracks, alert,
   JSON / CSV / screen lines.
 - **15d. Hub firmware** (`firmware/hub-p4/src/ear.rs`): microphone capture, the detector, a
-  pre-roll ring in PSRAM, and a WAV clip on the SD card (`ROTORSCP/AUDIO/`) from 5 s before a
-  detection until it ends (capped). Each clip gets an evidence-log entry with its hash.
+  pre-roll ring in PSRAM, and a WAV clip on the SD card (`ROTORSCP/AUDIO/`) when a contact
+  alerts, from 5 s before it began until it ends (capped; only with `audio clips on`, off by
+  default since 2026-11-18). Each clip gets an evidence-log entry with its hash.
   First on the board's own microphone, then an outdoor microphone with a windscreen.
 - **15e. Bearing pod** (after 15a–15d work outdoors): four microphones in a small pyramid,
   about 6 cm apart, on one cable to the hub. Direction comes from the 1–6 kHz part of the sound
@@ -826,10 +828,14 @@ drone we already see by radio is close: a small drone is only audible within abo
   ESP32 example).
 
 **Privacy.** A microphone outdoors hears people. The detector keeps only numbers (pitch,
-loudness, score) unless it believes a drone is present. Clips are capped in length, stay on the
-SD card, and are never sent to nodes or the web head. `SITE.TXT` line `audio clips on|off`
-turns recording off entirely (detection continues). Pennsylvania requires all-party consent to
-record conversations: a site that uses clips should post a notice. This is in the README note.
+loudness, score). **Owner decisions 2026-11-18:** audio clips are off by default and the owner
+turns them on per site (`SITE.TXT` line `audio clips on`); a recording marker shows on the
+screen; clips are capped (six an hour, 256 MiB on the card, never into the last 1 GiB of free
+space). With clips off no sound is kept beyond the detector's working buffers; with them on, a
+tape in PSRAM allows the pre-roll, and a clip is saved only when a contact raises a drone alert.
+Clips stay on the SD card and are never sent to nodes or the web head. Pennsylvania requires
+all-party consent to record conversations: a site that uses clips should post a notice. This is
+in the README note. Details: docs/ACOUSTIC.md.
 
 **Status 2026-11-18.** 15a–15d are built. 15d runs on the P4 with the board's own microphone and
 is proven with a rotor sound mixed in inside the chip (alert, clip on the card, evidence entry);

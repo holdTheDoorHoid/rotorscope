@@ -82,11 +82,12 @@ uses an obviously fake identity and the lowest transmit power, and must not be u
 impersonate an aircraft.
 
 The hub also has a microphone, for drones that transmit nothing (PLAN.md Phase 15,
-docs/ACOUSTIC.md, on branch `acoustic`). It keeps only numbers (pitch, loudness) unless it
-believes it hears a drone; then it saves a short sound clip to its own SD card. A microphone
-outdoors also hears people. `audio clips off` in the site file stops all storing of sound.
-Recording conversations needs consent in many places (everyone's, in Pennsylvania): post a
-notice where the device listens, or turn clips off.
+docs/ACOUSTIC.md, on branch `acoustic`). It keeps only numbers (pitch, loudness). Sound
+clips are **off** unless the owner puts `audio clips on` in the site file: then it keeps the
+last two minutes of sound in memory and saves a short clip to its own SD card when a sound
+raises a drone alert, capped per hour and in total, and the screen says so. A microphone
+outdoors also hears people. Recording conversations needs consent in many places (everyone's,
+in Pennsylvania): turn clips on only where that is settled, and post a notice.
 
 ## Acknowledgements
 

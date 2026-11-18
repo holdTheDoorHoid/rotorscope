@@ -8,6 +8,7 @@ PLAN.md Phase 15. Status 2026-11-18:
 | Hub tracker: sound contacts, alert, radio and aircraft cross-check | Built; laptop tests |
 | Hub firmware: microphone, detector, alert, clips to SD, evidence entries | **Running on the P4**; proven with a made-up rotor sound mixed in inside the chip |
 | A real sound through the real microphone | **Not yet tested.** No drone and no loudspeaker test so far |
+| Clips off by default, clip only on alert, caps, screen marker (WP-07) | Built 2026-11-18, **compile-checked only**; laptop tests; bench checks below not yet run |
 | Outdoor microphone, windscreen, range | Not started |
 | Bearing pod, fly-past measurement, aircraft type table | Not started (PLAN 15e, 15f, 15g) |
 
@@ -41,20 +42,58 @@ aircraft's track and looking up its type are PLAN 15f and 15g.
   a driver of our own (`firmware/hub-p4/src/mic.rs`): esp-hal has no audio input for this chip.
 - **Detector.** `ear.rs` runs it on every 32 ms of sound: about 4.4 ms of work, 14% of one
   core. The hub's loop still runs about 450 times a second.
-- **Tape.** The last two minutes of sound go round in PSRAM. Nothing reads them unless a drone
-  is heard, and they are gone at power-off.
 - **Alert.** A contact that has lasted five seconds and is not a tracked aircraft prints
-  `hub-p4: SOUND ...` and writes a `sound` entry to the evidence log.
-- **Clip.** While a drone is heard the hub saves `ROTORSCP/AUDIO/Cnnnnnnn.WAV`: from five
-  seconds before the detection to two seconds after it ends, sixty seconds at most, one clip
-  per contact. The evidence log gets a `sound_clip` entry with the clip's SHA-256. The clip is
-  written a little slower than real time so the hub keeps working.
-- **Turning clips off.** `audio clips off` in `ROTORSCP/SITE.TXT` or typed at the console
-  (`L`). Detection and alerts continue; no sound is stored.
+  `hub-p4: SOUND ...` and writes a `sound` entry to the evidence log. This works the same
+  whether audio clips are on or off.
+- **Audio clips are off unless the owner turns them on** for a site (owner decision
+  2026-11-18): `audio clips on` in `ROTORSCP/SITE.TXT`, or typed at the console (`L`, then the
+  line). `audio clips off` turns them off again. Every change is in the evidence log (below).
+- **Tape (clips on only).** While clips are on, the last two minutes of sound go round in PSRAM
+  so a clip can include the seconds before the alert. With clips off nothing is written to it;
+  switching clips off wipes it, and it is wiped at every start-up.
+- **Clip (clips on only).** A clip starts **at the moment a contact alerts**, and only for the
+  kinds that alert ("Drone audible (close)", "Possible drone heard, no radio"), never for
+  "Aircraft heard" and never for a contact shorter than the five seconds that raise the alert.
+  It reaches back to five seconds before the contact began (the onset is kept), at most twelve
+  seconds before the alert. It ends two seconds after the sound stops, or as soon as the contact
+  turns out to be a tracked aircraft, and is sixty seconds long at most. One clip at a time; a
+  second contact alerting meanwhile gets none. The rules are `tracker::sound::clip`, tested on a
+  laptop. The file is `ROTORSCP/AUDIO/Cnnnnnnn.WAV`; the evidence log gets a `sound_clip` entry
+  with the clip's SHA-256. The clip is written a little slower than real time so the hub keeps
+  working.
+- **Limits.** Six clips in any hour; 256 MiB of audio on the card in all; and a clip is never
+  started unless the whole largest clip (1.9 MB) fits while leaving 1 GiB free for the evidence
+  and CSV logs. A clip that would cross a limit while it is written is ended there. Free space
+  comes from the card's FAT32 free count; a card without one (FAT16, or a count marked
+  unknown) saves no clips, so format the card as FAT32 on a computer. Every refusal is counted:
+  the `hub-p4: ear ...` status line (`not_saved N (no_card .. hour .. audio_cap .. space ..
+  space_unknown .. cut ..)`) and the screen.
+- **On the screen.** While clips are on, a line at the bottom of every page reads
+  `AUDIO CLIPS ON: sound may be recorded` (`...; N not saved` once any were refused). While a
+  clip is being recorded or written it reads `RECORDING SOUND to SD card`. With clips off there
+  is no line.
+- **Evidence log.** The boot event says `audio clips off at boot`. Turning clips on or off from
+  the site file is a `setting` event `site (file): audio clips on|off`; from the console it is
+  the `setting` event `site (console): audio clips on|off` written when the line is typed.
+- **Pennsylvania** requires everyone's consent to record a conversation. Where clips are on,
+  post a notice; the screen line is not a substitute for one.
 
-### Proof on the board (2026-11-18)
+### What sound the hub keeps
 
-Built with `--features earfake`, the firmware mixes a made-up quadcopter sound (four rotors
+| State | Sound in memory | Sound on the card |
+|---|---|---|
+| Clips off (default) | The microphone's DMA ring in internal RAM: 8 buffers of 32 ms, stereo (256 ms), overwritten as it goes round. The detector's analysis window in PSRAM: the last 128 ms (2048 samples, and a windowed copy of them for the transform). One 32 ms buffer on the stack while it is processed. Nothing else: the tape is not written. | None |
+| Clips on, no clip | The above, plus the tape: the last 131 s (2^21 samples, 4 MB) in PSRAM | None |
+| Clips on, clip being made | The above | The clip being written |
+| Clips switched off | The tape is overwritten with zeros at once; any clip being written is ended where it is (`sound_clip` text says `cut short: audio clips switched off`) | Clips already saved stay |
+
+Everything in RAM is lost at power-off. PSRAM can keep its contents through a software reset
+(crash recovery, watchdog), which is why the tape is wiped at every start-up.
+
+### Proof on the board (2026-11-18, before WP-07)
+
+This was run before clips were made off by default and tied to the alert; the clip rules it
+shows (clip from the first heard second) are gone. Built with `--features earfake`, the firmware mixes a made-up quadcopter sound (four rotors
 near 210 Hz) into the microphone signal inside the chip, 20–45 s and 70–80 s after start-up,
 and reads every saved clip back from the card.
 
@@ -69,7 +108,60 @@ and reads every saved clip back from the card.
 
 The bench read-back blocks the loop for several seconds and loses sound while it runs; it is
 not in the normal firmware. `--features eardump` adds console `w`, which prints the last six
-seconds of the tape as hex for checking on a laptop; it must never be in a deployed unit.
+seconds of the tape as hex for checking on a laptop (nothing while clips are off: there is no
+tape); it must never be in a deployed unit. Both features are bench-only and fenced: the build
+refuses them without `ROTORSCOPE_BENCH=1`, and the hello line, the boot event and the screen's
+`BENCH BUILD` mark name them (docs/BENCH.md "Bench builds").
+
+### Bench checks (WP-07, not yet run)
+
+Everything WP-07 changed is compile-checked and laptop-tested only. On the bench, one board,
+with a spare FAT32 card:
+
+1. **Default off.** Normal build, card without an `audio` line in `SITE.TXT`. Boot: the evidence
+   boot event ends `audio clips off at boot`; no audio line on the screen; the `hub-p4: ear`
+   status line says `clips off tape 0 s`. Console `L`, `audio clips on`: within a second
+   `hub-p4: audio clips ON (from the console)`, the screen shows `AUDIO CLIPS ON: sound may be
+   recorded`, the status line's `tape` count starts rising; one `setting` event
+   `site (console): audio clips on`, not two. `L`, `audio clips off`: the line goes, `tape 0 s`.
+2. **From the file.** Add `audio clips on` to `SITE.TXT` on a laptop and boot: one `setting`
+   event `site (file): audio clips on` after the card mounts; the screen line appears.
+3. **No tape while off** (`ROTORSCOPE_BENCH=1`, `--features eardump`): with clips off, console
+   `w` prints `EARPCM none: audio clips are off`. Turn clips on, wait 10 s, `w` prints sound;
+   turn them off and `w` again prints `none`.
+4. **Clip only on alert** (`--features earfake`, clips on in `SITE.TXT`): the made-up rotor
+   sound starts 20 s after boot. No clip file is created before the `SOUND` line (about 25 s);
+   the screen shows `RECORDING SOUND to SD card` from then until the clip is written; the clip
+   starts about 11 s before the `SOUND` line (check its length against the console times) and
+   the read-back says `MATCH`. With clips off, the same run makes the `SOUND` line and no
+   clip.
+5. **Aircraft.** With an ADS-B aircraft tracked within 3 km (or `modesloop`) and the fake sound,
+   no `SOUND` line and no clip.
+6. **Hourly cap.** Needs seven alerts in one boot (the count is kept in RAM, so a reboot
+   starts it again; the 256 MiB total on the card is what survives reboots). `earfake` gives
+   only two per boot (20-45 s and 70-80 s), so this needs a local, uncommitted change to repeat
+   the fake sound every 40 s. The seventh contact prints `audio clip not saved: hourly clip
+   limit reached`; the status line shows `not_saved 1 (... hour 1 ...)` and the screen
+   `AUDIO CLIPS ON: may record; 1 not saved`. The rule itself is tested on a laptop
+   (`tracker::sound::clip` tests).
+7. **Space.** A small card (2 GB, FAT32): every clip is refused with `card space kept for the
+   evidence log`. A FAT16 card: `card free space unknown`. A card whose `ROTORSCP/AUDIO` holds
+   over 254 MiB of files: `audio limit on the card reached`. Evidence keeps recording in each case.
+8. **Switching off mid-clip.** During a fake-sound clip type `L`, `audio clips off`: the clip is
+   closed at once, its `sound_clip` entry ends `(cut short: audio clips switched off)`, the WAV
+   plays to its end on a laptop, the screen line goes.
+9. **Watchdog and loop.** During a clip, `max_gap` on the link line stays under 100 ms and the
+   watchdog never fires; switching clips off (tape wipe) shows one gap of about 0.1 s.
+10. **Microphone DMA** (src/mic.rs, "Ring"). The driver now reads buffers with volatile loads
+    and copies them out first; check that `bufs` still rises by 31.25 a second and `dma_err`
+    stays 0, and the earfake detection is unchanged. Then, separately and only if wanted: set
+    `in_check_owner` (`IN_CONF1` bit 12) in `Mic::start`, stall the loop for 0.5 s (a bench-only
+    busy-wait), and see whether the DMA stops with a descriptor error. If it does, the owner
+    check needs a restart path (re-link the ring and restart `IN_LINK`) before it can be used.
+11. **A real sound through the microphone** (needs the owner's OK before any audio is played):
+    a loudspeaker playing a drone recording 1-2 m from the board, clips on. Expect `Heard`,
+    a `SOUND` line after 5 s, one clip; then a recording of speech: no `SOUND` line and no
+    clip. Delete the clips afterwards.
 
 ## Trying it on recordings
 

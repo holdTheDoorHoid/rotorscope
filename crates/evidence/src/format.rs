@@ -245,7 +245,8 @@ pub enum EventCode {
     /// number (u32), contact id (u32, 0 unknown), sample rate (u32),
     /// samples (u32), samples that were no longer in memory and are
     /// silence in the file (u32), SHA-256 of the file's sample bytes (32).
-    /// Text: the file name.
+    /// Text: the file name, then ` (cut short: <why>)` if it was ended
+    /// early.
     SoundClip = 24,
 }
 

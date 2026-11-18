@@ -384,7 +384,7 @@ Now:
 | node-lr | `faulttest` | |
 | node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
 | hub (S3/C5 web head) | `demo` (fake drones, a made-up position, the build machine's clock), `open-hotspot` (no hotspot password) | |
-| hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` (console `p`: own position to a fixed test point) | (`AIRSPACE_PAK` only with `embedpack`) |
+| hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` (console `p`: own position to a fixed test point), `earfake` (a made-up rotor sound mixed into the microphone signal on the chip; every clip read back), `eardump` (console `w`: raw room audio dumped as hex over USB) | (`AIRSPACE_PAK` only with `embedpack`) |
 
 Not fenced, on purpose: `rid-beacon` (it is the test transmitter; nothing fields it), hub-p4
 `show-link-ids` (an operator privacy choice, not a bench aid), `modes` (a field feature), node-wifi
