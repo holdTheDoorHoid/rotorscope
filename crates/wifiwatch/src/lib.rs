@@ -68,6 +68,7 @@
 
 pub mod beacons;
 pub mod ble;
+pub mod contentlimit;
 pub mod drones;
 pub mod floods;
 pub mod mac;
