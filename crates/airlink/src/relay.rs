@@ -155,33 +155,39 @@ pub enum Drop {
 
 // ------------------------------------------------------------ budgets --
 
-/// Token bucket. `level` is in thousandths of a unit, so a rate in units a
-/// second adds exactly `rate` per millisecond.
-#[derive(Debug, Clone, Copy)]
-pub struct Bucket {
-    level: u64,
+/// Token bucket: `RATE` units a second, holding up to `BURST` units, full
+/// at time 0. It keeps what has been spent, in thousandths of a unit (a rate
+/// in units a second then refills exactly `RATE` a millisecond), so a fresh
+/// bucket is all zero bytes and a `static` holding many of them needs no
+/// initialised data.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Bucket<const RATE: u32, const BURST: u32> {
+    spent: u64,
     at_ms: u64,
-    rate: u32,
-    cap: u64,
 }
 
-impl Bucket {
-    /// Full at time 0. `rate` units a second, holding up to `burst` units.
-    pub const fn new(rate: u32, burst: u32) -> Self {
-        let cap = burst as u64 * 1000;
-        Bucket { level: cap, at_ms: 0, rate, cap }
+impl<const RATE: u32, const BURST: u32> Bucket<RATE, BURST> {
+    const CAP: u64 = BURST as u64 * 1000;
+
+    pub const fn new() -> Self {
+        Bucket { spent: 0, at_ms: 0 }
     }
 
     fn refill(&mut self, now_ms: u64) {
         let dt = now_ms.saturating_sub(self.at_ms);
-        self.level = self.cap.min(self.level.saturating_add(dt.saturating_mul(u64::from(self.rate))));
+        self.spent = self.spent.saturating_sub(dt.saturating_mul(u64::from(RATE)));
         self.at_ms = self.at_ms.max(now_ms);
     }
 
-    /// Room for `n` units now (after refilling)?
-    pub fn has(&mut self, n: u32, now_ms: u64) -> bool {
+    /// What it holds now, in thousandths.
+    fn level(&mut self, now_ms: u64) -> u64 {
         self.refill(now_ms);
-        self.level >= u64::from(n) * 1000
+        Self::CAP.saturating_sub(self.spent)
+    }
+
+    /// Room for `n` units now?
+    pub fn has(&mut self, n: u32, now_ms: u64) -> bool {
+        self.level(now_ms) >= u64::from(n) * 1000
     }
 
     /// Spend `n` units; false (and nothing spent) if there are not enough.
@@ -189,24 +195,26 @@ impl Bucket {
         if !self.has(n, now_ms) {
             return false;
         }
-        self.level -= u64::from(n) * 1000;
+        self.spent += u64::from(n) * 1000;
         true
+    }
+
+    /// Milliseconds until it holds `n` units (0: now).
+    pub fn wait_ms(&mut self, n: u32, now_ms: u64) -> u64 {
+        (u64::from(n) * 1000).saturating_sub(self.level(now_ms)).div_ceil(u64::from(RATE))
     }
 }
 
 /// One lane's budget: packets and bytes, both must have room.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Budget {
-    packets: Bucket,
-    bytes: Bucket,
+    packets: Bucket<PER_MAC_PACKETS_PER_S, PER_MAC_PACKETS_PER_S>,
+    bytes: Bucket<PER_MAC_BYTES_PER_S, PER_MAC_BYTES_PER_S>,
 }
 
 impl Budget {
     pub const fn new() -> Self {
-        Budget {
-            packets: Bucket::new(PER_MAC_PACKETS_PER_S, PER_MAC_PACKETS_PER_S),
-            bytes: Bucket::new(PER_MAC_BYTES_PER_S, PER_MAC_BYTES_PER_S),
-        }
+        Budget { packets: Bucket::new(), bytes: Bucket::new() }
     }
 
     /// Spend one packet of `len` bytes, or nothing.
@@ -216,12 +224,6 @@ impl Budget {
             return false;
         }
         self.packets.take(1, now_ms) && self.bytes.take(len, now_ms)
-    }
-}
-
-impl Default for Budget {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -253,49 +255,43 @@ pub struct Refusal {
 }
 
 /// Refusals per address and reason, drained once a window. `N` entries;
-/// past that, further addresses share one all-zero entry per reason.
+/// past that, further addresses share one all-zero entry per reason. An
+/// entry with `count` 0 is free (so a fresh log is all zero bytes).
 pub struct Refusals<const N: usize> {
-    entries: [Option<(Refusal, u64)>; N],
-    shared: [Option<(Refusal, u64)>; Refuse::COUNT],
+    entries: [(Refusal, u64); N],
+    shared: [(Refusal, u64); Refuse::COUNT],
     /// Since boot, per reason (wrapping).
     pub totals: [u32; Refuse::COUNT],
 }
 
 impl<const N: usize> Refusals<N> {
+    const FREE: (Refusal, u64) = (Refusal { src: [0; 6], reason: Refuse::NotInRoster, count: 0, rssi: 0, window_ms: 0 }, 0);
+
     pub const fn new() -> Self {
-        Refusals { entries: [None; N], shared: [None; Refuse::COUNT], totals: [0; Refuse::COUNT] }
+        Refusals { entries: [Self::FREE; N], shared: [Self::FREE; Refuse::COUNT], totals: [0; Refuse::COUNT] }
     }
 
     pub fn record(&mut self, src: Mac, reason: Refuse, rssi: i8, now_ms: u64) {
         let i = reason.index();
         self.totals[i] = self.totals[i].wrapping_add(1);
-        let fresh = || Some((Refusal { src, reason, count: 0, rssi, window_ms: 0 }, now_ms));
-        let slot = match self.entries.iter().position(|e| e.is_some_and(|(r, _)| r.src == src && r.reason == reason)) {
-            Some(k) => &mut self.entries[k],
-            None => match self.entries.iter().position(Option::is_none) {
-                Some(k) => {
-                    self.entries[k] = fresh();
-                    &mut self.entries[k]
-                }
-                None => {
-                    if self.shared[i].is_none() {
-                        self.shared[i] = Some((Refusal { src: [0; 6], reason, count: 0, rssi, window_ms: 0 }, now_ms));
-                    }
-                    &mut self.shared[i]
-                }
-            },
+        let k = self.entries.iter().position(|(r, _)| r.count > 0 && r.src == src && r.reason == reason);
+        let (e, who) = match k.or_else(|| self.entries.iter().position(|(r, _)| r.count == 0)) {
+            Some(k) => (&mut self.entries[k], src),
+            None => (&mut self.shared[i], [0; 6]),
         };
-        if let Some((r, _)) = slot {
-            r.count = r.count.saturating_add(1);
-            r.rssi = r.rssi.max(rssi);
+        if e.0.count == 0 {
+            *e = (Refusal { src: who, reason, count: 0, rssi, window_ms: 0 }, now_ms);
         }
+        e.0.count = e.0.count.saturating_add(1);
+        e.0.rssi = e.0.rssi.max(rssi);
     }
 
     /// Hand every entry to `out` (with its window: from its first refusal
     /// to `now_ms`) and start afresh.
     pub fn drain(&mut self, now_ms: u64, mut out: impl FnMut(Refusal)) {
         for e in self.entries.iter_mut().chain(self.shared.iter_mut()) {
-            if let Some((mut r, first)) = e.take() {
+            if e.0.count > 0 {
+                let (mut r, first) = core::mem::replace(e, Self::FREE);
                 r.window_ms = now_ms.saturating_sub(first).min(u64::from(u32::MAX)) as u32;
                 out(r);
             }
@@ -405,7 +401,7 @@ pub struct Uplink<const SLOTS: usize> {
     lanes: [Lane; LANES],
     slots: [Queued; SLOTS],
     used: [bool; SLOTS],
-    total: Bucket,
+    total: Bucket<TOTAL_BYTES_PER_S, TOTAL_BURST>,
     unprovisioned_at: Option<u64>,
     /// The next lane round-robin serves.
     turn: usize,
@@ -423,7 +419,7 @@ impl<const SLOTS: usize> Uplink<SLOTS> {
             lanes: [Lane::EMPTY; LANES],
             slots: [Queued::EMPTY; SLOTS],
             used: [false; SLOTS],
-            total: Bucket::new(TOTAL_BYTES_PER_S, TOTAL_BURST),
+            total: Bucket::new(),
             unprovisioned_at: None,
             turn: 0,
             refusals: Refusals::new(),
@@ -476,6 +472,11 @@ impl<const SLOTS: usize> Uplink<SLOTS> {
     /// Whether a roster has arrived yet.
     pub fn has_roster(&self) -> bool {
         self.roster.is_some()
+    }
+
+    /// The roster as the hub last sent it (empty before the first).
+    pub fn roster(&self) -> &[Mac] {
+        self.roster.as_ref().map_or(&[], |(list, n)| &list[..*n])
     }
 
     /// The roster lane of `mac`, if listed.
@@ -616,11 +617,7 @@ impl<const SLOTS: usize> Uplink<SLOTS> {
             }
         }
         let need = need?;
-        if self.total.has(need, now_ms) {
-            return Some(0);
-        }
-        let short = u64::from(need) * 1000 - self.total.level;
-        Some(short.div_ceil(u64::from(self.total.rate)))
+        Some(self.total.wait_ms(need, now_ms))
     }
 }
 
@@ -1258,6 +1255,7 @@ mod tests {
     fn roster_filter_and_before_the_first_roster() {
         let mut u = std::boxed::Box::new(Up::new());
         assert!(!u.has_roster());
+        assert!(u.roster().is_empty());
         // Before any roster, no node packet passes.
         assert_eq!(u.offer(A, 0, &small(1), 0, 0), Outcome::Dropped(Drop::Refused(Refuse::NotInRoster)));
         u.set_roster(&[A]);
@@ -1286,6 +1284,7 @@ mod tests {
         u.set_roster(&many);
         assert_eq!(u.roster_lane(&many[15]), Some(15));
         assert_eq!(u.roster_lane(&many[16]), None);
+        assert_eq!(u.roster(), &many[..16]);
     }
 
     #[test]
