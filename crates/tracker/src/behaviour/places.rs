@@ -92,19 +92,45 @@ pub struct Friend {
     pub label: String<LABEL_LEN>,
 }
 
+/// "Several at once" (rule 15) counts this many drones at the places by
+/// default (`crowd on`).
+pub const CROWD_DEFAULT: u8 = 3;
+/// The range a `crowd N` line may set.
+pub const CROWD_MIN: u8 = 2;
+pub const CROWD_MAX: u8 = 20;
+
 /// Everything the threat levels are judged against.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Places {
     pub areas: Vec<Area, MAX_AREAS>,
     /// Radius of the circle that moves with the unit's own GPS, metres;
     /// `None`: off.
     pub bubble_m: Option<f32>,
     pub friends: Vec<Friend, MAX_FRIENDS>,
+    /// How many drones at the places at once make "several at once" (rule
+    /// 15, slice 16d); `None`: that count is off (`crowd off`, for events
+    /// with many friendly drones). Drones appearing during jamming or GPS
+    /// interference still count.
+    pub crowd_min: Option<u8>,
+    /// Keep the repeat-visitor history (rule 17, `visits on|off`).
+    pub visits: bool,
+}
+
+impl Default for Places {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Places {
     pub const fn new() -> Self {
-        Self { areas: Vec::new(), bubble_m: None, friends: Vec::new() }
+        Self {
+            areas: Vec::new(),
+            bubble_m: None,
+            friends: Vec::new(),
+            crowd_min: Some(CROWD_DEFAULT),
+            visits: true,
+        }
     }
 
     /// Become a copy of `o`, one entry at a time (no whole `Places` on the
@@ -119,6 +145,8 @@ impl Places {
             let _ = self.friends.push(f.clone());
         }
         self.bubble_m = o.bubble_m;
+        self.crowd_min = o.crowd_min;
+        self.visits = o.visits;
     }
 
     /// Areas with a shape, and whether the bubble is on: anything to protect.

@@ -35,6 +35,13 @@
 //! bubble off
 //! friend 1581F5FKD229400B4WW1 our own Mini      # serial, then a label
 //! friend 1581F5FKD229400B4WW1 clear
+//!
+//! # Across drones and days (slice 16d):
+//! crowd 4                # "several at once" from 4 drones (default 3)
+//! crowd off              # ... not counted (an event with many friendly drones)
+//! crowd on               # ... back to the default
+//! visits off             # keep no repeat-visitor history (and wipe what is kept)
+//! visits on              # keep it (the default): drone IDs and pilot spots, 30 days
 //! ```
 //!
 //! At most [`places::MAX_AREAS`] areas and [`places::MAX_FRIENDS`] friends:
@@ -132,6 +139,12 @@ pub enum SiteLine {
     Friend(Friend),
     /// `friend SERIAL clear`.
     FriendClear { serial: heapless::String<{ places::SERIAL_LEN }> },
+    /// `crowd N`, `crowd on` (the default, [`places::CROWD_DEFAULT`]),
+    /// `crowd off` (`None`): how many drones at the places at once count as
+    /// "several at once" (threat rule 15).
+    Crowd { min: Option<u8> },
+    /// `visits on|off`: keep the repeat-visitor history (threat rule 17).
+    Visits { on: bool },
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -336,6 +349,24 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
     if word.eq_ignore_ascii_case("friend") {
         return parse_friend(rest);
     }
+    if word.eq_ignore_ascii_case("crowd") {
+        return match (it.next(), it.next()) {
+            (Some(w), None) if w.eq_ignore_ascii_case("off") => Ok(SiteLine::Crowd { min: None }),
+            (Some(w), None) if w.eq_ignore_ascii_case("on") => Ok(SiteLine::Crowd { min: Some(places::CROWD_DEFAULT) }),
+            (Some(w), None) => match w.parse::<u8>() {
+                Ok(n) if (places::CROWD_MIN..=places::CROWD_MAX).contains(&n) => Ok(SiteLine::Crowd { min: Some(n) }),
+                _ => Err("crowd takes a number of drones from 2 to 20, or on, or off"),
+            },
+            _ => Err("say: crowd N (drones), crowd on, or crowd off"),
+        };
+    }
+    if word.eq_ignore_ascii_case("visits") {
+        return match (it.next(), it.next()) {
+            (Some(w), None) if w.eq_ignore_ascii_case("on") => Ok(SiteLine::Visits { on: true }),
+            (Some(w), None) if w.eq_ignore_ascii_case("off") => Ok(SiteLine::Visits { on: false }),
+            _ => Err("say: visits on, or visits off"),
+        };
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -372,7 +403,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, home, mute, unmute, control, area, bubble, friend)")
+    Err("unknown line (node, home, mute, unmute, control, area, bubble, friend, crowd, visits)")
 }
 
 /// Whether a places line fits: a new area or friend when the list is full
@@ -388,7 +419,7 @@ pub fn check_room(p: &Places, l: &SiteLine) -> Result<(), SiteError> {
     }
 }
 
-/// Apply a places line (`area`, `bubble`, `friend`) to `p`; false for any
+/// Apply a places line (`area`, `bubble`, `friend`, `crowd`, `visits`) to `p`; false for any
 /// other line (and for `area here`, which needs the hub's position).
 pub fn apply_place(p: &mut Places, l: &SiteLine) -> bool {
     match l {
@@ -398,6 +429,8 @@ pub fn apply_place(p: &mut Places, l: &SiteLine) -> bool {
         SiteLine::Bubble { radius_m } => p.bubble_m = *radius_m,
         SiteLine::Friend(f) => drop(p.set_friend(f.clone())),
         SiteLine::FriendClear { serial } => p.clear_friend(serial),
+        SiteLine::Crowd { min } => p.crowd_min = *min,
+        SiteLine::Visits { on } => p.visits = *on,
         _ => return false,
     }
     true
@@ -486,7 +519,9 @@ impl SiteState {
             | SiteLine::AreaClear { .. }
             | SiteLine::Bubble { .. }
             | SiteLine::Friend(_)
-            | SiteLine::FriendClear { .. }) => {
+            | SiteLine::FriendClear { .. }
+            | SiteLine::Crowd { .. }
+            | SiteLine::Visits { .. }) => {
                 apply_place(&mut self.places, &l);
             }
         }
@@ -659,7 +694,8 @@ pub fn write_mute_text<W: Write>(w: &mut W, m: &Mute, now_ms: u64) -> core::fmt:
 /// One load of the site file at most logs this many change events; the
 /// rest are counted in one more event. (A file of any length holds at most
 /// [`crate::threats::MAX_MUTES`] mutes, [`MAX_PLACED`] positions, 8 areas,
-/// a bubble and 8 friends, so a load can change at most 105 things; a huge
+/// a bubble, 8 friends and the `crowd` and `visits` switches, so a load can
+/// change at most 107 things; a huge
 /// file costs one hash, one summary and at most this many events.)
 pub const MAX_CHANGE_EVENTS: usize = 48;
 
@@ -770,7 +806,12 @@ impl core::fmt::Display for LoadSummary<'_> {
             Some(r) => write!(f, "bubble {r:.0} m, ")?,
             None => f.write_str("bubble off, ")?,
         }
-        write!(f, "{} friends", st.places.friends.len())
+        write!(f, "{} friends", st.places.friends.len())?;
+        match st.places.crowd_min {
+            Some(n) => write!(f, ", several at once from {n} drones")?,
+            None => f.write_str(", several at once not counted (crowd off)")?,
+        }
+        f.write_str(if st.places.visits { ", visit history kept" } else { ", no visit history (visits off)" })
     }
 }
 
@@ -809,6 +850,10 @@ pub enum PlaceChange<'a> {
     Bubble(Option<f32>),
     FriendAdded(&'a Friend),
     FriendRemoved(&'a Friend),
+    /// `crowd` (slice 16d).
+    Crowd(Option<u8>),
+    /// `visits on|off` (slice 16d).
+    Visits(bool),
 }
 
 /// Every change from `old` to `new`. Returns how many.
@@ -834,6 +879,12 @@ pub fn place_changes<'a>(old: &'a Places, new: &'a Places, mut f: impl FnMut(Pla
     }
     for fr in old.friends.iter().filter(|fr| !new.friends.iter().any(|n| n.serial == fr.serial)) {
         out(PlaceChange::FriendRemoved(fr));
+    }
+    if old.crowd_min != new.crowd_min {
+        out(PlaceChange::Crowd(new.crowd_min));
+    }
+    if old.visits != new.visits {
+        out(PlaceChange::Visits(new.visits));
     }
     n
 }
@@ -862,6 +913,10 @@ pub fn write_place_change<W: Write>(w: &mut W, c: &PlaceChange<'_>) -> core::fmt
             link::printable::Printable(&fr.label)
         ),
         PlaceChange::FriendRemoved(fr) => write!(w, "friend {} removed", link::printable::Printable(&fr.serial)),
+        PlaceChange::Crowd(Some(n)) => write!(w, "several drones at once: a warning from {n} drones at the places"),
+        PlaceChange::Crowd(None) => w.write_str("several drones at once: not counted (crowd off; jamming and GPS interference still count)"),
+        PlaceChange::Visits(true) => w.write_str("repeat-visitor history kept (visits on): drone IDs and pilot spots, 30 days"),
+        PlaceChange::Visits(false) => w.write_str("repeat-visitor history off (visits off): nothing kept, the history is wiped"),
     }
 }
 
@@ -1097,6 +1152,12 @@ mod tests {
         assert_eq!((f.serial.as_str(), f.label.as_str()), ("1581F5FKD229400B4WW1", "our own Mini"));
         assert!(matches!(parse_line("friend SN1"), Ok(SiteLine::Friend(Friend { .. }))));
         assert!(matches!(parse_line("friend SN1 clear"), Ok(SiteLine::FriendClear { .. })));
+        // Slice 16d: several at once and the visit history.
+        assert_eq!(parse_line("crowd 4"), Ok(SiteLine::Crowd { min: Some(4) }));
+        assert_eq!(parse_line("Crowd OFF"), Ok(SiteLine::Crowd { min: None }));
+        assert_eq!(parse_line("crowd on"), Ok(SiteLine::Crowd { min: Some(places::CROWD_DEFAULT) }));
+        assert_eq!(parse_line("visits off # no history"), Ok(SiteLine::Visits { on: false }));
+        assert_eq!(parse_line("visits on"), Ok(SiteLine::Visits { on: true }));
         // Sixteen corners fit a line; seventeen do not.
         let corner = " 39.9520000 -75.1640000";
         let sixteen = std::format!("area big poly{}", corner.repeat(16));
@@ -1127,6 +1188,14 @@ mod tests {
             "bubble 300 400",
             "friend",
             "friend SN1 a label that is far too long for it",
+            "crowd",
+            "crowd 1",
+            "crowd 21",
+            "crowd many",
+            "crowd 3 4",
+            "visits",
+            "visits maybe",
+            "visits on off",
         ] {
             assert!(parse_line(bad).is_err(), "{bad}");
         }
@@ -1141,6 +1210,7 @@ mod tests {
         text += "area here 200\n"; // file: ignored
         text += "bubble 300\nbubble off\nbubble 250\n";
         text += "friend SN1 first\nfriend SN1 renamed\nfriend SN2\nfriend SN2 clear\n";
+        text += "crowd off\ncrowd 5\nvisits off\n";
         for i in 0..9 {
             text += &std::format!("area a{i} circle 1 2 100\n");
         }
@@ -1169,13 +1239,16 @@ mod tests {
             write_place_change(&mut t, &c).unwrap();
             seen.push(t);
         });
-        assert_eq!(n, 10, "{seen:?}");
+        assert_eq!(n, 12, "{seen:?}");
+        assert_eq!((p.crowd_min, p.visits), (Some(5), false));
+        assert!(seen.iter().any(|t| t.contains("a warning from 5 drones")), "{seen:?}");
+        assert!(seen.iter().any(|t| t.contains("visits off")), "{seen:?}");
         assert!(seen[0].starts_with("site file changed: area house circle at 39.9521000 -75.1638000, 200 m, ceiling 90 m"), "{seen:?}");
         assert!(seen.iter().any(|t| t.contains("friend SN1 \"renamed\" added")), "{seen:?}");
         assert_eq!(place_changes(p, &p.clone(), |_| panic!()), 0);
         let sha = [0; 32];
         let sum = std::format!("{}", LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 });
-        assert!(sum.ends_with("8 areas, bubble 250 m, 1 friends"), "{sum}");
+        assert!(sum.ends_with("8 areas, bubble 250 m, 1 friends, several at once from 5 drones, no visit history (visits off)"), "{sum}");
         assert_eq!(&LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 }.data()[37..], &[8, 25, 1]);
     }
 }

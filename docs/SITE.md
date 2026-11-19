@@ -169,6 +169,35 @@ level (Notice, Caution, Warning, Critical) with the reasons.
 * A console line is at most 120 characters, so a polygon with more than
   about five corners belongs in the file (a file line may be 384).
 
+## Several drones at once, and the visit history
+
+Two switches for the rules that look across drones and days (slice 16d):
+
+      crowd 4          # "several drones at once" from 4 drones at the places (default 3)
+      crowd off        # don't count drones at once (an event with many friendly drones)
+      crowd on         # back to the default, 3
+      visits off       # keep no repeat-visitor history, and wipe what is kept
+      visits on        # keep it (the default)
+
+* **`crowd`** sets how many drones at or near the places at the same time
+  make a Warning for each of them ("one of 4 drones at house at once"). It
+  takes 2 to 20, `on` or `off`. **`crowd off` does not switch off the
+  jamming part**: any drone at or near a place while the hub hears jamming,
+  sees a node blinded or sees GPS interference in the area is still a
+  Warning. Friends are never counted.
+* **`visits`**: with it on (the default) the hub keeps, on its SD card
+  (`ROTORSCP/VISITS.DAT`), which drones and which pilot spots were seen at
+  the places, on which days, for **30 days**, so a drone (or a pilot
+  standing in the same spot) back on 3 or more days in two weeks is shown as
+  a "repeat visitor". It keeps only a fingerprint of the drone's ID (not the
+  ID itself) or the 25 m square the pilot stood in, and the dates: no times,
+  no paths. Friends are never kept. `visits off` stops it and **wipes what
+  was kept**, on the hub and on the card (logged). It needs GPS time: with
+  no time, nothing is recorded.
+* **To wipe the history** without switching it off, press `W` twice on the
+  console (within 5 seconds). It is logged in the evidence log. There is no
+  button for it on the screen (the Settings page is full).
+
 ## What a load of the file leaves in the evidence log
 
 The hub reads the file at every card mount. A swapped or edited card must not
@@ -179,20 +208,22 @@ trace, so every load writes evidence "setting" events:
    bytes), its size and line count, lines used and ignored, how many mutes for
    good, how many mute lines not honoured, how many node positions, the
    control switches, and how many areas, the bubble's radius and how many
-   friends. For example `site file loaded: sha256 9f2c...e1, 412
-   bytes, 14 lines (12 used, 2 ignored); 1 mutes for good, 1 mute lines not
-   honoured; 3 node positions; control ids off, control content off; 2
-   areas, bubble off, 1 friends`.
+   friends, then the `crowd` and `visits` switches. For example `site file
+   loaded: sha256 9f2c...e1, 412 bytes, 14 lines (12 used, 2 ignored); 1
+   mutes for good, 1 mute lines not honoured; 3 node positions; control ids
+   off, control content off; 2 areas, bubble off, 1 friends, several at once
+   from 3 drones, visit history kept`.
 2. **One per change** from what the hub was using: a mute added or removed, a
    node placed, moved (with the old position) or cleared, e.g. `site file
    changed: node 10:bd:a3:ce:bd:18 at 39.9600000 -75.1638000 (was 39.9521000
    -75.1638000); spoof checks use it`; an area set or removed, the bubble,
    a friend added or removed (`site file changed: friend SN1 "our own Mini"
-   added (its area alarms are lowered to Notice; fast inbound never is)`).
+   added (its area alarms are lowered to Notice; fast inbound never is)`),
+   the `crowd` or `visits` switch changed.
    The same file loaded again changes nothing and logs only the summary.
 3. **Bounded.** However long the file (it is read a piece at a time; later
    lines win), the hub holds at most 24 mutes, 16 node positions, 8 areas, a bubble and 8 friends, so one
-   load can change at most 105 things. At most 48 are logged one by one; the
+   load can change at most 107 things. At most 48 are logged one by one; the
    rest are counted in one more event (`site file changed: N more changes not
    logged one by one`). The hash always covers the whole file.
 

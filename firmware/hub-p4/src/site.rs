@@ -16,7 +16,8 @@
 //! Snooze also snoozes the alerts of drones at Warning or above (threat
 //! levels, `tracker::behaviour`), for the same five minutes.
 //!
-//! **Places to protect** (`area`, `bubble`, `friend` lines) live in the
+//! **Places to protect** (`area`, `bubble`, `friend` lines, and slice 16d's
+//! `crowd` and `visits` switches) live in the
 //! tracker (`Tracker::places`), like the mute rules. A load logs each
 //! change to them (a friend lowers alarms, so a swapped card adding one
 //! must leave a trace). `area here R` (console only) becomes an ordinary
@@ -200,7 +201,9 @@ impl Site {
             | SiteLine::AreaClear { .. }
             | SiteLine::Bubble { .. }
             | SiteLine::Friend(_)
-            | SiteLine::FriendClear { .. }) => {
+            | SiteLine::FriendClear { .. }
+            | SiteLine::Crowd { .. }
+            | SiteLine::Visits { .. }) => {
                 site::apply_place(app.tracker.places_mut(), &l);
             }
             SiteLine::AllNodesHere | SiteLine::AreaHere { .. } | SiteLine::Nothing => {}
