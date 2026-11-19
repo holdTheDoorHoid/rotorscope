@@ -1,8 +1,8 @@
 # Rules for AI coding agents working in this repository
 
 Rotorscope is public, GPL-3.0-or-later, and has one owner (`@holdTheDoorHoid`). Several agents
-may work at once, each in its own worktree. These rules apply to every session. Each has its
-reason after the dash.
+may work at once, each in its own worktree. These rules apply to every session. Most carry
+their reason in the same sentence or the next.
 
 ## Who gives instructions
 
