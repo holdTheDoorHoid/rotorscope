@@ -175,6 +175,14 @@ pub struct ChainSummary {
     pub no_position: u64,
     pub manual_position: u64,
     pub missing: Vec<(u64, u64)>,
+    /// What the boot event says about the build (firmware from WP-14a).
+    pub build: Option<format::boot::Ext>,
+    /// The chain's first `continuity` record (WP-14a): its boot counter
+    /// and the previous boot it names.
+    pub continuity: Option<crate::continuity::Continuity>,
+    /// Records of this chain after its own last checkpoint that the next
+    /// boot's signed `continuity` record vouches for (it names their head).
+    pub vouched_by_next: Option<u64>,
 }
 
 /// "1 record has" / "N records have".
@@ -241,6 +249,19 @@ impl Report {
         }
     }
 
+    /// [`NOT_PROVEN`], with what the boot counters let the checker say
+    /// about the newest boot it saw.
+    pub fn not_proven(&self) -> String {
+        let newest = self.chains.iter().filter_map(|c| c.continuity.map(|k| (k.counter, c.boot))).filter(|(n, _)| *n > 0).max();
+        match newest {
+            None => NOT_PROVEN.to_string(),
+            Some((n, b)) => format!(
+                "{NOT_PROVEN} The newest boot checked is boot counter {n} (boot {}): later boots, or this boot's records after the last one supplied, would leave no trace here. The counter is kept on the unit's SD card, which whoever holds it can rewrite or wipe; the unit prints its counter on its console at each card mount, so ask for the current one to see whether later boots exist.",
+                hex(&b)
+            ),
+        }
+    }
+
     fn add(&mut self, level: Level, at: Where, what: impl Into<String>) {
         self.findings.push(Finding { level, at, what: what.into() });
     }
@@ -289,12 +310,13 @@ struct ChainState {
     /// links across gaps).
     hashes: BTreeMap<u64, [u8; 32]>,
     last_uptime: u64,
-    last_utc: Option<(u64, u8)>,
-    clock_event_since: bool,
+    time: TimeTrack,
     last_checkpoint_uptime: Option<u64>,
     last_signed_end: Option<u64>,
     /// The key was refused (test key, or not an outside key): said once.
     key_refused: bool,
+    /// Every `continuity` record: its sequence number and data.
+    continuity: Vec<(u64, crate::continuity::Continuity)>,
 }
 
 /// The bench features a boot event's text names (`...; bench: a,b`, as
@@ -311,6 +333,12 @@ pub fn boot_bench_list(text: &[u8]) -> Option<&str> {
 /// Check `inputs` in order. Card files should be given in file-number
 /// order; batches in upload order.
 pub fn verify(inputs: &[Input], opts: &Options) -> Report {
+    verify_inner(inputs, opts, false)
+}
+
+/// `uploads`: the inputs are a server's batches, which by rule end on a
+/// signed checkpoint (so a boot's last unsigned records never reach it).
+fn verify_inner(inputs: &[Input], opts: &Options, uploads: bool) -> Report {
     let mut rep = Report::default();
     let mut chains: Vec<ChainState> = Vec::new();
     let mut index: HashMap<[u8; 8], usize> = HashMap::new();
@@ -359,11 +387,11 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
                     head: [0; 32],
                     hashes: BTreeMap::new(),
                     last_uptime: 0,
-                    last_utc: None,
-                    clock_event_since: false,
+                    time: TimeTrack::default(),
                     last_checkpoint_uptime: None,
                     last_signed_end: None,
                     key_refused: false,
+                    continuity: Vec::new(),
                 });
                 chains.len() - 1
             });
@@ -414,6 +442,11 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
             rep.add(Level::Fail, w, format!("EV{prev_no:06}.EVL's ending changed after the unit opened the next file"));
         }
     }
+    for c in &mut chains {
+        c.time.finish(&mut rep, c.sum.build.map(|b| b.built_unix_s));
+    }
+    continuity_checks(&mut rep, &mut chains, opts, uploads);
+    time_across_boots(&mut rep, &chains, inputs.iter().all(|i| i.file_no.is_some()));
     let mut nos: Vec<u32> = file_tails.keys().copied().collect();
     nos.sort();
     for p in nos.windows(2) {
@@ -582,16 +615,10 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
             }
             c.sum.utc_first.get_or_insert(u);
             c.sum.utc_last = Some(u);
-            if let Some((prev, _)) = c.last_utc
-                && u + 2000 < prev
-                && !c.clock_event_since
-            {
-                rep.add(Level::Note, w.clone(), format!("UTC stepped back {} ms with no clock event logged", prev - u));
-            }
-            c.last_utc = Some((u, h.time_source));
-            c.clock_event_since = false;
+            c.time.utc(rep, h.uptime_ms, u, w);
         }
     }
+    c.time.tick(rep, h.uptime_ms);
     // "untrusted" is the one source that comes with no UTC (EVIDENCE-FORMAT.md:
     // GPS gave a time the hub withheld; the UTC field is 0).
     if h.utc_ms.is_none() && h.time_source != 0 && h.time_source != format::TimeSource::Untrusted as u8 {
@@ -616,11 +643,14 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
             match code {
                 None => rep.add(Level::Note, w.clone(), format!("unknown event code {} (newer firmware?)", e.code)),
                 Some(EventCode::Boot) => {
-                    if e.data.len() < 1 + format::PUBKEY_LEN {
-                        rep.add(Level::Fail, w.clone(), "boot event too short to hold the key");
-                    } else {
-                        c.sum.key_class = Some(e.data[0]);
-                        c.sum.key = Some(e.data[1..1 + format::PUBKEY_LEN].try_into().unwrap());
+                    match format::boot::Boot::decode(e.data) {
+                        None => rep.add(Level::Fail, w.clone(), "boot event too short to hold the key"),
+                        Some(b) => {
+                            c.sum.key_class = Some(b.key_class);
+                            c.sum.key = Some(b.pubkey);
+                            c.sum.build = b.ext;
+                            build_notes(rep, &b, w);
+                        }
                     }
                     if let Some(list) = boot_bench_list(e.text) {
                         rep.add(
@@ -630,7 +660,14 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
                         );
                     }
                 }
-                Some(EventCode::Clock) => c.clock_event_since = true,
+                Some(EventCode::Clock) => c.time.clock(h.uptime_ms),
+                Some(EventCode::Continuity) => match crate::continuity::Continuity::decode(e.data) {
+                    Some(k) => {
+                        c.sum.continuity.get_or_insert(k);
+                        c.continuity.push((h.seq, k));
+                    }
+                    None => rep.add(Level::Fail, w.clone(), "continuity record too short"),
+                },
                 _ => {}
             }
         }
@@ -652,6 +689,295 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
         }
     }
     claim
+}
+
+/// A UTC jump against uptime bigger than this needs a clock event.
+const JUMP_MS: i128 = 2_000;
+/// A clock event this close (uptime) after a jump explains it (the hub
+/// logs clock changes once a second, so records can show the new time first).
+const CLOCK_GRACE_MS: u64 = 3_000;
+/// Drift of UTC against uptime, with no clock event, beyond this plus
+/// [`DRIFT_PER_MS`] per ms of uptime is noted (the hub steers its clock by at
+/// most 20 ppm, docs/GNSS-INTEGRITY.md; this allows 50 times that).
+const DRIFT_MS: i128 = 1_000;
+const DRIFT_PER_MS: i128 = 1_000;
+/// Drift is judged over at least this much uptime.
+const DRIFT_SPAN_MS: u64 = 60_000;
+
+/// Time plausibility within one chain (WP-14a, HB-11): UTC against the
+/// hub's own uptime. Only records with UTC count; "none" and "untrusted"
+/// records carry none and are left out (counted elsewhere).
+#[derive(Default)]
+struct TimeTrack {
+    /// The latest UTC record: UTC - uptime, uptime, and whether a clock
+    /// event came after it.
+    last: Option<(i128, u64)>,
+    clock_since: bool,
+    /// Start of the current stretch without clock events: offset, uptime.
+    run: Option<(i128, u64)>,
+    /// A jump not yet explained: where, by how much, at what uptime.
+    pending: Option<(Where, i128, u64)>,
+    /// Earliest UTC in the chain, and where.
+    min_utc: Option<(u64, Where)>,
+}
+
+impl TimeTrack {
+    fn utc(&mut self, rep: &mut Report, uptime: u64, utc: u64, w: &Where) {
+        if self.min_utc.as_ref().is_none_or(|(m, _)| utc < *m) {
+            self.min_utc = Some((utc, w.clone()));
+        }
+        let off = i128::from(utc) - i128::from(uptime);
+        if let Some((last, _)) = self.last
+            && !self.clock_since
+            && (off - last).abs() > JUMP_MS
+        {
+            self.emit(rep);
+            self.pending = Some((w.clone(), off - last, uptime));
+            self.run = None;
+        }
+        match self.run {
+            Some((o, t)) if uptime.saturating_sub(t) >= DRIFT_SPAN_MS => {
+                let span = i128::from(uptime - t);
+                let drift = off - o;
+                if drift.abs() > DRIFT_MS + span / DRIFT_PER_MS {
+                    rep.add(
+                        Level::Note,
+                        w.clone(),
+                        format!(
+                            "UTC drifted {drift} ms against the hub's own clock over {} s with no clock event ({} ppm; the hub steers its clock by at most 20 ppm): the time in these records is doubtful",
+                            span / 1000,
+                            drift * 1_000_000 / span
+                        ),
+                    );
+                    self.run = Some((off, uptime));
+                }
+            }
+            Some(_) => {}
+            None => self.run = Some((off, uptime)),
+        }
+        self.last = Some((off, uptime));
+        self.clock_since = false;
+    }
+
+    fn clock(&mut self, uptime: u64) {
+        if self.pending.as_ref().is_some_and(|p| uptime.saturating_sub(p.2) <= CLOCK_GRACE_MS) {
+            self.pending = None;
+        }
+        self.clock_since = true;
+        self.run = None;
+    }
+
+    /// Every record: a jump whose grace has passed is reported.
+    fn tick(&mut self, rep: &mut Report, uptime: u64) {
+        if self.pending.as_ref().is_some_and(|p| uptime.saturating_sub(p.2) > CLOCK_GRACE_MS) {
+            self.emit(rep);
+        }
+    }
+
+    fn emit(&mut self, rep: &mut Report) {
+        if let Some((w, d, _)) = self.pending.take() {
+            rep.add(
+                Level::Note,
+                w,
+                format!(
+                    "UTC jumped {} {} s against the hub's own clock with no clock event: the hub logs every clock change of 0.5 s or more, so the time from here on is doubtful",
+                    if d > 0 { "forward" } else { "back" },
+                    d.abs() / 1000
+                ),
+            );
+        }
+    }
+
+    /// End of the chain: what is still pending, and UTC before the build.
+    fn finish(&mut self, rep: &mut Report, built_unix_s: Option<u64>) {
+        self.emit(rep);
+        if let (Some(b), Some((m, w))) = (built_unix_s, self.min_utc.take())
+            && m < b.saturating_mul(1000)
+        {
+            rep.add(
+                Level::Fail,
+                w,
+                format!(
+                    "UTC {} is before this firmware was built ({}): the hub never writes time before its build date as GPS time (it records it as untrusted), so these records were not written as they stand by the firmware the boot event names",
+                    fmt_utc(m),
+                    fmt_utc(b.saturating_mul(1000))
+                ),
+            );
+        }
+    }
+}
+
+/// Time from one boot to the next (WP-14a): a boot's first UTC before the
+/// previous boot's last UTC. Boots are ordered by their continuity records
+/// where they have them, else (card files only) in the order supplied.
+fn time_across_boots(rep: &mut Report, chains: &[ChainState], files: bool) {
+    let by_boot: HashMap<[u8; 8], usize> = chains.iter().enumerate().map(|(i, c)| (c.sum.boot, i)).collect();
+    for (i, c) in chains.iter().enumerate() {
+        let prev = match c.sum.continuity {
+            Some(k) if k.has_prev() => by_boot.get(&k.prev_boot).copied(),
+            Some(_) => None,
+            None if files && i > 0 && chains[i - 1].sum.continuity.is_none() => Some(i - 1),
+            None => None,
+        };
+        let Some(p) = prev else { continue };
+        if let (Some(end), Some(start)) = (chains[p].sum.utc_last, c.sum.utc_first)
+            && start + 2_000 < end
+        {
+            rep.add(
+                Level::Note,
+                Where { boot: Some(c.sum.boot), ..Default::default() },
+                format!(
+                    "this boot's first UTC ({}) is earlier than the end of the boot before it ({}, boot {}): one of the two clocks was wrong",
+                    fmt_utc(start),
+                    fmt_utc(end),
+                    hex(&chains[p].sum.boot)
+                ),
+            );
+        }
+    }
+}
+
+/// Continuity across boots (WP-14a): each boot's `continuity` record names
+/// its counter and how far the boot before it had reached the card. Given
+/// that boot too, its log must reach that far with that very record;
+/// a boot missing between two supplied ones is a missing boot. Run after
+/// every input is read, before the chains' gap lines.
+fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options, uploads: bool) {
+    use crate::continuity::{self as k, Continuity};
+    let by_boot: HashMap<[u8; 8], usize> = chains.iter().enumerate().map(|(i, c)| (c.sum.boot, i)).collect();
+    // Counters the supplied boots have (any of their continuity records).
+    let counters: Vec<u64> = chains.iter().flat_map(|c| c.continuity.iter().map(|(_, k)| k.counter)).filter(|&n| n > 0).collect();
+    let (missing_level, why) = if opts.gaps_allowed {
+        (Level::Gap, "; it may have been removed, which cannot be told apart from one never supplied")
+    } else {
+        (Level::Fail, " (fails unless --allow-gaps)")
+    };
+    for ci in 0..chains.len() {
+        let boot = chains[ci].sum.boot;
+        if chains[ci].continuity.is_empty() {
+            if chains[ci].sum.build.is_some_and(|b| b.counter_source != format::boot::COUNTER_NONE) {
+                rep.add(
+                    Level::Note,
+                    Where { boot: Some(boot), ..Default::default() },
+                    "this boot keeps a boot counter but no continuity record of it was checked (no card mounted while it ran, or its records after the mount were not supplied): its place among the unit's boots is not shown",
+                );
+            }
+            continue;
+        }
+        let list: Vec<(u64, Continuity)> = chains[ci].continuity.clone();
+        for (seq, c) in list {
+            let w = Where { boot: Some(boot), seq: Some(seq), ..Default::default() };
+            match c.status {
+                k::CONTINUED => {}
+                k::FRESH => rep.add(Level::Note, w.clone(), format!("boot counter {}: the card held no counter (a new or wiped card, or its state files were removed): nothing links this boot to earlier ones", c.counter)),
+                k::UNREADABLE => rep.add(Level::Note, w.clone(), format!("boot counter {}: the card's counter was unreadable, so it started again: nothing links this boot to earlier ones", c.counter)),
+                k::NOT_SAVED => rep.add(Level::Note, w.clone(), format!("boot counter {}: the unit could not save it, so the next boot will not follow on from this one", c.counter)),
+                k::STORE_ERROR => rep.add(Level::Note, w.clone(), "the unit could not read its boot counter: this boot's place among the others is not shown"),
+                n => rep.add(Level::Note, w.clone(), format!("continuity record with unknown status {n} (newer firmware?)")),
+            }
+            if !c.has_prev() {
+                continue;
+            }
+            let prev = hex(&c.prev_boot);
+            let before = c.counter.saturating_sub(1);
+            let Some(&pi) = by_boot.get(&c.prev_boot) else {
+                if counters.iter().any(|&n| n < c.counter) {
+                    rep.add(
+                        missing_level,
+                        w.clone(),
+                        format!("boot counter {before} (boot {prev}, {} records) was not supplied, but boots before and after it were{why}", c.prev_records),
+                    );
+                } else {
+                    rep.add(
+                        Level::Note,
+                        w.clone(),
+                        format!("this is boot counter {}: the boot before it (counter {before}, boot {prev}, {} records stored) is outside what was checked", c.counter, c.prev_records),
+                    );
+                }
+                continue;
+            };
+            let p = &chains[pi];
+            if !p.continuity.is_empty() && !p.continuity.iter().any(|(_, pk)| pk.counter == before) {
+                rep.add(
+                    Level::Fail,
+                    w.clone(),
+                    format!("boot {prev} is named as boot counter {before}, but its own continuity record says otherwise: the boots do not follow each other"),
+                );
+            }
+            if c.prev_records == 0 {
+                continue;
+            }
+            let last = c.prev_records - 1;
+            match p.hashes.get(&last) {
+                Some(h) if *h == c.prev_head => {
+                    // That head is now vouched for by this boot's chain: by
+                    // its signature, once this record is signed.
+                    let signed_here = chains[ci].last_signed_end.is_some_and(|e| e >= seq);
+                    let p = &mut chains[pi];
+                    if signed_here && p.last_signed_end.is_none_or(|e| e < last) {
+                        let from = p.last_signed_end.map_or(0, |e| e + 1);
+                        p.last_signed_end = Some(last);
+                        p.sum.vouched_by_next = Some(last);
+                        rep.add(
+                            Level::Note,
+                            Where { boot: Some(p.sum.boot), seq: Some(from), ..Default::default() },
+                            format!("records #{from}..#{last} come after this boot's last checkpoint; the next boot's signed continuity record names their head, so its signature covers them"),
+                        );
+                    }
+                }
+                Some(_) => rep.add(
+                    Level::Fail,
+                    w.clone(),
+                    format!("record #{last} of boot {prev} is not the one the unit had stored when this boot began (changed afterwards)"),
+                ),
+                // A server's batches end on a checkpoint by rule: a boot's
+                // records after its last one never reach it. Not told apart
+                // from records removed, so a gap, not a pass.
+                None if uploads && p.sum.last_seq.is_some() && p.last_signed_end == p.sum.last_seq => rep.add(
+                    Level::Gap,
+                    w.clone(),
+                    format!(
+                        "boot {prev}'s records #{}..#{last} are not here: when this boot began the card held them, but they came after that boot's last checkpoint and a server only takes batches that end on one. Copy them from the card to check them; until then they cannot be told apart from records removed",
+                        p.sum.last_seq.map_or(0, |l| l + 1)
+                    ),
+                ),
+                None if p.sum.last_seq.is_none_or(|l| l < last) => rep.add(
+                    missing_level,
+                    w.clone(),
+                    format!(
+                        "boot {prev} ends at record #{}, but when this boot began the card held its records through #{last}: the end of its log was cut off, or not supplied{why}",
+                        p.sum.last_seq.map_or("-".to_string(), |l| l.to_string())
+                    ),
+                ),
+                // Records missing inside the chain: reported with the chain.
+                None => {}
+            }
+        }
+    }
+}
+
+/// What the boot event says about the build, as notes.
+fn build_notes(rep: &mut Report, b: &format::boot::Boot, w: &Where) {
+    use format::boot;
+    let Some(e) = b.ext else {
+        rep.add(
+            Level::Note,
+            w.clone(),
+            "the boot event predates WP-14a: it names no source commit, build date or boot counter, so continuity across boots cannot be checked for this boot",
+        );
+        return;
+    };
+    let commit = hex(&e.git);
+    match e.git_state {
+        boot::GIT_CLEAN => {}
+        boot::GIT_DIRTY => rep.add(
+            Level::Note,
+            w.clone(),
+            format!("built from source commit {commit} WITH CHANGES to tracked files: the commit alone does not say what code ran (the firmware hash names the exact image)"),
+        ),
+        _ if e.git == [0; 20] => rep.add(Level::Note, w.clone(), "the build did not record its source commit (built outside a git checkout): only the firmware hash names the image"),
+        _ => rep.add(Level::Note, w.clone(), format!("built from source commit {commit}, but whether the tree had changes is unknown")),
+    }
 }
 
 fn check_detection(rep: &mut Report, d: &format::DetectionBody<'_>, w: &Where) {
@@ -1025,7 +1351,7 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
     // chain order (each batch holds one boot's contiguous run; their arrival
     // order was checked against the audit log above).
     inputs.sort_by_key(|i| format::parse(&i.bytes).map(|r| (r.header.boot_id, r.header.seq)).unwrap_or(([0xFF; 8], u64::MAX)));
-    let inner = verify(&inputs, opts);
+    let inner = verify_inner(&inputs, opts, true);
     rep.findings.extend(inner.findings);
     rep.chains = inner.chains;
     rep.records = inner.records;

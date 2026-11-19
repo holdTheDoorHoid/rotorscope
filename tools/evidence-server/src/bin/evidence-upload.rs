@@ -17,16 +17,31 @@
 //! ```
 //!
 //! It uploads each boot's records from the first one the server lacks, in
-//! batches that end on a signed checkpoint (the server refuses anything
-//! else). Records after the last checkpoint wait for the next one. The
-//! laptop vouches for nothing: the server checks the hub's signatures.
+//! batches that end on a signed checkpoint (at most 15 MiB each). Records
+//! after a boot's last checkpoint (its "tail") wait until a later boot's
+//! `continuity` record, which names the tail's last record by number and
+//! hash, is stored; then the tail is sent on its own and the server checks
+//! it against that record. The laptop vouches for nothing: the server
+//! checks the hub's signatures.
+//!
+//! What it reads from its peers is capped: console lines (a line with no
+//! end is dropped, not held), records held in memory, and server replies.
+//! Text from the server is printed without control characters.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Read};
+use std::io::Read;
 use std::time::{Duration, Instant};
 
-use evidence::format::{self, Body, EventCode, Kind};
+use evidence::format::{self, Body, EventCode};
 use evidence::verify::hex;
+use evidence_server::lines::{Line, LineReader, MAX_LINE};
+use evidence_server::plan;
+
+/// A batch the uploader builds is at most this (the server takes 16 MiB).
+const BATCH_BYTES: usize = 15 << 20;
+/// A server reply read as JSON, and an error message, at most.
+const MAX_REPLY: u64 = 1 << 20;
+const MAX_ERROR: u64 = 4 << 10;
 
 struct Opts {
     agent: ureq::Agent,
@@ -39,10 +54,12 @@ struct Opts {
 
 #[derive(Default)]
 struct Collected {
-    chains: BTreeMap<[u8; 8], BTreeMap<u64, Vec<u8>>>,
+    chains: plan::Chains,
     key: Option<[u8; 65]>,
     conflicts: u32,
     bad: u32,
+    held: usize,
+    dropped: u64,
 }
 
 impl Collected {
@@ -69,7 +86,14 @@ impl Collected {
                 eprintln!("evidence-upload: WARNING two different records #{} for boot {}", r.header.seq, hex(&r.header.boot_id));
             }
             Some(_) => {}
+            None if self.held + rec.len() > plan::MAX_HELD_BYTES => {
+                if self.dropped == 0 {
+                    eprintln!("evidence-upload: WARNING holding {} MiB of records: dropping new ones (upload, then run again)", plan::MAX_HELD_BYTES >> 20);
+                }
+                self.dropped += 1;
+            }
             None => {
+                self.held += rec.len();
                 m.insert(r.header.seq, rec.to_vec());
             }
         }
@@ -123,6 +147,85 @@ fn req(o: &Opts, method: &str, path: &str) -> ureq::Request {
     r
 }
 
+/// A server reply as JSON, read up to [`MAX_REPLY`].
+fn json(r: ureq::Response) -> serde_json::Value {
+    let mut b = Vec::new();
+    let _ = r.into_reader().take(MAX_REPLY).read_to_end(&mut b);
+    serde_json::from_slice(&b).unwrap_or_default()
+}
+
+/// Server text for the terminal: no control characters (a hostile server
+/// could otherwise move the cursor or rewrite what was printed).
+fn clean(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+fn send(o: &Opts, id: &str, b: &str, recs: &BTreeMap<u64, Vec<u8>>, first: u64, last: u64, what: &str) -> bool {
+    let mut batch = Vec::new();
+    for s in first..=last {
+        batch.extend_from_slice(&recs[&s]);
+    }
+    match req(o, "POST", &format!("/api/devices/{id}/batches")).set("Content-Type", "application/octet-stream").send_bytes(&batch) {
+        Ok(r) => {
+            let v = json(r);
+            println!("evidence-upload: boot {b}: records #{first}..#{last} ({what}) stored as batch {} (sha256 {})", v["batch"], clean(v["sha256"].as_str().unwrap_or("?")));
+            true
+        }
+        Err(e) => {
+            eprintln!("evidence-upload: boot {b}: records #{first}..#{last} ({what}) refused: {}", describe(e));
+            false
+        }
+    }
+}
+
+/// What the server has: the next record it lacks, per boot.
+fn status(o: &Opts, id: &str, key: &[u8; 65]) -> Option<serde_json::Value> {
+    match req(o, "GET", &format!("/api/devices/{id}")).call() {
+        Ok(r) => Some(json(r)),
+        Err(ureq::Error::Status(404, _)) => {
+            let Some(name) = &o.register else {
+                eprintln!("evidence-upload: unit {id} is not registered. Check this fingerprint against the one the unit prints at boot, then run again with --register NAME");
+                return None;
+            };
+            match req(o, "POST", "/api/devices").send_json(serde_json::json!({ "public_key": hex(key), "name": name })) {
+                Ok(_) => println!("evidence-upload: registered unit {id} as {name:?}"),
+                Err(e) => {
+                    eprintln!("evidence-upload: registering failed: {}", describe(e));
+                    return None;
+                }
+            }
+            Some(serde_json::json!({}))
+        }
+        Err(e) => {
+            eprintln!("evidence-upload: server: {}", describe(e));
+            None
+        }
+    }
+}
+
+/// The first record to send for a boot, or `None` to skip it.
+fn start_of(o: &Opts, status: &serde_json::Value, b: &str, recs: &BTreeMap<u64, Vec<u8>>, quiet: bool) -> Option<u64> {
+    let start = status["next_seq"][b].as_u64().unwrap_or(0);
+    if recs.contains_key(&start) {
+        return Some(start);
+    }
+    match recs.range(start..).next() {
+        Some((&s, _)) if o.allow_gap => {
+            if !quiet {
+                eprintln!("evidence-upload: boot {b}: records #{start}..#{} are missing here; uploading from #{s} (--allow-gap: the server will show the gap)", s - 1);
+            }
+            Some(s)
+        }
+        Some((&s, _)) => {
+            if !quiet {
+                eprintln!("evidence-upload: boot {b}: the server needs #{start} next but this laptop has #{s}.. only; replay the card file (--replay) or read the card (--card), or use --allow-gap");
+            }
+            None
+        }
+        None => None,
+    }
+}
+
 /// Upload what is ready. Returns batches stored.
 fn upload(o: &Opts, c: &Collected) -> u32 {
     let Some(key) = c.key else {
@@ -130,66 +233,34 @@ fn upload(o: &Opts, c: &Collected) -> u32 {
         return 0;
     };
     let id = String::from_utf8(evidence::fingerprint(&key).to_vec()).unwrap();
-    let status = match req(o, "GET", &format!("/api/devices/{id}")).call() {
-        Ok(r) => r.into_json::<serde_json::Value>().unwrap_or_default(),
-        Err(ureq::Error::Status(404, _)) => {
-            let Some(name) = &o.register else {
-                eprintln!("evidence-upload: unit {id} is not registered. Check this fingerprint against the one the unit prints at boot, then run again with --register NAME");
-                return 0;
-            };
-            match req(o, "POST", "/api/devices").send_json(serde_json::json!({ "public_key": hex(&key), "name": name })) {
-                Ok(_) => println!("evidence-upload: registered unit {id} as {name:?}"),
-                Err(e) => {
-                    eprintln!("evidence-upload: registering failed: {}", describe(e));
-                    return 0;
-                }
-            }
-            serde_json::json!({})
-        }
-        Err(e) => {
-            eprintln!("evidence-upload: server: {}", describe(e));
-            return 0;
-        }
-    };
+    let Some(st) = status(o, &id, &key) else { return 0 };
     let mut stored = 0;
+    // First every boot's signed batches (a later boot's continuity record
+    // must be stored before the earlier boot's tail can be)...
     for (boot, recs) in &c.chains {
         let b = hex(boot);
-        let mut start = status["next_seq"][&b].as_u64().unwrap_or(0);
-        if !recs.contains_key(&start) {
-            match recs.range(start..).next() {
-                Some((&s, _)) if o.allow_gap => {
-                    eprintln!("evidence-upload: boot {b}: records #{start}..#{} are missing here; uploading from #{s} (--allow-gap: the server will show the gap)", s - 1);
-                    start = s;
-                }
-                Some((&s, _)) => {
-                    eprintln!("evidence-upload: boot {b}: the server needs #{start} next but this laptop has #{s}.. only; replay the card file (--replay) or read the card (--card), or use --allow-gap");
-                    continue;
-                }
-                None => continue,
+        let Some(start) = start_of(o, &st, &b, recs, false) else { continue };
+        for (first, last) in plan::signed_batches(recs, start, BATCH_BYTES) {
+            if !send(o, &id, &b, recs, first, last, "signed") {
+                break;
             }
+            stored += 1;
         }
-        let mut end = None;
-        let mut s = start;
-        while let Some(r) = recs.get(&s) {
-            if format::parse(r).is_ok_and(|p| p.header.kind == Kind::Checkpoint) {
-                end = Some(s);
-            }
-            s += 1;
-        }
-        let Some(end) = end else {
-            continue;
-        };
-        let mut batch = Vec::new();
-        for s in start..=end {
-            batch.extend_from_slice(&recs[&s]);
-        }
-        match req(o, "POST", &format!("/api/devices/{id}/batches")).set("Content-Type", "application/octet-stream").send_bytes(&batch) {
-            Ok(r) => {
-                let v: serde_json::Value = r.into_json().unwrap_or_default();
-                println!("evidence-upload: boot {b}: records #{start}..#{end} stored as batch {} (sha256 {})", v["batch"], v["sha256"].as_str().unwrap_or("?"));
-                stored += 1;
-            }
-            Err(e) => eprintln!("evidence-upload: boot {b}: records #{start}..#{end} refused: {}", describe(e)),
+    }
+    // ...then the tails a later boot now covers.
+    let tails: Vec<_> = c.chains.keys().filter(|b| plan::covered_through(&c.chains, b).is_some()).collect();
+    if tails.is_empty() {
+        return stored;
+    }
+    let Some(st) = status(o, &id, &key) else { return stored };
+    for boot in tails {
+        let recs = &c.chains[boot];
+        let b = hex(boot);
+        let Some(start) = start_of(o, &st, &b, recs, true) else { continue };
+        if let Some((first, last)) = plan::tail(recs, start, plan::covered_through(&c.chains, boot))
+            && send(o, &id, &b, recs, first, last, "tail, covered by the next boot's continuity record")
+        {
+            stored += 1;
         }
     }
     stored
@@ -197,7 +268,11 @@ fn upload(o: &Opts, c: &Collected) -> u32 {
 
 fn describe(e: ureq::Error) -> String {
     match e {
-        ureq::Error::Status(code, r) => format!("{code} {}", r.into_string().unwrap_or_default()),
+        ureq::Error::Status(code, r) => {
+            let mut b = Vec::new();
+            let _ = r.into_reader().take(MAX_ERROR).read_to_end(&mut b);
+            format!("{code} {}", clean(&String::from_utf8_lossy(&b)))
+        }
         e => e.to_string(),
     }
 }
@@ -248,11 +323,12 @@ fn report(c: &Collected) {
     for (b, m) in &c.chains {
         let first = m.keys().next().copied().unwrap_or(0);
         let last = m.keys().next_back().copied().unwrap_or(0);
-        let missing = (last - first + 1) as usize - m.len();
+        // Record numbers come from the hub: no arithmetic that can overflow.
+        let missing = (u128::from(last) - u128::from(first) + 1).saturating_sub(m.len() as u128);
         println!("evidence-upload: boot {} records #{first}..#{last} ({} held, {missing} missing in between)", hex(b), m.len());
     }
-    if c.bad + c.conflicts > 0 {
-        println!("evidence-upload: {} unreadable lines/records, {} conflicting duplicates", c.bad, c.conflicts);
+    if c.bad + c.conflicts > 0 || c.dropped > 0 {
+        println!("evidence-upload: {} unreadable or over-long lines/records, {} conflicting duplicates, {} records not held (memory cap)", c.bad, c.conflicts, c.dropped);
     }
 }
 
@@ -279,15 +355,17 @@ fn serial(o: &Opts, c: &mut Collected, path: &str, replay: bool, seconds: Option
     let t0 = Instant::now();
     let mut last_up = Instant::now();
     let mut reader = std::io::BufReader::new(port);
-    let mut line = Vec::new();
+    // Bounded: a console that never sends a newline cannot grow memory, and
+    // a line split by a read timeout is kept, not dropped.
+    let mut lines = LineReader::new(MAX_LINE);
     loop {
         if seconds.is_some_and(|s| t0.elapsed() >= Duration::from_secs(s)) {
             break;
         }
-        line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) => {}
-            Ok(_) => {
+        match lines.read(&mut reader) {
+            Ok(None) => {}
+            Ok(Some(Line::TooLong)) => c.bad += 1,
+            Ok(Some(Line::Text(line))) => {
                 let l = String::from_utf8_lossy(&line);
                 if let Some(f) = save.as_mut() {
                     use std::io::Write;

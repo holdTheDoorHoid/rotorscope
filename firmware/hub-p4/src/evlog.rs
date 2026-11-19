@@ -30,6 +30,12 @@
 //! hardware key design. Nothing here touches eFuses. Key bytes are never
 //! printed or logged; only the public key and its fingerprint are.
 //!
+//! **Signer.** Checkpoints are signed only through the `evidence::Signer`
+//! trait ([`HubSigner`], made by [`make_signer`]): the software key is the
+//! one implementation today; a secure element replaces it there, with no
+//! format change (same algorithm, its own key class; the writer puts any
+//! signature in low-S form).
+//!
 //! **Bench builds.** The boot event's text lists the bench features
 //! compiled in (`bench: none` for a normal build), so a log made by a build
 //! that can fake data says so in its first record.
@@ -76,6 +82,45 @@ pub fn built_key_class() -> KeyClass {
 /// normal build.
 pub const BENCH: &str = env!("ROTORSCOPE_BENCH_LIST");
 
+/// The source commit, `-dirty` when tracked files were changed, or
+/// `unknown` (build.rs, `evidence` buildid).
+pub const GIT: &str = env!("ROTORSCOPE_GIT");
+
+/// When build.rs ran (or SOURCE_DATE_EPOCH): never later than the build.
+pub const BUILT_UNIX_S: u64 = const_u64(env!("ROTORSCOPE_BUILD_UNIX_S"));
+
+const fn const_u64(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut v = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(b[i].is_ascii_digit(), "ROTORSCOPE_BUILD_UNIX_S is not a number");
+        v = v * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    v
+}
+
+/// The signer this build uses. The only place to change for another
+/// implementation of `evidence::Signer` (a secure element).
+pub type HubSigner = SoftSigner;
+
+/// The development key if the build has a usable one, else the published
+/// test key (said loudly).
+fn make_signer() -> HubSigner {
+    match dev_key().and_then(|k| SoftSigner::new(&k, KeyClass::DevelopmentSoftware)) {
+        Some(s) => s,
+        None => {
+            if DEV_KEY_HEX.is_some() {
+                // Well-formed digits (build.rs) but not a usable P-256
+                // scalar: say so loudly; the screen shows TEST KEY.
+                println!("hub-p4: evidence dev key REFUSED (not a valid P-256 private key): signing with the PUBLISHED TEST KEY");
+            }
+            SoftSigner::public_test()
+        }
+    }
+}
+
 fn dev_key() -> Option<[u8; 32]> {
     let h = DEV_KEY_HEX?.as_bytes();
     if h.len() != 64 {
@@ -87,6 +132,46 @@ fn dev_key() -> Option<[u8; 32]> {
         k[i] = (d(c[0])? * 16 + d(c[1])?) as u8;
     }
     Some(k)
+}
+
+/// The CPU cycle counter (`mcycle`; the P4 has no `pccr` CSR, and esp-hal's
+/// RNG driver reads this one between RNG reads on this chip already).
+fn cycles() -> u32 {
+    let c: u32;
+    // SAFETY: reads a counter CSR, no side effects.
+    unsafe { core::arch::asm!("csrr {0}, mcycle", out(reg) c) };
+    c
+}
+
+/// The boot id (`evidence::bootid`, WP-14a): the hardware RNG is not a
+/// proven entropy source on the P4 (no radio), so it is mixed with timing
+/// jitter, the time since power-on, the reset cause and the chip's unique
+/// identifiers. Returns the id and the RNG's first 8 bytes, which the hub
+/// prints so a bench can see whether the RNG alone repeats across power
+/// cycles. Out of line: its buffers stay off the main frame.
+#[inline(never)]
+pub fn make_boot_id(reset_code: u32) -> ([u8; 8], [u8; 8]) {
+    let rng = esp_hal::rng::Rng::new();
+    let mut m = evidence::bootid::Mixer::new();
+    let mut first = [0u8; 8];
+    let mut jitter = [0u8; 16 * 8];
+    for i in 0..16 {
+        let mut w = [0u8; 4];
+        rng.read(&mut w);
+        if i < 2 {
+            first[i * 4..i * 4 + 4].copy_from_slice(&w);
+        }
+        m.add(b"rng", &w);
+        let t = Instant::now().duration_since_epoch().as_micros() as u32;
+        jitter[i * 8..i * 8 + 4].copy_from_slice(&cycles().to_le_bytes());
+        jitter[i * 8 + 4..i * 8 + 8].copy_from_slice(&t.to_le_bytes());
+    }
+    m.add(b"jitter", &jitter);
+    m.add_u64(b"since power-on us", Instant::now().duration_since_epoch().as_micros());
+    m.add_u64(b"reset", u64::from(reset_code));
+    m.add(b"unique id", &esp_hal::efuse::read_field_le::<[u8; 16]>(esp_hal::efuse::OPTIONAL_UNIQUE_ID));
+    m.add(b"mac", esp_hal::efuse::base_mac_address().as_bytes());
+    (m.finish(), first)
 }
 
 /// SHA-256 of the firmware ELF file, as espflash wrote it into the app
@@ -107,7 +192,7 @@ struct NodeSeen {
 
 pub struct Evidence {
     chain: Chain,
-    signer: SoftSigner,
+    signer: HubSigner,
     q: &'static mut [u8],
     len: usize,
     /// Bytes at the front of the queue written to the current card file
@@ -138,6 +223,10 @@ pub struct Evidence {
     pub drained: u32,
     /// Records in `q` (see `queued_records`).
     queued_records: u32,
+    /// This chain's records known durably on a card (flushed), and the
+    /// hash of the last of them: what the boot counter store keeps for
+    /// the next boot (`evidence::continuity`).
+    durable: Option<(u64, [u8; 32])>,
 }
 
 impl Evidence {
@@ -152,21 +241,12 @@ impl Evidence {
             // SAFETY: taken once, here.
             _ => unsafe { &mut *(&raw mut RAM_Q) },
         };
-        let signer = match dev_key().and_then(|k| SoftSigner::new(&k, KeyClass::DevelopmentSoftware)) {
-            Some(s) => s,
-            None => {
-                if DEV_KEY_HEX.is_some() {
-                    // Well-formed digits (build.rs) but not a usable P-256
-                    // scalar: say so loudly; the screen shows TEST KEY.
-                    println!("hub-p4: evidence dev key REFUSED (not a valid P-256 private key): signing with the PUBLISHED TEST KEY");
-                }
-                SoftSigner::public_test()
-            }
-        };
+        let signer = make_signer();
         let pk = signer.public_key();
         let fp = evidence::fingerprint(&pk);
         println!(
-            "hub-p4: evidence key {} fingerprint {} ({}); queue {} KB in {}",
+            "hub-p4: evidence key {} {} fingerprint {} ({}); queue {} KB in {}",
+            signer.algorithm().name(),
             signer.key_class().name(),
             core::str::from_utf8(&fp).unwrap_or("?"),
             signer.key_class().note(),
@@ -206,6 +286,7 @@ impl Evidence {
             last_sign_us: 0,
             drained: 0,
             queued_records: 0,
+            durable: None,
         }
     }
 
@@ -225,6 +306,16 @@ impl Evidence {
 
     pub fn seq(&self) -> u64 {
         self.chain.seq()
+    }
+
+    pub fn boot_id(&self) -> [u8; 8] {
+        self.chain.boot_id()
+    }
+
+    /// Records of this boot's chain durably on a card, and the hash of the
+    /// last of them (see `flushed`).
+    pub fn durable(&self) -> Option<(u64, [u8; 32])> {
+        self.durable
     }
 
     pub fn queued(&self) -> usize {
@@ -250,23 +341,32 @@ impl Evidence {
 
     /// The first record: who signs, which firmware.
     /// `reset` is why the chip last reset (`fault::reset_reason`).
-    pub fn boot(&mut self, chip: (u8, u8), reset: &str) {
-        let mut data = [0u8; 1 + format::PUBKEY_LEN + 2];
-        data[0] = self.signer.key_class() as u8;
-        data[1..66].copy_from_slice(&self.signer.public_key());
-        data[66] = chip.0;
-        data[67] = chip.1;
-        // Version (~6), git (~40), reset reason (~10) and the bench list
+    /// The data also names the build (date, source commit and whether the
+    /// tree was modified), the boot counter source and how the boot id was
+    /// made (`evidence::format::boot`).
+    #[inline(never)]
+    pub fn boot(&mut self, chip: (u8, u8), reset: &str, counter_source: u8, boot_id_method: u8) {
+        use evidence::format::boot;
+        let (git, git_state) = boot::parse_git(GIT);
+        let b = boot::Boot {
+            key_class: self.signer.key_class() as u8,
+            pubkey: self.signer.public_key(),
+            chip,
+            ext: Some(boot::Ext { built_unix_s: BUILT_UNIX_S, git, git_state, counter_source, boot_id_method }),
+        };
+        let mut data = [0u8; boot::LEN];
+        let n = b.encode(&mut data);
+        // Version (~6), git (~50), reset reason (~10) and the bench list
         // (every hub-p4 bench feature at once is ~110): 256 holds them all.
         let mut text: heapless::String<256> = heapless::String::new();
         let _ = write!(
             text,
-            "hub-p4 {} {} last reset: {reset}; bench: {}",
+            "hub-p4 {} git {} last reset: {reset}; bench: {}",
             env!("CARGO_PKG_VERSION"),
-            option_env!("ROTORSCOPE_GIT").unwrap_or(""),
+            GIT,
             if BENCH.is_empty() { "none" } else { BENCH }
         );
-        self.event(EventCode::Boot, text.as_bytes(), &data);
+        self.event(EventCode::Boot, text.as_bytes(), &data[..n]);
     }
 
     /// An event record. Events are small; they still need room.
@@ -351,7 +451,10 @@ impl Evidence {
     }
 
     /// Once a second: GPS, clock, nodes and pack changes become events.
-    pub fn watch(&mut self, gps: &crate::gps::Gps, nodes: &[crate::links::NodeStats], pack: Option<&airspace::Pack<'_>>, now: u64) {
+    /// `pack`: the airspace pack in use and its SHA-256. Out of line: its
+    /// text buffers stay off the main loop's frame.
+    #[inline(never)]
+    pub fn watch(&mut self, gps: &crate::gps::Gps, nodes: &[crate::links::NodeStats], pack: Option<(&airspace::Pack<'_>, [u8; 32])>, now: u64) {
         use tracker::json::GpsState;
         self.watch_integrity(gps);
         let present = gps.status.state != GpsState::Absent;
@@ -445,15 +548,19 @@ impl Evidence {
             }
         }
         if !self.pack_logged
-            && let Some(p) = pack
+            && let Some((p, sha)) = pack
         {
             self.pack_logged = true;
-            let mut t: heapless::String<64> = heapless::String::new();
-            let _ = write!(t, "airspace pack v{} built {} ({} bytes)", p.version, p.created, p.len());
-            let mut data = [0u8; 10];
+            let mut t: heapless::String<160> = heapless::String::new();
+            let _ = write!(t, "airspace pack v{} built {} ({} bytes) sha256 ", p.version, p.created, p.len());
+            for b in sha {
+                let _ = write!(t, "{b:02x}");
+            }
+            let mut data = [0u8; format::pack::LEN];
             data[..4].copy_from_slice(&p.created.to_le_bytes());
             data[4..8].copy_from_slice(&(p.len() as u32).to_le_bytes());
-            data[8..].copy_from_slice(&p.version.to_le_bytes());
+            data[8..10].copy_from_slice(&p.version.to_le_bytes());
+            data[10..].copy_from_slice(&sha);
             self.event(EventCode::Pack, t.as_bytes(), &data);
         }
     }
@@ -512,14 +619,22 @@ impl Evidence {
         let w = self.written;
         // Whole records only are flushed (sd.rs flushes at a record boundary).
         let mut at = 0;
+        let mut last = None;
         while at < w {
             match format::peek_len(&self.q[at..w]) {
-                Ok(l) if l > 0 => {
+                Ok(l) if l > 0 && at + l <= w => {
+                    last = Some((at, l));
                     at += l;
                     self.queued_records = self.queued_records.saturating_sub(1);
                 }
                 _ => break,
             }
+        }
+        // The last record now on the card: the next boot names it.
+        if let Some((a, l)) = last {
+            let r = &self.q[a..a + l];
+            let seq = u64::from_le_bytes(r[format::off::SEQ..format::off::SEQ + 8].try_into().unwrap_or([0; 8]));
+            self.durable = Some((seq + 1, evidence::sha256(r)));
         }
         self.q.copy_within(w..self.len, 0);
         self.len -= w;
@@ -547,6 +662,29 @@ impl Evidence {
         data[12..44].copy_from_slice(&ph);
         data[44] = ps;
         self.event(EventCode::CardMounted, name.as_bytes(), &data);
+    }
+
+    /// Where this boot stands among the unit's boots (`evidence::continuity`):
+    /// once a boot when the counter store answers, again for a card with
+    /// another counter.
+    pub fn continuity(&mut self, k: &evidence::continuity::Continuity) {
+        let mut t: heapless::String<160> = heapless::String::new();
+        let _ = write!(
+            t,
+            "boot counter {} ({}); previous boot ",
+            k.counter,
+            evidence::continuity::Continuity::status_name(k.status)
+        );
+        if k.prev_boot == [0; 8] {
+            let _ = t.push_str("none");
+        } else {
+            for b in k.prev_boot {
+                let _ = write!(t, "{b:02x}");
+            }
+            let _ = write!(t, " with {} records stored", k.prev_records);
+        }
+        println!("hub-p4: evidence {t}");
+        self.event(EventCode::Continuity, t.as_bytes(), &k.encode());
     }
 
     /// Where the hub is and what time it is, for every record.

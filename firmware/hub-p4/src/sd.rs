@@ -238,6 +238,55 @@ pub struct Logger {
     /// Its next contents, written by `record` when the card is free (WP-12).
     gps_mem_pending: Option<heapless::String<128>>,
     pub gps_mem_writes: u32,
+    /// The boot counter in the evidence folder (`evidence::continuity`).
+    counter: evidence::continuity::FileCounter,
+    /// Records the counter state last said were on the card, and when.
+    state_records: u64,
+    state_at: u64,
+}
+
+/// The boot counter's two state files in `ROTORSCP/EVIDENCE`
+/// (`evidence::continuity::SLOT_NAMES`).
+struct SdSlots<'a> {
+    vm: &'a Vm,
+    dir: RawDirectory,
+}
+
+impl evidence::continuity::Slots for SdSlots<'_> {
+    type Error = FsError;
+    fn read(&mut self, slot: usize, buf: &mut [u8; evidence::continuity::STATE_LEN]) -> Result<Option<usize>, FsError> {
+        let name = evidence::continuity::SLOT_NAMES[slot];
+        let f = match self.vm.open_file_in_dir(self.dir, name, Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(embedded_sdmmc::Error::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let r = (|| {
+            let len = self.vm.file_length(f)? as usize;
+            let want = len.min(buf.len());
+            let mut got = 0;
+            while got < want {
+                let n = self.vm.read(f, &mut buf[got..want])?;
+                if n == 0 {
+                    break;
+                }
+                got += n;
+            }
+            // Short reads count as a short (unreadable) state.
+            Ok(Some(if got < want { got } else { len }))
+        })();
+        let _ = self.vm.close_file(f);
+        r
+    }
+
+    fn write(&mut self, slot: usize, data: &[u8; evidence::continuity::STATE_LEN]) -> Result<(), FsError> {
+        let name = evidence::continuity::SLOT_NAMES[slot];
+        let f = self.vm.open_file_in_dir(self.dir, name, Mode::ReadWriteCreateOrTruncate)?;
+        let w = self.vm.write(f, data);
+        let c = self.vm.close_file(f);
+        w?;
+        c
+    }
 }
 
 /// Node positions and muted alarms (`tracker::site`). The hub only ever
@@ -310,6 +359,9 @@ impl Logger {
             gps_mem: None,
             gps_mem_pending: None,
             gps_mem_writes: 0,
+            counter: evidence::continuity::FileCounter::new(),
+            state_records: 0,
+            state_at: 0,
         }
     }
 
@@ -537,6 +589,8 @@ impl Logger {
         if let Some(f) = self.ev_file.as_mut() {
             f.flushed_at = 0;
         }
+        // And the boot counter's head right after.
+        self.state_at = 0;
     }
 
     pub fn ev_name(&self) -> &str {
@@ -900,6 +954,27 @@ impl Logger {
             Ok((file, name, no, prev)) => {
                 ev.card_mounted(name.as_str(), no, prev);
                 self.ev_file = Some(EvFile { dir, file, name, pos: 0, dirty: false, flushed_at: now });
+                // The boot counter (WP-14a): advanced and saved before this
+                // boot writes anything else to this card's state.
+                use evidence::continuity::{BootCounter, Continuity, SlotCounter};
+                let mut slots = SdSlots { vm, dir };
+                match (SlotCounter { slots: &mut slots, state: &mut self.counter }).begin(ev.boot_id()) {
+                    Ok(Some(k)) => ev.continuity(&k),
+                    Ok(None) => println!("hub-p4: evidence boot counter {:?}: this boot already counted on this card", self.counter.counter()),
+                    Err(e) => {
+                        println!("hub-p4: evidence boot counter unreadable: {e:?}");
+                        ev.continuity(&Continuity {
+                            source: evidence::format::boot::COUNTER_SD_FILE,
+                            status: evidence::continuity::STORE_ERROR,
+                            counter: 0,
+                            prev_boot: [0; 8],
+                            prev_records: 0,
+                            prev_head: [0; 32],
+                        });
+                    }
+                }
+                self.state_records = 0;
+                self.state_at = 0;
                 Ok(())
             }
             Err(e) => {
@@ -964,7 +1039,10 @@ impl Logger {
 
     /// Length, hash of the last whole record, and status (1 whole, 2 ends
     /// in an incomplete record, 3 no whole record) of the evidence file
-    /// `name`. Closes it again whatever happens.
+    /// `name`. Closes it again whatever happens. Out of line: its 2 KB
+    /// buffer is on the stack only for this call (not under the boot
+    /// counter's card reads in `mount_evidence`).
+    #[inline(never)]
     fn previous_tail(vm: &Vm, dir: RawDirectory, name: &str) -> Result<(u32, [u8; 32], u8), FsError> {
         let f = vm.open_file_in_dir(dir, name, Mode::ReadOnly)?;
         let r = (|| {
@@ -1020,6 +1098,23 @@ impl Logger {
                 self.last_io = now;
                 return Ok(Some("ev_flush"));
             }
+        }
+        // The boot counter's state follows what is now on the card (its
+        // own step, at most every PROGRESS_EVERY_MS).
+        if let Some((records, head)) = ev.durable()
+            && records != self.state_records
+            && self.counter.counter().is_some()
+            && (self.state_at == 0 || now.saturating_sub(self.state_at) >= evidence::continuity::PROGRESS_EVERY_MS)
+        {
+            use evidence::continuity::{BootCounter, SlotCounter};
+            self.state_at = now.max(1);
+            self.state_records = records;
+            let mut slots = SdSlots { vm, dir: f.dir };
+            if let Err(e) = (SlotCounter { slots: &mut slots, state: &mut self.counter }).progress(records, head) {
+                self.ev_errors += 1;
+                println!("hub-p4: evidence boot counter state not saved: {e:?}");
+            }
+            return Ok(Some("ev_state"));
         }
         let Some(rp) = self.replay.as_mut() else { return Ok(None) };
         // One record line needs ~1.4 KB of console room.

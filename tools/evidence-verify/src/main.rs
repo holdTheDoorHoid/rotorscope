@@ -171,7 +171,7 @@ fn main() -> ExitCode {
     }
     let code = report.exit_code();
     println!("{}", report.verdict());
-    println!("{}", verify::NOT_PROVEN);
+    println!("{}", report.not_proven());
     ExitCode::from(code as u8)
 }
 
@@ -245,6 +245,18 @@ fn print_report(r: &Report, list: bool) {
         if let Some(f) = c.fw_hash {
             println!("  firmware SHA-256 {}{}", hex(&f), if f == [0; 32] { " (not filled in: flashed without espflash)" } else { "" });
         }
+        if let Some(b) = c.build {
+            let state = match b.git_state {
+                format::boot::GIT_CLEAN => "",
+                format::boot::GIT_DIRTY => " WITH CHANGES",
+                _ => " (tree state unknown)",
+            };
+            println!(
+                "  built {} from source commit {}{state}",
+                verify::fmt_utc(b.built_unix_s.saturating_mul(1000)),
+                if b.git == [0; 20] { "unknown".to_string() } else { hex(&b.git) }
+            );
+        }
         match (c.utc_first, c.utc_last) {
             (Some(a), Some(b)) => println!("  UTC {} .. {}", verify::fmt_utc(a), verify::fmt_utc(b)),
             _ => println!("  UTC: none (no GPS time in any record)"),
@@ -253,6 +265,16 @@ fn print_report(r: &Report, list: bool) {
             "  time: {} records without UTC ({} no GPS time yet, {} GPS time untrusted), {} free-running; position: {} without, {} typed in",
             c.no_time, c.no_time - c.untrusted_time, c.untrusted_time, c.free_running, c.no_position, c.manual_position
         );
+        if let Some(k) = c.continuity {
+            println!(
+                "  boot counter {} ({}); previous boot {} with {} records stored{}",
+                k.counter,
+                evidence::continuity::Continuity::status_name(k.status),
+                if k.prev_boot == [0; 8] { "-".to_string() } else { hex(&k.prev_boot) },
+                k.prev_records,
+                c.vouched_by_next.map_or(String::new(), |l| format!("; records to #{l} vouched for by the next boot"))
+            );
+        }
         for (a, b) in &c.missing {
             println!("  missing records #{a}..#{b}");
         }

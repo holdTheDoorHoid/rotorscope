@@ -23,10 +23,14 @@ laptop that built the firmware.
   so a log checked only against the key it names proves nothing about who
   made it: the verifier says **VERIFIED** only when you give it the unit's
   key from outside the log (`--key` or `--keys`, see "Who signed" below).
-- **that the log is complete.** Nothing records, across power-cycles or
-  card changes, how much was written. A log cut off at a checkpoint, the
-  newest card files deleted, a reformatted card, or a whole boot never
-  uploaded leave no trace in what is left. The verifier says so on every run.
+- **that the log is complete.** Since WP-14a each boot records a boot
+  counter and how far the boot before it had reached the card, so a boot
+  missing *between* the ones supplied, or an older boot's log cut short
+  after the next boot started, now fails. But the counter is kept on the SD
+  card, which whoever holds it can rewrite or wipe: the newest boot's last
+  records, the newest card files deleted, or a wiped card still leave no
+  trace. The verifier says so on every run, naming the newest boot counter
+  it saw.
 - **that the times are true.** Times come from the unit's own GPS receiver
   and clock; nothing outside the unit vouches for them unless someone asked
   the server for an outside time-stamp, and that only shows the records
@@ -34,13 +38,22 @@ laptop that built the firmware.
   it trusts, and its clock follows GPS by no more than a crystal could drift,
   but a spoofer present from the very first boot, or walking the time by
   under about 1.7-3.5 s a day, is not caught (docs/GNSS-INTEGRITY.md).
+  The verifier checks what it can without an outside reference (WP-14a):
+  UTC before the firmware's build date **fails** (the hub never writes such
+  time); a jump of UTC against the hub's own uptime with no clock event, a
+  drift beyond the hub's own steering, and a boot whose time starts before
+  the previous boot's ended are **noted** (they cast doubt on the time, not
+  on the records). A log from a hub that never had GPS time verifies as
+  before, its records marked "no UTC".
 
 **Still missing before it could be court-grade:**
 
 1. a signing key held in hardware, which software cannot read (design
    below, nothing burned yet);
-2. a counter that survives reboots and card changes, written into every
-   boot, so missing boots and missing newest files show;
+2. a counter that cannot be set back (a secure element: the SD card
+   counter of WP-14a is behind the same interface and in the same format),
+   so that missing newest boots show to a checker who reads the unit's
+   current counter;
 3. outside time-stamping as a matter of course, not on request;
 4. reproducible firmware builds, plus secure boot, so the firmware hash in
    each record can be matched to published source and only that firmware
@@ -122,6 +135,46 @@ the log (see "Who signed").
   The access log is not signed, so whoever runs the server can rewrite it
   whole; signing it is later work.
 - **A batch altered on the way to the server**: refused on arrival.
+- **A boot's last records on the server** (WP-14b): a batch must end on a
+  signed checkpoint, except a boot's tail (its records after its last
+  checkpoint), which the server takes once the next boot's records are
+  stored and only if that boot's continuity record names the tail's last
+  record by number and hash; that boot's signature then covers it. The
+  uploader sends tails by itself after the signed batches. A tail that no
+  stored continuity record names, or that runs past the record named, is
+  refused. So an export of several boots shows no gap at each boot's end,
+  except the newest boot's (nothing names it yet).
+- **The server under load and against hostile peers** (WP-14b): an upload
+  is checked (every link and signature) without holding the server's
+  store, a few at a time, so a large or slow upload does not hold up other
+  requests; two uploads of the same records at once keep one and refuse
+  the other as an overlap. Size caps: 16 MiB per upload, 64 KiB for other
+  request bodies, a unit's name 100 characters (no control characters), a
+  note 4000 characters, a time-stamp reply 256 KiB; TLS handshakes time
+  out after 15 s, request headers after 30 s. The uploader reads console
+  lines with a length cap (and keeps a line split by a pause, which it used
+  to drop), holds at most 512 MiB of records, reads server replies up to
+  1 MiB and prints server text without control characters.
+- **The page** (WP-14b): its script, style and map library (Leaflet 1.9.4,
+  BSD-2-Clause, kept in `tools/evidence-server/src/static/`, byte-identical
+  to the published release, checked by a test against the SRI hashes
+  leafletjs.com publishes) are served by the server itself, under a
+  Content-Security-Policy that allows no inline script and no script from
+  anywhere else. Map tiles still come from tile.openstreetmap.org (images
+  only: they can show a wrong map, not change the records or the list;
+  they also tell OpenStreetMap which area is being viewed). The page warns
+  when a unit signs with the published test key or when a stored file
+  failed its check at start-up; such a file's detections are not shown.
+  The page is a view; the export bundle checked with `evidence-verify` is
+  the evidence.
+- **A boot left out, or an older boot's log cut short** (WP-14a): each
+  boot's `continuity` record names its boot counter and the previous boot's
+  record count and last record. Given both boots, a log cut back to a
+  checkpoint after the next boot started fails, and a boot missing between
+  two supplied ones fails (a gap with `--allow-gaps`); the earliest boot
+  supplied says which boot came before it. A previous boot's last records
+  after its own last checkpoint are covered by the next boot's signature.
+  The counter is on the SD card: see "What is NOT protected yet".
 - **An earlier card file shortened or extended** after the hub moved on:
   each new card file names the previous file's exact length and last
   record, so this shows, provided the newer file is there. **A missing file
@@ -135,6 +188,20 @@ the log (see "Who signed").
   Logs written by firmware built before 2026-11-18 have the other form on
   about half their checkpoints and now fail those checks; rebuild the hub
   firmware.
+- **Attacks that come and go** (WP-14a): every time an attack or jamming
+  alarm is raised it gets a record, and every time it ends a `threat_ended`
+  record with what it totalled (how long, how many frames, how strong), so
+  an alarm tripped briefly and then used for a real attack minutes later
+  shows as two episodes. An alarm that flaps (raised three times within a
+  minute) is held as one episode until it has been quiet for a minute, so
+  it cannot flood the log; the records say when that happens and how many
+  raises the episode held. A re-raised alarm counts as not yet seen on the
+  screen, so "Mute seen alarms" does not silence it.
+- **Which build and which airspace data** (WP-14a): the boot event names
+  the build date, the source commit and whether the source had changes
+  ("-dirty"); the verifier notes a changed or unknown source. The firmware
+  hash still names the exact image. The `pack` event carries the airspace
+  pack's SHA-256.
 - **No GPS**: records made without GPS time say "time source: none" and
   carry only time since power-on; records without a GPS position say so. The
   verifier counts and prints them. A typed-in position is marked "manual".
@@ -155,7 +222,9 @@ the log (see "Who signed").
 ## What is NOT protected yet (be plain about this in any report)
 
 1. **Development key.** The signing key was made on a laptop and built into
-   the firmware. Anyone with the firmware file, the laptop, or the unit
+   the firmware. (The hub signs only through one interface, so a hardware
+   key in a secure element can replace it without changing the log format;
+   that chip is not chosen yet.) Anyone with the firmware file, the laptop, or the unit
    (reading its flash) can sign records that look like this unit's. Every
    checkpoint says "DEVELOPMENT KEY, NOT EVIDENCE-GRADE", and the verifier
    shows the class the log claims. So today the signatures show the records
@@ -168,12 +237,19 @@ the log (see "Who signed").
    a different one from running.
 3. **The end of the log.** Records after the newest signature are chained
    but not yet signed; the verifier reports them as "not covered by a
-   signature". Cutting the log back to any checkpoint, or deleting the
-   newest card files, leaves no trace at all. There is no counter that
-   survives a reboot or a card change, so a whole boot that was never
-   uploaded, or a reformatted card, does not show either.
+   signature" (the next boot's signed continuity record covers them once it
+   exists). Cutting the **newest** boot's log back to a checkpoint, or
+   deleting the newest card files, leaves no trace. The boot counter
+   (WP-14a) lives in two state files on the SD card: whoever holds the card
+   can rewrite them, delete them (the next boot then says the card held no
+   counter and starts at 1) or wipe the card. So boots after the newest one
+   supplied do not show unless you know the unit's current counter (the hub
+   prints `evidence boot counter N` on its console at each card mount; a
+   secure-element counter would make that number trustworthy).
 4. **Time-stamps are not automatic.** Someone has to ask the server for one
-   (button/API), and only while it is online.
+   (button/API), and only while it is online. The options for making them
+   automatic, and the owner's choices, are in
+   docs/EVIDENCE-TIMESTAMPING-DESIGN.md (design only).
 5. **The re-decode shares our decoder.** The verifier decodes the raw bytes
    again, but with the same `rid` code the hub uses, so it shows the summary
    matches the bytes, not that our decoding is right. The raw Remote ID
@@ -279,7 +355,20 @@ Every run also prints: "NOT PROVEN: that the log is complete."
   altered in transit, re-uploads, gaps filled later, bundles with a record
   edited / deleted / truncated, a batch dropped or reordered, audit entries
   edited / dropped / reordered, the key swapped, a stored batch altered on
-  the server's disk; the no-GPS marking.
+  the server's disk; the no-GPS marking. WP-14b (`tests/hardening.rs`,
+  `lines`, `plan`, `tsa` unit tests): a bad upload refused while the store
+  is held by something else, six simultaneous uploads of the same records
+  (one kept), the page's policy and the vendored library's hashes, body
+  and field caps, a tail taken only once covered and only up to the named
+  record (and not for another unit), a changed batch file kept off the
+  map, the newest checkpoint found past a tail, a console line with no end,
+  a line split by a timeout, batches split at checkpoints under a size cap,
+  an endless time-stamp reply. End to end with the binaries: a two-boot
+  card through `evidence-upload` -> server -> export -> `evidence-verify`:
+  VERIFIED, 0 gaps, boot 1's tail sent as its own batch; the 2026-11-18
+  bench logs (`final-replay`, `spoofboot-stream`) upload and verify, and
+  `spoofboot-stream`'s two records after its last checkpoint stay on the
+  laptop (no later boot names them).
 - Bench, 2026-11-15, P4 CrowPanel (chip v1.3) with the `fakedrone` build,
   two real nodes via the gateway, no GPS attached: detections went hub ->
   USB -> laptop uploader -> server -> export bundle -> verifier: **VERIFIED**
