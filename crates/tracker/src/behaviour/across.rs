@@ -94,7 +94,8 @@ struct Spotter {
     striker: u32,
 }
 
-/// A drone that left an area (rule 16).
+/// A drone that left an area, and then (`back`) came back probing (rule
+/// 16). Keyed by the drone's ID, so it holds across a new track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Exit {
     key: u64,
@@ -102,6 +103,12 @@ struct Exit {
     bit: u16,
     /// It went [`PROBE_AWAY_M`] beyond the edge since.
     far: bool,
+    /// It came back: probing while it stays in.
+    back: bool,
+    /// How long it was away (seconds), once back.
+    away_s: u16,
+    /// When it left; once back, when it was last seen in (the entry is
+    /// freed [`PROBE_WINDOW_MS`] after either).
     left_ms: u64,
 }
 
@@ -185,7 +192,7 @@ fn place_bytes(n: &str) -> [u8; NAME_LEN] {
 impl<const P: usize> Across<P> {
     pub const fn new() -> Self {
         const S: Spotter = Spotter { track: 0, key: 0, place: [0; NAME_LEN], last_ms: 0, struck_ms: 0, striker: 0 };
-        const E: Exit = Exit { key: 0, bit: 0, far: false, left_ms: 0 };
+        const E: Exit = Exit { key: 0, bit: 0, far: false, back: false, away_s: 0, left_ms: 0 };
         Self { spotters: [S; P], exits: [E; P], near_now: 0, near_prev: 0, pruned_day: None, visits: Visits::new() }
     }
 
@@ -279,7 +286,7 @@ impl<const P: usize> Across<P> {
         else {
             return;
         };
-        self.exits[i] = Exit { key, bit, far: false, left_ms: now_ms };
+        self.exits[i] = Exit { key, bit, left_ms: now_ms, ..Exit::default() };
     }
 
     /// The drone is `out_m` beyond the edge of area `bit` it left.
@@ -291,14 +298,25 @@ impl<const P: usize> Across<P> {
         }
     }
 
-    /// The drone came into area `bit`: how long it was away, when that
-    /// makes it probing.
-    fn came_back(&mut self, key: u64, bit: u16, now_ms: u64) -> Option<u64> {
-        let e = self.exits.iter_mut().find(|e| e.bit == bit && e.key == key)?;
+    /// The drone came into area `bit`: probing when it was away long
+    /// enough and far enough, and not too long.
+    fn came_back(&mut self, key: u64, bit: u16, now_ms: u64) {
+        let Some(e) = self.exits.iter_mut().find(|e| e.bit == bit && e.key == key) else { return };
         let away = now_ms.saturating_sub(e.left_ms);
-        let far = e.far;
-        *e = Exit::default();
-        (far && (PROBE_MIN_OUT_MS..=PROBE_WINDOW_MS).contains(&away)).then_some(away)
+        if e.far && (PROBE_MIN_OUT_MS..=PROBE_WINDOW_MS).contains(&away) {
+            e.back = true;
+            e.away_s = (away / 1000).min(u64::from(u16::MAX - 1)) as u16;
+        } else {
+            *e = Exit::default();
+        }
+    }
+
+    /// The drone, in area `bit` now, is probing it: how long it was away
+    /// (seconds). The entry is kept while it stays in.
+    fn probing(&mut self, key: u64, bit: u16, now_ms: u64) -> Option<u16> {
+        let e = self.exits.iter_mut().find(|e| e.back && e.bit == bit && e.key == key)?;
+        e.left_ms = now_ms;
+        Some(e.away_s)
     }
 
     /// The visit table (rule 17).
@@ -349,8 +367,7 @@ impl Reason {
     }
 }
 
-/// Rules 14-19 for one drone, adding to `hits`. Returns the areas it is
-/// probing (bits) and how long it was away from the first of them.
+/// Rules 14-19 for one drone, adding to `hits`.
 #[inline(never)]
 pub(crate) fn judge<const H: usize, const P: usize>(
     hits: &mut Vec<Reason, H>,
@@ -360,7 +377,7 @@ pub(crate) fn judge<const H: usize, const P: usize>(
     f: &Facts<'_>,
     c: &mut Cross<'_, P>,
     now_ms: u64,
-) -> (u16, u16) {
+) {
     let a = &mut *c.across;
     let place_level = if f.friend { Level::Notice } else { Level::Caution };
     let at = |n: &Near, rule: Rule, level: Level| Reason::new(rule, level, &n.name, n.from_middle);
@@ -370,8 +387,7 @@ pub(crate) fn judge<const H: usize, const P: usize>(
 
     // 16: probing (fixed areas; the bubble moves with the unit, so coming
     // back into it is often the unit's own doing).
-    let mut probing = t.threat.probing() & f.inside_now;
-    let mut away_s = t.threat.probe_away_s();
+    let mut probing: Option<(usize, u16)> = None;
     for i in 0..places.areas.len() {
         let bit = 2u16 << i;
         let (was, is) = (f.was_inside & bit != 0, f.inside_now & bit != 0);
@@ -379,15 +395,14 @@ pub(crate) fn judge<const H: usize, const P: usize>(
             a.left(f.key, bit, now_ms);
         } else if !is {
             a.away(f.key, bit, f.area_out[i]);
-        } else if !was
-            && is
-            && let Some(away) = a.came_back(f.key, bit, now_ms)
-        {
-            probing |= bit;
-            away_s = (away / 1000).min(u64::from(u16::MAX - 1)) as u16;
+        } else if !was {
+            a.came_back(f.key, bit, now_ms);
+        }
+        if is && probing.is_none() {
+            probing = a.probing(f.key, bit, now_ms).map(|s| (i, s));
         }
     }
-    if let Some(i) = (0..places.areas.len()).find(|i| probing & (2u16 << i) != 0) {
+    if let Some((i, away_s)) = probing {
         let name = &places.areas[i].name;
         let r = Reason::new(Rule::Probing, place_level, name, range_at(hits, &place_bytes(name)));
         let _ = hits.push(r.with_secs(u64::from(away_s) * 1000));
@@ -474,5 +489,4 @@ pub(crate) fn judge<const H: usize, const P: usize>(
             let _ = hits.push(r);
         }
     }
-    (probing, away_s)
 }

@@ -431,10 +431,6 @@ pub struct Eval {
     /// Which places it counts as inside (bit 0 the bubble, bit 1 + n area
     /// n), for the edge margin next time.
     pub inside: u16,
-    /// Areas it is probing (rule 16, bits as `inside`), and how long it was
-    /// away (seconds).
-    pub probing: u16,
-    pub probe_away_s: u16,
 }
 
 /// One drone's threat level, as shown, and what it needs to move slowly.
@@ -456,9 +452,6 @@ pub struct TrackThreat {
     last_heard_ms: u64,
     /// Places it counts as inside ([`Eval::inside`]).
     inside: u16,
-    /// Areas it is probing, and how long it was away ([`Eval::probing`]).
-    probing: u16,
-    probe_away_s: u16,
     /// The latest approach reason while the drone was heard.
     inbound: Option<Reason>,
     snoozed_until_ms: u64,
@@ -550,8 +543,6 @@ impl TrackThreat {
         self.held = false;
         self.last_heard_ms = e.heard_ms;
         self.inside = e.inside;
-        self.probing = e.probing;
-        self.probe_away_s = e.probe_away_s;
         self.friend = e.friend;
         self.inbound = e.reasons.iter().find(|r| matches!(r.rule, Rule::Beeline | Rule::FastInbound)).copied();
         match self.level {
@@ -583,16 +574,6 @@ impl TrackThreat {
     /// Places it counted as inside at the last judgement.
     pub fn inside(&self) -> u16 {
         self.inside
-    }
-
-    /// Areas it is probing (rule 16; bits as [`Eval::inside`]).
-    pub fn probing(&self) -> u16 {
-        self.probing
-    }
-
-    /// How long it was away before coming back (rule 16), seconds.
-    pub fn probe_away_s(&self) -> u16 {
-        self.probe_away_s
     }
 
     fn unheard(&mut self, has_position: bool, now_ms: u64) {
@@ -1037,16 +1018,14 @@ pub fn evaluate<const P: usize>(
         add(Reason::new(Rule::Following, level, &Name::new(), fl.travelled_m).with_secs(fl.ms));
     }
     // 14-19: across drones and days.
-    let mut probing = (0, 0);
     if let Some(c) = cross {
         let (key, id_key) = across::keys(t);
         let facts = across::Facts { key, id_key, friend, near: near.as_ref(), was_inside, inside_now, area_out, pilot };
-        probing = across::judge(&mut hits, t, ring, places, &facts, c, now_ms);
+        across::judge(&mut hits, t, ring, places, &facts, c, now_ms);
     }
     let mut e = judge(hits, friend);
     e.heard_ms = loc.rx_ms;
     e.inside = inside_now;
-    (e.probing, e.probe_away_s) = probing;
     Some(e)
 }
 
@@ -1084,7 +1063,7 @@ fn judge<const H: usize>(mut hits: Vec<Reason, H>, friend: bool) -> Eval {
             break;
         }
     }
-    Eval { level, reasons, combined, friend, heard_ms: 0, inside: 0, probing: 0, probe_away_s: 0 }
+    Eval { level, reasons, combined, friend, heard_ms: 0, inside: 0 }
 }
 
 // ------------------------------------------------------------- wording --
