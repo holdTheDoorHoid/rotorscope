@@ -251,6 +251,15 @@ pub enum EventCode {
     /// Text: the ID, how far apart, and that neither is verified.
     /// (Codes 23 and 24 are taken by the acoustic work: `sound`, `sound_clip`.)
     IdDisputed = 25,
+    /// A drone's threat level rose (tracker `behaviour`, docs/THREAT-PROFILES.md),
+    /// once per rise to caution or above. Data: level (1: 1 notice, 2 caution,
+    /// 3 warning, 4 critical), drone track id (u32 LE), the rule numbers of up
+    /// to four reasons (4, most serious first, 0 none), flags (1: bit 0
+    /// snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3 held after
+    /// the drone was lost). Text: the drone and the reasons with their numbers.
+    /// (Codes 26 and 27 are taken on other branches: `threat_ended`,
+    /// `continuity`.)
+    ThreatLevel = 28,
 }
 
 impl EventCode {
@@ -280,6 +289,7 @@ impl EventCode {
             21 => LinkForgery,
             22 => AircraftConflict,
             25 => IdDisputed,
+            28 => ThreatLevel,
             _ => return None,
         })
     }
@@ -309,6 +319,7 @@ impl EventCode {
             LinkForgery => "link_forgery",
             AircraftConflict => "aircraft_conflict",
             IdDisputed => "id_disputed",
+            ThreatLevel => "threat_level",
         }
     }
 }

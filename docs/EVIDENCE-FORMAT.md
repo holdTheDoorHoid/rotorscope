@@ -99,6 +99,8 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 22 | aircraft_conflict | level (1: 1 advisory, 2 caution, 3 warning), drone track id (u32), aircraft address (u32), aircraft source (1); text: the pair, distance, height difference, predicted closest approach |
 | 23, 24 | (reserved) | taken by the acoustic work: 23 `sound`, 24 `sound_clip` (on the acoustic branch) |
 | 25 | id_disputed | drone track id (u32 LE), what (1: bit 0 position, 1 Self-ID, 2 operator ID, 3 a second ID), other claim's source (1: 0 Remote ID, 1 DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none); text: two transmitters claim this ID, how far apart, neither verified (tracker `claims`, docs/SPOOFING.md) |
+| 26, 27 | (reserved) | taken on other branches: 26 `threat_ended`, 27 `continuity` |
+| 28 | threat_level | a drone's threat level rose (docs/THREAT-PROFILES.md, tracker `behaviour`), once per rise to caution or above: level (1: 1 notice, 2 caution, 3 warning, 4 critical), drone track id (u32 LE), rule numbers of up to four reasons, most serious first (4: 1 in area, 2 pilot near, 3 pilot outside, 4 above ceiling, 5 beeline, 6 fast inbound, 20 last seen inbound; 0 none), flags (1: bit 0 snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3 held after the drone was lost); text: the level, the drone, and each reason with its numbers, e.g. `Warning: drone SN-1 heading for house, 640 m away at 12 m/s, there in about 41 s` |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 
