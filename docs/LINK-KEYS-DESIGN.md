@@ -513,3 +513,42 @@ only with each other.
 * A node that has just booted takes the first genuine beacon of any epoch (no floor yet);
   it moves to the right epoch at its first sync.
 * The CVE fix is established by provenance, not by test (section 8).
+
+## 12. Review decisions (2026-11-18)
+
+The design above is accepted as the plan for WP-13, with these decisions and additions.
+
+Decisions on the points marked **Owner** (taken on the recommendations; the owner can still
+overrule any of them before the cut-over):
+
+* The master lives in the hub's flash until a secure element is fitted; "a captured hub is a
+  captured kit" goes in the docs in those words.
+* The wired bus stays unkeyed in this package.
+* Beacon tags are 8 bytes. Gateway budget per roster MAC: 40 packets/s and 16 KB/s, to be
+  re-checked against the S0 measurements.
+* Every radio firmware carries the patched esp-radio with the receive-length check, and the
+  blob-hash check script.
+* Kits ship with open records; the buyer seals with `link-key`.
+
+Additions the packages must cover:
+
+1. **Epochs are ordered, and the rule is written down and tested (13b).** The epoch is a
+   counter now, so say exactly what a node does with a packet from a higher epoch, a lower
+   one, and its first packet after boot, and test: an old-epoch beacon and an old `TimeSync`
+   replayed (from the gateway's address) to a node that has just booted; the same to a node
+   jammed for several minutes; a hub that was re-provisioned and came back with a lower
+   counter than its nodes last saw (the kit must recover without reflashing nodes, and the
+   recovery path must not reopen the replays above). A `TimeSync` must be useless to a node
+   after that node reboots, as a command is.
+2. **One boot counter on the hub (13e, with the evidence package).** The `rsboot` counter is
+   also the boot counter the evidence log needs (it survives a wiped or swapped SD card,
+   which a counter file on the card does not). The evidence work on `sec/p3-evidence` puts
+   its counter behind a trait; at integration the flash counter becomes that trait's source,
+   and a secure-element counter can replace both later.
+3. **The key source is the seam for the secure element (13a, 13e).** `KeySource::derive` and
+   the hub's random source must be implementable by an I2C element without touching the
+   verifier: no code outside the key source may read the master.
+4. **The hub has no proven random source** (the P4 HAL marks its TRNG unsupported). Nothing in
+   this package may depend on hub randomness for security; where the hub needs uniqueness it
+   uses the boot counter.
+5. **Spike S0 runs before 13c, 13e, 13f and 13g start.** 13a and 13d do not depend on it.
