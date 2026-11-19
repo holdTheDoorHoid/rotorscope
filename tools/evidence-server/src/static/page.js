@@ -3,7 +3,7 @@
 // source. Every value from the server goes through esc() before innerHTML.
 'use strict';
 const $ = (id) => document.getElementById(id);
-let map = null, layer = null, units = [];
+let map = null, layer = null, units = [], stamping = null;
 try { $('actor').value = localStorage.getItem('actor') || ''; } catch (e) {}
 function headers() {
   const h = { 'X-Actor': $('actor').value || 'anonymous' };
@@ -16,7 +16,37 @@ async function devices() {
   const r = await fetch('/api/devices', { headers: headers() });
   if (!r.ok) { $('rows').innerHTML = '<tr><td colspan=6>' + esc(r.status) + ' (token?)</td></tr>'; return; }
   units = await r.json();
+  const s = await fetch('/api/stamping', { headers: headers() });
+  stamping = s.ok ? await s.json() : null;
   $('dev').innerHTML = units.map(d => `<option value="${esc(d.key_id)}">${esc(d.name)} (${esc(d.key_id)}, ${esc(d.detections)} detections)</option>`).join('');
+}
+function utc(ms) { return typeof ms === 'number' ? new Date(ms).toISOString().replace('.000Z', 'Z') : '?'; }
+function dur(ms) {
+  if (typeof ms !== 'number') return '?';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.floor(s / 60) + ' min';
+  if (s < 86400) return Math.floor(s / 3600) + ' h ' + Math.floor(s / 60) % 60 + ' min';
+  return Math.floor(s / 86400) + ' d ' + Math.floor(s / 3600) % 24 + ' h';
+}
+// Outside time-stamps of this unit's access log: what each service has
+// stamped, what is still owed, what failed. Never as proof of when the
+// records were written.
+function stampLines(d) {
+  const out = [];
+  if (!stamping) return out;
+  out.push(stamping.what_it_shows);
+  const st = d && d.stamping;
+  if (!stamping.enabled || !st) return out;
+  for (const s of st.services || []) {
+    const n = s.newest;
+    let line = esc(s.authority) + ': ';
+    line += n ? `access log through entry #${esc(n.audit_n)} existed by ${esc(utc(n.gen_time_ms))} (stamped ${esc(dur(n.delay_ms))} after the upload)` : 'no stamp yet';
+    if (s.outstanding) line += `; a stamp of entry #${esc(s.outstanding.audit_n)} is outstanding since ${esc(utc(s.outstanding.queued_utc_ms))}`;
+    if (s.failures_since_last_stamp > 0 && s.last_failure) line += `; ${esc(s.failures_since_last_stamp)} failed attempt(s) since the last stamp, latest ${esc(utc(s.last_failure.utc_ms))}: ${esc(s.last_failure.reason)}`;
+    out.push(line);
+  }
+  return out;
 }
 // What the server knows is wrong or weak about this unit's stored log.
 function warnings(id) {
@@ -24,8 +54,13 @@ function warnings(id) {
   const w = [];
   if (d && d.test_key) w.push('This unit signs with the PUBLISHED TEST KEY: anyone can make records like these. Not evidence.');
   if (d && Array.isArray(d.problems)) for (const p of d.problems) w.push('Stored files: ' + p);
+  if (stamping) for (const x of stamping.warnings || []) w.push(x);
+  if (d && d.stamping && d.stamping.stale) w.push(`An upload of this unit has waited more than ${stamping ? stamping.alarm_h : '?'} h for any outside time-stamp: check the services' failures below.`);
   $('warn').hidden = w.length === 0;
   $('warn').innerHTML = w.length ? '<ul>' + w.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
+  const s = stampLines(d);
+  // Lines from stampLines() are already escaped piece by piece.
+  $('stamps').innerHTML = s.length ? '<b>Outside time-stamps.</b> ' + esc(s[0]) + (s.length > 1 ? '<ul>' + s.slice(1).map(x => '<li>' + x + '</li>').join('') + '</ul>' : '') : '';
 }
 async function show() {
   try { localStorage.setItem('actor', $('actor').value); } catch (e) {}
