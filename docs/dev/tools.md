@@ -270,6 +270,8 @@ How it behaves:
 - Boards are addressed by USB by-id path (it contains the MAC), never `/dev/ttyACMn`, never a
   serial number. Two names for one board share one lock. `--register` only finds boards under
   `/dev/serial/by-id/usb-Espressif_*`, and resets each new one to read its chip type.
+- No board is built in. A name that is not in `tools/boards.local` (including the default `s3`) is
+  refused with the advice to run `--register`.
 - The lock lives outside `/tmp` because a sandboxed program can have a private `/tmp`, giving each
   program its own "shared" lock. Waiting is capped at 10 minutes. A held lock records the PID,
   time and command, which `--list` shows.

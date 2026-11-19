@@ -10,8 +10,8 @@
 //!
 //! ```text
 //! # Node positions (the station address the hub's Health page shows):
-//! node 10:bd:a3:ce:bd:18 39.95210 -75.16380   roof, north corner
-//! node 10:bd:a3:ce:bd:18 clear
+//! node 02:00:00:00:00:18 39.95210 -75.16380   roof, north corner
+//! node 02:00:00:00:00:18 clear
 //! node all here          # (console/screen only) every node at the hub
 //!
 //! # Alarms muted for good: a venue's known false alarm, one specific
@@ -765,15 +765,15 @@ mod tests {
     fn reads_every_kind_of_line() {
         assert_eq!(parse_line("  # just a comment"), Ok(SiteLine::Nothing));
         assert_eq!(parse_line(""), Ok(SiteLine::Nothing));
-        let mac = [0x10, 0xbd, 0xa3, 0xce, 0xbd, 0x18];
-        match parse_line("NODE 10:BD:a3:ce:bd:18  39.9521 -75.1638  roof # north").unwrap() {
+        let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x1a];
+        match parse_line("NODE 02:00:00:00:00:1A  39.9521 -75.1638  roof # north").unwrap() {
             SiteLine::NodeAt { mac: m, lat, lon } => {
                 assert_eq!(m, mac);
                 assert!((lat - 39.9521).abs() < 1e-9 && (lon + 75.1638).abs() < 1e-9);
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(parse_line("node 10-bd-a3-ce-bd-18 clear"), Ok(SiteLine::NodeClear { mac }));
+        assert_eq!(parse_line("node 02-00-00-00-00-1a clear"), Ok(SiteLine::NodeClear { mac }));
         assert_eq!(parse_line("node all here"), Ok(SiteLine::AllNodesHere));
         assert_eq!(parse_line("unmute all"), Ok(SiteLine::UnmuteAll));
         let SiteLine::Mute(m) = parse_line("mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi Guest ").unwrap() else {
@@ -875,9 +875,9 @@ mod tests {
     #[test]
     fn refuses_bad_lines_with_a_reason() {
         for bad in [
-            "node 10:bd:a3 1 2",
-            "node 10:bd:a3:ce:bd:18 91 0",
-            "node 10:bd:a3:ce:bd:18 39.9",
+            "node 02:00:00 1 2",
+            "node 02:00:00:00:00:18 91 0",
+            "node 02:00:00:00:00:18 39.9",
             "node all there",
             "mute no_such_kind",
             "mute deauth target=zz",
@@ -901,13 +901,13 @@ mod tests {
         let mut text = std::string::String::new();
         // 300 appended changes, far more than any buffer: the last ones win.
         for i in 0..300 {
-            text += &std::format!("node 10:bd:a3:ce:bd:{:02x} 1.{i} 2.0\n", i % 20);
+            text += &std::format!("node 02:00:00:00:00:{:02x} 1.{i} 2.0\n", i % 20);
             text += "mute deauth target=ff:ff:ff:ff:ff:ff\n";
             if i % 7 == 0 {
                 text += "unmute all\n";
             }
         }
-        text += "node 10:bd:a3:ce:bd:00 clear\nbad line here\n";
+        text += "node 02:00:00:00:00:00 clear\nbad line here\n";
         text += &"x".repeat(400);
         text += "\nmute evil_twin source=02:00:00:00:00:01 ssid=Last One"; // no final newline
         for piece in [1usize, 7, 512] {
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn a_load_is_summarised_and_only_changes_are_listed() {
-        let text = "node 10:bd:a3:ce:bd:18 39.9521 -75.1638\n\
+        let text = "node 02:00:00:00:00:18 39.9521 -75.1638\n\
                     mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi\n\
                     mute deauth\n\
                     control ids on\n";
@@ -956,11 +956,11 @@ mod tests {
             seen[0],
             "site file changed: added mute for good (site file): Evil twin network; claimed source 02:11:22:33:44:55; claimed name \"Cafe WiFi\""
         );
-        assert!(seen[1].contains("node 10:bd:a3:ce:bd:18 at 39.9521000 -75.1638000 (new)"), "{seen:?}");
+        assert!(seen[1].contains("node 02:00:00:00:00:18 at 39.9521000 -75.1638000 (new)"), "{seen:?}");
         // The same file again: nothing changed.
         assert_eq!(changes(&st, &load(text), |_| panic!("no change")), 0);
         // An edited card: the node moved and the mute is gone.
-        let edited = load("node 10:bd:a3:ce:bd:18 39.9600 -75.1638\ncontrol ids on\n");
+        let edited = load("node 02:00:00:00:00:18 39.9600 -75.1638\ncontrol ids on\n");
         let mut seen = std::vec::Vec::new();
         assert_eq!(changes(&st, &edited, |c| seen.push(std::format!("{}", Text(c)))), 2);
         assert!(seen[0].starts_with("site file changed: removed mute for good"), "{seen:?}");

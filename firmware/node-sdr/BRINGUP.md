@@ -57,7 +57,7 @@ second-stage bootloader print a few at reset).
 
 ```sh
 cargo test --workspace                       # rawcap: unpacking, ring, trigger, dumps, pipeline
-DRONEID_TESTDATA=$HOME/Desktop/rotorscope/testdata/droneid cargo test --release -p rawcap -p rawcap-pull
+DRONEID_TESTDATA=$PWD/testdata/droneid cargo test --release -p rawcap -p rawcap-pull
 (cd firmware/node-sdr/c5 && cargo fw)
 ```
 

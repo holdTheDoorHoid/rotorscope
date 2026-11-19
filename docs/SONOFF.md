@@ -60,9 +60,9 @@ restarts it. Changes nothing. You should see `wafer 0xBB41 = CC13x2/CC26x2`,
 ## Step 2: back up the Zigbee firmware
 
 ```sh
-mkdir -p ~/rotorscope-backups
-cargo run --release -p cc26xx-flash -- --port "$PORT" read ~/rotorscope-backups/sonoff-zigbee.bin
-sha256sum ~/rotorscope-backups/sonoff-zigbee.bin
+mkdir -p ~/sonoff-backup
+cargo run --release -p cc26xx-flash -- --port "$PORT" read ~/sonoff-backup/sonoff-zigbee.bin
+sha256sum ~/sonoff-backup/sonoff-zigbee.bin
 ```
 
 This takes under a minute. The tool reads every byte, then asks the chip to
@@ -135,7 +135,7 @@ It combines with everything else `rid-view` reads: nodes, `--ble`, `--adsbee`,
 Flash your backup with the same tool:
 
 ```sh
-cargo run --release -p cc26xx-flash -- --port "$PORT" flash ~/rotorscope-backups/sonoff-zigbee.bin
+cargo run --release -p cc26xx-flash -- --port "$PORT" flash ~/sonoff-backup/sonoff-zigbee.bin
 ```
 
 It erases Sniffle, writes the backup, checks it and restarts. The dongle comes
