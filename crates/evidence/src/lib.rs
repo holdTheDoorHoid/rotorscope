@@ -22,6 +22,8 @@
 //! - [`verify`] (feature `verify`, host): check a whole log.
 //! - [`b64`]: base64 for the console stream and bundles.
 //! - [`files`]: evidence file names on the card and the next one to create.
+//! - [`tsp`]: a minimal reader for RFC 3161 time-stamp replies (outside
+//!   time-stamps of a server's access log; signature not checked here).
 //! - [`continuity`]: the boot counter and the previous boot's head, behind
 //!   the [`continuity::BootCounter`] trait (SD card state file now).
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
@@ -42,6 +44,7 @@ pub mod format;
 pub mod sign;
 #[cfg(feature = "decode")]
 pub mod summary;
+pub mod tsp;
 #[cfg(feature = "verify")]
 pub mod verify;
 pub mod writer;
