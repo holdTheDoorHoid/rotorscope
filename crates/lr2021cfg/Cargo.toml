@@ -11,3 +11,6 @@ modes.workspace = true
 aerohop = { path = "../aerohop" }
 ctrlwatch = { path = "../ctrlwatch" }
 heapless.workspace = true
+
+[dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }

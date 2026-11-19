@@ -78,6 +78,9 @@ pub mod sightings;
 pub mod signatures;
 pub mod sik;
 
+#[cfg(test)]
+mod fuzz_tests;
+
 pub use content::ControlContent;
 pub use rx::{Modulation, Probe, RxConfig, RxMeta, ScanStep};
 pub use sightings::{Sighting, Sightings};

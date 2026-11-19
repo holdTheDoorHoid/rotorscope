@@ -11,7 +11,7 @@ use droneid::payload::{self, BLOCK, Record};
 use rand_core::{OsRng, RngCore};
 use sm2::{NonZeroScalar, Scalar};
 
-const K: [u8; 16] = *b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff";
+pub(crate) const K: [u8; 16] = *b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff";
 
 fn test_key() -> PrivateKey {
     let mut b = [0u8; 32];
@@ -30,7 +30,11 @@ fn deg_to_rad_e7(deg: f64) -> i32 {
 /// SPEC.md sender side: C1 = kG, S = kQ, t = SM3(x2||y2||1)[..16],
 /// C2 = K ^ t, C3 = SM3(x2||K||y2).
 fn wrap(q: &AffinePoint, k: &[u8; 16]) -> ([u8; 64], [u8; 32], [u8; 16]) {
-    let e = NonZeroScalar::random(&mut OsRng);
+    wrap_with(q, k, NonZeroScalar::random(&mut OsRng))
+}
+
+/// [`wrap`] with a given ephemeral scalar (repeatable seeds for the fuzz tests).
+pub(crate) fn wrap_with(q: &AffinePoint, k: &[u8; 16], e: NonZeroScalar) -> ([u8; 64], [u8; 32], [u8; 16]) {
     let c1 = (ProjectivePoint::GENERATOR * *e).to_affine().to_encoded_point(false);
     let s = (ProjectivePoint::from(*q) * *e).to_affine().to_encoded_point(false);
     let (x2, y2) = (s.x().unwrap(), s.y().unwrap());
@@ -50,7 +54,7 @@ fn ctr(k: &[u8; 16], iv: &[u8; 8], b: &mut [u8]) {
     SessionKey(*k).ctr(iv, b);
 }
 
-fn cryp_aux(serial: &str, lat: f64, lon: f64) -> [u8; 32] {
+pub(crate) fn cryp_aux(serial: &str, lat: f64, lon: f64) -> [u8; 32] {
     let mut p = [0u8; 32];
     p[..serial.len()].copy_from_slice(serial.as_bytes());
     p[16..20].copy_from_slice(&deg_to_rad_e7(lon).to_le_bytes());
@@ -60,7 +64,10 @@ fn cryp_aux(serial: &str, lat: f64, lon: f64) -> [u8; 32] {
 }
 
 fn cryp_core(q: &AffinePoint, k: &[u8; 16], aux: &[u8; 32]) -> Vec<u8> {
-    let (c1, c3, c2) = wrap(q, k);
+    cryp_core_wrapped(k, aux, wrap(q, k))
+}
+
+pub(crate) fn cryp_core_wrapped(k: &[u8; 16], aux: &[u8; 32], (c1, c3, c2): ([u8; 64], [u8; 32], [u8; 16])) -> Vec<u8> {
     let iv = [0, 1, 2, 3, 4, 5, 6, 7];
     let mut c = std::vec![0u8; CRYP_LEN];
     c[0] = 0x13;
@@ -78,7 +85,7 @@ fn cryp_core(q: &AffinePoint, k: &[u8; 16], aux: &[u8; 32]) -> Vec<u8> {
 }
 
 /// A plausible INFP-10 plaintext over City Hall, Philadelphia.
-fn infp10_plain(serial: &str) -> [u8; 109] {
+pub(crate) fn infp10_plain(serial: &str) -> [u8; 109] {
     infp10_at(serial, 7, 1_794_232_987_250)
 }
 
@@ -106,7 +113,7 @@ fn infp10_at(serial: &str, seq: u16, gps_ms: u64) -> [u8; 109] {
     p
 }
 
-fn infp10_core(k: &[u8; 16], plain: &[u8; 109]) -> Vec<u8> {
+pub(crate) fn infp10_core(k: &[u8; 16], plain: &[u8; 109]) -> Vec<u8> {
     let iv = [9, 9, 9, 9, 1, 2, 3, 4];
     let mut c = std::vec![0u8; INFP10_LEN];
     c[0] = 0x10;
@@ -120,7 +127,7 @@ fn infp10_core(k: &[u8; 16], plain: &[u8; 109]) -> Vec<u8> {
     c
 }
 
-fn infp11_core(k: &[u8; 16], serial: &str, purpose: &str) -> Vec<u8> {
+pub(crate) fn infp11_core(k: &[u8; 16], serial: &str, purpose: &str) -> Vec<u8> {
     let mut p = [0u8; 141];
     p[0] = 0x11;
     p[1..1 + serial.len()].copy_from_slice(serial.as_bytes());
@@ -154,7 +161,7 @@ fn block_and_object(core: &[u8]) -> ([u8; BLOCK], Vec<u8>) {
     (b, obj)
 }
 
-fn checked_object(core: &[u8]) -> Vec<u8> {
+pub(crate) fn checked_object(core: &[u8]) -> Vec<u8> {
     let (b, obj) = block_and_object(core);
     let p = payload::parse(&b);
     match p.record {

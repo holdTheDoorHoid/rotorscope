@@ -590,4 +590,6 @@ impl<const N: usize> Decryptor<N> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod fuzz_tests;

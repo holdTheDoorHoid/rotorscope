@@ -573,6 +573,7 @@ name = "ctrlwatch"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
+ "fuzzkit",
  "heapless 0.8.0",
  "mavwatch",
  "serde",
@@ -630,6 +631,7 @@ dependencies = [
  "aes",
  "ctr",
  "droneid",
+ "fuzzkit",
  "rand_core 0.6.4",
  "sha2 0.10.9",
  "sm2",
@@ -1551,6 +1553,7 @@ version = "0.1.0"
 dependencies = [
  "aerohop",
  "ctrlwatch",
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "modes",
@@ -1575,6 +1578,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mavwatch"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "heapless 0.8.0",
  "mavwatch",
 ]
@@ -1725,6 +1729,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "openlink"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "openlink",
  "serde",
  "serde_json",
@@ -2860,6 +2865,9 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wifidrone"
 version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+]
 
 [[package]]
 name = "wifiwatch"

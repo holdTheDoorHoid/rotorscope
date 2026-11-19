@@ -14,6 +14,7 @@ mavwatch.workspace = true
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 serde_json = "1"
 ctrlwatch = { path = ".", features = ["serde"] }
 mavwatch = { workspace = true, features = ["encode"] }
