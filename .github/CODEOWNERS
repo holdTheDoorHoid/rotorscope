@@ -1,0 +1,22 @@
+# Who must review changes to the files that steer agents, run CI, or decide what we depend on.
+#
+# NOTE: this file only REQUESTS review. It enforces nothing unless the repository setting
+# "Require review from Code Owners" (a branch protection rule on `main`) is switched on.
+# That is the owner's decision: sessions today push straight to `main`, and such a rule
+# would change that way of working. Nothing in this repository changes any GitHub setting.
+
+/AGENTS.md                      @holdTheDoorHoid
+/CLAUDE.md                      @holdTheDoorHoid
+/.claude/                       @holdTheDoorHoid
+/.github/                       @holdTheDoorHoid
+Cargo.lock                      @holdTheDoorHoid
+/tools/approved-deps.txt        @holdTheDoorHoid
+/tools/approved-actions.txt     @holdTheDoorHoid
+/tools/check-deps.py            @holdTheDoorHoid
+/deny.toml                      @holdTheDoorHoid
+/SECURITY.md                    @holdTheDoorHoid
+/tools/p4-prepare.sh            @holdTheDoorHoid
+/tools/fetch-*.sh               @holdTheDoorHoid
+/tools/docs-build.sh            @holdTheDoorHoid
+/firmware/patches/              @holdTheDoorHoid
+/third_party/                   @holdTheDoorHoid
