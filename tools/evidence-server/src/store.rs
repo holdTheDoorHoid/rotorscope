@@ -5,6 +5,7 @@
 //! <data>/devices/<key-id>/batches/000001.bin each upload exactly as received
 //! <data>/devices/<key-id>/audit.log          one AuditLine (JSON) per line
 //! <data>/devices/<key-id>/timestamps.log     outside time-stamps (JSON lines)
+//! <data>/devices/<key-id>/stamp-queue.log    stamps asked for, and failed attempts (JSON lines)
 //! ```
 //!
 //! A batch is checked in two steps: [`check_batch`] on its own (every
@@ -26,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use evidence::continuity::Continuity;
 use evidence::format::{self, Body, EventCode};
-use evidence::verify::bundle::{audit_hash, AuditEntry, AuditLine, Batch, Bundle, Device as BDevice, Timestamp, FORMAT};
+use evidence::verify::bundle::{audit_hash, AuditEntry, AuditLine, Batch, Bundle, Device as BDevice, StampFailure, Timestamp, FORMAT};
 use evidence::verify::{self, hex, unhex, Input, Level, Options};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,23 @@ struct Cover {
     k: Continuity,
 }
 
+/// An access-log stamp asked for: the audit entry it covers (the newest
+/// when it was queued), its hash, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Queued {
+    pub audit_n: u64,
+    pub audit_hash: String,
+    pub queued_utc_ms: u64,
+}
+
+/// One line of `stamp-queue.log`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+enum QueueLine {
+    Queued(Queued),
+    Failed(StampFailure),
+}
+
 /// A detection for the map and list.
 #[derive(Debug, Clone, Serialize)]
 pub struct Point {
@@ -100,6 +118,10 @@ pub struct Device {
     pub audit: Vec<AuditLine>,
     audit_head: [u8; 32],
     pub timestamps: Vec<Timestamp>,
+    /// Access-log stamps asked for (oldest first) and failed attempts, from
+    /// `stamp-queue.log`.
+    pub queue: Vec<Queued>,
+    pub stamp_failures: Vec<StampFailure>,
     pub points: Vec<Point>,
     pub firmware: Vec<String>,
     /// Problems found when loading from disk (should stay empty).
@@ -132,6 +154,12 @@ pub struct BundlePlan {
 }
 
 impl BundlePlan {
+    /// The server's stamping set-up and backlog for this unit.
+    pub fn stamping(mut self, s: Option<evidence::verify::bundle::Stamping>) -> Self {
+        self.bundle.stamping = s;
+        self
+    }
+
     pub fn build(mut self) -> Result<Bundle, StoreError> {
         for b in &self.batches {
             let bytes = fs::read(&b.path)?;
@@ -331,7 +359,21 @@ impl Store {
             dev.load_problems.push(format!("audit log has {} uploads, {} batch files on disk", uploads.len(), files.len()));
         }
         if let Ok(text) = fs::read_to_string(dir.join("timestamps.log")) {
-            dev.timestamps = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+            for (i, l) in text.lines().enumerate() {
+                match serde_json::from_str(l) {
+                    Ok(t) => dev.timestamps.push(t),
+                    Err(e) => dev.load_problems.push(format!("timestamps.log line {}: {e}", i + 1)),
+                }
+            }
+        }
+        if let Ok(text) = fs::read_to_string(dir.join("stamp-queue.log")) {
+            for (i, l) in text.lines().enumerate() {
+                match serde_json::from_str::<QueueLine>(l) {
+                    Ok(QueueLine::Queued(q)) => dev.queue.push(q),
+                    Ok(QueueLine::Failed(f)) => dev.stamp_failures.push(f),
+                    Err(e) => dev.load_problems.push(format!("stamp-queue.log line {}: {e}", i + 1)),
+                }
+            }
         }
         Ok(dev)
     }
@@ -380,6 +422,8 @@ impl Device {
             audit: Vec::new(),
             audit_head: [0; 32],
             timestamps: Vec::new(),
+            queue: Vec::new(),
+            stamp_failures: Vec::new(),
             points: Vec::new(),
             firmware: Vec::new(),
             load_problems: Vec::new(),
@@ -581,6 +625,76 @@ impl Device {
         append_line(&self.dir.join("timestamps.log"), &serde_json::to_string(&t).unwrap())?;
         self.timestamps.push(t);
         Ok(())
+    }
+
+    /// The audit chain's head: its newest entry's number and hash.
+    pub fn audit_head(&self) -> Option<(u64, [u8; 32])> {
+        let n = self.audit.len().checked_sub(1)?;
+        Some((n as u64, self.audit_head))
+    }
+
+    /// The newest upload in the audit chain: its entry number and time.
+    pub fn newest_upload(&self) -> Option<(u64, u64)> {
+        self.audit.iter().enumerate().rev().find_map(|(i, l)| {
+            let e: AuditEntry = serde_json::from_str(&l.entry).ok()?;
+            (e.action == "upload").then_some((i as u64, e.utc_ms))
+        })
+    }
+
+    /// The newest upload not yet covered by a queued stamp, if any (after a
+    /// restart: the stamp it still needs).
+    pub fn unqueued_upload(&self) -> Option<(u64, u64)> {
+        let (n, t) = self.newest_upload()?;
+        let queued = self.queue.last().map(|q| q.audit_n);
+        queued.is_none_or(|q| q < n).then_some((n, t))
+    }
+
+    /// Ask for a stamp of the access log as it is now.
+    pub fn queue_stamp(&mut self, now: u64) -> Result<Queued, StoreError> {
+        let (n, h) = self.audit_head().ok_or_else(|| StoreError::Rejected("no access log yet".into()))?;
+        let q = Queued { audit_n: n, audit_hash: hex(&h), queued_utc_ms: now };
+        append_line(&self.dir.join("stamp-queue.log"), &serde_json::to_string(&QueueLine::Queued(q.clone())).unwrap())?;
+        self.queue.push(q.clone());
+        Ok(q)
+    }
+
+    /// A failed attempt (refused, unreachable, or a reply that is not a
+    /// stamp of what was sent): kept, never stored as a stamp.
+    pub fn record_stamp_failure(&mut self, f: StampFailure) -> Result<(), StoreError> {
+        append_line(&self.dir.join("stamp-queue.log"), &serde_json::to_string(&QueueLine::Failed(f.clone())).unwrap())?;
+        self.stamp_failures.push(f);
+        Ok(())
+    }
+
+    /// Keep a stamp, then log it in the audit chain (so removing it from
+    /// `timestamps.log` shows).
+    pub fn record_stamp(&mut self, t: Timestamp, gen_time_ms: u64) -> Result<(), StoreError> {
+        let token = evidence::b64::decode_vec(&t.token).unwrap_or_default();
+        let detail = serde_json::json!({
+            "authority": t.authority,
+            "covers": t.covers,
+            "audit_n": t.audit_n,
+            "imprint": t.imprint,
+            "token_sha256": hex(&evidence::sha256(&token)),
+            "gen_time": verify::fmt_utc(gen_time_ms),
+        });
+        self.add_timestamp(t)?;
+        self.audit("time-stamper", "timestamp", detail)?;
+        Ok(())
+    }
+
+    /// The stamp `authority` still owes: the newest queued one, unless it
+    /// has been received. (A newer stamp covers every older entry, so older
+    /// queued ones it never answered are not asked for again.)
+    pub fn outstanding_for(&self, authority: &str) -> Option<&Queued> {
+        let q = self.queue.last()?;
+        let done = self.timestamps.iter().any(|t| t.authority == authority && t.audit_n == Some(q.audit_n));
+        (!done).then_some(q)
+    }
+
+    /// Newest access-log stamp received from `authority`.
+    pub fn newest_stamp(&self, authority: &str) -> Option<&Timestamp> {
+        self.timestamps.iter().filter(|t| t.authority == authority && t.audit_n.is_some()).max_by_key(|t| t.audit_n)
     }
 
     /// True once the record exists here (for annotations).

@@ -3,9 +3,16 @@
 //! ```text
 //! evidence-server serve --data DIR [--listen 127.0.0.1:8650]
 //!                 [--tls-cert cert.pem --tls-key key.pem] [--token T]
-//!                 [--tsa URL] [--name NAME] [--open-registration]
+//!                 [--name NAME] [--open-registration]
+//!                 [--stamp [--stamp-tsa URL[,chain=URL][,crl=URL]]...
+//!                  [--stamp-every MIN] [--stamp-idle SEC] [--stamp-alarm-hours H]]
 //! evidence-server keygen --out FILE
 //! ```
+//!
+//! Outside time-stamping is off unless `--stamp` is given: it sends a
+//! SHA-256 fingerprint of each unit's access log (nothing else) to the
+//! services listed, by default the built-in ones (`stamp::default_authorities`).
+//! Each `--stamp-tsa` replaces the built-in list. See docs/EVIDENCE.md.
 //!
 //! Registering a unit needs the token. Without `--token` the server refuses
 //! to register anything unless `--open-registration` is given (a bench
@@ -35,7 +42,8 @@ fn main() {
         Some("serve") => serve(&args),
         Some("keygen") => keygen(&args),
         _ => {
-            eprintln!("usage: evidence-server serve --data DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--token T] [--tsa URL] [--name NAME] [--open-registration]");
+            eprintln!("usage: evidence-server serve --data DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--token T] [--name NAME] [--open-registration]");
+            eprintln!("         [--stamp [--stamp-tsa URL[,chain=URL][,crl=URL]]... [--stamp-every MIN] [--stamp-idle SEC] [--stamp-alarm-hours H]]");
             eprintln!("       evidence-server keygen --out FILE");
             std::process::exit(2);
         }
@@ -87,7 +95,9 @@ fn serve(args: &[String]) {
     };
     let name = arg(args, "--name").unwrap_or_else(|| format!("{}://{listen}", if tls.is_some() { "https" } else { "http" }));
     let token = arg(args, "--token").or_else(|| std::env::var("EVIDENCE_TOKEN").ok());
-    let app = Arc::new(App::new(store, token, args.iter().any(|a| a == "--open-registration"), name.clone(), arg(args, "--tsa")));
+    let cfg = stamp_config(args);
+    let stamping = cfg.enabled.then(|| evidence_server::stamp::Stamping::new(cfg.clone()));
+    let app = Arc::new(App::new(store, token, args.iter().any(|a| a == "--open-registration"), name.clone(), stamping));
     let n = app.lock().devices.len();
     eprintln!("evidence-server: data {data}, {n} devices, listening on {name}{}", if tls.is_none() { " (plain HTTP: bench only, not evidence-grade transport)" } else { "" });
     if app.token.is_none() {
@@ -96,6 +106,17 @@ fn serve(args: &[String]) {
         } else {
             eprintln!("evidence-server: no --token: registering units is refused (add --token T, or --open-registration for a bench laptop)");
         }
+    }
+    if cfg.enabled {
+        let list: Vec<&str> = cfg.authorities.iter().map(|a| a.url.as_str()).collect();
+        eprintln!("evidence-server: outside time-stamping ON: {} (one stamp per unit at most every {} min while uploading, and when uploads stop)", list.join(", "), cfg.every_ms / 60_000);
+        eprintln!("evidence-server: it sends only a SHA-256 fingerprint of each unit's access log; the services also see this server's address");
+    }
+    for w in cfg.warnings() {
+        eprintln!("evidence-server: WARNING: {w}");
+    }
+    if cfg.enabled {
+        evidence_server::stamp::spawn_worker(app.clone());
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
@@ -106,6 +127,48 @@ fn serve(args: &[String]) {
             Some(cfg) => serve_tls(listener, r, cfg).await,
         }
     });
+}
+
+/// Every value after each `name`.
+fn args_all(args: &[String], name: &str) -> Vec<String> {
+    args.windows(2).filter(|w| w[0] == name).map(|w| w[1].clone()).collect()
+}
+
+fn stamp_config(args: &[String]) -> evidence_server::stamp::Config {
+    use evidence_server::stamp::{Authority, Config};
+    if arg(args, "--tsa").is_some() {
+        eprintln!("--tsa is replaced by --stamp (automatic, access-log stamps) and --stamp-tsa URL; see docs/EVIDENCE.md");
+        std::process::exit(2);
+    }
+    let mut c = Config { enabled: args.iter().any(|a| a == "--stamp"), ..Config::default() };
+    let specs = args_all(args, "--stamp-tsa");
+    if !specs.is_empty() {
+        c.authorities = specs
+            .iter()
+            .map(|s| {
+                Authority::parse(s).unwrap_or_else(|e| {
+                    eprintln!("--stamp-tsa {e}");
+                    std::process::exit(2)
+                })
+            })
+            .collect();
+        if !c.enabled {
+            eprintln!("evidence-server: --stamp-tsa given without --stamp: outside time-stamping stays OFF");
+        }
+    }
+    let num = |name: &str, unit: u64, default: u64| -> u64 {
+        match arg(args, name) {
+            None => default,
+            Some(v) => v.parse::<u64>().ok().filter(|&n| n > 0).map(|n| n.saturating_mul(unit)).unwrap_or_else(|| {
+                eprintln!("{name} needs a whole number above 0");
+                std::process::exit(2)
+            }),
+        }
+    };
+    c.every_ms = num("--stamp-every", 60_000, c.every_ms);
+    c.idle_ms = num("--stamp-idle", 1000, c.idle_ms);
+    c.alarm_ms = num("--stamp-alarm-hours", 3_600_000, c.alarm_ms);
+    c
 }
 
 fn tls_config(cert: &str, key: &str) -> Arc<rustls::ServerConfig> {
