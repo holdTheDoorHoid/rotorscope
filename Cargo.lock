@@ -655,6 +655,7 @@ name = "droneid"
 version = "0.1.0"
 dependencies = [
  "droneid",
+ "fuzzkit",
  "sha2 0.10.9",
 ]
 
