@@ -33,6 +33,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod auth;
+pub mod relay;
 pub mod v3;
 mod hmac;
 /// The build script's key decision, compiled here for its tests only.
