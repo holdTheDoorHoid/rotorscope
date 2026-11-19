@@ -22,6 +22,17 @@
 //!   --allow-test-key     accept the published test key (this project's
 //!                        own tests only: anyone can sign with it)
 //!   --quiet              verdict lines only
+//!   --check-timestamps DIR   (bundles) write each RFC 3161 token, and the
+//!                        chain and revocation list stored with it, to DIR
+//!                        and check its signature with the system's
+//!                        `openssl ts -verify` at the token's own time; the
+//!                        command is printed, so it can be run elsewhere when
+//!                        openssl is not installed here
+//!   --tsa-ca FILE        a time-stamp authority's root certificate (PEM)
+//!                        obtained OUTSIDE the bundle, e.g. from its website;
+//!                        repeat for each authority. Without it the check
+//!                        uses the chain the server stored, which proves
+//!                        less (the server supplied it)
 //!
 //! exit codes:
 //!   0  VERIFIED: every link and signature checks out against a key given
@@ -55,6 +66,7 @@ fn usage() -> ExitCode {
     eprintln!("  --key HEX    the unit's public key (130 hex digits), confirmed outside the log:");
     eprintln!("               from the unit's screen or console at setup, or your own key record");
     eprintln!("  --keys FILE  trusted keys, one per line: HEX then a label; # comments");
+    eprintln!("  --check-timestamps DIR [--tsa-ca ROOT.pem]...  check a bundle's time-stamp tokens with openssl");
     eprintln!("  Without --key or --keys the log is checked only against the key it names itself,");
     eprintln!("  which anyone could have generated: the result is never VERIFIED.");
     eprintln!("exit: 0 verified, 1 failed, 2 could not run, 3 signer checked but gaps or unsigned records,");
@@ -94,6 +106,8 @@ fn main() -> ExitCode {
     let mut quiet = false;
     let mut opts = Options::default();
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut stamp_dir: Option<PathBuf> = None;
+    let mut tsa_cas: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -125,6 +139,20 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--check-timestamps" => match args.next() {
+                Some(d) => stamp_dir = Some(d.into()),
+                None => {
+                    eprintln!("--check-timestamps needs a folder to write the tokens to");
+                    return usage();
+                }
+            },
+            "--tsa-ca" => match args.next() {
+                Some(f) => tsa_cas.push(f.into()),
+                None => {
+                    eprintln!("--tsa-ca needs a PEM file");
+                    return usage();
+                }
+            },
             "-h" | "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -137,7 +165,16 @@ fn main() -> ExitCode {
         return usage();
     }
 
-    let report = if paths.len() == 1 && paths[0].extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+    let is_bundle = paths.len() == 1 && paths[0].extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if (stamp_dir.is_some() || !tsa_cas.is_empty()) && !is_bundle {
+        eprintln!("--check-timestamps and --tsa-ca take one export bundle (.json)");
+        return ExitCode::from(2);
+    }
+    if !tsa_cas.is_empty() && stamp_dir.is_none() {
+        eprintln!("--tsa-ca goes with --check-timestamps DIR");
+        return ExitCode::from(2);
+    }
+    let mut report = if is_bundle {
         let bytes = match std::fs::read(&paths[0]) {
             Ok(b) => b,
             Err(e) => {
@@ -150,7 +187,14 @@ fn main() -> ExitCode {
             println!("bundle {}  SHA-256 {sha}", paths[0].display());
             println!("  (compare with the export entry in the server's audit log and the custody record)");
         }
-        verify::verify_bundle(&bytes, &opts)
+        let mut r = verify::verify_bundle(&bytes, &opts);
+        if let Some(dir) = &stamp_dir
+            && let Err(e) = check_timestamps(&bytes, dir, &tsa_cas, &mut r, quiet)
+        {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+        r
     } else {
         let inputs = match load(&paths) {
             Ok(i) => i,
@@ -166,6 +210,7 @@ fn main() -> ExitCode {
         }
         verify::verify(&inputs, &opts)
     };
+    report.findings.sort_by_key(|f| std::cmp::Reverse(f.level));
     if !quiet {
         print_report(&report, list);
     }
@@ -173,6 +218,99 @@ fn main() -> ExitCode {
     println!("{}", report.verdict());
     println!("{}", report.not_proven());
     ExitCode::from(code as u8)
+}
+
+/// `--check-timestamps`: each RFC 3161 token written to `dir` with what was
+/// stored beside it, and checked with `openssl ts -verify` at the token's
+/// own time against the roots given with `--tsa-ca` (or, saying so, the
+/// chain the server stored). Results are added to the report.
+fn check_timestamps(json: &[u8], dir: &Path, cas: &[PathBuf], rep: &mut Report, quiet: bool) -> Result<(), String> {
+    use evidence::verify::{Finding, Where};
+    let Ok(b) = verify::bundle::parse(json) else { return Ok(()) };
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let roots = if cas.is_empty() {
+        None
+    } else {
+        let mut all = Vec::new();
+        for c in cas {
+            all.extend(std::fs::read(c).map_err(|e| format!("{}: {e}", c.display()))?);
+            all.push(b'\n');
+        }
+        let p = dir.join("trusted-roots.pem");
+        std::fs::write(&p, all).map_err(|e| format!("{}: {e}", p.display()))?;
+        Some(p)
+    };
+    let openssl = std::process::Command::new("openssl").arg("version").output().is_ok_and(|o| o.status.success());
+    let mut add = |level: Level, at: String, what: String| rep.findings.push(Finding { level, at: Where { source: at, ..Default::default() }, what });
+    if !quiet {
+        println!("time-stamp tokens written to {}", dir.display());
+    }
+    for (i, t) in b.timestamps.iter().enumerate() {
+        let at = format!("time-stamp {i} ({})", t.authority);
+        if t.kind != "rfc3161" {
+            continue;
+        }
+        let Some(token) = evidence::b64::decode_vec(&t.token) else { continue };
+        let Ok(info) = evidence::tsp::tst_info(&token) else { continue };
+        let w = |name: String, bytes: &[u8]| -> Result<PathBuf, String> {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+            Ok(p)
+        };
+        let tsr = w(format!("stamp-{i}.tsr"), &token)?;
+        let chain = match t.certs.as_deref().and_then(evidence::b64::decode_vec) {
+            Some(c) => Some(w(format!("stamp-{i}-chain.pem"), &c)?),
+            None => None,
+        };
+        if let Some(c) = t.revocation.as_deref().and_then(evidence::b64::decode_vec) {
+            let p = w(format!("stamp-{i}.crl"), &c)?;
+            if !quiet {
+                println!("  {at}: revocation list as fetched when stamped ({}): {} (openssl crl -in FILE -noout -text; add -inform DER if it is binary)", t.revocation_from.as_deref().unwrap_or("?"), p.display());
+            }
+        }
+        let (ca, outside) = match (&roots, &chain) {
+            (Some(r), _) => (r.clone(), true),
+            (None, Some(c)) => (c.clone(), false),
+            (None, None) => {
+                add(Level::Note, at, "signature not checked: no certificate to check it against (give the authority's root with --tsa-ca)".into());
+                continue;
+            }
+        };
+        let mut args: Vec<String> = vec!["ts".into(), "-verify".into(), "-in".into(), tsr.display().to_string(), "-digest".into(), t.imprint.clone(), "-CAfile".into(), ca.display().to_string()];
+        if outside && let Some(c) = &chain {
+            args.extend(["-untrusted".into(), c.display().to_string()]);
+        }
+        args.extend(["-attime".into(), (info.gen_time_ms / 1000).to_string()]);
+        if !quiet {
+            println!("  {at}: openssl {}", args.join(" "));
+        }
+        if !openssl {
+            add(Level::Note, at, "signature not checked here: openssl not found; run the command shown".into());
+            continue;
+        }
+        let out = std::process::Command::new("openssl").args(&args).output().map_err(|e| format!("openssl: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        if out.status.success() && text.contains("Verification: OK") {
+            let whose = if outside {
+                "the roots given with --tsa-ca".to_string()
+            } else {
+                "the certificate the server stored with it (it came from the server: give the authority's own root with --tsa-ca for an outside check)".to_string()
+            };
+            add(Level::Note, at, format!("openssl: the token's signature checks out against {whose}, at the token's time {}", verify::fmt_utc(info.gen_time_ms)));
+        } else {
+            // openssl's reason ("Verify error:...", or its error line), else its last line.
+            let why = text
+                .lines()
+                .find_map(|l| l.split_once("Verify error:").map(|(_, r)| r))
+                .or_else(|| text.lines().find(|l| l.contains("error:")).map(|l| l.rsplit(':').next().unwrap_or(l)))
+                .or_else(|| text.lines().rev().find(|l| !l.trim().is_empty()))
+                .unwrap_or("no output")
+                .trim()
+                .to_string();
+            add(Level::Fail, at, format!("openssl ts -verify failed: {why}"));
+        }
+    }
+    Ok(())
 }
 
 /// Directories expand to their EVnnnnnn.EVL files; card files are sorted by

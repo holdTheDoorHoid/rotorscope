@@ -32,9 +32,10 @@ laptop that built the firmware.
   trace. The verifier says so on every run, naming the newest boot counter
   it saw.
 - **that the times are true.** Times come from the unit's own GPS receiver
-  and clock; nothing outside the unit vouches for them unless someone asked
-  the server for an outside time-stamp, and that only shows the records
-  existed by the time of the stamp. Since WP-12 the hub only writes GPS time
+  and clock; nothing outside the unit vouches for them. An outside
+  time-stamp (when the server's operator has turned them on, below) only
+  shows the records existed by the time of the stamp, which is after they
+  were uploaded. Since WP-12 the hub only writes GPS time
   it trusts, and its clock follows GPS by no more than a crystal could drift,
   but a spoofer present from the very first boot, or walking the time by
   under about 1.7-3.5 s a day, is not caught (docs/GNSS-INTEGRITY.md).
@@ -54,7 +55,9 @@ laptop that built the firmware.
    counter of WP-14a is behind the same interface and in the same format),
    so that missing newest boots show to a checker who reads the unit's
    current counter;
-3. outside time-stamping as a matter of course, not on request;
+3. outside time-stamping turned on, with two independent services (built
+   in WP-14c and automatic once on, but off by default, and only one free
+   service qualifies as a built-in default; see "Outside time-stamps");
 4. reproducible firmware builds, plus secure boot, so the firmware hash in
    each record can be matched to published source and only that firmware
    can run.
@@ -88,9 +91,9 @@ An **export bundle** is one file with everything: the records exactly as
 uploaded, the unit's public key, the firmware fingerprints, the server's
 access log for them, and any outside time-stamps. The **verifier**
 (`evidence-verify`, open source, runs on any laptop) checks all of it and
-says, for any problem it can see, which file, record and byte. It does not
-check the time-stamp token itself (use `openssl ts -verify`, see
-EVIDENCE-FORMAT.md).
+says, for any problem it can see, which file, record and byte. With
+`--check-timestamps` it also checks each time-stamp's signature, using the
+`openssl` tool (see "Outside time-stamps").
 
 ## Who signed: give the verifier the key
 
@@ -197,6 +200,13 @@ the log (see "Who signed").
   it cannot flood the log; the records say when that happens and how many
   raises the episode held. A re-raised alarm counts as not yet seen on the
   screen, so "Mute seen alarms" does not silence it.
+- **Muted alarms are still on record** (fixed 2026-11-18): muting or
+  snoozing an alarm stops the alert, not the record. An alarm that starts
+  while a mute or a site-file rule already covers it gets its `threat`
+  record and its `threat_ended` record like any other, marked as silenced
+  and by which kind of rule. Before this, such an alarm left no record of
+  its own (only the node's raw frames, and nothing at all for alarms the
+  hub raises itself, such as "node blinded" or an ID flood).
 - **Which build and which airspace data** (WP-14a): the boot event names
   the build date, the source commit and whether the source had changes
   ("-dirty"); the verifier notes a changed or unknown source. The firmware
@@ -214,10 +224,11 @@ the log (see "Who signed").
   own clock: docs/GNSS-INTEGRITY.md "Time") is ever written as GPS time; held
   time is "free running" with its age. The verifier counts "untrusted"
   records separately.
-- **Outside time-stamp**: the server can have a public time-stamp authority
-  (tested with DigiCert's free service, no account) sign a chain fingerprint,
-  proving the records existed by that time. Only a fingerprint leaves the
-  server. Off unless the server is started with `--tsa`.
+- **Outside time-stamps** (WP-14c): when the server's operator turns them
+  on, the server has public RFC 3161 time-stamp services sign a fingerprint
+  of each unit's access log after uploads, automatically, showing the whole
+  log existed by then. Only the fingerprint leaves the server. Off unless
+  the server is started with `--stamp`. Details in "Outside time-stamps".
 
 ## What is NOT protected yet (be plain about this in any report)
 
@@ -246,10 +257,14 @@ the log (see "Who signed").
    supplied do not show unless you know the unit's current counter (the hub
    prints `evidence boot counter N` on its console at each card mount; a
    secure-element counter would make that number trustworthy).
-4. **Time-stamps are not automatic.** Someone has to ask the server for one
-   (button/API), and only while it is online. The options for making them
-   automatic, and the owner's choices, are in
-   docs/EVIDENCE-TIMESTAMPING-DESIGN.md (design only).
+4. **Time-stamps: off by default, one built-in service, no renewal.**
+   Automatic stamping is built (WP-14c) but stays off until the server's
+   operator turns it on. Only one free service (FreeTSA) says on its own
+   pages that anyone may use it, so it is the only built-in one: with it
+   alone the server warns that it has fewer than two independent services.
+   A stamp shows the log existed by the service's time, which is after the
+   upload, not when records were written. Old tokens are not re-stamped yet
+   (see "Not built yet" under "Outside time-stamps").
 5. **The re-decode shares our decoder.** The verifier decodes the raw bytes
    again, but with the same `rid` code the hub uses, so it shows the summary
    matches the bytes, not that our decoding is right. The raw Remote ID
@@ -268,6 +283,162 @@ the log (see "Who signed").
    access log is whatever the person typed. Real accounts are later work.
 9. **Over-the-air frames.** The node keeps the Remote ID messages, not the
    whole Wi-Fi or Bluetooth packet they came in.
+
+## Outside time-stamps (WP-14c)
+
+**What a stamp shows.** That the unit's access log on the server, and so
+every batch uploaded and every view, export and note logged up to that
+entry, existed exactly as it is by the time a service outside the owner's
+control vouches for. Nothing in it can have been changed, added or removed
+after that time without the stamp failing. It does **not** show when the
+records were written: they reach the server only when uploaded (minutes
+with the live uploader, days if a card is read later). The verifier and the
+page show the delay between the upload and the stamp, and between the
+newest GPS time in the records and the stamp, and say plainly that the
+stamp is not proof of when the records were written.
+
+**When.** After an upload is stored and answered, the server marks the
+unit. At most once every 10 minutes per unit while uploads continue, and
+once more 2 minutes after they stop, it queues a stamp of the access log's
+newest entry. Each service is asked on its own (one being down or slow does
+not hold up another); a failed attempt is retried after 1 minute, doubling
+to at most 1 hour; a service is sent at most one request every 2 seconds
+(FreeTSA allows one per second per address). An upload never waits for a
+service and never fails because of one. A server restart picks the queue up
+again (`stamp-queue.log`), including an upload stored just before it stopped.
+
+**What leaves the server.** Per stamp, one HTTP POST to the service's URL:
+
+```text
+POST /tsr HTTP/1.1
+Host: <the service>
+User-Agent: rfc3161-client
+Accept: */*
+Content-Type: application/timestamp-query
+Accept-Encoding: identity
+Content-Length: 69
+
+<69 bytes: DER TimeStampReq = SHA-256 algorithm id, the 32-byte imprint,
+ an 8-byte random nonce, certReq true>
+```
+
+The imprint is a SHA-256 over the unit's key id, the entry number and that
+entry's hash (EVIDENCE-FORMAT.md, "Export bundle"): it names nothing and
+cannot be reversed. No cookies, no referrer, no proxy settings taken from the
+environment, no redirects followed. When a certificate chain or revocation
+list URL is configured, the server also fetches those files (plain GETs with
+the same headers), at most once an hour per service. The service sees this
+server's IP address and the times of the requests. A test checks the exact
+bytes sent, and passes both in a build of the server alone and in a
+workspace-wide build (where another crate turns on the HTTP client's gzip
+support, which used to add `Accept-Encoding: gzip`; the headers are now set
+explicitly, and a compressed reply is refused in either build). One case
+remains build-dependent: a reply both compressed and chunked is unpacked
+by a workspace-wide build instead of refused; it must still be a stamp of
+exactly the imprint and nonce sent.
+
+**What is kept.** A reply is kept only if it is a granted stamp whose
+imprint and nonce are exactly the ones sent; anything else (refused,
+unreachable, timed out after 30 s, larger than 256 KiB, compressed, of
+unstated length, a redirect, another imprint, another or no nonce, not a
+time-stamp reply at all) is recorded as
+a failure with its reason and never stored as a stamp. A stamp is a line in
+`timestamps.log` with the service's reply as received, the nonce, when it
+was queued and sent, and the chain and revocation list fetched then; plus
+an audit entry naming the token's SHA-256, so removing a stamp shows.
+Export bundles carry all of it, plus the server's list of outstanding and
+failed stamps (bundle format 2).
+
+**Turning it on** (the server's operator; it sends fingerprints to third
+parties, so it is never on by default):
+
+```text
+evidence-server serve --data DIR --token T --stamp \
+  --stamp-tsa 'https://freetsa.org/tsr,chain=https://freetsa.org/files/cacert.pem,crl=https://www.freetsa.org/crl/root_ca.crl' \
+  --stamp-tsa '<a second service, of a different operator>'
+```
+
+- `--stamp` alone uses the built-in list (FreeTSA only) and warns, at
+  start-up and on the page, that fewer than two independent services are
+  configured.
+- Each `--stamp-tsa URL[,chain=URL][,crl=URL]` replaces the built-in list,
+  so list every service you want, FreeTSA included. Any RFC 3161 URL works.
+  Two services count as independent when their host names differ; whether
+  they share an operator is for you to check.
+- `--stamp-every MIN` (default 10), `--stamp-idle SEC` (default 120),
+  `--stamp-alarm-hours H` (default 24: the page and the server's log warn
+  when an upload has waited that long for any stamp).
+- `POST /api/devices/{id}/timestamp` asks for a stamp at the next round
+  (about a second) instead of waiting for the 10 minutes. The old `--tsa`
+  option (one manual stamp of a chain head) is gone; bundles holding such
+  stamps still verify.
+
+**Time-stamp services** (checked 2026-11-19 on the operators' own pages;
+the server never contacted any of them during development or tests). A
+service is built in only if its operator says free general use is allowed.
+
+| service | operator | URL | free general use stated by the operator? | rate limit stated | hashes | certificate chain | built in |
+|---|---|---|---|---|---|---|---|
+| FreeTSA | an individual (the site names a contact, no company) | `https://freetsa.org/tsr` | **yes**: "Timestamps issued by FreeTSA may be used for commercial purposes." and "FreeTSA provides a publicly accessible timestamping service." ([freetsa.org/freetsa.html](https://freetsa.org/freetsa.html)); best effort, no SLA | "a maximum of one timestamping request per second per IP address" (same page) | SHA-1, -224, -256, -384, -512 ([freetsa.org](https://freetsa.org/)) | root `https://freetsa.org/files/cacert.pem`, TSA `https://freetsa.org/files/tsa.crt`, CRL `https://www.freetsa.org/crl/root_ca.crl`, OCSP `http://www.freetsa.org:2560` | **yes** |
+| DigiCert | DigiCert, Inc. | `http://timestamp.digicert.com` | not stated: the page gives the URL and chain only ([knowledge.digicert.com](https://knowledge.digicert.com/general-information/rfc3161-compliant-time-stamp-authority-server)) | none stated | not stated (SHA-256/384/512 responder certificates listed) | on the same page | no: works technically; terms not confirmed |
+| Sectigo | Sectigo | `http://timestamp.sectigo.com` | not stated ([sectigo.com](https://www.sectigo.com/resource-library/time-stamping-server)) | asks scripts for "a delay of 15 seconds or more" between requests (same page) | SHA-384 signing by default; request hash chosen by the request | not found | no: works technically; terms not confirmed |
+| Sigstore public TSA | the Sigstore community (OpenSSF) | `https://timestamp.sigstore.dev/api/v1/timestamp` | not stated; Sigstore's docs list it among public TSAs ([docs.sigstore.dev](https://docs.sigstore.dev/cosign/verifying/timestamps/)) | none stated | SHA-256/384/512 per its software's documentation | self-signed root; publication point not found | no: works technically; terms not confirmed |
+| Certum | Asseco Data Systems S.A. | `http://time.certum.pl` | no: its TSA policy (Polish) treats free use as for code signing (Authenticode) and warns of claims against users without an agreement | none stated | not stated | CRLs and OCSP at `crl.certum.pl`, `ocsp.certum.pl` | no: do not enable without an agreement |
+| Apple | Apple Inc. | (third-party lists only) | no: its time-stamp CPS says its users are internal to Apple | - | - | - | no |
+| Microsoft | Microsoft | `http://timestamp.acs.microsoft.com` | no: for its Artifact Signing subscribers | - | - | - | no |
+| GlobalSign, DFN, SSL.com, Entrust | the CAs | various | not confirmed on operator pages (DFN: a university page says non-commercial use within DFN only; SSL.com: by arrangement; Entrust: no public endpoint found) | - | - | - | no |
+
+The owner chose two independent free services. Only one qualifies today,
+so the server ships with one and says so. To have two, the owner can ask
+DigiCert or Sectigo (or another operator) for written permission, or use a
+paid or EU-qualified provider as the second (docs/EVIDENCE-TIMESTAMPING-DESIGN.md).
+
+**Checking stamps** (`evidence-verify`): for every stamp in a bundle it
+recomputes the imprint from the bundle's own access log (a stamp naming an
+entry that is missing or was changed, a token over another hash, or a stamp
+the access log records but the bundle lacks, **fails**) and says, e.g.:
+
+```text
+NOTE  time-stamp 0 (https://freetsa.org/tsr): the access log through entry #2
+      (registration, 2 uploaded batches and every view, export and note logged
+      before it) existed by 2026-11-19T01:12:36.000Z, by https://freetsa.org/tsr's
+      clock (its signature is checked only with --check-timestamps). Stamped
+      4 min after the newest upload it covers was stored (server clock); 2 h 5 min
+      after the newest GPS time in the records it covers. A stamp shows the log
+      existed by then; it does not show when the records in it were written
+```
+
+It also lists the server's outstanding and failed stamps and warns when
+fewer than two independent services were used. With
+`--check-timestamps DIR --tsa-ca ROOT.pem` (one `--tsa-ca` per service,
+the root obtained from the service itself) it writes each token, chain and
+revocation list to `DIR` and runs
+`openssl ts -verify -in DIR/stamp-N.tsr -digest <imprint> -CAfile ROOT.pem -attime <the token's time>`
+on each: a signature that does not check is a **failure**. Without
+`--tsa-ca` it checks against the chain the server stored and says that
+proves less (the server supplied it). Without `openssl` it prints the
+commands to run elsewhere. The stored revocation list is written out but
+not checked automatically (`openssl crl -in DIR/stamp-N.crl -noout -text`).
+No Rust code checks token signatures (no new dependencies); the reader in
+`crates/evidence/src/tsp.rs` only takes out the time, imprint and nonce.
+
+**Not built yet, and what that means.**
+
+- **Re-stamping (archive time-stamps, RFC 4998).** A token stays checkable
+  only while its service's certificate chain, the revocation status at
+  stamping time and its algorithms (SHA-256, the service's signature
+  algorithm) can be trusted. The server keeps the chain and a revocation
+  list fetched at stamping time when their URLs are configured (built in
+  for FreeTSA; it fetches a CRL, not an OCSP response), so a token can be
+  checked at its own time after the certificate expires (FreeTSA's current
+  one runs to 2040). But if a service's key is ever compromised, or its
+  algorithms weaken, tokens taken before then lose their value unless they
+  were stamped again, by a fresh service, before it happened. Nothing does
+  that yet; the `Stamper` trait in `tools/evidence-server/src/stamp.rs` is
+  where a yearly re-stamp would go.
+- **OpenTimestamps** (a Bitcoin-anchored stamp with no certificate
+  authority): not built; it would be a second kind of `Stamper`.
+- Stamps are taken at the server, after upload: the hub has no network.
 
 ## Privacy
 
@@ -363,7 +534,22 @@ Every run also prints: "NOT PROVEN: that the log is complete."
   record (and not for another unit), a changed batch file kept off the
   map, the newest checkpoint found past a tail, a console line with no end,
   a line split by a timeout, batches split at checkpoints under a size cap,
-  an endless time-stamp reply. End to end with the binaries: a two-boot
+  an endless time-stamp reply. WP-14c (`crates/evidence/tests/stamps.rs`,
+  `tools/evidence-server/tests/stamping.rs`,
+  `tools/evidence-verify/tests/timestamps.rs`, fake services on 127.0.0.1
+  and canned tokens from two throwaway openssl test authorities, never a
+  real service): the exact bytes and headers sent; replies that are
+  refused, garbage, over another imprint, with another or no nonce,
+  oversized, a 500, a redirect (not followed) or too slow all recorded as
+  failures and never kept as stamps; two services independent with their
+  own back-off; an upload answered at once while a service hangs; the queue
+  re-read after a restart; the coalescing rule with a fake clock; the export
+  carrying stamps, outstanding and failed ones; the checker failing a cut or
+  edited access log, a token over another hash, a removed stamp, a broken
+  token signature and an untrusted root; version 1 bundles still verify;
+  the DER reader on malformed input and 5000 random mutations of a token;
+  a three-boot continuity chain (fixed in WP-14c: the checker now follows
+  the boots' continuity records, not their ids). End to end with the binaries: a two-boot
   card through `evidence-upload` -> server -> export -> `evidence-verify`:
   VERIFIED, 0 gaps, boot 1's tail sent as its own batch; the 2026-11-18
   bench logs (`final-replay`, `spoofboot-stream`) upload and verify, and

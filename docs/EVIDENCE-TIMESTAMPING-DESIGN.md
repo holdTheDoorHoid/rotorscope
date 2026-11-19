@@ -1,9 +1,18 @@
-# Outside time-stamping of evidence: design note (not implemented)
+# Outside time-stamping of evidence: design note
 
-Status: design for the owner to choose from (WP-14b, 2026-11-18). Nothing
-here is built yet beyond what exists today: the server can ask one RFC 3161
-time-stamp authority, by hand, to stamp one chain head (`--tsa URL`,
-`POST /api/devices/{id}/timestamp`; `tools/evidence-server/src/tsa.rs`).
+Status: written for the owner to choose from (WP-14b, 2026-11-18).
+**Owner's choice:** two independent free RFC 3161 services, stamped
+automatically; no paid provider, no public transparency log;
+OpenTimestamps left for later. **Built in WP-14c (2026-11-19):** steps 1 to
+6 of the implementation outline below (access-log imprint and bundle format
+2, queue, worker with pluggable services, chain and revocation list kept,
+verifier with `--check-timestamps`, page and alarm), off until the server's
+operator turns it on with `--stamp`. Not built: step 7 (OpenTimestamps) and
+step 8 (re-stamping). Only one free service (FreeTSA) states on its own
+pages that general use is allowed, so the server ships with one and warns
+that it has fewer than two. How to use it, the services checked and their
+terms: docs/EVIDENCE.md, "Outside time-stamps". The manual `--tsa` option
+described below as "today" is gone.
 
 ## Why
 

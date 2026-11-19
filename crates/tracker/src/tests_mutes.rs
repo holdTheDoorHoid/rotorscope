@@ -137,12 +137,15 @@ fn operator_mutes_expire_site_mutes_stay_and_old_catch_alls_are_dropped() {
     tr.ingest_threat(1, &twin("CafeWiFi", 8), 2_000);
     assert_eq!(announced(&mut tr, 2_000).len(), 1);
     // Still heard two hours later: the mute ends and it alarms again.
+    // Meanwhile each time it comes back is recorded, silenced (no alert).
     let end = 1_000 + OPERATOR_MUTE_MS;
     let mut t = 2_000;
     while t < end - 1_000 {
         t += 60_000;
         tr.ingest_threat(1, &twin("CafeWiFi", 7), t.min(end - 1_000));
-        assert!(announced(&mut tr, t).is_empty());
+        assert_eq!(announced(&mut tr, t), [a]);
+        assert_eq!(tr.get_threat(a).unwrap().silence(), Some(threats::Silence::Muted));
+        assert_eq!(tr.active_threats(t.min(end - 1_000)).count(), 0, "no alert");
     }
     assert!(tr.get_threat(a).unwrap().muted);
     tr.ingest_threat(1, &twin("CafeWiFi", 7), end + 1_000);
@@ -159,12 +162,15 @@ fn operator_mutes_expire_site_mutes_stay_and_old_catch_alls_are_dropped() {
     assert_eq!(tr.mute(venue, end), Ok(true));
     let v = tr.ingest_threat(2, &twin("Venue Guest", 9), end + 2_000).unwrap();
     assert!(tr.get_threat(v).unwrap().muted);
-    // Days later (a new entry by then): still muted, never announced.
+    // Days later (a new entry by then): still muted, never alerted on, but
+    // its raise is recorded as muted by the site file.
     let later = end + 10 * OPERATOR_MUTE_MS;
     let v = tr.ingest_threat(2, &twin("Venue Guest", 9), later).unwrap();
     tr.expire(later);
     assert!(tr.get_threat(v).unwrap().muted, "for good");
-    assert!(!announced(&mut tr, later).contains(&v));
+    assert!(announced(&mut tr, later).contains(&v));
+    assert_eq!(tr.get_threat(v).unwrap().silence(), Some(threats::Silence::ForGood));
+    assert!(tr.active_threats(later).all(|t| t.id != v), "no alert");
 
     // Rules an older hub saved on the card: the catch-alls and the kinds
     // that can only be snoozed are not honoured, with a reason.

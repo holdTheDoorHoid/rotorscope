@@ -102,7 +102,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 14 | shutdown | (none); a shutdown checkpoint follows |
 | 15 | gps_receiver | 1 answering, 0 silent |
 | 16 | o4_decrypted | session key ID (4), record selector (1); text is what it decrypted to, never the key |
-| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); from WP-14a also episode (u32, 1 = the alarm entry's first), how it was raised (1: 0 first, 1 again after an earlier episode ended, 2 still sounding when its mute or snooze ended), raises within the last minute (1). Text describes it. One record per raise (see "Threat episodes" below). For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
+| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); from WP-14a also episode (u32, 1 = the alarm entry's first), how it was raised (1: 0 first, 1 again after an earlier episode ended, 2 still sounding when its mute or snooze ended), raises within the last minute (1); then whether a mute rule covered it so no alert was given (1: 0 alerted, 1 snoozed, 2 muted by the operator, 3 muted for good by the site file; absent before 2026-11-18, when only alerted raises were recorded). Data length: 7 before WP-14a, 13 from WP-14a, 14 from 2026-11-18; all within format version 1, and the checker reads none of it, so every length verifies. Text describes it, and for a silenced one says so. One record per raise (see "Threat episodes" below). For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
 | 18 | gnss_jamming | kind (1), level (i16); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
@@ -129,8 +129,13 @@ has been raised 3 times within 60 s, its episode ends only after 60 s with
 no report, and the raises in between are counted into that episode
 (`raises`, flag "held") instead of each getting a record. The third raise's
 text says the hold begins. Records per alarm entry are thus at most about
-four a minute. A silenced (muted or snoozed) alarm is not raised and so
-has no end record; its raw frames are logged as before.
+four a minute. A silenced (muted or snoozed) alarm is recorded the same
+way, raise and end, with its raise marked silenced (no alert was given);
+when the rule ends while it is still sounding it gets one more raise record
+(how 2, "still sounding after its mute or snooze ended"). Muting stops the
+alert, never the record. Logs written before 2026-11-18 have no raise or
+end record for an alarm that started while a mute covered it (only the
+node's raw frames, and nothing for a hub-raised kind).
 
 ### Continuity across boots
 
@@ -303,32 +308,86 @@ The hub prints each record on its USB console as one line:
 
 ## Export bundle
 
-JSON, from evidence-server (`/api/devices/{id}/export`):
+JSON, from evidence-server (`/api/devices/{id}/export`). Servers write
+format **2** (since WP-14c, 2026-11-19); the verifier reads 1 and 2 and
+refuses any other, so an older verifier refuses a version 2 bundle rather
+than skip what it does not know.
 
 ```text
-{ "format": "rotorscope-evidence-bundle/1",
+{ "format": "rotorscope-evidence-bundle/2",
   "created_utc_ms": ..., "server": "...",
   "device": { "key_id", "public_key" (hex), "name", "registered_utc_ms" },
   "batches": [ { "n", "received_utc_ms", "sha256" (hex), "records" (base64) } ],
   "audit": [ { "entry": "<JSON text>", "hash": hex } ],
   "firmware_hashes": [hex],
-  "timestamps": [ { "kind": "rfc3161", "authority", "imprint", "boot", "seq", "head", "token" (base64) } ] }
+  "timestamps": [ <time-stamp>, ... ],
+  "stamping": { "enabled": bool, "authorities": [url],          (version 2)
+                "outstanding": [ { "authority", "audit_n", "queued_utc_ms" } ],
+                "failures": [ { "authority", "audit_n", "utc_ms", "reason" } ] } }
+
+<time-stamp>, access-log head (version 2):
+  { "kind": "rfc3161", "authority": url, "covers": "audit-head",
+    "imprint": hex, "audit_n", "audit_hash": hex,
+    "queued_utc_ms", "requested_utc_ms", "nonce": hex,
+    "token": base64 (the TimeStampResp exactly as received),
+    "certs", "certs_from", "revocation", "revocation_from",   (optional)
+    "evidence_note" }                                          (optional)
+
+<time-stamp>, chain head (version 1; "covers" absent means this):
+  { "kind": "rfc3161", "authority", "imprint", "boot", "seq", "head", "token" }
 ```
 
 - **Batches** are the uploads exactly as received: records back to back,
-  one boot's contiguous run, ending on a signed checkpoint.
+  one boot's contiguous run, ending on a signed checkpoint (or a boot's tail
+  that a later boot's stored continuity record names).
 - **Audit chain**: `hash` = SHA-256(previous entry's hash bytes ‖ `entry`
   bytes), the first entry's previous hash being 32 zero bytes. Entry 0 is
   the registration; each upload entry names its batch number and SHA-256.
-  Actions: register, upload, view, annotate, export, timestamp.
+  Actions: register, upload, view, annotate, export, timestamp. A
+  `timestamp` entry (actor `time-stamper`) names the authority, `covers`,
+  `audit_n`, `imprint`, `token_sha256` (SHA-256 of the token bytes) and the
+  authority's `gen_time`.
 - **key_id**: the first 8 bytes of SHA-256 of the public key, hex, grouped
   `xxxx-xxxx-xxxx-xxxx`.
 - **device.public_key** is the key the server registered for the device.
   It is the server's word, not a confirmation of who signed: check the
   records against the unit's key obtained independently.
-- **Time-stamps**: `imprint` = SHA-256(boot id ‖ seq as u64 LE ‖ record
-  hash); `token` is the RFC 3161 TimeStampResp. Check it with
-  `openssl ts -verify -digest <imprint> -in token.tsr -CAfile <roots>`.
+- **Access-log time-stamps** (`covers` = `audit-head`): what was sent to the
+  authority is
+
+  ```text
+  imprint = SHA-256( "rotorscope audit head v1"   24 ASCII bytes
+                     || len(key_id)               1 byte (19)
+                     || key_id                    ASCII, e.g. "1a2b-3c4d-5e6f-7a8b"
+                     || audit_n                   u64 little-endian
+                     || hash of audit entry n )   32 bytes
+  ```
+
+  Because each audit entry's hash covers every entry before it, and each
+  upload entry names its batch's SHA-256, one stamp covers the registration,
+  every batch uploaded so far, and every view, export and note logged
+  before entry `audit_n`. `queued_utc_ms` is when the server queued the
+  request (on its own clock, right after storing the upload),
+  `requested_utc_ms` when it sent it; `nonce` is the request's nonce
+  (INTEGER contents). `certs` and `revocation` are the authority's published
+  certificate chain and revocation list (CRL) as fetched when the stamp was
+  taken, base64 of the bytes received, with the URLs they came from; absent
+  when not configured, with `evidence_note` saying why when a fetch failed.
+- **Checking a stamp by hand**: recompute `audit_hash` by walking the audit
+  chain to entry `audit_n`, recompute `imprint` as above, then, with the
+  token saved as `token.tsr` (base64-decoded) and the authority's root
+  obtained from the authority itself:
+  `openssl ts -verify -in token.tsr -digest <imprint> -CAfile root.pem -attime <genTime in Unix seconds>`
+  (`openssl ts -reply -in token.tsr -text` shows genTime).
+  `evidence-verify --check-timestamps DIR --tsa-ca root.pem bundle.json`
+  does all of this.
+- **Chain-head time-stamps** (version 1, from the manual `--tsa` option,
+  now removed): `imprint` = SHA-256(boot id ‖ seq as u64 LE ‖ record hash).
+  Still checked when found in a bundle.
+- **`stamping`** is the server's own account (not proof): whether it was
+  set to stamp, with which services, which stamps it is still waiting for
+  (per service, the newest one queued that it has not received; older ones
+  are covered by it), and every failed attempt with its reason.
 - **Bundle hash**: SHA-256 of the bundle file. The server returns it in the
   `X-Bundle-SHA256` header and records it in the export audit entry that
   follows (that entry is not inside the bundle it describes).

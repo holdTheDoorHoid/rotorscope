@@ -17,7 +17,8 @@
 //! | `GET /api/devices/{id}/audit` | the unit's audit chain | view |
 //! | `POST /api/devices/{id}/annotations` `{boot, seq, text}` | a note on a record | annotate |
 //! | `GET /api/devices/{id}/export` | the export bundle (header `X-Bundle-SHA256`) | export |
-//! | `POST /api/devices/{id}/timestamp` | outside time-stamp of the newest checkpoint | timestamp |
+//! | `POST /api/devices/{id}/timestamp` | ask for an outside time-stamp of the access log now (stamping must be on) | timestamp (when it arrives) |
+//! | `GET /api/stamping` | outside time-stamping: on or off, services, warnings | - |
 //!
 //! Who: the `X-Actor` header names the person (bench: not authenticated).
 //! With `--token`, every call except uploads needs
@@ -37,6 +38,7 @@
 
 pub mod lines;
 pub mod plan;
+pub mod stamp;
 pub mod store;
 pub mod tsa;
 
@@ -65,7 +67,8 @@ pub struct App {
     pub open_registration: bool,
     /// Name written into bundles (e.g. the server's URL).
     pub server_name: String,
-    pub tsa_url: Option<String>,
+    /// Outside time-stamping (`None`: not configured; see [`stamp`]).
+    pub stamping: Option<stamp::Stamping>,
 }
 
 impl App {
@@ -87,7 +90,10 @@ pub const MAX_NAME_CHARS: usize = 100;
 pub const MAX_NOTE_CHARS: usize = 4000;
 
 impl App {
-    pub fn new(store: Store, token: Option<String>, open_registration: bool, server_name: String, tsa_url: Option<String>) -> Self {
+    pub fn new(store: Store, token: Option<String>, open_registration: bool, server_name: String, stamping: Option<stamp::Stamping>) -> Self {
+        if let Some(st) = &stamping {
+            st.restore(&store);
+        }
         let keys = store.devices.iter().map(|(id, d)| (id.clone(), d.key)).collect();
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
         App {
@@ -97,7 +103,7 @@ impl App {
             token,
             open_registration,
             server_name,
-            tsa_url,
+            stamping,
         }
     }
 
@@ -121,6 +127,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/devices/{id}/annotations", post(annotate))
         .route("/api/devices/{id}/export", get(export))
         .route("/api/devices/{id}/timestamp", post(timestamp))
+        .route("/api/stamping", get(stamping))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .with_state(app)
 }
@@ -205,7 +212,10 @@ async fn list_devices(State(app): State<Shared>, h: HeaderMap) -> Response {
     let v: Vec<_> = s
         .devices
         .values()
-        .map(|d| serde_json::json!({ "key_id": d.info.key_id, "name": d.info.name, "registered_utc_ms": d.info.registered_utc_ms, "batches": d.batches.len(), "ranges": d.ranges(), "detections": d.points.len(), "problems": d.load_problems, "test_key": d.key == evidence::sign::public_test_key() }))
+        .map(|d| {
+            let stamps = app.stamping.as_ref().map(|st| st.status(d, store::now_ms()));
+            serde_json::json!({ "key_id": d.info.key_id, "name": d.info.name, "registered_utc_ms": d.info.registered_utc_ms, "batches": d.batches.len(), "ranges": d.ranges(), "detections": d.points.len(), "problems": d.load_problems, "test_key": d.key == evidence::sign::public_test_key(), "stamping": stamps })
+        })
         .collect();
     Json(v).into_response()
 }
@@ -274,9 +284,16 @@ async fn upload(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: H
             Err(e) => return err(StoreError::Io(e.to_string())),
         }
     };
-    let mut s = app.lock();
-    match s.device_mut(&id).and_then(|d| d.commit(&checked, &body, &who)) {
-        Ok(res) => (StatusCode::CREATED, Json(res)).into_response(),
+    let committed = app.lock().device_mut(&id).and_then(|d| d.commit(&checked, &body, &who));
+    match committed {
+        Ok(res) => {
+            // The store is released: stamping only marks the unit here; the
+            // worker asks the services later.
+            if let Some(st) = &app.stamping {
+                st.on_upload(&id, store::now_ms());
+            }
+            (StatusCode::CREATED, Json(res)).into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -353,7 +370,7 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: H
     // What to send is fixed under the store; reading the batch files and
     // building the bundle is not (stored batches never change).
     let plan = match app.lock().device(&id) {
-        Ok(d) => d.bundle_plan(&app.server_name),
+        Ok(d) => d.bundle_plan(&app.server_name).stamping(app.stamping.as_ref().map(|st| st.report(d))),
         Err(e) => return err(e),
     };
     let built = tokio::task::spawn_blocking(move || {
@@ -388,50 +405,35 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: H
     r
 }
 
-async fn timestamp(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: HeaderMap) -> Response {
+/// Stamp the access log at the next round of the worker (stamping on).
+async fn timestamp(State(app): State<Shared>, Path(id): Path<String>, h: HeaderMap) -> Response {
     if let Err(r) = authorized(&app, &h) {
         return r;
     }
-    let who = actor(&h, c.0);
-    let Some(url) = app.tsa_url.clone() else {
-        return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({ "error": "no time-stamp authority configured (start with --tsa URL); see docs/EVIDENCE.md" }))).into_response();
+    let Some(st) = app.stamping.as_ref().filter(|s| s.config.enabled) else {
+        return (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({ "error": "outside time-stamping is off (the server's operator turns it on with --stamp); see docs/EVIDENCE.md" }))).into_response();
     };
-    let head = {
-        let s = app.lock();
-        match s.device(&id) {
-            Ok(d) => d.latest_checkpoint(),
-            Err(e) => return err(e),
-        }
-    };
-    let Some((boot, seq, hash)) = head else {
-        return err(StoreError::Rejected("no checkpoint stored yet".into()));
-    };
-    let imprint = evidence::verify::bundle::head_imprint(&boot, seq, &hash);
-    let u = url.clone();
-    let token = match tokio::task::spawn_blocking(move || tsa::request(&u, &imprint)).await {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": format!("time-stamp authority: {e}") }))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
-    };
-    let t = evidence::verify::bundle::Timestamp {
-        kind: "rfc3161".into(),
-        authority: url,
-        imprint: evidence::verify::hex(&imprint),
-        boot: evidence::verify::hex(&boot),
-        seq,
-        head: evidence::verify::hex(&hash),
-        token: evidence::b64::encode_vec(&token),
-    };
-    let mut s = app.lock();
-    let d = match s.device_mut(&id) {
-        Ok(d) => d,
-        Err(e) => return err(e),
-    };
-    if let Err(e) = d.add_timestamp(t.clone()) {
-        return err(e.into());
-    }
-    if let Err(e) = d.audit(&who, "timestamp", serde_json::json!({ "authority": t.authority, "seq": seq, "boot": t.boot, "imprint": t.imprint, "token_sha256": evidence::verify::hex(&evidence::sha256(&token)) })) {
+    if let Err(e) = app.lock().device(&id) {
         return err(e);
     }
-    (StatusCode::CREATED, Json(t)).into_response()
+    st.stamp_soon(&id, store::now_ms());
+    (StatusCode::ACCEPTED, Json(serde_json::json!({ "queued": true, "services": st.authorities() }))).into_response()
+}
+
+/// The stamping set-up, for the page.
+async fn stamping(State(app): State<Shared>, h: HeaderMap) -> Response {
+    if let Err(r) = authorized(&app, &h) {
+        return r;
+    }
+    let cfg = app.stamping.as_ref().map(|s| s.config.clone()).unwrap_or_default();
+    Json(serde_json::json!({
+        "enabled": cfg.enabled,
+        "services": cfg.authorities.iter().map(|a| a.url.clone()).collect::<Vec<_>>(),
+        "independent": cfg.independent(),
+        "warnings": cfg.warnings(),
+        "what_it_shows": stamp::WHAT_IT_SHOWS,
+        "every_min": cfg.every_ms / 60_000,
+        "alarm_h": cfg.alarm_ms / 3_600_000,
+    }))
+    .into_response()
 }

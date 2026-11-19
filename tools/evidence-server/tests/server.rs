@@ -532,4 +532,10 @@ fn page_escapes_server_text() {
     for raw in ["${d.key_id}", "${p.time_source}", "p.hub_position +", "+ p.hub_position"] {
         assert!(!page.contains(raw), "{raw} is not escaped");
     }
+    // Time-stamp lines: every server value escaped (the authority URL and a
+    // failure reason come from configuration and from a third party).
+    for raw in ["${s.authority}", "s.authority +", "${s.last_failure.reason}", "${n.audit_n}", "${s.outstanding.audit_n}"] {
+        assert!(!page.contains(raw), "{raw} is not escaped");
+    }
+    assert!(page.contains("esc(s.authority)") && page.contains("esc(s.last_failure.reason)"));
 }
