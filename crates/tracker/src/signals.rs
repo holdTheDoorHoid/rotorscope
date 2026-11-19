@@ -361,7 +361,13 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// Feed one raw-capture sighting from `node`.
     pub fn ingest_rf(&mut self, node: u8, s: &RfSighting, now_ms: u64) -> EmitterId {
         self.expire(now_ms);
-        self.emitters.ingest(node, s, now_ms, &self.config)
+        let id = self.emitters.ingest(node, s, now_ms, &self.config);
+        // Rule 12 follows the drone's own video (slice 16c).
+        if crate::behaviour::trend::rising_kind(s.kind) {
+            let src = crate::behaviour::SignalSrc::Emitter { id, kind: s.kind, freq: s.freq };
+            let _ = self.trends.note(src, node, s.snr_db, now_ms);
+        }
+        id
     }
 
     /// RF emitters, in table order.
@@ -381,7 +387,10 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         now_ms: u64,
     ) -> WifiDroneId {
         self.expire(now_ms);
-        self.wifi_drones.ingest(node, s, now_ms, &self.config)
+        let id = self.wifi_drones.ingest(node, s, now_ms, &self.config);
+        let src = crate::behaviour::SignalSrc::Wifi { id, maker: s.maker, channel: s.channel };
+        let _ = self.trends.note(src, node, s.rssi, now_ms);
+        id
     }
 
     /// Wi-Fi drones, in table order.

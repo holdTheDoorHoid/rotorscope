@@ -903,6 +903,7 @@ fn state_full_adds_the_new_tables_and_state_is_unchanged() {
     let signals = json::Signals {
         emitters: tr.emitters(),
         wifi_drones: tr.wifi_drones(),
+        threats: &[],
     };
     let mut buf = std::vec![0u8; json::state_full_max_len(1, 0, 0, 0, 2, 1)];
     let n = json::state_full(tr.tracks(), &[], &[], &signals, &ctx, &hub, &mut buf).unwrap();

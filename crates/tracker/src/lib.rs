@@ -1019,6 +1019,9 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     /// [`behaviour::across`]): spotters, drones that left an area, the
     /// repeat-visitor history. About 10 KB with path rings, nothing without.
     across: behaviour::Across<P>,
+    /// Signals without a position and their levels (slice 16c,
+    /// [`behaviour::trend`]): one slot per path ring, about 370 bytes each.
+    trends: behaviour::Trends<P>,
     /// Where each drone has been ([`behaviour::path`]): about 4.4 KB a
     /// track, the largest part of the tracker. Kept last.
     paths: behaviour::PathStore<P>,
@@ -1060,6 +1063,7 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             places: behaviour::Places::new(),
             own_trail: behaviour::OwnTrail::new(),
             across: behaviour::Across::new(),
+            trends: behaviour::Trends::new(),
             paths: behaviour::PathStore::new(),
             config,
         }
@@ -1655,7 +1659,13 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         sighting: &link::OpenLinkSighting,
         now_ms: u64,
     ) -> LinkTrackId {
-        self.links.ingest(node, sighting, now_ms, &self.config)
+        let id = self.links.ingest(node, sighting, now_ms, &self.config);
+        // Rule 12 follows what the aircraft sends (slice 16c).
+        if sighting.link.direction != openlink::Direction::GroundToAir {
+            let src = behaviour::SignalSrc::OpenLink { id, system: sighting.link.system, channel: sighting.channel };
+            let _ = self.trends.note(src, node, sighting.rssi, now_ms);
+        }
+        id
     }
 
     /// Open links, in table order (the order `json::state` lists them).
@@ -1820,6 +1830,17 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             let has_position = t.location.as_ref().is_some_and(|l| l.value.position.is_some());
             t.threat.update(e, has_position, now_ms);
         }
+        // Signals and sounds without a position (slice 16c), after the
+        // drones (a striker without a position needs this second's
+        // spotters).
+        let world = behaviour::trend::World {
+            places: &self.places,
+            own: own.as_ref(),
+            nodes: &self.spoof_cfg.nodes,
+            last_radio_ms: self.last_radio_drone_ms(own.as_ref()),
+            tracks: &self.tracks,
+        };
+        self.trends.judge(&world, &mut self.across, now_ms);
     }
 
     /// Rule 15's alarms, read from the threat table (never changed here):
@@ -1885,10 +1906,9 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// Drones at Warning or above whose alerts are not snoozed (what the
     /// screen's Snooze would act on).
     pub fn snoozable_levels(&self, now_ms: u64) -> usize {
-        self.tracks
-            .iter()
-            .filter(|t| t.threat.level >= Some(behaviour::Level::Warning) && !t.threat.snoozed(now_ms))
-            .count()
+        let warn = |t: &behaviour::TrackThreat| t.level >= Some(behaviour::Level::Warning) && !t.snoozed(now_ms);
+        self.tracks.iter().filter(|t| warn(&t.threat)).count()
+            + self.signal_threats().iter().filter(|s| warn(&s.threat)).count()
     }
 
     /// Snooze one drone's level alerts for [`behaviour::SNOOZE_MS`] (RAM

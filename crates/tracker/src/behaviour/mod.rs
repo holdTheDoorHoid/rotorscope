@@ -50,6 +50,16 @@
 //! 18. **Pilot on the move** (Caution): the pilot moving over 5 m/s.
 //! 19. **Identity changes** (Warning): a new ID mid-flight near a place.
 //!
+//! Slice 16c adds the rules without a position ([`trend`]), for signals
+//! that are not drone tracks (FPV video, control-link downlinks, drone
+//! Wi-Fi, open FPV links) and rotor sound; each gets its own level
+//! ([`trend::SignalThreat`]), moved by the same policy:
+//! 12. **Getting louder fast** (Caution; Warning on two nodes at once or
+//!     with the microphone agreeing): a steady rise of 6 dB in 5-12 s.
+//! 13. **Dark drone** (Warning): rotor sound with no drone heard by radio.
+//!
+//! A rising signal at a place a spotter lingered at is a striker (14).
+//!
 //! Two or more *different* Caution rules at once make a Warning (one sign
 //! rarely proves anything; two together are worth more), with two
 //! exceptions: loitering is the same sign as being in the area (it is
@@ -83,6 +93,7 @@ pub mod linger;
 pub mod path;
 pub mod places;
 pub mod scenario;
+pub mod trend;
 pub mod visits;
 pub mod watch;
 
@@ -93,6 +104,7 @@ use libm::{acosf, sqrtf};
 
 pub use across::{Across, Cross};
 pub use path::{OwnTrail, PathPoint, PathRing, PathStore};
+pub use trend::{RotorSound, SignalKind, SignalRise, SignalSrc, SignalThreat, SignalThreatId, Trends};
 pub use visits::Visits;
 pub use places::{Area, Frame, Friend, Local, Name, Places, Shape, Vertex};
 
@@ -204,6 +216,11 @@ pub enum Rule {
     LowHover = 9,
     Drop = 10,
     Following = 11,
+    /// Slice 16c ([`trend`]): a signal without a position getting louder
+    /// fast, or rotor sound getting louder (on a signal, not a track).
+    GettingLouder = 12,
+    /// Slice 16c: rotor sound with no drone heard by radio (on a sound).
+    DarkDrone = 13,
     /// Slice 16d ([`across`]): a different drone heads for a place soon
     /// after a spotter lingered there (on the striker).
     SpotterStriker = 14,
@@ -233,6 +250,8 @@ impl Rule {
             Rule::LowHover => "low_hover",
             Rule::Drop => "drop",
             Rule::Following => "following",
+            Rule::GettingLouder => "getting_louder",
+            Rule::DarkDrone => "dark_drone",
             Rule::SpotterStriker => "spotter_striker",
             Rule::Several => "several_at_once",
             Rule::Probing => "probing",
@@ -250,6 +269,8 @@ impl Rule {
         match self {
             Rule::InArea | Rule::PilotNear | Rule::PilotOutside | Rule::AboveCeiling => Level::Caution,
             Rule::Loitering | Rule::Circling | Rule::Probing | Rule::PilotMoving => Level::Caution,
+            Rule::GettingLouder => Level::Caution,
+            Rule::DarkDrone => Level::Warning,
             Rule::LowHover | Rule::Drop | Rule::Following => Level::Warning,
             Rule::Beeline | Rule::Several | Rule::IdentityChanged | Rule::Spotter => Level::Warning,
             Rule::FastInbound | Rule::SpotterStriker => Level::Critical,
@@ -261,7 +282,8 @@ impl Rule {
     /// Rules about places and lingering (1-4, 7-11; from 16d also several
     /// at once, probing and pilot on the move): a friend gets only Notice
     /// from them. The approach rules (5, 6, 14 on the striker) and identity
-    /// changes (19) are never lowered.
+    /// changes (19) are never lowered. Rules 12 and 13 are about signals no
+    /// `friend` line can name, so they are never lowered either.
     pub const fn is_place_rule(self) -> bool {
         matches!(
             self,
@@ -351,7 +373,9 @@ impl Reason {
             rule,
             level,
             place: p,
-            range_m: libm::roundf(range_m).clamp(0.0, 65_535.0) as u16,
+            // 65535 is "no distance" (rules 12 and 13, a striker without a
+            // position).
+            range_m: libm::roundf(range_m).clamp(0.0, f32::from(NONE_U16 - 1)) as u16,
             eta_ds: NONE_U16,
             speed_dms: NONE_U16,
             height_m: i16::MIN,
@@ -492,6 +516,11 @@ impl TrackThreat {
         if matches!(rule, Rule::Several | Rule::RepeatVisitor) {
             // The alarm's name, the pilot spot: wider than the numbers.
             r.eta_ds = 1;
+        }
+        if matches!(rule, Rule::SpotterStriker | Rule::Spotter | Rule::IdentityChanged) {
+            // The widest other drone: a track id has ten digits at most
+            // (from 2^31 the ids are signals', slice 16c, written as `sig`).
+            r = r.with_other(TrackId(u32::MAX >> 1));
         }
         r
     }
@@ -1107,6 +1136,10 @@ fn at_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
 /// The other drone of a rule-14 or rule-19 reason: its ID when the caller
 /// knows it (`name`), else `drone #12` (its track number).
 fn other_text(w: &mut impl Write, r: &Reason, name: Option<&str>) -> core::fmt::Result {
+    if let Some(s) = r.other_signal() {
+        // A striker without a position (slice 16c).
+        return write!(w, "a signal getting louder (S{})", s.0);
+    }
     match (name.filter(|n| !n.is_empty()), r.other()) {
         (Some(n), _) => write!(w, "drone {n}"),
         (None, Some(id)) => write!(w, "drone #{}", id.0),
@@ -1222,9 +1255,10 @@ pub fn write_reason_named(w: &mut impl Write, r: &Reason, other: Option<&str>) -
         Rule::Spotter => {
             w.write_str("spotter: ")?;
             other_text(w, r, other)?;
-            w.write_str(" is rushing to ")?;
+            w.write_str(if r.other_signal().is_some() { " is closing on " } else { " is rushing to " })?;
             place_text(w, r)
         }
+        Rule::GettingLouder | Rule::DarkDrone => trend::write_trend(w, r),
         Rule::Several => match r.alarm() {
             Some(a) => {
                 at_text(w, r)?;
@@ -1364,7 +1398,12 @@ pub fn strip_text(t: &Track) -> Option<String<64>> {
             Rule::Drop => write!(s, "drop at {place} {}m", r.range_m),
             Rule::Following => write!(s, "following you {}m", r.range_m),
             Rule::SpotterStriker => write!(s, "after spotter to {place}"),
-            Rule::Spotter => write!(s, "spotter for #{}", r.other().map_or(0, |o| o.0)),
+            Rule::Spotter => match r.other_signal() {
+                Some(sig) => write!(s, "spotter for signal S{}", sig.0),
+                None => write!(s, "spotter for #{}", r.other().map_or(0, |o| o.0)),
+            },
+            // Signals have a strip of their own (`trend::strip_text_signal`).
+            Rule::GettingLouder | Rule::DarkDrone => write!(s, "{}", r.rule.name()),
             Rule::Several => match r.alarm() {
                 Some(a) => write!(s, "at {place} {}", if a == across::ALARM_GNSS { "GPS jam" } else { "jamming" }),
                 None => write!(s, "{} at once {place}", r.count().unwrap_or(0)),
@@ -1384,3 +1423,5 @@ mod tests;
 mod tests_across;
 #[cfg(test)]
 mod tests_linger;
+#[cfg(test)]
+mod tests_trend;

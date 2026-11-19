@@ -995,6 +995,7 @@ fn run(o: Options) -> Result<(), String> {
             let signals = json::Signals {
                 emitters: tr.emitters(),
                 wifi_drones: tr.wifi_drones(),
+                threats: tr.signal_threats(),
             };
             if let Ok(n) = json::state_full(
                 tr.tracks(),

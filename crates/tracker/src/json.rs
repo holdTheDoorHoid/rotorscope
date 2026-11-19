@@ -105,14 +105,21 @@ impl Serialize for ReasonsJ<'_> {
             );
             let lasting = matches!(
                 r.rule,
-                Rule::Loitering | Rule::Circling | Rule::LowHover | Rule::Following | Rule::Probing | Rule::PilotMoving
+                Rule::Loitering
+                    | Rule::Circling
+                    | Rule::LowHover
+                    | Rule::Following
+                    | Rule::Probing
+                    | Rule::PilotMoving
+                    | Rule::GettingLouder
+                    | Rule::DarkDrone
             );
             let since = matches!(r.rule, Rule::LastSeenInbound | Rule::Drop | Rule::SpotterStriker | Rule::IdentityChanged);
             seq.serialize_element(&ReasonJ {
                 rule: r.rule.name(),
                 level: r.level.name(),
-                place: r.place(),
-                m: r.range_m(),
+                place: (!r.no_place()).then(|| r.place()),
+                m: r.has_range().then(|| r.range_m()),
                 eta_s: r.eta_s().filter(|_| approach),
                 mps: r.speed_mps().filter(|_| approach || r.rule == Rule::PilotMoving),
                 h_m: r.height_m().filter(|_| high),
@@ -123,6 +130,11 @@ impl Serialize for ReasonsJ<'_> {
                 alarm: r.alarm().map(|a| if a == crate::behaviour::across::ALARM_GNSS { "gps" } else { "jamming" }),
                 days: r.count().filter(|_| r.rule == Rule::RepeatVisitor),
                 by: (r.rule == Rule::RepeatVisitor).then_some(if r.by_pilot_spot() { "pilot_spot" } else { "drone" }),
+                sig: r.other_signal().map(|s| s.0),
+                kind: r.signal_kind().map(|k| k.name()),
+                db: r.db(),
+                nodes: r.nodes(),
+                agreed: r.agreed().then_some(true),
             })?;
         }
         seq.end()
@@ -144,13 +156,28 @@ impl Serialize for ReasonsJ<'_> {
 /// long), identity_changed (`ago_s` since the change, `other` the earlier
 /// track when it was a new track). For these `m` is the distance from the
 /// place's middle (the striker's own distance for spotter_striker).
+///
+/// Slice 16c added the rules without a position, on `signal_threat` lines
+/// ([`signal_threat_line`]), never on a track: getting_louder (`kind`
+/// `"video"`, `"control"`, `"wifi"`, `"open_link"` or `"sound"`, `db` how
+/// much louder, `for_s` over how long, `nodes` on how many nodes at once for
+/// a radio signal, `agreed` true when the other sense agrees: the
+/// microphone for a radio signal, a radio signal for a sound) and
+/// dark_drone (`kind` `"sound"`, `for_s` how long it has been heard). These
+/// have no `m` (no distance), nor has a spotter_striker on a signal; their
+/// `place` is the place the signal is judged to close on (`""` the bubble
+/// or the unit), `null` when none fitted. A spotter whose striker was a
+/// signal carries `sig` (that signal's `signal_threat` id) in place of
+/// `other`.
 #[derive(Serialize)]
 struct ReasonJ<'a> {
     rule: &'static str,
     level: &'static str,
-    /// The area's name; empty for the bubble round the unit.
-    place: &'a str,
-    m: f32,
+    /// The area's name; empty for the bubble round the unit; null (slice
+    /// 16c) for a signal no place fitted.
+    place: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    m: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     eta_s: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,6 +198,16 @@ struct ReasonJ<'a> {
     days: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     by: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sig: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    db: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nodes: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agreed: Option<bool>,
 }
 
 fn threat_json(t: &Track, now: u64) -> Option<ThreatJ<'_>> {
@@ -944,6 +981,64 @@ pub fn wifi_drone_line(w: &WifiDrone, ctx: &Context, buf: &mut [u8]) -> Result<u
     finish(&line, buf)
 }
 
+#[derive(Serialize)]
+struct SignalThreatLine<'a> {
+    t: &'static str,
+    id: crate::behaviour::SignalThreatId,
+    /// What kind of judgement this is: `"signal_trend"` (a radio signal's
+    /// strength over time) or `"sound"` (the microphone). Never a position.
+    basis: &'static str,
+    /// The table the signal is in (`"rf"`, `"wifidrone"`, `"link"`,
+    /// `"control"`, `"sound"`) and its id there.
+    src: &'static str,
+    src_id: u32,
+    kind: &'static str,
+    /// In a few words, from the firmware's own tables: `"Analog video
+    /// 5740.0 MHz"`, `"ExpressLRS 915 link"`, `"rotor sound"`.
+    what: heapless::String<48>,
+    /// Nodes it was last heard getting louder on.
+    nodes: heapless::Vec<u8, { crate::behaviour::trend::NODE_ROWS }>,
+    threat: Option<ThreatJ<'a>>,
+    first_ms: u64,
+    last_ms: u64,
+    age_ms: u64,
+}
+
+/// A buffer this size always holds one `signal_threat` line (see the test).
+pub const MAX_SIGNAL_THREAT_LINE: usize = 1024;
+const _: () = assert!(MAX_SIGNAL_THREAT_LINE <= MAX_LINE);
+
+/// Write one signal without a position and its threat level (slice 16c,
+/// rules 12 and 13, `crate::behaviour::trend`) as a JSON object followed by
+/// `\n` (`"t":"signal_threat"`). The reasons are as on a track's `threat`
+/// (see `ReasonJ`); `threat` is null while it has no level.
+pub fn signal_threat_line(s: &crate::behaviour::SignalThreat, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let th = &s.threat;
+    let kind = s.src.kind();
+    let line = SignalThreatLine {
+        t: "signal_threat",
+        id: s.id,
+        basis: if kind == crate::behaviour::SignalKind::Sound { "sound" } else { "signal_trend" },
+        src: s.src.table(),
+        src_id: s.src.table_id(),
+        kind: kind.name(),
+        what: crate::text::render(&s.src),
+        nodes: s.rising_nodes().collect(),
+        threat: th.level.map(|l| ThreatJ {
+            level: l.name(),
+            snoozed_s: th.snooze_left_s(ctx.now_ms),
+            held: th.held,
+            friend: false,
+            combined: th.combined,
+            reasons: ReasonsJ(&th.reasons),
+        }),
+        first_ms: s.first_ms,
+        last_ms: s.last_ms,
+        age_ms: ctx.now_ms.saturating_sub(s.last_ms),
+    };
+    finish(&line, buf)
+}
+
 fn finish<T: Serialize>(line: &T, buf: &mut [u8]) -> Result<usize, FormatError> {
     let n = serde_json_core::to_slice(line, buf).map_err(|_| FormatError::BufferTooSmall)?;
     let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;
@@ -1121,9 +1216,13 @@ pub const STATE_END: &[u8] = b"]}\n";
 pub const STATE_AIRCRAFT_TO_RF: &[u8] = b"],\"rf\":[";
 /// [`state_full`] only: between the RF emitters and the Wi-Fi drones.
 pub const STATE_RF_TO_WIFI: &[u8] = b"],\"wifi_drones\":[";
+/// [`state_full`] only: between the Wi-Fi drones and the signals' threat
+/// levels (slice 16c).
+pub const STATE_WIFI_TO_SIGNAL_THREATS: &[u8] = b"],\"signal_threats\":[";
 
 /// As [`state_max_len`], plus room for `rf` emitters and `wifi` Wi-Fi drones
-/// in [`state_full`].
+/// in [`state_full`], and for an empty `signal_threats` (add
+/// [`MAX_SIGNAL_THREAT_LINE`] + 1 for each signal threat to write).
 pub const fn state_full_max_len(
     tracks: usize,
     links: usize,
@@ -1137,6 +1236,7 @@ pub const fn state_full_max_len(
         + STATE_RF_TO_WIFI.len()
         + rf * (MAX_RF_LINE + 1)
         + wifi * (MAX_WIFI_DRONE_LINE + 1)
+        + STATE_WIFI_TO_SIGNAL_THREATS.len()
 }
 
 /// The protocol-4 tables [`state_full`] adds after the aircraft.
@@ -1144,10 +1244,15 @@ pub const fn state_full_max_len(
 pub struct Signals<'a> {
     pub emitters: &'a [Emitter],
     pub wifi_drones: &'a [WifiDrone],
+    /// Signals without a position with a threat level (slice 16c,
+    /// `Tracker::signal_threats`; only those with a level are written).
+    pub threats: &'a [crate::behaviour::SignalThreat],
 }
 
-/// [`state`], then `"rf":[...]` (each as [`rf_line`]) and
-/// `"wifi_drones":[...]` (each as [`wifi_drone_line`]) after the aircraft.
+/// [`state`], then `"rf":[...]` (each as [`rf_line`]),
+/// `"wifi_drones":[...]` (each as [`wifi_drone_line`]) and, since slice
+/// 16c, `"signal_threats":[...]` (each signal with a level, as
+/// [`signal_threat_line`]) after the aircraft.
 /// `state` itself is unchanged, so a hub that streams it piece by piece
 /// keeps working; a reader treats missing `rf` / `wifi_drones` as empty.
 pub fn state_full(
@@ -1175,6 +1280,14 @@ pub fn state_full(
         }
         let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
         n += wifi_drone_line(w, ctx, rest)? - 1;
+    }
+    put(buf, &mut n, STATE_WIFI_TO_SIGNAL_THREATS)?;
+    for (i, t) in signals.threats.iter().filter(|t| t.threat.level.is_some()).enumerate() {
+        if i > 0 {
+            put(buf, &mut n, b",")?;
+        }
+        let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
+        n += signal_threat_line(t, ctx, rest)? - 1;
     }
     put(buf, &mut n, STATE_END)?;
     Ok(n)

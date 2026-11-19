@@ -42,11 +42,11 @@
 //! lowered (as rules 5 and 6), nor are identity changes: switching to a
 //! friend's serial mid-flight is exactly how a faked friend would look.
 //!
-//! **Hook for 16c** (not built): a striker need not report its position.
-//! An FPV signal getting louder fast (rule 12) can call
-//! [`Across::striker`] with the place it is judged to close on (the bubble,
-//! or the only area, for a signal heard at the hub) and its own key; it then
-//! gets the same answer a positional striker gets.
+//! **Strikers without a position** (slice 16c, [`super::trend`]): a signal
+//! getting louder fast (rule 12) calls [`Across::striker_if`] with the
+//! place it is judged to close on and its own key; it gets the same answer
+//! a positional striker gets, and the spotter is marked the same way (its
+//! reason then names the signal, [`Reason::other_signal`]).
 //!
 //! **Memory.** Per drone path ring one spotter slot and one exit slot (48
 //! and 24 bytes), plus the visit table; nothing on hubs without path
@@ -249,6 +249,21 @@ impl<const P: usize> Across<P> {
     /// is marked. This is also the hook for drones without a position
     /// (slice 16c, see the module notes).
     pub fn striker(&mut self, track: TrackId, key: u64, previous: Option<TrackId>, place: &str, now_ms: u64) -> Option<(TrackId, u64)> {
+        self.striker_if(track, key, previous, place, now_ms, |_| true)
+    }
+
+    /// As [`Self::striker`], with only the spotters `ok` accepts (slice 16c:
+    /// a signal without a position skips a spotter that is itself heading
+    /// in, whose own signal it may be).
+    pub fn striker_if(
+        &mut self,
+        track: TrackId,
+        key: u64,
+        previous: Option<TrackId>,
+        place: &str,
+        now_ms: u64,
+        ok: impl Fn(TrackId) -> bool,
+    ) -> Option<(TrackId, u64)> {
         let place = place_bytes(place);
         let s = self
             .spotters
@@ -260,6 +275,7 @@ impl<const P: usize> Across<P> {
                     && previous != Some(TrackId(s.track))
                     && s.place == place
                     && now_ms.saturating_sub(s.last_ms) <= STRIKE_WINDOW_MS
+                    && ok(TrackId(s.track))
             })
             .max_by_key(|s| s.last_ms)?;
         s.struck_ms = now_ms;
@@ -328,7 +344,7 @@ impl<const P: usize> Across<P> {
 impl Reason {
     /// Another drone's track kept in place of the numbers these rules do
     /// not use (`eta_ds`, `speed_dms`).
-    fn with_other(mut self, id: TrackId) -> Self {
+    pub(super) fn with_other(mut self, id: TrackId) -> Self {
         self.eta_ds = id.0 as u16;
         self.speed_dms = (id.0 >> 16) as u16;
         self
@@ -338,11 +354,25 @@ impl Reason {
     /// a striker, the striker on a spotter, the earlier track of a drone
     /// that changed identity.
     pub fn other(&self) -> Option<TrackId> {
+        self.other_raw().filter(|id| id & super::trend::SIGNAL_TRACK_BIT == 0).map(TrackId)
+    }
+
+    /// The spotter's mark when its striker was a signal without a position
+    /// (slice 16c): that signal's entry.
+    pub fn other_signal(&self) -> Option<super::trend::SignalThreatId> {
+        if self.rule != Rule::Spotter {
+            return None;
+        }
+        let bit = super::trend::SIGNAL_TRACK_BIT;
+        self.other_raw().filter(|id| id & bit != 0).map(|id| super::trend::SignalThreatId(id & !bit))
+    }
+
+    fn other_raw(&self) -> Option<u32> {
         if !matches!(self.rule, Rule::SpotterStriker | Rule::Spotter | Rule::IdentityChanged) {
             return None;
         }
         let id = u32::from(self.eta_ds) | u32::from(self.speed_dms) << 16;
-        (id != 0 && id != u32::MAX).then_some(TrackId(id))
+        (id != 0 && id != u32::MAX).then_some(id)
     }
 
     fn with_code(mut self, code: u8) -> Self {

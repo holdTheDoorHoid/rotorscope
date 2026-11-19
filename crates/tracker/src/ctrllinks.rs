@@ -443,6 +443,8 @@ impl ControlTable {
                 ctrlwatch::Direction::Unknown => {}
             }
             l.last_seen_ms = now_ms;
+            // Rule 12 (the drone's downlink) and rule 13 (radio heard).
+            tracker.note_control_level(l.id, l.system, l.region, node, s.rssi_dbm, s.direction, l.best, now_ms);
         }
         if r.part == 0 {
             self.summaries = self.summaries.saturating_add(1);
