@@ -321,9 +321,12 @@ for c in "$cargo_home/config.toml" "$cargo_home/config"; do
 done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/rotorscope-release.XXXXXX")
+finished=0 made_out=0
 cleanup() {
   [[ -n ${REPRO_LINK:-} && -L $REPRO_LINK && $(readlink "$REPRO_LINK") == "$work/src" ]] && rm -f "$REPRO_LINK"
   rm -rf "$work"
+  # A failed run leaves no half-made release behind (only a folder this run made).
+  if (( ! finished && made_out )); then rm -rf "$out"; fi
 }
 trap cleanup EXIT
 stray=$(stray_cargo_dirs "$work/src")
@@ -354,6 +357,7 @@ else
 fi
 
 repro_link "$src"
+[[ -e $out ]] || made_out=1
 mkdir -p "$out/elf" "$out/parts"
 REPRO_LEAK_PATHS=("$work" "$src")
 built=()
@@ -435,6 +439,7 @@ done
 } >"$out/BUILD-INPUTS.txt"
 
 sums_write "$out"
+finished=1
 echo
 echo "release-build: done: $out"
 sed 's/^/  /' "$out/SHA256SUMS"
