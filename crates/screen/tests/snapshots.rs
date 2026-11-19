@@ -857,6 +857,7 @@ fn banded_render_matches_full_frame() {
         evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 7, dropped: 0 }),
         silenced: Silenced { muted: 1, mute_left_s: 3_600, snoozed: 0, snooze_left_s: 0, site: 2 },
         switches: Switches { control_ids: true, ..Switches::default() },
+        link: LinkCaveats::default(),
     };
     cases.push(("caveats", Ui::default(), st));
 

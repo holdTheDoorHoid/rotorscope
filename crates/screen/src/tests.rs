@@ -500,3 +500,49 @@ fn caveat_lines() {
     assert!(l[2].as_ref().unwrap().len() <= 52, "{:?}", l[2]);
     assert!(l[3].as_ref().unwrap().len() <= 52, "{:?}", l[3]);
 }
+
+/// The keyed link's line (docs/LINK-KEYS-DESIGN.md 4.4, 6.4): second in
+/// priority, after the evidence state; with every line present, silenced
+/// alarms and switches share the fourth.
+#[test]
+fn caveat_link_line() {
+    let mut c = Caveats { link: LinkCaveats { unprovisioned: 2, ..LinkCaveats::default() }, ..Caveats::default() };
+    assert_eq!(c.lines(), [Some("UNPROVISIONED NODE 2".try_into().unwrap()), None, None, None]);
+    c.link.old_gateway = true;
+    assert_eq!(c.lines()[0].as_deref(), Some("OLD FIRMWARE: gateway  UNPROVISIONED NODE 2"));
+    c.link.old_nodes = 3;
+    c.link.unprovisioned = 0;
+    assert_eq!(c.lines()[0].as_deref(), Some("OLD FIRMWARE: gateway, 3 nodes"));
+    c.link = LinkCaveats { old_nodes: 1, ..LinkCaveats::default() };
+    assert_eq!(c.lines()[0].as_deref(), Some("OLD FIRMWARE: 1 node"));
+    for (k, t) in [
+        (KitProblem::Missing, "NO KIT KEYS: link closed"),
+        (KitProblem::Damaged, "KIT RECORDS DAMAGED: link closed"),
+        (KitProblem::OtherKit, "ROSTER FROM OTHER KIT"),
+        (KitProblem::BootCounter, "NO BOOT COUNTER: link closed"),
+    ] {
+        c.link = LinkCaveats { kit: Some(k), ..LinkCaveats::default() };
+        assert_eq!(c.lines()[0].as_deref(), Some(t));
+    }
+    // Under the evidence line, above the build marks.
+    c.evidence = Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 1, dropped: 0 });
+    c.bench = true;
+    let l = c.lines();
+    assert_eq!(l[0].as_deref(), Some("NO EVIDENCE (no SD): 1 waiting"));
+    assert_eq!(l[1].as_deref(), Some("NO BOOT COUNTER: link closed"));
+    assert_eq!(l[2].as_deref(), Some("BENCH BUILD"));
+    assert!(l[3].is_none());
+    // All five: silenced and switches share the last line.
+    c.silenced = Silenced { muted: 1, mute_left_s: 60, ..Silenced::default() };
+    c.switches = Switches { control_ids: true, ..Switches::default() };
+    let l = c.lines();
+    assert_eq!(l[3].as_deref(), Some("MUTED 1 1m00  ON: control IDs"));
+    // Old gateway, a few old nodes and unprovisioned ones fit the panel's
+    // 52 columns; past that the renderer cuts the tail (the count of
+    // unprovisioned nodes), never the start.
+    c.link = LinkCaveats { kit: None, old_gateway: true, old_nodes: 9, unprovisioned: 9 };
+    let l = c.lines();
+    assert!(l[1].as_ref().unwrap().len() <= 52, "{:?}", l[1]);
+    c.link = LinkCaveats { kit: None, old_gateway: true, old_nodes: 16, unprovisioned: 16 };
+    assert!(c.lines()[1].as_ref().unwrap().starts_with("OLD FIRMWARE: gateway, 16 nodes  UNPROVISIONED NODE"));
+}
