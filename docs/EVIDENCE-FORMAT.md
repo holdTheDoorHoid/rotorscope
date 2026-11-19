@@ -7,6 +7,13 @@ document says what was intended and the code has a bug.
 
 Format version 1. All integers little-endian. "SHA-256" is FIPS 180-4.
 
+**Additions within version 1** (a reader that knows only the earlier
+layout reads every log, since fields were only appended to event data and
+codes added): WP-14a (2026-11-18) appended build identity to the boot
+event and the pack's SHA-256 to the pack event, episode fields to `threat`
+(17), and added `threat_ended` (26) and `continuity` (27), key class 3, the
+mixed boot id. Logs written before it verify unchanged.
+
 ## Where the files are
 
 On the hub's SD card (FAT32): `ROTORSCP/EVIDENCE/EVnnnnnn.EVL`, six decimal

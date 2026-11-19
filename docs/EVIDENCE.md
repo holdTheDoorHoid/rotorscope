@@ -156,6 +156,20 @@ the log (see "Who signed").
   Logs written by firmware built before 2026-11-18 have the other form on
   about half their checkpoints and now fail those checks; rebuild the hub
   firmware.
+- **Attacks that come and go** (WP-14a): every time an attack or jamming
+  alarm is raised it gets a record, and every time it ends a `threat_ended`
+  record with what it totalled (how long, how many frames, how strong), so
+  an alarm tripped briefly and then used for a real attack minutes later
+  shows as two episodes. An alarm that flaps (raised three times within a
+  minute) is held as one episode until it has been quiet for a minute, so
+  it cannot flood the log; the records say when that happens and how many
+  raises the episode held. A re-raised alarm counts as not yet seen on the
+  screen, so "Mute seen alarms" does not silence it.
+- **Which build and which airspace data** (WP-14a): the boot event names
+  the build date, the source commit and whether the source had changes
+  ("-dirty"); the verifier notes a changed or unknown source. The firmware
+  hash still names the exact image. The `pack` event carries the airspace
+  pack's SHA-256.
 - **No GPS**: records made without GPS time say "time source: none" and
   carry only time since power-on; records without a GPS position say so. The
   verifier counts and prints them. A typed-in position is marked "manual".
@@ -176,7 +190,9 @@ the log (see "Who signed").
 ## What is NOT protected yet (be plain about this in any report)
 
 1. **Development key.** The signing key was made on a laptop and built into
-   the firmware. Anyone with the firmware file, the laptop, or the unit
+   the firmware. (The hub signs only through one interface, so a hardware
+   key in a secure element can replace it without changing the log format;
+   that chip is not chosen yet.) Anyone with the firmware file, the laptop, or the unit
    (reading its flash) can sign records that look like this unit's. Every
    checkpoint says "DEVELOPMENT KEY, NOT EVIDENCE-GRADE", and the verifier
    shows the class the log claims. So today the signatures show the records
