@@ -686,6 +686,6 @@ fn level_and_reasons_reach_json_cot_and_the_strip() {
     assert!(x.contains("; Threat: Critical: FAST, heading for house, "), "{x}");
     assert!(x.contains("<color argb=\"-65536\"/>"), "{x}");
     let strip = strip_text(t).unwrap();
-    assert!(strip.starts_with("CRITICAL #1 FAST to house "), "{strip}");
+    assert!(strip.starts_with("CRITICAL OUT-1 FAST to house "), "{strip}");
     assert_eq!(sim.tr.top_threat(now).map(|t| t.id), Some(t.id));
 }

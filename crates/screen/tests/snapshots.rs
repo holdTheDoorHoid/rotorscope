@@ -806,6 +806,21 @@ fn caveats_strip() {
     press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
     ui.tick(NOW + 5_000);
     shot("caveats_alarms_health", &ui, &st);
+    // A drone's threat level (slice 16a) leads the strip, red from Warning;
+    // with every caveat on as well, the strip still holds four lines.
+    let mut st = five_drones(true);
+    st.threat_strip = Some(ThreatStrip { level: 4, text: s("CRITICAL 229400B4 FAST to house 640m 21s") });
+    shot("threat_strip_critical", &Ui::default(), &st);
+    st.threat_strip = Some(ThreatStrip { level: 2, text: s("CAUTION 229400B4 over yard, pilot outside") });
+    st.caveats = Caveats {
+        key: EvidenceKey::Test,
+        bench: true,
+        evidence: Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 3, dropped: 0 }),
+        silenced: Silenced { muted: 2, mute_left_s: 7_140, ..Silenced::default() },
+        switches: Switches { control_ids: true, ..Switches::default() },
+        ..Caveats::default()
+    };
+    shot("threat_strip_full", &Ui::default(), &st);
 }
 
 // ---------------------------------------------------------------------------

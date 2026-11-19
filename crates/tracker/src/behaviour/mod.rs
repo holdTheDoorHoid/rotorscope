@@ -927,13 +927,25 @@ pub fn describe(t: &Track, now_ms: u64) -> String<256> {
     s
 }
 
-/// The short form for the screen strip: `WARNING #12 heading for house
-/// 180m 14s`.
+/// The short form for the screen strip: `WARNING 229400B4 to house 180m
+/// 14s`. The drone is named by the last eight characters of its ID (the
+/// part that differs between drones; anything but printable ASCII shown as
+/// `?`, since it came over the air), or `#` and its track number.
 pub fn strip_text(t: &Track) -> Option<String<64>> {
     let th = &t.threat;
     let level = th.level?;
     let mut s: String<64> = String::new();
-    let _ = write!(s, "{} #{}", level.upper(), t.id.0);
+    let _ = write!(s, "{} ", level.upper());
+    match t.primary_id().map(|u| u.id.as_bytes()).filter(|b| !b.is_empty()) {
+        Some(id) => {
+            for &b in &id[id.len().saturating_sub(8)..] {
+                let _ = s.push(if (0x21..0x7f).contains(&b) { b as char } else { '?' });
+            }
+        }
+        None => {
+            let _ = write!(s, "#{}", t.id.0);
+        }
+    }
     if let Some(r) = th.reasons.first() {
         let _ = s.push(' ');
         let mut place: String<16> = String::new();

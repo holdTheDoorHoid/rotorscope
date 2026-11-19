@@ -222,14 +222,16 @@ const CAVEAT_H: i32 = 11;
 /// The caveats strip (`Caveats::lines`): inverse lines along the bottom
 /// edge, on every page, for as long as they hold.
 fn caveats<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
-    let lines = s.caveats.lines();
+    let lines = s.strip_lines();
     let n = lines.iter().flatten().count() as i32;
     let mut y = HEIGHT - n * CAVEAT_H;
     // Whole characters that fit (the lines are ASCII).
     let (cw, sp) = (F_SMALL.character_size.width as i32, F_SMALL.character_spacing as i32);
     let fits = ((WIDTH - 6 + sp) / (cw + sp)) as usize;
-    for l in lines.iter().flatten() {
-        fill(d, 0, y, WIDTH, CAVEAT_H, p.accent)?;
+    for (l, threat) in lines.iter().flatten() {
+        // A drone's threat level: red from Warning up.
+        let bg = if *threat && s.threat_strip.as_ref().is_some_and(|t| t.level >= 3) { p.rec } else { p.accent };
+        fill(d, 0, y, WIDTH, CAVEAT_H, bg)?;
         text(d, &l[..l.len().min(fits)], 3, y + 1, F_SMALL, p.accent_ink)?;
         y += CAVEAT_H;
     }

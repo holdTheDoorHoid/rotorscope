@@ -791,6 +791,56 @@ pub struct UiState {
     /// Build and evidence facts kept on screen (P4 hub); the default
     /// shows nothing.
     pub caveats: Caveats,
+    /// The most serious drone's threat level (tracker `behaviour`), at
+    /// Caution or above and not snoozed; drawn as the first line of the
+    /// bottom strip ([`UiState::strip_lines`]). `None`: nothing to show
+    /// (and on hubs that do not run the threat levels).
+    pub threat_strip: Option<ThreatStrip>,
+}
+
+/// The threat-level line of the bottom strip: `WARNING #12 to house 180m 14s`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThreatStrip {
+    /// 2 caution, 3 warning, 4 critical (tracker `behaviour::Level`).
+    pub level: u8,
+    pub text: String<64>,
+}
+
+/// Lines the bottom strip holds at most.
+pub const STRIP_LINES: usize = 4;
+
+impl UiState {
+    /// The bottom strip, top to bottom: the threat-level line first (when
+    /// there is one), then [`Caveats::lines`]. Never more than
+    /// [`STRIP_LINES`]: with all five, the last two caveat lines (alarms
+    /// silenced, collection switches) share one. The flag is true for the
+    /// threat line.
+    pub fn strip_lines(&self) -> [Option<(String<64>, bool)>; STRIP_LINES] {
+        let mut out: [Option<(String<64>, bool)>; STRIP_LINES] = Default::default();
+        let mut caveats: Vec<String<64>, 4> = self.caveats.lines().into_iter().flatten().collect();
+        let mut i = 0;
+        if let Some(t) = &self.threat_strip {
+            out[0] = Some((t.text.clone(), true));
+            i = 1;
+            if caveats.len() == STRIP_LINES
+                && let (Some(b), Some(a)) = (caveats.pop(), caveats.last_mut())
+            {
+                let _ = a.push_str("  ");
+                for c in b.chars() {
+                    if a.push(c).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        for c in caveats {
+            if let Some(slot) = out.get_mut(i) {
+                *slot = Some((c, false));
+                i += 1;
+            }
+        }
+        out
+    }
 }
 
 /// GPS interference in the area (tracker `area_gnss`), for the status bar

@@ -500,3 +500,27 @@ fn caveat_lines() {
     assert!(l[2].as_ref().unwrap().len() <= 52, "{:?}", l[2]);
     assert!(l[3].as_ref().unwrap().len() <= 52, "{:?}", l[3]);
 }
+
+#[test]
+fn the_threat_line_leads_the_strip_and_the_strip_keeps_four_lines() {
+    let mut st = UiState::default();
+    assert_eq!(st.strip_lines(), [None, None, None, None]);
+    let mut t: String<64> = String::new();
+    t.push_str("WARNING 229400B4 to house 180m 14s").unwrap();
+    st.threat_strip = Some(ThreatStrip { level: 3, text: t });
+    st.caveats = Caveats { key: EvidenceKey::Test, ..Caveats::default() };
+    let l = st.strip_lines();
+    assert_eq!(l[0].as_ref().map(|x| (x.0.as_str(), x.1)), Some(("WARNING 229400B4 to house 180m 14s", true)));
+    assert_eq!(l[1].as_ref().map(|x| (x.0.as_str(), x.1)), Some(("TEST KEY: log not evidence", false)));
+    assert!(l[2].is_none());
+    // All four caveats as well: the last two share a line.
+    st.caveats.evidence = Some(EvidenceStop { why: EvidenceStopWhy::NoCard, waiting: 1, dropped: 0 });
+    st.caveats.silenced = Silenced { muted: 1, mute_left_s: 60, ..Silenced::default() };
+    st.caveats.switches = Switches { control_ids: true, ..Switches::default() };
+    let l = st.strip_lines();
+    assert!(l.iter().all(|x| x.is_some()));
+    assert_eq!(l[3].as_ref().unwrap().0.as_str(), "MUTED 1 1m00  ON: control IDs");
+    // Without the threat line, the caveats are as before.
+    st.threat_strip = None;
+    assert_eq!(st.strip_lines()[3].as_ref().unwrap().0.as_str(), "ON: control IDs");
+}
