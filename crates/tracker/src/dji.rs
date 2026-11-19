@@ -368,7 +368,7 @@ impl Track {
     }
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// The track for a DJI serial: the most established one that has it
     /// (as a Remote ID or DJI ID), else a new one if it is admitted
     /// ([`crate::probation`]). One record never merges tracks.

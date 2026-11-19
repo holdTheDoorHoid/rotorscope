@@ -24,7 +24,22 @@
 //! control ids on          # read link identifiers (ELRS UID bytes, SiK NET ID...)
 //! control content on      # decode sticks, telemetry, positions; keep raw packets
 //! control content off
+//!
+//! # Places to protect and friendly drones (threat levels, crate::behaviour):
+//! area house circle 39.95210 -75.16380 150      # name, centre, radius in metres
+//! area yard poly 39.9520 -75.1640 39.9523 -75.1636 39.9519 -75.1633
+//! area house ceiling 90                         # metres above the unit (default 120)
+//! area house clear
+//! area here 200          # (console/screen only) a circle round the hub now
+//! bubble 300             # a circle that moves with the hub's own GPS
+//! bubble off
+//! friend 1581F5FKD229400B4WW1 our own Mini      # serial, then a label
+//! friend 1581F5FKD229400B4WW1 clear
 //! ```
+//!
+//! At most [`places::MAX_AREAS`] areas and [`places::MAX_FRIENDS`] friends:
+//! a line that would add one more is refused (an area is never dropped to
+//! make room). Area names are up to 12 letters, digits, `_` or `-`.
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
 //! last.
@@ -47,6 +62,7 @@ use core::fmt::Write;
 
 use link::ThreatKind;
 
+use crate::behaviour::places::{self, Friend, Name, Places, Shape, Vertex};
 use crate::threats::{Mute, NOT_HONOURED};
 
 /// Every kind, in `ThreatKind` order, for reading names back.
@@ -100,6 +116,22 @@ pub enum SiteLine {
     Home { lat: f64, lon: f64, alt: Option<f64> },
     /// `home clear`: no placed home (the hub learns one again).
     HomeClear,
+    /// `area NAME circle LAT LON RADIUS` or `area NAME poly LAT LON ...`.
+    AreaShape { name: Name, shape: Shape },
+    /// `area NAME ceiling METRES`.
+    AreaCeiling { name: Name, ceiling_m: f32 },
+    /// `area NAME clear`.
+    AreaClear { name: Name },
+    /// `area here RADIUS` (console and screen only): a circle round the
+    /// hub's position now, saved as an ordinary `area here circle ...`
+    /// line. Ignored in the file, like `node all here`.
+    AreaHere { radius_m: f32 },
+    /// `bubble RADIUS` (`None`: `bubble off`).
+    Bubble { radius_m: Option<f32> },
+    /// `friend SERIAL [label]`.
+    Friend(Friend),
+    /// `friend SERIAL clear`.
+    FriendClear { serial: heapless::String<{ places::SERIAL_LEN }> },
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -144,6 +176,88 @@ fn lat_lon(lat: &str, lon: &str) -> Result<(f64, f64), SiteError> {
         return Err("position out of range (latitude first, decimal degrees)");
     }
     Ok((lat, lon))
+}
+
+fn radius(s: &str) -> Result<f32, SiteError> {
+    let r: f32 = s.parse().map_err(|_| "radius is not a number (metres)")?;
+    if !(places::MIN_RADIUS_M..=places::MAX_RADIUS_M).contains(&r) {
+        return Err("radius out of range (10 to 10000 metres)");
+    }
+    Ok(r)
+}
+
+fn area_name(s: &str) -> Result<Name, SiteError> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err("area names are letters, digits, _ or -");
+    }
+    Name::try_from(s).map_err(|_| "area name longer than 12 characters")
+}
+
+fn parse_area<'a>(mut it: impl Iterator<Item = &'a str>) -> Result<SiteLine, SiteError> {
+    const SAY: SiteError = "say: area NAME circle LAT LON RADIUS | poly LAT LON LAT LON ... | ceiling METRES | clear";
+    let name = it.next().ok_or(SAY)?;
+    let what = it.next().ok_or(SAY)?;
+    if name.eq_ignore_ascii_case("here") && what.parse::<f32>().is_ok() {
+        let radius_m = radius(what)?;
+        return if it.next().is_none() { Ok(SiteLine::AreaHere { radius_m }) } else { Err("say: area here RADIUS") };
+    }
+    let name = area_name(name)?;
+    if what.eq_ignore_ascii_case("circle") {
+        let (a, b, r) = (it.next(), it.next(), it.next());
+        let (Some(a), Some(b), Some(r)) = (a, b, r) else {
+            return Err("say: area NAME circle LAT LON RADIUS");
+        };
+        let (lat, lon) = lat_lon(a, b)?;
+        let radius_m = radius(r)?;
+        if it.next().is_some() {
+            return Err("say: area NAME circle LAT LON RADIUS");
+        }
+        return Ok(SiteLine::AreaShape { name, shape: Shape::Circle { lat, lon, radius_m } });
+    }
+    if what.eq_ignore_ascii_case("poly") {
+        let mut v: heapless::Vec<Vertex, { places::MAX_VERTICES }> = heapless::Vec::new();
+        loop {
+            let Some(a) = it.next() else { break };
+            let b = it.next().ok_or("a polygon corner needs a longitude after the latitude")?;
+            let (lat, lon) = lat_lon(a, b)?;
+            v.push(Vertex::new(lat, lon)).map_err(|_| "a polygon has at most 16 corners")?;
+        }
+        if v.len() < places::MIN_VERTICES {
+            return Err("a polygon needs at least 3 corners (LAT LON each)");
+        }
+        return Ok(SiteLine::AreaShape { name, shape: Shape::Poly(v) });
+    }
+    if what.eq_ignore_ascii_case("ceiling") {
+        let m: f32 = it.next().ok_or("say: area NAME ceiling METRES")?.parse().map_err(|_| "ceiling is not a number (metres)")?;
+        if !(1.0..=10_000.0).contains(&m) || it.next().is_some() {
+            return Err("say: area NAME ceiling METRES (1 to 10000)");
+        }
+        return Ok(SiteLine::AreaCeiling { name, ceiling_m: m });
+    }
+    if what.eq_ignore_ascii_case("clear") {
+        return if it.next().is_none() { Ok(SiteLine::AreaClear { name }) } else { Err("say: area NAME clear") };
+    }
+    Err(SAY)
+}
+
+fn parse_friend(rest: &str) -> Result<SiteLine, SiteError> {
+    let (serial, label) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let label = label.trim();
+    if serial.is_empty() {
+        return Err("say: friend SERIAL [label], or friend SERIAL clear");
+    }
+    if !serial.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("a friend serial is printable text without spaces");
+    }
+    let serial = heapless::String::try_from(serial).map_err(|_| "a serial is at most 20 characters")?;
+    if label.eq_ignore_ascii_case("clear") {
+        return Ok(SiteLine::FriendClear { serial });
+    }
+    if !label.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return Err("a friend label is plain text");
+    }
+    let label = heapless::String::try_from(label).map_err(|_| "a friend label is at most 20 characters")?;
+    Ok(SiteLine::Friend(Friend { serial, label }))
 }
 
 pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
@@ -209,6 +323,19 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::Home { lat, lon, alt });
     }
+    if word.eq_ignore_ascii_case("area") {
+        return parse_area(it);
+    }
+    if word.eq_ignore_ascii_case("bubble") {
+        return match (it.next(), it.next()) {
+            (Some(w), None) if w.eq_ignore_ascii_case("off") => Ok(SiteLine::Bubble { radius_m: None }),
+            (Some(w), None) => Ok(SiteLine::Bubble { radius_m: Some(radius(w)?) }),
+            _ => Err("say: bubble RADIUS (metres), or bubble off"),
+        };
+    }
+    if word.eq_ignore_ascii_case("friend") {
+        return parse_friend(rest);
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -245,7 +372,49 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, home, mute, unmute, control)")
+    Err("unknown line (node, home, mute, unmute, control, area, bubble, friend)")
+}
+
+/// Whether a places line fits: a new area or friend when the list is full
+/// is refused (nothing is dropped to make room).
+pub fn check_room(p: &Places, l: &SiteLine) -> Result<(), SiteError> {
+    match l {
+        SiteLine::AreaShape { name, .. } | SiteLine::AreaCeiling { name, .. } if p.area_full(name) => {
+            Err("too many areas (8): clear one first")
+        }
+        SiteLine::AreaHere { .. } if p.area_full("here") => Err("too many areas (8): clear one first"),
+        SiteLine::Friend(f) if p.friends_full(&f.serial) => Err("too many friends (8): clear one first"),
+        _ => Ok(()),
+    }
+}
+
+/// Apply a places line (`area`, `bubble`, `friend`) to `p`; false for any
+/// other line (and for `area here`, which needs the hub's position).
+pub fn apply_place(p: &mut Places, l: &SiteLine) -> bool {
+    match l {
+        SiteLine::AreaShape { name, shape } => drop(p.set_shape(name, shape.clone())),
+        SiteLine::AreaCeiling { name, ceiling_m } => drop(p.set_ceiling(name, *ceiling_m)),
+        SiteLine::AreaClear { name } => p.clear_area(name),
+        SiteLine::Bubble { radius_m } => p.bubble_m = *radius_m,
+        SiteLine::Friend(f) => drop(p.set_friend(f.clone())),
+        SiteLine::FriendClear { serial } => p.clear_friend(serial),
+        _ => return false,
+    }
+    true
+}
+
+/// The line that recreates an area's outline (ends in `\n`).
+pub fn write_area<W: Write>(w: &mut W, name: &str, shape: &Shape) -> core::fmt::Result {
+    match shape {
+        Shape::Circle { lat, lon, radius_m } => writeln!(w, "area {name} circle {lat:.7} {lon:.7} {radius_m:.0}"),
+        Shape::Poly(v) => {
+            write!(w, "area {name} poly")?;
+            for p in v {
+                write!(w, " {:.7} {:.7}", p.lat(), p.lon())?;
+            }
+            w.write_char('\n')
+        }
+    }
 }
 
 /// Node positions held by [`SiteState`].
@@ -264,6 +433,8 @@ pub struct SiteState {
     pub control_content: Option<bool>,
     /// The hub's own placed position (`home` lines), `(lat, lon, height)`.
     pub home: Option<(f64, f64, Option<f64>)>,
+    /// Areas, the bubble and friendly drones (threat levels).
+    pub places: Places,
     pub used: u32,
     pub ignored: u32,
     /// `mute` lines not honoured: too broad, or for a kind that can only be
@@ -306,17 +477,26 @@ impl SiteState {
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
             SiteLine::Home { lat, lon, alt } => self.home = Some((lat, lon, alt)),
             SiteLine::HomeClear => self.home = None,
-            SiteLine::AllNodesHere => {
+            SiteLine::AllNodesHere | SiteLine::AreaHere { .. } => {
                 self.ignored += 1;
                 return;
+            }
+            l @ (SiteLine::AreaShape { .. }
+            | SiteLine::AreaCeiling { .. }
+            | SiteLine::AreaClear { .. }
+            | SiteLine::Bubble { .. }
+            | SiteLine::Friend(_)
+            | SiteLine::FriendClear { .. }) => {
+                apply_place(&mut self.places, &l);
             }
         }
         self.used += 1;
     }
 }
 
-/// Longest line kept; a longer one is ignored as a whole.
-pub const MAX_LINE: usize = 160;
+/// Longest line kept; a longer one is ignored as a whole. (160 before the
+/// `area ... poly` lines: 16 corners at 7 decimals take about 330.)
+pub const MAX_LINE: usize = 384;
 
 /// Splits a byte stream fed in pieces into lines.
 #[derive(Debug, Default)]
@@ -373,7 +553,7 @@ pub fn finish_into(state: &mut SiteState, lines: &mut Lines, mut refused: impl F
 
 impl SiteState {
     fn line(&mut self, n: u32, r: Result<&str, SiteError>, refused: &mut impl FnMut(u32, SiteError)) {
-        match r.and_then(parse_line) {
+        match r.and_then(parse_line).and_then(|l| check_room(&self.places, &l).map(|_| l)) {
             Ok(l) => self.apply(l),
             Err(e) => {
                 self.ignored += 1;
@@ -574,7 +754,7 @@ impl core::fmt::Display for LoadSummary<'_> {
         let onoff = |v: Option<bool>| if v == Some(true) { "on" } else { "off" };
         write!(
             f,
-            ", {} bytes, {} lines ({} used, {} ignored); {} mutes for good, {} mute lines not honoured; {} node positions; control ids {}, control content {}",
+            ", {} bytes, {} lines ({} used, {} ignored); {} mutes for good, {} mute lines not honoured; {} node positions; control ids {}, control content {}; {} areas, ",
             self.bytes,
             self.lines,
             st.used,
@@ -584,16 +764,23 @@ impl core::fmt::Display for LoadSummary<'_> {
             st.nodes.len(),
             onoff(st.control_ids),
             onoff(st.control_content),
-        )
+            st.places.areas.len(),
+        )?;
+        match st.places.bubble_m {
+            Some(r) => write!(f, "bubble {r:.0} m, ")?,
+            None => f.write_str("bubble off, ")?,
+        }
+        write!(f, "{} friends", st.places.friends.len())
     }
 }
 
 impl LoadSummary<'_> {
     /// The event's data: the SHA-256, then mutes, mute lines not honoured,
     /// node positions (one byte each, saturating), control ids and content
-    /// (0 off, 1 on).
-    pub fn data(&self) -> [u8; 37] {
-        let mut d = [0u8; 37];
+    /// (0 off, 1 on), then (added with the threat levels) areas, bubble
+    /// radius in tens of metres (0 off, saturating) and friends.
+    pub fn data(&self) -> [u8; 40] {
+        let mut d = [0u8; 40];
         d[..32].copy_from_slice(self.sha256);
         let b = |n: usize| n.min(255) as u8;
         d[32] = b(self.st.mutes.len());
@@ -601,7 +788,80 @@ impl LoadSummary<'_> {
         d[34] = b(self.st.nodes.len());
         d[35] = u8::from(self.st.control_ids == Some(true));
         d[36] = u8::from(self.st.control_content == Some(true));
+        let p = &self.st.places;
+        d[37] = b(p.areas.len());
+        d[38] = p.bubble_m.map_or(0, |r| (libm::roundf(r / 10.0) as usize).clamp(1, 255) as u8);
+        d[39] = b(p.friends.len());
         d
+    }
+}
+
+// ------------------------------------------------------ places changes --
+
+/// A change to the places from one load of the site file to the next (or
+/// from what the hub was using). A friend lowers alarms, so a swapped card
+/// that adds one must leave a trace.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaceChange<'a> {
+    /// Set or changed (outline or ceiling).
+    AreaSet(&'a places::Area),
+    AreaCleared(&'a Name),
+    Bubble(Option<f32>),
+    FriendAdded(&'a Friend),
+    FriendRemoved(&'a Friend),
+}
+
+/// Every change from `old` to `new`. Returns how many.
+pub fn place_changes<'a>(old: &'a Places, new: &'a Places, mut f: impl FnMut(PlaceChange<'a>)) -> usize {
+    let mut n = 0;
+    let mut out = |c| {
+        n += 1;
+        f(c)
+    };
+    for a in &new.areas {
+        if old.area(&a.name) != Some(a) {
+            out(PlaceChange::AreaSet(a));
+        }
+    }
+    for a in old.areas.iter().filter(|a| new.area(&a.name).is_none()) {
+        out(PlaceChange::AreaCleared(&a.name));
+    }
+    if old.bubble_m != new.bubble_m {
+        out(PlaceChange::Bubble(new.bubble_m));
+    }
+    for fr in new.friends.iter().filter(|fr| !old.friends.contains(fr)) {
+        out(PlaceChange::FriendAdded(fr));
+    }
+    for fr in old.friends.iter().filter(|fr| !new.friends.iter().any(|n| n.serial == fr.serial)) {
+        out(PlaceChange::FriendRemoved(fr));
+    }
+    n
+}
+
+/// Evidence text for one places change.
+pub fn write_place_change<W: Write>(w: &mut W, c: &PlaceChange<'_>) -> core::fmt::Result {
+    w.write_str("site file changed: ")?;
+    match c {
+        PlaceChange::AreaSet(a) => {
+            match &a.shape {
+                Some(Shape::Circle { lat, lon, radius_m }) => {
+                    write!(w, "area {} circle at {lat:.7} {lon:.7}, {radius_m:.0} m", a.name)?
+                }
+                Some(Shape::Poly(v)) => write!(w, "area {} polygon of {} corners", a.name, v.len())?,
+                None => write!(w, "area {} (no outline yet)", a.name)?,
+            }
+            write!(w, ", ceiling {:.0} m", a.ceiling())
+        }
+        PlaceChange::AreaCleared(n) => write!(w, "area {n} removed"),
+        PlaceChange::Bubble(Some(r)) => write!(w, "bubble {r:.0} m round the hub"),
+        PlaceChange::Bubble(None) => w.write_str("bubble off"),
+        PlaceChange::FriendAdded(fr) => write!(
+            w,
+            "friend {} \"{}\" added (its area alarms are lowered to Notice; fast inbound never is)",
+            link::printable::Printable(&fr.serial),
+            link::printable::Printable(&fr.label)
+        ),
+        PlaceChange::FriendRemoved(fr) => write!(w, "friend {} removed", link::printable::Printable(&fr.serial)),
     }
 }
 
@@ -743,7 +1003,7 @@ mod tests {
         let s = std::format!("{sum}");
         assert!(s.starts_with("site file loaded: sha256 abababab"), "{s}");
         assert!(s.contains("1 mutes for good, 1 mute lines not honoured; 1 node positions; control ids on, control content off"), "{s}");
-        assert_eq!(&sum.data()[32..], &[1, 1, 1, 1, 0]);
+        assert_eq!(&sum.data()[32..], &[1, 1, 1, 1, 0, 0, 0, 0]);
         // The first load after boot: everything is a change.
         let empty = SiteState::default();
         let mut seen = std::vec::Vec::new();
@@ -809,5 +1069,113 @@ mod tests {
         write_node(&mut s, &[1, 2, 3, 4, 5, 6], -33.8688197, 151.2092955).unwrap();
         let SiteLine::NodeAt { lat, lon, .. } = parse_line(&s).unwrap() else { panic!() };
         assert!((lat + 33.8688197).abs() < 1e-7 && (lon - 151.2092955).abs() < 1e-7);
+    }
+
+    #[test]
+    fn places_lines_are_read_and_refused_with_reasons() {
+        let SiteLine::AreaShape { name, shape: Shape::Circle { lat, lon, radius_m } } =
+            parse_line("AREA house  CIRCLE 39.95210 -75.16380 150   # the house").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((name.as_str(), lat, lon, radius_m), ("house", 39.9521, -75.1638, 150.0));
+        let SiteLine::AreaShape { shape: Shape::Poly(v), .. } =
+            parse_line("area yard poly 39.9520 -75.1640 39.9523 -75.1636 39.9519 -75.1633").unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[1], Vertex::new(39.9523, -75.1636));
+        assert_eq!(parse_line("area house ceiling 90"), Ok(SiteLine::AreaCeiling { name: Name::try_from("house").unwrap(), ceiling_m: 90.0 }));
+        assert_eq!(parse_line("area house clear"), Ok(SiteLine::AreaClear { name: Name::try_from("house").unwrap() }));
+        assert_eq!(parse_line("area here 200"), Ok(SiteLine::AreaHere { radius_m: 200.0 }));
+        // What the hub saves for `area here`: an ordinary area named here.
+        assert!(matches!(parse_line("area here circle 1 2 200"), Ok(SiteLine::AreaShape { .. })));
+        assert_eq!(parse_line("bubble 300"), Ok(SiteLine::Bubble { radius_m: Some(300.0) }));
+        assert_eq!(parse_line("Bubble OFF"), Ok(SiteLine::Bubble { radius_m: None }));
+        let SiteLine::Friend(f) = parse_line("friend 1581F5FKD229400B4WW1 our own Mini").unwrap() else { panic!() };
+        assert_eq!((f.serial.as_str(), f.label.as_str()), ("1581F5FKD229400B4WW1", "our own Mini"));
+        assert!(matches!(parse_line("friend SN1"), Ok(SiteLine::Friend(Friend { .. }))));
+        assert!(matches!(parse_line("friend SN1 clear"), Ok(SiteLine::FriendClear { .. })));
+        // Sixteen corners fit a line; seventeen do not.
+        let corner = " 39.9520000 -75.1640000";
+        let sixteen = std::format!("area big poly{}", corner.repeat(16));
+        assert!(sixteen.len() <= MAX_LINE, "{}", sixteen.len());
+        assert!(parse_line(&sixteen).is_ok());
+        for bad in [
+            "area",
+            "area house",
+            "area house circle 39.9 -75.1",
+            "area house circle 39.9 -75.1 5",
+            "area house circle 39.9 -75.1 99999",
+            "area house circle 91 0 100",
+            "area house circle 39.9 -75.1 100 extra",
+            "area house poly 39.9 -75.1 39.8 -75.1",
+            "area house poly 39.9 -75.1 39.8 -75.1 39.8",
+            &std::format!("area big poly{}", corner.repeat(17)),
+            "area house ceiling",
+            "area house ceiling high",
+            "area house clear now",
+            "area house square 1 2 3",
+            "area my*house circle 1 2 100",
+            "area averyveryverylongname circle 1 2 100",
+            "area here 5",
+            "area here 200 300",
+            "bubble",
+            "bubble big",
+            "bubble 1",
+            "bubble 300 400",
+            "friend",
+            "friend SN1 a label that is far too long for it",
+        ] {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn places_later_lines_win_and_lists_do_not_overflow() {
+        let mut text = std::string::String::new();
+        text += "area house circle 39.95210 -75.16380 150\n";
+        text += "area house ceiling 90\n";
+        text += "area house circle 39.95210 -75.16380 200\n"; // outline replaced, ceiling kept
+        text += "area here 200\n"; // file: ignored
+        text += "bubble 300\nbubble off\nbubble 250\n";
+        text += "friend SN1 first\nfriend SN1 renamed\nfriend SN2\nfriend SN2 clear\n";
+        for i in 0..9 {
+            text += &std::format!("area a{i} circle 1 2 100\n");
+        }
+        let (mut st, mut lines) = (SiteState::default(), Lines::default());
+        let mut refused = std::vec::Vec::new();
+        read_into(&mut st, &mut lines, text.as_bytes(), |n, e| refused.push((n, e)));
+        let p = &st.places;
+        assert_eq!(p.areas.len(), 8, "house + 7 of the 9");
+        let house = p.area("house").unwrap();
+        assert_eq!(house.ceiling(), 90.0);
+        assert_eq!(house.shape, Some(Shape::Circle { lat: 39.9521, lon: -75.1638, radius_m: 200.0 }));
+        assert_eq!(p.bubble_m, Some(250.0));
+        assert_eq!(p.friends.len(), 1);
+        assert_eq!(p.friends[0].label.as_str(), "renamed");
+        // The 9th and 10th areas were refused, not the oldest dropped.
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert!(refused.iter().all(|r| r.1.starts_with("too many areas")));
+        assert!(p.area("a7").is_none() && p.area("a6").is_some());
+        let mut s = std::string::String::new();
+        write_area(&mut s, "house", house.shape.as_ref().unwrap()).unwrap();
+        assert_eq!(parse_line(&s), Ok(SiteLine::AreaShape { name: Name::try_from("house").unwrap(), shape: house.shape.clone().unwrap() }));
+        // Changes from an empty start, then the same again (none).
+        let mut seen = std::vec::Vec::new();
+        let n = place_changes(&Places::default(), p, |c| {
+            let mut t = std::string::String::new();
+            write_place_change(&mut t, &c).unwrap();
+            seen.push(t);
+        });
+        assert_eq!(n, 10, "{seen:?}");
+        assert!(seen[0].starts_with("site file changed: area house circle at 39.9521000 -75.1638000, 200 m, ceiling 90 m"), "{seen:?}");
+        assert!(seen.iter().any(|t| t.contains("friend SN1 \"renamed\" added")), "{seen:?}");
+        assert_eq!(place_changes(p, &p.clone(), |_| panic!()), 0);
+        let sha = [0; 32];
+        let sum = std::format!("{}", LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 });
+        assert!(sum.ends_with("8 areas, bubble 250 m, 1 friends"), "{sum}");
+        assert_eq!(&LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 }.data()[37..], &[8, 25, 1]);
     }
 }

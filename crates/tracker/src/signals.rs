@@ -357,7 +357,7 @@ impl NodeTable {
     }
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// Feed one raw-capture sighting from `node`.
     pub fn ingest_rf(&mut self, node: u8, s: &RfSighting, now_ms: u64) -> EmitterId {
         self.expire(now_ms);

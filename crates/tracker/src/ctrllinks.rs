@@ -406,9 +406,9 @@ impl ControlTable {
     /// new link with no room (see [`MAX_CONTROL_LINKS`]). Forged links
     /// replacing each other at [`crate::probation::CONTROL_FLOOD_PER_S`] a
     /// second raise an `IdFlood` threat (table control links).
-    pub fn ingest<const N: usize, const A: usize>(
+    pub fn ingest<const N: usize, const A: usize, const P: usize>(
         &mut self,
-        tracker: &mut Tracker<N, A>,
+        tracker: &mut Tracker<N, A, P>,
         node: u8,
         r: &ControlReport,
         now_ms: u64,
@@ -455,9 +455,9 @@ impl ControlTable {
         Some(self.links[i].id)
     }
 
-    fn content<const N: usize, const A: usize>(
+    fn content<const N: usize, const A: usize, const P: usize>(
         &mut self,
-        tracker: &mut Tracker<N, A>,
+        tracker: &mut Tracker<N, A, P>,
         i: usize,
         node: u8,
         c: &ControlContent,
@@ -551,9 +551,9 @@ impl ControlTable {
     }
 
     /// Feed a protocol 12 frame (others are ignored).
-    pub fn ingest_frame<const N: usize, const A: usize>(
+    pub fn ingest_frame<const N: usize, const A: usize, const P: usize>(
         &mut self,
-        tracker: &mut Tracker<N, A>,
+        tracker: &mut Tracker<N, A, P>,
         node: u8,
         f: &link::Frame,
         now_ms: u64,
@@ -585,7 +585,7 @@ impl ControlTable {
     }
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// A position decoded from a control link: the drone track `want` (or a
     /// new one for link identity `key`, if it has none or that track
     /// expired, and the table admits it: [`crate::probation`]). Returns its

@@ -948,7 +948,7 @@ fn seen_alarm(t: &Threat, seen_ms: u64, now_ms: u64) -> bool {
 
 // --------------------------------------------------------------- tracker --
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// Feed one threat reported by `node`. `None` when it is new and the
     /// table is full of threats it may not replace (see the module notes).
     pub fn ingest_threat(&mut self, node: u8, s: &ThreatSighting, now_ms: u64) -> Option<ThreatId> {

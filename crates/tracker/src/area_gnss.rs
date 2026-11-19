@@ -437,9 +437,9 @@ impl AreaWatch {
     /// refresh the threats. Returns the threats touched (jamming,
     /// spoofing), for a caller that wants them; new ones are also handed
     /// out by [`Tracker::take_new_threat`] as usual.
-    pub fn tick<const N: usize, const A: usize>(
+    pub fn tick<const N: usize, const A: usize, const P: usize>(
         &mut self,
-        tr: &mut Tracker<N, A>,
+        tr: &mut Tracker<N, A, P>,
         now_ms: u64,
     ) -> (Option<ThreatId>, Option<ThreatId>) {
         let own_pos = tr.own_position(now_ms);
@@ -532,7 +532,7 @@ impl AreaWatch {
     }
 
     /// Refresh one verdict's threat while it is latched.
-    fn raise<const N: usize, const A: usize>(&mut self, tr: &mut Tracker<N, A>, jamming: bool, now_ms: u64) -> Option<ThreatId> {
+    fn raise<const N: usize, const A: usize, const P: usize>(&mut self, tr: &mut Tracker<N, A, P>, jamming: bool, now_ms: u64) -> Option<ThreatId> {
         let v = if jamming { &mut self.jam } else { &mut self.spoof };
         if !v.on {
             return None;
@@ -659,7 +659,7 @@ impl AreaWatch {
     /// Notice confirmed drone tracks whose path-jump count rose since the
     /// last look (`claims`: one transmitter that moved, not a rival claim
     /// or a dispute), and how each was heard.
-    fn look_drones<const N: usize, const A: usize>(&mut self, tr: &Tracker<N, A>, now: u64) {
+    fn look_drones<const N: usize, const A: usize, const P: usize>(&mut self, tr: &Tracker<N, A, P>, now: u64) {
         let ctx = tr.context(now, None);
         self.drones.retain(|d| tr.get(d.id).is_some());
         // A jump taken while the track was undisputed stops counting once

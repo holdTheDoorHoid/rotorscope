@@ -70,6 +70,7 @@
 
 pub mod aircraft;
 pub mod area_gnss;
+pub mod behaviour;
 pub mod claims;
 pub mod continuity;
 pub mod ctrllinks;
@@ -424,6 +425,9 @@ pub struct Track {
     confirmed_ms: Option<u64>,
     /// The node whose frame made the track ([`probation::ShedWatch`]).
     first_node: u8,
+    /// Its threat level and the reasons ([`behaviour`]), set once a second
+    /// by [`Tracker::tick_behaviour`].
+    pub threat: behaviour::TrackThreat,
 }
 
 impl Track {
@@ -452,6 +456,7 @@ impl Track {
             heard: 0,
             confirmed_ms: None,
             first_node: threats::NODE_ANY,
+            threat: behaviour::TrackThreat::default(),
         }
     }
 
@@ -825,6 +830,7 @@ impl Track {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        self.threat.absorb(&other.threat);
     }
 }
 
@@ -846,6 +852,14 @@ pub struct OwnFix {
     /// so it compares with Remote ID's geodetic altitude. `None` for a 2D fix.
     pub alt_m: Option<f64>,
     pub fix_ms: u64,
+    /// Ground speed, m/s: from the receiver when it says (u-blox NAV-PVT
+    /// `gSpeed`, NMEA RMC), else worked out from consecutive fixes; 0 for a
+    /// manual or held position, `None` until known. Below
+    /// [`behaviour::OWN_STATIONARY_MPS`] it is 0 (standing still).
+    pub speed_mps: Option<f32>,
+    /// Direction of travel, degrees true; `None` while standing still or
+    /// unknown.
+    pub course_deg: Option<f32>,
 }
 
 /// Range, bearing and relative height of a drone and its operator from the
@@ -949,8 +963,13 @@ impl Ingested {
 }
 
 /// The track table. `N` is the drone capacity (PLAN.md D7: 32 required, 64
-/// goal); `A` the aircraft capacity (see [`aircraft`]).
-pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAFT }> {
+/// goal); `A` the aircraft capacity (see [`aircraft`]); `P` how many drones
+/// keep a path history for the threat levels ([`behaviour::path`], about
+/// 4.4 KB each). The P4 hub, with the tracker in PSRAM, keeps one per
+/// track (`P = N`); the default 0 (the S3 hub, the laptop viewer, most
+/// tests) keeps none, and then only the place rules (1-4) can fire, on the
+/// latest position alone.
+pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAFT }, const P: usize = 0> {
     tracks: Vec<Track, N>,
     /// Open FPV links, a separate table with its own ids.
     links: openlinks::LinkTable,
@@ -988,16 +1007,24 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     contradictory: u32,
     next_id: u32,
     own: Option<OwnFix>,
+    /// The unit's own speed and course from consecutive fixes, when the
+    /// receiver does not give them ([`behaviour::OwnMotion`]).
+    own_motion: behaviour::OwnMotion,
+    /// Areas, the bubble and friendly drones (site file; [`behaviour`]).
+    places: behaviour::Places,
+    /// Where each drone has been ([`behaviour::path`]): about 4.4 KB a
+    /// track, the largest part of the tracker. Kept last.
+    paths: behaviour::PathStore<P>,
     config: Config,
 }
 
-impl<const N: usize, const A: usize> Default for Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Default for Tracker<N, A, P> {
     fn default() -> Self {
         Self::new(Config::default())
     }
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     pub const fn new(config: Config) -> Self {
         Self {
             tracks: Vec::new(),
@@ -1022,6 +1049,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             contradictory: 0,
             next_id: 1,
             own: None,
+            own_motion: behaviour::OwnMotion::new(),
+            places: behaviour::Places::new(),
+            paths: behaviour::PathStore::new(),
             config,
         }
     }
@@ -1031,19 +1061,35 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     }
 
     /// Record the unit's GPS fix. `alt_m` is height above the WGS-84
-    /// ellipsoid, `None` for a 2D fix.
+    /// ellipsoid, `None` for a 2D fix. Its speed and direction are worked
+    /// out from consecutive fixes (use [`Tracker::set_own_fix`] when the
+    /// receiver gives them).
     pub fn set_own_position(&mut self, lat: f64, lon: f64, alt_m: Option<f64>, time_ms: u64) {
+        self.set_own_fix(lat, lon, alt_m, time_ms, None);
+    }
+
+    /// As [`Tracker::set_own_position`], with the receiver's ground speed
+    /// (m/s) and direction of travel (degrees true) when it gives them.
+    /// A manual or held position passes `Some((0.0, None))`: not moving.
+    pub fn set_own_fix(&mut self, lat: f64, lon: f64, alt_m: Option<f64>, time_ms: u64, motion: Option<(f32, Option<f32>)>) {
+        let (speed_mps, course_deg) = match motion {
+            Some((speed, course)) => self.own_motion.reported(lat, lon, time_ms, speed, course),
+            None => self.own_motion.derived(lat, lon, time_ms),
+        };
         self.own = Some(OwnFix {
             lat,
             lon,
             alt_m,
             fix_ms: time_ms,
+            speed_mps,
+            course_deg,
         });
     }
 
     /// Forget the fix (GPS lost lock). Geometry becomes `None` (P4).
     pub fn clear_own_position(&mut self) {
         self.own = None;
+        self.own_motion = behaviour::OwnMotion::new();
     }
 
     /// The own fix, if not older than [`Config::own_fix_max_age_ms`].
@@ -1698,6 +1744,109 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             let _ = self.threats.ingest(0, true, &s, now_ms);
         }
         before - self.tracks.len()
+    }
+
+    // ------------------------------------------------- threat levels --
+
+    /// Areas, the bubble and friendly drones in force ([`behaviour`]).
+    pub fn places(&self) -> &behaviour::Places {
+        &self.places
+    }
+
+    /// Change them (a site-file line typed on the hub).
+    pub fn places_mut(&mut self) -> &mut behaviour::Places {
+        &mut self.places
+    }
+
+    /// Replace them (the site file read at mount).
+    pub fn set_places(&mut self, p: behaviour::Places) {
+        self.places = p;
+    }
+
+    /// The path history of a track ([`behaviour::path`]).
+    pub fn path(&self, id: TrackId) -> Option<&behaviour::PathRing> {
+        self.paths.get(id)
+    }
+
+    /// Once a second: add each drone's newest position to its path
+    /// history, then judge every drone against the places
+    /// ([`behaviour::evaluate`]) and move its level ([`behaviour::TrackThreat`]).
+    pub fn tick_behaviour(&mut self, now_ms: u64) {
+        let own = self.own_position(now_ms);
+        let tracks = &self.tracks;
+        self.paths.retain(|id| tracks.iter().any(|t| t.id == id));
+        for t in self.tracks.iter() {
+            if let Some(l) = &t.location
+                && let Some(p) = l.value.position
+                && now_ms.saturating_sub(l.rx_ms) <= behaviour::FRESH_MS
+            {
+                self.paths.record(t.id, p.lat, p.lon, l.value.altitude_geodetic, l.rx_ms);
+            }
+        }
+        for t in self.tracks.iter_mut() {
+            let e = behaviour::evaluate(t, self.paths.get(t.id), &self.places, own.as_ref(), now_ms);
+            let has_position = t.location.as_ref().is_some_and(|l| l.value.position.is_some());
+            t.threat.update(e, has_position, now_ms);
+        }
+    }
+
+    /// The next drone whose level rose to Caution or above, for the
+    /// evidence log (code `threat_level`) and the console; once per rise.
+    pub fn take_level_rise(&mut self, now_ms: u64) -> Option<behaviour::Rise> {
+        let t = self.tracks.iter_mut().find(|t| t.threat.rise_pending())?;
+        t.threat.take_rise();
+        Some(behaviour::Rise {
+            track: t.id,
+            level: t.threat.level.unwrap_or(behaviour::Level::Notice),
+            snoozed: t.threat.snoozed(now_ms),
+        })
+    }
+
+    /// The most serious drone that is not snoozed, at Caution or above
+    /// (the screen's strip), nearest first among equals.
+    pub fn top_threat(&self, now_ms: u64) -> Option<&Track> {
+        self.tracks
+            .iter()
+            .filter(|t| t.threat.level >= Some(behaviour::Level::Caution) && !t.threat.snoozed(now_ms))
+            .max_by(|a, b| {
+                let range = |t: &Track| t.threat.reasons.first().map_or(f32::MAX, |r| r.range_m());
+                a.threat.level.cmp(&b.threat.level).then(range(b).total_cmp(&range(a)))
+            })
+    }
+
+    /// Drones at Warning or above whose alerts are not snoozed (what the
+    /// screen's Snooze would act on).
+    pub fn snoozable_levels(&self, now_ms: u64) -> usize {
+        self.tracks
+            .iter()
+            .filter(|t| t.threat.level >= Some(behaviour::Level::Warning) && !t.threat.snoozed(now_ms))
+            .count()
+    }
+
+    /// Snooze one drone's level alerts for [`behaviour::SNOOZE_MS`] (RAM
+    /// only; the level is still shown and logged). False when there is no
+    /// such drone or it is below Caution.
+    pub fn snooze_drone(&mut self, id: TrackId, now_ms: u64) -> bool {
+        match self.tracks.iter_mut().find(|t| t.id == id) {
+            Some(t) if t.threat.level >= Some(behaviour::Level::Caution) => {
+                t.threat.snooze(now_ms);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The screen's Snooze: every drone at Warning or above. Returns them
+    /// (for the evidence log).
+    pub fn snooze_levels(&mut self, now_ms: u64) -> Vec<TrackId, N> {
+        let mut out = Vec::new();
+        for t in self.tracks.iter_mut() {
+            if t.threat.level >= Some(behaviour::Level::Warning) && !t.threat.snoozed(now_ms) {
+                t.threat.snooze(now_ms);
+                let _ = out.push(t.id);
+            }
+        }
+        out
     }
 
     /// The next drone to alert on (buzzer, screen), exactly once per track,

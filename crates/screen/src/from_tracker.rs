@@ -20,8 +20,8 @@ use crate::model::*;
 /// `total_drones`, and downgrades a 2D/3D/manual `gps.fix` to `None` when
 /// the tracker considers the own position too old, so the layout and the
 /// numbers agree. (`Fix::Absent` is left alone: it says more.)
-pub fn fill_from_tracker<const N: usize, const A: usize>(
-    tracker: &Tracker<N, A>,
+pub fn fill_from_tracker<const N: usize, const A: usize, const P: usize>(
+    tracker: &Tracker<N, A, P>,
     ctx: &Context,
     state: &mut UiState,
 ) {

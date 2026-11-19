@@ -1508,7 +1508,7 @@ impl fmt::Display for Summary<'_> {
     }
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// Tell the checks the current UTC (Unix ms) at hub time `now_ms`, for
     /// the clock check. Call whenever GPS time is known; the offset is kept.
     pub fn set_utc(&mut self, utc_ms: u64, now_ms: u64) {

@@ -1,0 +1,933 @@
+//! Threat levels: what each drone is *doing*, judged against the places
+//! the owner protects (docs/THREAT-PROFILES.md, slice 16a).
+//!
+//! Every drone that reports its position (Remote ID, DJI DroneID, MAVLink
+//! telemetry) gets one level, the highest any rule gives it, and up to
+//! [`MAX_REASONS`] reasons with their numbers:
+//!
+//! | Level | Meaning |
+//! |---|---|
+//! | Notice | a drone is around, nothing about it is unusual |
+//! | Caution | something worth watching |
+//! | Warning | behaviour that matches a known hostile pattern |
+//! | Critical | something may arrive within seconds |
+//!
+//! Rules in this slice (numbered as in the design):
+//! 1. **In the area** (Caution): inside a fixed area or the bubble.
+//! 2. **Pilot in or near the area** (Caution): the broadcast pilot position
+//!    is inside, or within [`PILOT_NEAR_M`] of the edge.
+//! 3. **Drone in, pilot outside** (Caution).
+//! 4. **Above the ceiling** (Caution): inside an area and higher above the
+//!    unit than the area's ceiling (120 m unless the site file says).
+//! 5. **Beeline** (Warning): heading for the place on a fairly straight
+//!    path, predicted to reach it within [`LOOKAHEAD_S`]. "Fairly straight"
+//!    comes from the path history ([`path`]), so a drone flying straight
+//!    *past* (its closest approach is outside) or circling does not count.
+//! 6. **Fast inbound** (Critical): as 5, closing faster than [`FAST_MPS`]
+//!    or arriving in under [`SOON_S`].
+//!
+//! Two or more *different* Caution rules at once make a Warning (one sign
+//! rarely proves anything; two together are worth more).
+//!
+//! **How the level moves** (human-factors choices, see the design):
+//! - It goes up at once and comes down only after [`DECAY_MS`] without the
+//!   rule that raised it, so it does not flicker.
+//! - A drone at Warning or Critical that stops being heard while it was
+//!   heading in keeps its level for [`DECAY_MS`], with the reason "last
+//!   seen inbound" (losing a low drone behind trees is when it matters).
+//! - A `friend` is lowered, never hidden: rules 1-4 give a friend only
+//!   Notice, but rules 5 and 6 are never lowered (serials can be faked).
+//! - A drone's level can be snoozed for [`SNOOZE_MS`] (the alert stops;
+//!   the level is still shown and logged), never switched off.
+//!
+//! **Positions are rough** (Remote ID promises 30 m at 95 %): the area
+//! checks use the average of the last [`SMOOTH_POINTS`] positions (moved on
+//! along the drone's velocity to now), a drone counted inside stays inside
+//! until it is [`EDGE_MARGIN_M`] beyond the edge, and the approach rules
+//! need the path to have been straight for 10 s (5 s when fast).
+//!
+//! Only confirmed tracks ([`crate::probation`]) with a position heard in
+//! the last [`FRESH_MS`] are judged; a drone with no position gets no level.
+
+pub mod path;
+pub mod places;
+pub mod scenario;
+
+use core::fmt::Write;
+
+use heapless::{String, Vec};
+use libm::{acosf, sqrtf};
+
+pub use path::{PathPoint, PathRing, PathStore};
+pub use places::{Area, Frame, Friend, Local, Name, Places, Shape, Vertex};
+
+use crate::{OwnFix, Track, TrackId};
+
+/// A position older than this is not judged (Remote ID repeats its
+/// position every second).
+pub const FRESH_MS: u64 = 5_000;
+/// A level comes down only after this long without the rule that raised
+/// it; a drone lost while heading in keeps its level this long.
+pub const DECAY_MS: u64 = 30_000;
+/// How far ahead the approach rules look.
+pub const LOOKAHEAD_S: f32 = 60.0;
+/// Closing faster than this is "fast inbound" (camera drones top out near
+/// 16-21 m/s; FPV attack drones fly 40 m/s and more).
+pub const FAST_MPS: f32 = 25.0;
+/// Arriving sooner than this is "fast inbound".
+pub const SOON_S: f32 = 30.0;
+/// Slower than this relative to the place is not an approach.
+pub const MIN_APPROACH_MPS: f32 = 3.0;
+/// A pilot this close outside an area counts as "at the fence".
+pub const PILOT_NEAR_M: f32 = 30.0;
+/// A pilot position older than this is not used.
+pub const PILOT_FRESH_MS: u64 = 60_000;
+/// The straightness check looks at this much of the path.
+pub const STRAIGHT_WINDOW_MS: u64 = 20_000;
+/// It needs at least this much path (less for a fast drone).
+pub const STRAIGHT_SPAN_MS: u64 = 10_000;
+pub const STRAIGHT_SPAN_FAST_MS: u64 = 5_000;
+/// Faster than this (m/s), the shorter span is enough.
+pub const STRAIGHT_FAST_MPS: f32 = 15.0;
+/// The two halves of the path may differ in direction by this much.
+pub const MAX_TURN_DEG: f32 = 25.0;
+/// The path and the reported direction of travel may differ by this much.
+pub const MAX_COURSE_OFF_DEG: f32 = 30.0;
+/// Each half of the path must cover at least this much ground.
+pub const MIN_LEG_M: f32 = 15.0;
+/// The unit is standing still below this speed.
+pub const OWN_STATIONARY_MPS: f32 = 0.5;
+/// How long a snooze lasts (as the attack alarms' snooze).
+pub const SNOOZE_MS: u64 = crate::threats::SNOOZE_MS;
+/// Reasons kept per drone.
+pub const MAX_REASONS: usize = 4;
+/// Positions averaged for the area checks (one a second).
+pub const SMOOTH_POINTS: usize = 5;
+/// A drone counted inside a place stays inside until it is this far beyond
+/// its edge, so one hovering at the fence does not go in and out.
+pub const EDGE_MARGIN_M: f32 = 10.0;
+
+/// How worrying a drone is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Level {
+    Notice = 1,
+    Caution = 2,
+    Warning = 3,
+    Critical = 4,
+}
+
+impl Level {
+    /// `"notice"`, ... (JSON).
+    pub const fn name(self) -> &'static str {
+        match self {
+            Level::Notice => "notice",
+            Level::Caution => "caution",
+            Level::Warning => "warning",
+            Level::Critical => "critical",
+        }
+    }
+
+    /// `"Notice"`, ... (text).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Level::Notice => "Notice",
+            Level::Caution => "Caution",
+            Level::Warning => "Warning",
+            Level::Critical => "Critical",
+        }
+    }
+
+    /// `"NOTICE"`, ... (the screen).
+    pub const fn upper(self) -> &'static str {
+        match self {
+            Level::Notice => "NOTICE",
+            Level::Caution => "CAUTION",
+            Level::Warning => "WARNING",
+            Level::Critical => "CRITICAL",
+        }
+    }
+}
+
+/// Which rule gave a reason (numbered as in docs/THREAT-PROFILES.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum Rule {
+    InArea = 1,
+    PilotNear = 2,
+    PilotOutside = 3,
+    AboveCeiling = 4,
+    Beeline = 5,
+    FastInbound = 6,
+    /// Not a rule of its own: a Warning or Critical drone lost while it
+    /// was heading in, held for [`DECAY_MS`].
+    LastSeenInbound = 20,
+}
+
+impl Rule {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Rule::InArea => "in_area",
+            Rule::PilotNear => "pilot_near",
+            Rule::PilotOutside => "pilot_outside",
+            Rule::AboveCeiling => "above_ceiling",
+            Rule::Beeline => "beeline",
+            Rule::FastInbound => "fast_inbound",
+            Rule::LastSeenInbound => "last_seen_inbound",
+        }
+    }
+
+    /// The level the rule gives.
+    pub const fn level(self) -> Level {
+        match self {
+            Rule::InArea | Rule::PilotNear | Rule::PilotOutside | Rule::AboveCeiling => Level::Caution,
+            Rule::Beeline => Level::Warning,
+            Rule::FastInbound => Level::Critical,
+            Rule::LastSeenInbound => Level::Warning,
+        }
+    }
+
+    /// Rules about places (1-4): a friend gets only Notice from them.
+    pub const fn is_place_rule(self) -> bool {
+        matches!(self, Rule::InArea | Rule::PilotNear | Rule::PilotOutside | Rule::AboveCeiling)
+    }
+}
+
+/// One reason for a level, with its numbers. Which numbers mean what:
+/// - in area: `range_m` from the place's middle (from the unit, for the
+///   bubble); `height_m` above the unit when known.
+/// - pilot near / pilot outside: `range_m` the pilot is outside the edge
+///   (0 inside).
+/// - above ceiling: `height_m` above the unit; `range_m` from the middle.
+/// - beeline / fast inbound: `range_m` from the middle, `eta_s` until it
+///   reaches the place (the edge, or the middle when already inside),
+///   `speed_mps` how fast it is closing.
+/// - last seen inbound: the beeline's numbers when last heard, and
+///   `ago_s` since then.
+///
+/// Kept compact (26 bytes: whole metres, tenths of seconds and of m/s),
+/// because every track holds up to [`MAX_REASONS`] and the S3 hub keeps
+/// its tracker in internal RAM.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reason {
+    pub rule: Rule,
+    /// What this rule gave this drone (Notice for a friend's place rules).
+    pub level: Level,
+    /// The area's name, zero-padded; all zero for the bubble.
+    place: [u8; places::NAME_LEN],
+    range_m: u16,
+    /// Tenths of a second; [`NONE_U16`] unknown.
+    eta_ds: u16,
+    /// Tenths of a m/s; [`NONE_U16`] unknown.
+    speed_dms: u16,
+    /// Whole metres; `i16::MIN` unknown.
+    height_m: i16,
+    ago_s: u16,
+}
+
+const NONE_U16: u16 = u16::MAX;
+
+fn tenths(v: f32) -> u16 {
+    libm::roundf(v * 10.0).clamp(0.0, f32::from(NONE_U16 - 1)) as u16
+}
+
+impl Reason {
+    fn new(rule: Rule, level: Level, place: &Name, range_m: f32) -> Self {
+        let mut p = [0u8; places::NAME_LEN];
+        p[..place.len()].copy_from_slice(place.as_bytes());
+        Self {
+            rule,
+            level,
+            place: p,
+            range_m: libm::roundf(range_m).clamp(0.0, 65_535.0) as u16,
+            eta_ds: NONE_U16,
+            speed_dms: NONE_U16,
+            height_m: i16::MIN,
+            ago_s: NONE_U16,
+        }
+    }
+
+    fn with_eta(mut self, s: f32) -> Self {
+        self.eta_ds = tenths(s);
+        self
+    }
+
+    fn with_speed(mut self, mps: f32) -> Self {
+        self.speed_dms = tenths(mps);
+        self
+    }
+
+    fn with_height(mut self, m: Option<f32>) -> Self {
+        self.height_m = m.map_or(i16::MIN, |m| libm::roundf(m).clamp(-32_767.0, 32_767.0) as i16);
+        self
+    }
+
+    /// The area's name; empty for the bubble.
+    pub fn place(&self) -> &str {
+        let n = self.place.iter().position(|&b| b == 0).unwrap_or(self.place.len());
+        core::str::from_utf8(&self.place[..n]).unwrap_or("")
+    }
+
+    /// The bubble round the unit (not a named area).
+    pub fn is_bubble(&self) -> bool {
+        self.place[0] == 0
+    }
+
+    /// Metres (see the list above for what it measures).
+    pub fn range_m(&self) -> f32 {
+        f32::from(self.range_m)
+    }
+
+    pub fn eta_s(&self) -> Option<f32> {
+        (self.eta_ds != NONE_U16).then(|| f32::from(self.eta_ds) / 10.0)
+    }
+
+    pub fn speed_mps(&self) -> Option<f32> {
+        (self.speed_dms != NONE_U16).then(|| f32::from(self.speed_dms) / 10.0)
+    }
+
+    pub fn height_m(&self) -> Option<f32> {
+        (self.height_m != i16::MIN).then(|| f32::from(self.height_m))
+    }
+
+    pub fn ago_s(&self) -> Option<u16> {
+        (self.ago_s != NONE_U16).then_some(self.ago_s)
+    }
+}
+
+/// What the rules said about one drone at one moment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Eval {
+    pub level: Level,
+    pub reasons: Vec<Reason, MAX_REASONS>,
+    /// Warning reached by two Caution rules together.
+    pub combined: bool,
+    pub friend: bool,
+    /// Hub time the position judged was heard.
+    pub heard_ms: u64,
+    /// Which places it counts as inside (bit 0 the bubble, bit 1 + n area
+    /// n), for the edge margin next time.
+    pub inside: u16,
+}
+
+/// One drone's threat level, as shown, and what it needs to move slowly.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TrackThreat {
+    /// `None`: not judged (no position, or not confirmed yet).
+    pub level: Option<Level>,
+    /// Why, most serious first.
+    pub reasons: Vec<Reason, MAX_REASONS>,
+    pub combined: bool,
+    /// Matched a `friend` line.
+    pub friend: bool,
+    /// Held after the drone was lost while heading in.
+    pub held: bool,
+    /// Hub time the level was reached.
+    pub since_ms: u64,
+    last_hit_ms: u64,
+    /// When the position last judged was heard.
+    last_heard_ms: u64,
+    /// Places it counts as inside ([`Eval::inside`]).
+    inside: u16,
+    /// The latest approach reason while the drone was heard.
+    inbound: Option<Reason>,
+    snoozed_until_ms: u64,
+    /// The level rose (to Caution or above) since the last
+    /// [`crate::Tracker::take_level_rise`].
+    rise: bool,
+}
+
+impl TrackThreat {
+    /// The operator snoozed this drone's alerts, until then.
+    pub fn snoozed(&self, now_ms: u64) -> bool {
+        now_ms < self.snoozed_until_ms
+    }
+
+    /// Seconds of snooze left.
+    pub fn snooze_left_s(&self, now_ms: u64) -> Option<u32> {
+        self.snoozed(now_ms).then(|| self.snoozed_until_ms.saturating_sub(now_ms).div_ceil(1000) as u32)
+    }
+
+    pub(crate) fn snooze(&mut self, now_ms: u64) {
+        self.snoozed_until_ms = now_ms + SNOOZE_MS;
+    }
+
+    pub(crate) fn take_rise(&mut self) -> bool {
+        core::mem::take(&mut self.rise)
+    }
+
+    pub(crate) fn rise_pending(&self) -> bool {
+        self.rise
+    }
+
+    /// Two records of one drone merged: keep the more serious picture.
+    pub(crate) fn absorb(&mut self, o: &TrackThreat) {
+        if o.level > self.level {
+            let mine = (self.snoozed_until_ms, self.rise);
+            *self = o.clone();
+            self.snoozed_until_ms = self.snoozed_until_ms.max(mine.0);
+            self.rise |= mine.1;
+        } else {
+            self.snoozed_until_ms = self.snoozed_until_ms.max(o.snoozed_until_ms);
+        }
+    }
+
+    /// One evaluation: `e` is what the rules said (`None`: no fresh
+    /// position, or not judged), `has_position` whether the drone has ever
+    /// sent one.
+    pub fn update(&mut self, e: Option<Eval>, has_position: bool, now_ms: u64) {
+        let Some(e) = e else {
+            return self.unheard(has_position, now_ms);
+        };
+        self.held = false;
+        self.last_heard_ms = e.heard_ms;
+        self.inside = e.inside;
+        self.friend = e.friend;
+        self.inbound = e.reasons.iter().find(|r| matches!(r.rule, Rule::Beeline | Rule::FastInbound)).copied();
+        match self.level {
+            Some(l) if e.level < l && now_ms.saturating_sub(self.last_hit_ms) < DECAY_MS => {
+                // Coming down slowly: keep the level and the reasons that
+                // raised it.
+            }
+            Some(l) if e.level <= l => {
+                if e.level < l {
+                    self.since_ms = now_ms;
+                }
+                self.set(e, now_ms);
+            }
+            _ => {
+                self.since_ms = now_ms;
+                self.rise |= e.level >= Level::Caution;
+                self.set(e, now_ms);
+            }
+        }
+    }
+
+    fn set(&mut self, e: Eval, now_ms: u64) {
+        self.level = Some(e.level);
+        self.reasons = e.reasons;
+        self.combined = e.combined;
+        self.last_hit_ms = now_ms;
+    }
+
+    /// Places it counted as inside at the last judgement.
+    pub fn inside(&self) -> u16 {
+        self.inside
+    }
+
+    fn unheard(&mut self, has_position: bool, now_ms: u64) {
+        self.inside = 0;
+        let Some(level) = self.level else { return };
+        if level == Level::Notice && self.reasons.is_empty() {
+            return;
+        }
+        // Held for DECAY_MS from the last rule hit, or from when the drone
+        // was last heard if that was earlier (a position up to FRESH_MS old
+        // is still judged).
+        if now_ms.saturating_sub(self.last_hit_ms.min(self.last_heard_ms)) >= DECAY_MS {
+            *self = TrackThreat {
+                level: has_position.then_some(Level::Notice),
+                friend: self.friend,
+                snoozed_until_ms: self.snoozed_until_ms,
+                since_ms: now_ms,
+                ..TrackThreat::default()
+            };
+            return;
+        }
+        if level >= Level::Warning
+            && let Some(r) = &self.inbound
+        {
+            let mut held = *r;
+            held.rule = Rule::LastSeenInbound;
+            held.level = level;
+            held.ago_s = now_ms.saturating_sub(self.last_heard_ms).div_ceil(1000).min(u64::from(NONE_U16 - 1)) as u16;
+            self.held = true;
+            self.reasons.clear();
+            let _ = self.reasons.push(held);
+        }
+    }
+}
+
+// ------------------------------------------------------------ own motion --
+
+/// The unit's own speed and course, worked out from consecutive fixes when
+/// the receiver does not say (smoothed: each new estimate counts half).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct OwnMotion {
+    anchor: Option<(f64, f64, u64)>,
+    vel: Option<(f32, f32)>,
+}
+
+/// Fixes this far apart give a speed estimate.
+const MOTION_MIN_DT_MS: u64 = 2_000;
+/// Fixes further apart than this start the estimate again.
+const MOTION_MAX_DT_MS: u64 = 30_000;
+
+impl OwnMotion {
+    pub const fn new() -> Self {
+        Self { anchor: None, vel: None }
+    }
+
+    /// The receiver said (or the position is manual: speed 0).
+    pub fn reported(&mut self, lat: f64, lon: f64, ms: u64, speed: f32, course: Option<f32>) -> (Option<f32>, Option<f32>) {
+        self.anchor = Some((lat, lon, ms));
+        self.vel = course.map(|c| {
+            let (e, n) = crate::conflict::east_north(f64::from(speed), f64::from(c));
+            (e as f32, n as f32)
+        });
+        speed_course(speed, course)
+    }
+
+    /// A fix with no speed from the receiver.
+    pub fn derived(&mut self, lat: f64, lon: f64, ms: u64) -> (Option<f32>, Option<f32>) {
+        let Some((alat, alon, ams)) = self.anchor else {
+            self.anchor = Some((lat, lon, ms));
+            return (None, None);
+        };
+        let dt = ms.saturating_sub(ams);
+        if dt > MOTION_MAX_DT_MS || ms < ams {
+            self.anchor = Some((lat, lon, ms));
+            self.vel = None;
+            return (None, None);
+        }
+        if dt >= MOTION_MIN_DT_MS {
+            let (x, y) = Frame::at(alat, alon).xy(lat, lon);
+            let s = dt as f32 / 1000.0;
+            let v = (x / s, y / s);
+            self.vel = Some(match self.vel {
+                Some(o) => ((o.0 + v.0) / 2.0, (o.1 + v.1) / 2.0),
+                None => v,
+            });
+            self.anchor = Some((lat, lon, ms));
+        }
+        match self.vel {
+            Some((e, n)) => {
+                let speed = sqrtf(e * e + n * n);
+                speed_course(speed, Some(libm::atan2f(e, n).to_degrees()))
+            }
+            None => (None, None),
+        }
+    }
+}
+
+/// Speed, and the course only while moving ([`OWN_STATIONARY_MPS`]).
+fn speed_course(speed: f32, course: Option<f32>) -> (Option<f32>, Option<f32>) {
+    if speed < OWN_STATIONARY_MPS {
+        return (Some(0.0), None);
+    }
+    (Some(speed), course.map(|c| if c < 0.0 { c + 360.0 } else { c } % 360.0))
+}
+
+impl OwnFix {
+    /// Velocity east and north, m/s; zero when standing still or unknown.
+    pub fn velocity(&self) -> (f32, f32) {
+        match (self.speed_mps, self.course_deg) {
+            (Some(s), Some(c)) if s >= OWN_STATIONARY_MPS => {
+                let (e, n) = crate::conflict::east_north(f64::from(s), f64::from(c));
+                (e as f32, n as f32)
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+}
+
+// ------------------------------------------------------------ the rules --
+
+/// A drone's IDs as text (for `friend` matching).
+fn ids_of(t: &Track) -> impl Iterator<Item = &str> {
+    t.uas_ids
+        .iter()
+        .filter_map(|u| u.id.as_str())
+        .chain(t.dji.serial.as_ref().and_then(|s| s.as_str()))
+}
+
+/// The friend entry this track matches, if any.
+pub fn friend_of<'a>(t: &Track, places: &'a Places) -> Option<&'a Friend> {
+    places.friend(ids_of(t))
+}
+
+/// The average of the last [`SMOOTH_POINTS`] positions heard within
+/// [`FRESH_MS`], and their mean time.
+fn smoothed(ring: Option<&PathRing>, now_ms: u64) -> Option<(f64, f64, u64)> {
+    let r = ring?;
+    let mut n = 0u32;
+    let (mut lat, mut lon, mut t) = (0.0f64, 0.0f64, 0u64);
+    for (pt, p) in r.fine().rev().take(SMOOTH_POINTS) {
+        if now_ms.saturating_sub(pt) > FRESH_MS {
+            break;
+        }
+        lat += p.lat();
+        lon += p.lon();
+        t += pt;
+        n += 1;
+    }
+    (n > 0).then(|| (lat / f64::from(n), lon / f64::from(n), t / u64::from(n)))
+}
+
+fn mean(pts: &[(u64, f32, f32)]) -> (f32, f32, f32) {
+    let n = pts.len().max(1) as f32;
+    let (mut x, mut y, mut t) = (0.0, 0.0, 0.0);
+    for &(pt, px, py) in pts {
+        x += px;
+        y += py;
+        t += pt as f32 / 1000.0;
+    }
+    (x / n, y / n, t / n)
+}
+
+fn angle_deg(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (la, lb) = (sqrtf(a.0 * a.0 + a.1 * a.1), sqrtf(b.0 * b.0 + b.1 * b.1));
+    if la <= 0.0 || lb <= 0.0 {
+        return 180.0;
+    }
+    acosf(((a.0 * b.0 + a.1 * b.1) / (la * lb)).clamp(-1.0, 1.0)).to_degrees()
+}
+
+/// Whether the recent path is fairly straight, and the velocity it shows
+/// (east, north, m/s). The path is split in two halves; each half's
+/// direction is taken between averages of three points (so one bad
+/// position moves it little), and the halves must agree within
+/// [`MAX_TURN_DEG`] and with the reported direction within
+/// [`MAX_COURSE_OFF_DEG`]. A circling drone turns too much; a hovering one
+/// covers too little ground.
+pub fn straight_path(ring: &PathRing, now_ms: u64, course: Option<f32>, speed: Option<f32>) -> Option<(f32, f32)> {
+    let last = ring.last_ms()?;
+    if now_ms.saturating_sub(last) > FRESH_MS {
+        return None;
+    }
+    let mut pts: Vec<(u64, f32, f32), 24> = Vec::new();
+    let (_, newest) = ring.fine().next_back()?;
+    let frame = Frame::at(newest.lat(), newest.lon());
+    for (t, p) in ring.fine().rev() {
+        if last.saturating_sub(t) > STRAIGHT_WINDOW_MS || pts.is_full() {
+            break;
+        }
+        let (x, y) = frame.xy(p.lat(), p.lon());
+        let _ = pts.push((t, x, y));
+    }
+    pts.reverse();
+    let n = pts.len();
+    if n < 5 {
+        return None;
+    }
+    let span = pts[n - 1].0 - pts[0].0;
+    let need = if speed.is_some_and(|s| s > STRAIGHT_FAST_MPS) { STRAIGHT_SPAN_FAST_MS } else { STRAIGHT_SPAN_MS };
+    if span < need {
+        return None;
+    }
+    let a = mean(&pts[..3]);
+    let m = mean(&pts[n / 2 - 1..n / 2 + 2]);
+    let b = mean(&pts[n - 3..]);
+    let d1 = (m.0 - a.0, m.1 - a.1);
+    let d2 = (b.0 - m.0, b.1 - m.1);
+    let len = |d: (f32, f32)| sqrtf(d.0 * d.0 + d.1 * d.1);
+    if len(d1) < MIN_LEG_M || len(d2) < MIN_LEG_M || angle_deg(d1, d2) > MAX_TURN_DEG {
+        return None;
+    }
+    let whole = (b.0 - a.0, b.1 - a.1);
+    if let Some(c) = course {
+        let r = c.to_radians();
+        if angle_deg(whole, (libm::sinf(r), libm::cosf(r))) > MAX_COURSE_OFF_DEG {
+            return None;
+        }
+    }
+    let dt = (b.2 - a.2).max(0.5);
+    Some((whole.0 / dt, whole.1 / dt))
+}
+
+/// One place being judged against: its outline in its own flat map, how
+/// it moves (the bubble moves with the unit), its name and ceiling.
+struct Target {
+    local: Local,
+    vel: (f32, f32),
+    name: Name,
+    ceiling_m: f32,
+}
+
+/// Judge one drone against every place. `None` when it is not judged: not
+/// confirmed, no position, or the position is older than [`FRESH_MS`].
+pub fn evaluate(t: &Track, ring: Option<&PathRing>, places: &Places, own: Option<&OwnFix>, now_ms: u64) -> Option<Eval> {
+    let was_inside = t.threat.inside;
+    if !t.confirmed() {
+        return None;
+    }
+    let loc = t.location.as_ref()?;
+    let pos = loc.value.position?;
+    if now_ms.saturating_sub(loc.rx_ms) > FRESH_MS {
+        return None;
+    }
+    let friend = friend_of(t, places).is_some();
+    let (lat, lon, at_ms) = smoothed(ring, now_ms).unwrap_or((pos.lat, pos.lon, loc.rx_ms));
+    let l = &loc.value;
+    let reported = match (l.speed_horizontal, l.direction) {
+        (Some(s), Some(d)) => {
+            let (e, n) = crate::conflict::east_north(f64::from(s), f64::from(d));
+            Some((e as f32, n as f32))
+        }
+        _ => None,
+    };
+    let path_vel = ring.and_then(|r| straight_path(r, now_ms, l.direction, l.speed_horizontal));
+    // The approach rules need a straight path; the velocity is the
+    // drone's own report when it sends one, else what the path shows.
+    let approach_vel = path_vel.map(|p| reported.unwrap_or(p));
+    let height = match (l.altitude_geodetic, own.and_then(|o| o.alt_m)) {
+        (Some(d), Some(o)) => Some(d - o as f32),
+        _ => l.height.filter(|_| {
+            matches!(l.height_type, rid::message::HeightType::AboveTakeoff | rid::message::HeightType::AboveGround)
+        }),
+    };
+    let pilot = t
+        .system
+        .as_ref()
+        .filter(|s| now_ms.saturating_sub(s.rx_ms) <= PILOT_FRESH_MS)
+        .and_then(|s| s.value.operator_position);
+    let mut hits: Vec<Reason, 24> = Vec::new();
+    let mut add = |r: Reason| {
+        let _ = hits.push(r);
+    };
+    let bubble = places.bubble_m.zip(own).map(|(r, o)| Target {
+        local: Local::circle(o.lat, o.lon, r),
+        vel: o.velocity(),
+        name: Name::new(),
+        ceiling_m: places::DEFAULT_CEILING_M,
+    });
+    let areas = places.areas.iter().filter_map(|a| {
+        Some(Target { local: Local::of(a.shape.as_ref()?), vel: (0.0, 0.0), name: a.name.clone(), ceiling_m: a.ceiling() })
+    });
+    let place_level = if friend { Level::Notice } else { Level::Caution };
+    let mut inside_now = 0u16;
+    // Bit 0 the bubble (when on), bit 1 + n area n.
+    let bits = (places.bubble_m.is_some() && own.is_some()).then_some(1u16).into_iter().chain(
+        places.areas.iter().enumerate().filter(|(_, a)| a.shape.is_some()).map(|(i, _)| 2u16 << i),
+    );
+    for (tg, bit) in bubble.into_iter().chain(areas).zip(bits) {
+        let f = &tg.local.frame;
+        let age_s = (now_ms.saturating_sub(at_ms) as f32 / 1000.0).min(crate::conflict::MAX_EXTRAPOLATE_S as f32);
+        let mut p = f.xy(lat, lon);
+        if let Some(v) = approach_vel.or(reported) {
+            p = (p.0 + v.0 * age_s, p.1 + v.1 * age_s);
+        }
+        let from_middle = sqrtf(p.0 * p.0 + p.1 * p.1);
+        let inside = tg.local.contains(p) || (was_inside & bit != 0 && tg.local.outside_by(p) <= EDGE_MARGIN_M);
+        if inside {
+            inside_now |= bit;
+            add(Reason::new(Rule::InArea, place_level, &tg.name, from_middle).with_height(height));
+            if let Some(h) = height.filter(|h| *h > tg.ceiling_m) {
+                add(Reason::new(Rule::AboveCeiling, place_level, &tg.name, from_middle).with_height(Some(h)));
+            }
+        }
+        if let Some(pp) = pilot {
+            let q = f.xy(pp.lat, pp.lon);
+            let out = tg.local.outside_by(q);
+            if out <= PILOT_NEAR_M {
+                add(Reason::new(Rule::PilotNear, place_level, &tg.name, out));
+            }
+            if inside && out > 0.0 {
+                add(Reason::new(Rule::PilotOutside, place_level, &tg.name, out));
+            }
+        }
+        // Approach: relative to the place (the bubble moves with the unit).
+        let Some(v) = approach_vel else { continue };
+        let rel = (v.0 - tg.vel.0, v.1 - tg.vel.1);
+        let rel_speed = sqrtf(rel.0 * rel.0 + rel.1 * rel.1);
+        if rel_speed < MIN_APPROACH_MPS || from_middle < 1.0 {
+            continue;
+        }
+        let closing = -(p.0 * rel.0 + p.1 * rel.1) / from_middle;
+        if closing <= 0.0 {
+            continue;
+        }
+        let eta = if inside {
+            crate::conflict::closest_approach(
+                (f64::from(p.0), f64::from(p.1)),
+                (f64::from(rel.0), f64::from(rel.1)),
+                f64::from(LOOKAHEAD_S),
+            )
+            .filter(|(_, d)| (*d as f32) < tg.local.core_m)
+            .map(|(t, _)| t as f32)
+        } else {
+            tg.local.entry_s(p, rel, LOOKAHEAD_S)
+        };
+        let Some(eta) = eta else { continue };
+        let r = Reason::new(Rule::Beeline, Level::Warning, &tg.name, from_middle).with_eta(eta).with_speed(closing);
+        if closing > FAST_MPS || eta < SOON_S {
+            let mut c = r;
+            c.rule = Rule::FastInbound;
+            c.level = Level::Critical;
+            add(c);
+        }
+        add(r);
+    }
+    let mut e = judge(hits, friend);
+    e.heard_ms = loc.rx_ms;
+    e.inside = inside_now;
+    Some(e)
+}
+
+/// The level from the rules' hits: the highest, raised to Warning when two
+/// different rules each gave Caution.
+fn judge<const H: usize>(mut hits: Vec<Reason, H>, friend: bool) -> Eval {
+    let mut cautions: Vec<Rule, 8> = Vec::new();
+    for h in hits.iter().filter(|h| h.level == Level::Caution) {
+        if !cautions.contains(&h.rule) {
+            let _ = cautions.push(h.rule);
+        }
+    }
+    let top = hits.iter().map(|h| h.level).max().unwrap_or(Level::Notice);
+    let combined = cautions.len() >= 2 && top < Level::Warning;
+    let level = if combined { Level::Warning } else { top };
+    // Most serious first; within a level the later rule (approach before
+    // place), then the nearer.
+    hits.sort_unstable_by(|a, b| {
+        b.level.cmp(&a.level).then(b.rule.cmp(&a.rule)).then(a.range_m.cmp(&b.range_m))
+    });
+    let mut reasons: Vec<Reason, MAX_REASONS> = Vec::new();
+    for h in hits {
+        // One reason per rule (the most serious place for it).
+        if reasons.iter().any(|r| r.rule == h.rule) {
+            continue;
+        }
+        if reasons.push(h).is_err() {
+            break;
+        }
+    }
+    Eval { level, reasons, combined, friend, heard_ms: 0, inside: 0 }
+}
+
+// ------------------------------------------------------------- wording --
+
+/// A level that rose, for the evidence log and the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rise {
+    pub track: TrackId,
+    pub level: Level,
+    pub snoozed: bool,
+}
+
+/// Evidence `threat_level` data: level (1), track id (u32 LE), the rule
+/// numbers of up to four reasons (4, 0 none), flags (1: bit 0 snoozed,
+/// bit 1 friend, bit 2 combination, bit 3 held after the drone was lost).
+pub fn rise_data(t: &Track, r: &Rise) -> [u8; 10] {
+    let mut d = [0u8; 10];
+    d[0] = r.level as u8;
+    d[1..5].copy_from_slice(&r.track.0.to_le_bytes());
+    for (i, reason) in t.threat.reasons.iter().take(4).enumerate() {
+        d[5 + i] = reason.rule as u8;
+    }
+    let th = &t.threat;
+    d[9] = u8::from(r.snoozed) | u8::from(th.friend) << 1 | u8::from(th.combined) << 2 | u8::from(th.held) << 3;
+    d
+}
+
+fn place_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
+    if r.is_bubble() { w.write_str("you") } else { w.write_str(r.place()) }
+}
+
+fn area_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
+    if r.is_bubble() { w.write_str("your bubble") } else { w.write_str(r.place()) }
+}
+
+/// One reason in words: `heading for house, 180 m away at 12 m/s, there in
+/// about 14 s`.
+pub fn write_reason(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
+    match r.rule {
+        Rule::InArea if r.is_bubble() => write!(w, "within your bubble, {:.0} m from you", r.range_m()),
+        Rule::InArea => write!(w, "over {}", r.place()),
+        Rule::PilotNear if r.range_m == 0 => {
+            w.write_str("pilot inside ")?;
+            area_text(w, r)
+        }
+        Rule::PilotNear => {
+            w.write_str("pilot at the edge of ")?;
+            area_text(w, r)?;
+            write!(w, " ({} m outside)", r.range_m)
+        }
+        Rule::PilotOutside => {
+            write!(w, "pilot outside, {} m beyond the edge of ", r.range_m)?;
+            area_text(w, r)
+        }
+        Rule::AboveCeiling => {
+            write!(w, "{:.0} m up over ", r.height_m().unwrap_or(0.0))?;
+            place_text(w, r)?;
+            w.write_str(", above the ceiling")
+        }
+        Rule::Beeline | Rule::FastInbound => {
+            w.write_str(if r.rule == Rule::FastInbound { "FAST, heading for " } else { "heading for " })?;
+            place_text(w, r)?;
+            write!(w, ", {} m away at {:.0} m/s", r.range_m, r.speed_mps().unwrap_or(0.0))?;
+            if let Some(t) = r.eta_s() {
+                write!(w, ", there in about {:.0} s", libm::ceilf(t))?;
+            }
+            Ok(())
+        }
+        Rule::LastSeenInbound => {
+            w.write_str("last seen heading for ")?;
+            place_text(w, r)?;
+            write!(w, ", {} m away, {} s ago", r.range_m, r.ago_s().unwrap_or(0))
+        }
+    }
+}
+
+/// The evidence and console text for a drone's level: `Warning: drone
+/// 1581F5FKD229400B4WW1 heading for house, 180 m away at 12 m/s, there in
+/// about 14 s; over yard`. The drone's ID arrived over the air: the hub
+/// cleans it before printing or logging.
+pub fn describe(t: &Track, now_ms: u64) -> String<256> {
+    let mut s: String<256> = String::new();
+    let th = &t.threat;
+    let _ = write!(s, "{}: drone ", th.level.map_or("No level", |l| l.label()));
+    match t.primary_id().and_then(|u| u.id.as_str()).filter(|x| !x.is_empty()) {
+        Some(id) => {
+            let _ = s.push_str(id);
+        }
+        None => {
+            let _ = write!(s, "#{}", t.id.0);
+        }
+    }
+    if th.friend {
+        let _ = s.push_str(" (friend)");
+    }
+    for (i, r) in th.reasons.iter().enumerate() {
+        let _ = s.push_str(if i == 0 { " " } else { "; " });
+        let _ = write_reason(&mut s, r);
+    }
+    if th.combined {
+        let _ = s.push_str("; two signs at once");
+    }
+    if th.snoozed(now_ms) {
+        let _ = s.push_str(" (snoozed)");
+    }
+    s
+}
+
+/// The short form for the screen strip: `WARNING #12 heading for house
+/// 180m 14s`.
+pub fn strip_text(t: &Track) -> Option<String<64>> {
+    let th = &t.threat;
+    let level = th.level?;
+    let mut s: String<64> = String::new();
+    let _ = write!(s, "{} #{}", level.upper(), t.id.0);
+    if let Some(r) = th.reasons.first() {
+        let _ = s.push(' ');
+        let mut place: String<16> = String::new();
+        let _ = place_text(&mut place, r);
+        let _ = match r.rule {
+            Rule::InArea => write!(s, "over {place}"),
+            Rule::PilotNear => write!(s, "pilot at {place}"),
+            Rule::PilotOutside => write!(s, "over {place}, pilot outside"),
+            Rule::AboveCeiling => write!(s, "{:.0}m up over {place}", r.height_m().unwrap_or(0.0)),
+            Rule::Beeline | Rule::FastInbound => {
+                write!(s, "{}to {place} {}m", if r.rule == Rule::FastInbound { "FAST " } else { "" }, r.range_m)
+                    .and_then(|_| match r.eta_s() {
+                        Some(e) => write!(s, " {:.0}s", libm::ceilf(e)),
+                        None => Ok(()),
+                    })
+            }
+            Rule::LastSeenInbound => write!(s, "lost inbound {place} {}s ago", r.ago_s().unwrap_or(0)),
+        };
+    }
+    Some(s)
+}
+
+#[cfg(test)]
+mod tests;

@@ -214,6 +214,8 @@ fn full_table_keeps_the_nearest() {
         lon: CITY_HALL.1,
         alt_m: None,
         fix_ms: 0,
+        speed_mps: None,
+        course_deg: None,
     };
     // Four entries: at most three established, at most two unproven.
     let mut t: AircraftTable<4> = AircraftTable::new();
@@ -310,6 +312,8 @@ fn aircraft_line_worst_case_fits() {
         lon: 179.123_456_789_012_3,
         alt_m: Some(-12_345.678_901_234),
         fix_ms: 0,
+        speed_mps: None,
+        course_deg: None,
     });
     let mut buf = [0u8; 2048];
     let n = json::aircraft_line(&tr.aircraft()[0], &[], &ctx, &mut buf).unwrap();
@@ -402,6 +406,8 @@ fn state_head_with_adsb_fits_its_bound() {
         lon: -179.123_456_789_012_3,
         alt_m: Some(-12_345.678_901_234),
         fix_ms: 0,
+        speed_mps: None,
+        course_deg: None,
     });
     let hub = json::HubStatus {
         own_source: json::OwnSource::Manual,

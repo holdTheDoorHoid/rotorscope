@@ -494,9 +494,9 @@ impl<const N: usize> Engine<N> {
     /// drops an entry still in use at its own standing (see `entry`): size
     /// `N` for every drone and aircraft the tracker holds (the P4 uses its
     /// drone plus aircraft capacity) and nothing is ever dropped at all.
-    pub fn update<const T: usize, const A: usize>(
+    pub fn update<const T: usize, const A: usize, const P: usize>(
         &mut self,
-        tracker: &Tracker<T, A>,
+        tracker: &Tracker<T, A, P>,
         pack: Option<&Pack<'_>>,
         now: u64,
         utc_ms: Option<u64>,
@@ -550,9 +550,9 @@ impl<const N: usize> Engine<N> {
     }
 
     /// One drone's evaluation (see [`Engine::update`]).
-    fn eval_drone<const T: usize, const A: usize>(
+    fn eval_drone<const T: usize, const A: usize, const P: usize>(
         &mut self,
-        tracker: &Tracker<T, A>,
+        tracker: &Tracker<T, A, P>,
         t: &tracker::Track,
         pack: Option<&Pack<'_>>,
         s: &Settings,
