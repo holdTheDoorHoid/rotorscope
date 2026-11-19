@@ -15,6 +15,22 @@ heard in a single instant stays unconfirmed (`?` in the table, `"confirmed":fals
 recordings at once are each timed from their own first line, so their drones are not
 aligned with one another.
 
+## Working on the phone page (`--mock-state`)
+
+`rid-view --http 127.0.0.1:8080 --demo` serves the page with the demo's drones, but its tracker
+judges no threat levels (no path history), so the threat display, the places on the radar and
+the signals without a position never show. For those, serve a fixed state instead:
+
+    cargo build -p rid-view
+    target/debug/rid-view --http 127.0.0.1:8080 --mock-state web/mock/threat-state.json
+
+then open <http://127.0.0.1:8080/> and stop it with Ctrl-C. The file is read again every half
+second, so edits show on the next poll. `web/mock/threat-state.json` was written by the tracker
+itself (a scripted run with two areas, a bubble, the `home` profile, drones from Notice to
+Critical and an FPV video signal getting louder on two nodes; test coordinates only);
+`web/mock/no-levels-state.json` is the same sky as a hub that judges no levels sends it (the S3
+hub), to check that the page degrades cleanly. A position typed on the page is ignored.
+
 ## Laptop Bluetooth as a Remote ID sensor (`--ble`)
 
 Any Linux laptop adapter can listen for Bluetooth Remote ID through BlueZ. It needs no root and

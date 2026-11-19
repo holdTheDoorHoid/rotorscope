@@ -134,6 +134,12 @@ OPTIONS:
                              Keep it on loopback: the page shows where
                              drones are and takes a position, and other
                              addresses print a warning.
+    --mock-state FILE        With --http and nothing else: serve FILE as
+                             /api/state (read again every half second, so
+                             edits show at once) instead of a tracker's
+                             state, for working on the phone page. Positions
+                             typed on the page are ignored. Fixtures:
+                             web/mock/*.json.
     -h, --help               This text.
 ";
 
@@ -157,6 +163,7 @@ struct Options {
     sniffle: Vec<String>,
     sniffle_mode: String,
     duration: Option<u64>,
+    mock_state: Option<String>,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -180,6 +187,7 @@ fn parse_args() -> Result<Options, String> {
         sniffle: Vec::new(),
         sniffle_mode: "1m".into(),
         duration: None,
+        mock_state: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -217,6 +225,7 @@ fn parse_args() -> Result<Options, String> {
             "--json" => o.json = true,
             "--realtime" => o.realtime = true,
             "--http" => o.http = Some(value("--http")?),
+            "--mock-state" => o.mock_state = Some(value("--mock-state")?),
             "--show-link-ids" => o.show_link_ids = true,
             "--hide-droneid-ids" => o.hide_droneid_ids = true,
             "--adsbee" => o.adsbee = Some(value("--adsbee")?),
@@ -233,6 +242,15 @@ fn parse_args() -> Result<Options, String> {
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => o.inputs.push(a),
         }
+    }
+    if o.mock_state.is_some() {
+        if o.http.is_none() {
+            return Err("--mock-state serves the phone page: it needs --http".into());
+        }
+        if !o.inputs.is_empty() || o.demo || o.adsbee.is_some() || !o.ble.is_empty() || !o.sniffle.is_empty() || o.once {
+            return Err("--mock-state takes no inputs: it serves a fixed state file".into());
+        }
+        return Ok(o);
     }
     if o.inputs.is_empty()
         && !o.demo
@@ -1048,6 +1066,60 @@ fn run(o: Options) -> Result<(), String> {
     Ok(())
 }
 
+/// `--mock-state FILE`: the phone page and its API with a fixed state, for
+/// working on the page without a hub or a tracker that judges threat
+/// levels. The file is read again every half second; a file that is not
+/// JSON keeps the last good one (and says why, once).
+fn run_mock(o: Options) -> Result<(), String> {
+    let (Some(addr), Some(path)) = (o.http.as_deref(), o.mock_state.as_deref()) else {
+        return Err("--mock-state needs --http".into());
+    };
+    let listener = TcpListener::bind(addr).map_err(|e| format!("--http {addr}: {e}"))?;
+    let at = listener.local_addr().map_err(|e| e.to_string())?;
+    if let Some(w) = http::exposure_warning(at) {
+        eprintln!("{w}");
+    }
+    let (pos_tx, pos_rx) = mpsc::channel::<OwnPosRequest>();
+    let shared = Arc::new(http::Shared {
+        state: Mutex::new(Vec::new()),
+        own_pos: Mutex::new(pos_tx),
+    });
+    let mut last_err = String::new();
+    let mut load = |shared: &http::Shared| match std::fs::read(path) {
+        Ok(b) => match serde_json::from_slice::<serde_json::Value>(&b) {
+            Ok(_) => {
+                if let Ok(mut s) = shared.state.lock() {
+                    *s = b;
+                }
+                last_err.clear();
+                Ok(())
+            }
+            Err(e) => Err(format!("{path}: not JSON: {e}")),
+        },
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+    .or_else(|e| {
+        if e != last_err {
+            eprintln!("rid-view: {e} (keeping the last good state)");
+            last_err = e;
+        }
+        Ok::<(), String>(())
+    });
+    load(&shared)?;
+    if shared.state.lock().map(|s| s.is_empty()).unwrap_or(true) {
+        return Err(format!("{path}: no state to serve"));
+    }
+    http::spawn(listener, Arc::clone(&shared));
+    eprintln!("rid-view: phone page at http://{at}/ (mock state from {path}; Ctrl-C to stop)");
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+        load(&shared)?;
+        while let Ok(r) = pos_rx.try_recv() {
+            eprintln!("rid-view: mock: position from the page ignored ({r:?})");
+        }
+    }
+}
+
 fn main() -> ExitCode {
     match parse_args() {
         Err(e) if e.is_empty() => {
@@ -1058,7 +1130,7 @@ fn main() -> ExitCode {
             eprintln!("rid-view: {e}\n\n{USAGE}");
             ExitCode::from(2)
         }
-        Ok(o) => match run(o) {
+        Ok(o) => match if o.mock_state.is_some() { run_mock(o) } else { run(o) } {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("rid-view: {e}");

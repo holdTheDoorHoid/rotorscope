@@ -1,0 +1,558 @@
+{
+ "t": "state",
+ "v": 1,
+ "now_ms": 199000,
+ "utc_ms": 1794232987250,
+ "own": {
+  "lat": 39.9521,
+  "lon": -75.1638,
+  "alt": 10,
+  "source": "gps",
+  "age_ms": 1000
+ },
+ "manual": null,
+ "gps": {
+  "state": "3d",
+  "sats": 11
+ },
+ "rec": true,
+ "nodes": [
+  {
+   "role": "Wifi24",
+   "alive": true,
+   "age_ms": 300,
+   "seen_per_s": 412,
+   "rid_per_s": 3,
+   "drops": 0,
+   "can": null,
+   "plan": null
+  },
+  {
+   "role": "Fpv",
+   "alive": true,
+   "age_ms": 700,
+   "seen_per_s": 55,
+   "rid_per_s": 0,
+   "drops": 0,
+   "can": null,
+   "plan": null
+  },
+  {
+   "role": "Ble",
+   "alive": false,
+   "age_ms": null,
+   "seen_per_s": null,
+   "rid_per_s": 0,
+   "drops": null,
+   "can": null,
+   "plan": null
+  }
+ ],
+ "adsb": null,
+ "open_links": [],
+ "tracks": [
+  {
+   "t": "track",
+   "id": 1,
+   "state": "active",
+   "ids": [
+    {
+     "type": "SerialNumber",
+     "id": "1668BEF2C0A11C7E"
+    }
+   ],
+   "ua": "HelicopterOrMultirotor",
+   "first_ms": 100000,
+   "last_ms": 198000,
+   "age_ms": 1000,
+   "rssi": -60,
+   "links": [
+    {
+     "tr": "WifiBeacon",
+     "n": 99,
+     "rssi": -60,
+     "ch": 6,
+     "band": "2.4",
+     "mac": "60:60:1f:00:00:02",
+     "ctr": 7,
+     "age_ms": 1000,
+     "node": 0
+    }
+   ],
+   "loc": {
+    "lat": 39.9524745,
+    "lon": -75.1631176,
+    "alt_geo": 55,
+    "alt_baro": null,
+    "height": 45,
+    "height_ref": "AboveTakeoff",
+    "speed": 0,
+    "vspeed": 0,
+    "dir": 0,
+    "status": "Airborne",
+    "hacc_m": 10,
+    "vacc_m": 10,
+    "age_ms": 1000
+   },
+   "op": {
+    "lat": 39.9526396,
+    "lon": -75.1687273,
+    "alt": null,
+    "src": "Takeoff",
+    "age_ms": 1000
+   },
+   "self_id": null,
+   "op_id": null,
+   "own": {
+    "dist_m": 71.6,
+    "brg": 54.5,
+    "op_dist_m": 425.3,
+    "op_brg": 278.1,
+    "above_m": 45
+   },
+   "loc_src": "RemoteId",
+   "op_src": "RemoteId",
+   "home": null,
+   "dji": null,
+   "spoof": {
+    "score": 44,
+    "flags": [
+     {
+      "check": "vendor_mismatch",
+      "conf": 30,
+      "detail": 3
+     },
+     {
+      "check": "frozen_counter",
+      "conf": 20,
+      "detail": 100
+     }
+    ],
+    "auth": 0
+   },
+   "cont": null,
+   "confirmed": true,
+   "claims": null,
+   "threat": {
+    "level": "warning",
+    "snoozed_s": null,
+    "held": false,
+    "friend": false,
+    "combined": true,
+    "reasons": [
+     {
+      "rule": "pilot_outside",
+      "level": "caution",
+      "place": "",
+      "m": 174
+     },
+     {
+      "rule": "in_area",
+      "level": "caution",
+      "place": "",
+      "m": 73,
+      "h_m": 45
+     }
+    ]
+   }
+  },
+  {
+   "t": "track",
+   "id": 2,
+   "state": "active",
+   "ids": [
+    {
+     "type": "SerialNumber",
+     "id": "TEST-ORBIT-03"
+    }
+   ],
+   "ua": "HelicopterOrMultirotor",
+   "first_ms": 100000,
+   "last_ms": 198000,
+   "age_ms": 1000,
+   "rssi": -60,
+   "links": [
+    {
+     "tr": "WifiBeacon",
+     "n": 99,
+     "rssi": -60,
+     "ch": 6,
+     "band": "2.4",
+     "mac": "60:60:1f:00:00:03",
+     "ctr": 7,
+     "age_ms": 1000,
+     "node": 0
+    }
+   ],
+   "loc": {
+    "lat": 39.952067,
+    "lon": -75.1635944,
+    "alt_geo": 60,
+    "alt_baro": null,
+    "height": 50,
+    "height_ref": "AboveTakeoff",
+    "speed": 6,
+    "vspeed": 0,
+    "dir": 211,
+    "status": "Airborne",
+    "hacc_m": 10,
+    "vacc_m": 10,
+    "age_ms": 1000
+   },
+   "op": null,
+   "self_id": null,
+   "op_id": null,
+   "own": {
+    "dist_m": 17.9,
+    "brg": 101.8,
+    "op_dist_m": null,
+    "op_brg": null,
+    "above_m": 50
+   },
+   "loc_src": "RemoteId",
+   "op_src": null,
+   "home": null,
+   "dji": null,
+   "spoof": {
+    "score": 29,
+    "flags": [
+     {
+      "check": "serial_format",
+      "conf": 20,
+      "detail": 3
+     },
+     {
+      "check": "incomplete_message_set",
+      "conf": 20,
+      "detail": 1
+     },
+     {
+      "check": "frozen_counter",
+      "conf": 20,
+      "detail": 100
+     }
+    ],
+    "auth": 0
+   },
+   "cont": null,
+   "confirmed": true,
+   "claims": null,
+   "threat": {
+    "level": "warning",
+    "snoozed_s": null,
+    "held": false,
+    "friend": false,
+    "combined": true,
+    "reasons": [
+     {
+      "rule": "circling",
+      "level": "caution",
+      "place": "",
+      "m": 69,
+      "h_m": 50,
+      "for_s": 78
+     },
+     {
+      "rule": "in_area",
+      "level": "caution",
+      "place": "",
+      "m": 19,
+      "h_m": 50
+     }
+    ]
+   }
+  },
+  {
+   "t": "track",
+   "id": 3,
+   "state": "active",
+   "ids": [
+    {
+     "type": "SerialNumber",
+     "id": "OUR-MINI-01"
+    }
+   ],
+   "ua": "HelicopterOrMultirotor",
+   "first_ms": 100000,
+   "last_ms": 198000,
+   "age_ms": 1000,
+   "rssi": -60,
+   "links": [
+    {
+     "tr": "WifiBeacon",
+     "n": 99,
+     "rssi": -60,
+     "ch": 6,
+     "band": "2.4",
+     "mac": "60:60:1f:00:00:04",
+     "ctr": 7,
+     "age_ms": 1000,
+     "node": 0
+    }
+   ],
+   "loc": {
+    "lat": 39.9565966,
+    "lon": -75.1555879,
+    "alt_geo": 90,
+    "alt_baro": null,
+    "height": 80,
+    "height_ref": "AboveTakeoff",
+    "speed": 0,
+    "vspeed": 0,
+    "dir": 0,
+    "status": "Airborne",
+    "hacc_m": 10,
+    "vacc_m": 10,
+    "age_ms": 1000
+   },
+   "op": {
+    "lat": 39.9564167,
+    "lon": -75.1557052,
+    "alt": null,
+    "src": "Takeoff",
+    "age_ms": 1000
+   },
+   "self_id": null,
+   "op_id": null,
+   "own": {
+    "dist_m": 861.2,
+    "brg": 54.6,
+    "op_dist_m": 841.5,
+    "op_brg": 55.3,
+    "above_m": 80
+   },
+   "loc_src": "RemoteId",
+   "op_src": "RemoteId",
+   "home": null,
+   "dji": null,
+   "spoof": {
+    "score": 29,
+    "flags": [
+     {
+      "check": "serial_format",
+      "conf": 20,
+      "detail": 2
+     },
+     {
+      "check": "frozen_counter",
+      "conf": 20,
+      "detail": 100
+     }
+    ],
+    "auth": 0
+   },
+   "cont": null,
+   "confirmed": true,
+   "claims": null,
+   "threat": {
+    "level": "notice",
+    "snoozed_s": null,
+    "held": false,
+    "friend": true,
+    "combined": false,
+    "reasons": []
+   }
+  },
+  {
+   "t": "track",
+   "id": 4,
+   "state": "active",
+   "ids": [
+    {
+     "type": "SerialNumber",
+     "id": "1581F5FKD229400B4WW1"
+    }
+   ],
+   "ua": "HelicopterOrMultirotor",
+   "first_ms": 150000,
+   "last_ms": 198000,
+   "age_ms": 1000,
+   "rssi": -60,
+   "links": [
+    {
+     "tr": "WifiBeacon",
+     "n": 49,
+     "rssi": -60,
+     "ch": 6,
+     "band": "2.4",
+     "mac": "60:60:1f:00:00:01",
+     "ctr": 7,
+     "age_ms": 1000,
+     "node": 0
+    }
+   ],
+   "loc": {
+    "lat": 39.9464882,
+    "lon": -75.1638,
+    "alt_geo": 60.5,
+    "alt_baro": null,
+    "height": 50.5,
+    "height_ref": "AboveTakeoff",
+    "speed": 12,
+    "vspeed": 0,
+    "dir": 0,
+    "status": "Airborne",
+    "hacc_m": 10,
+    "vacc_m": 10,
+    "age_ms": 1000
+   },
+   "op": null,
+   "self_id": null,
+   "op_id": null,
+   "own": {
+    "dist_m": 623.1,
+    "brg": 180,
+    "op_dist_m": null,
+    "op_brg": null,
+    "above_m": 50.5
+   },
+   "loc_src": "RemoteId",
+   "op_src": null,
+   "home": null,
+   "dji": null,
+   "spoof": {
+    "score": 29,
+    "flags": [
+     {
+      "check": "incomplete_message_set",
+      "conf": 20,
+      "detail": 1
+     },
+     {
+      "check": "frozen_counter",
+      "conf": 20,
+      "detail": 100
+     }
+    ],
+    "auth": 0
+   },
+   "cont": null,
+   "confirmed": true,
+   "claims": null,
+   "threat": {
+    "level": "critical",
+    "snoozed_s": null,
+    "held": false,
+    "friend": false,
+    "combined": false,
+    "reasons": [
+     {
+      "rule": "fast_inbound",
+      "level": "critical",
+      "place": "yard",
+      "m": 427,
+      "eta_s": 28.3,
+      "mps": 12
+     },
+     {
+      "rule": "beeline",
+      "level": "warning",
+      "place": "yard",
+      "m": 427,
+      "eta_s": 28.3,
+      "mps": 12
+     }
+    ]
+   }
+  }
+ ],
+ "aircraft": [],
+ "rf": [
+  {
+   "t": "rf",
+   "id": 1,
+   "state": "active",
+   "kind": "AnalogVideo",
+   "label": "Analog video",
+   "alerts": true,
+   "mhz": 5740,
+   "width_khz": null,
+   "snr": 13,
+   "peak_snr": 18,
+   "duty": 90,
+   "line_hz": 15734,
+   "n": 198,
+   "node": 2,
+   "first_ms": 100000,
+   "last_ms": 198000,
+   "age_ms": 1000
+  }
+ ],
+ "wifi_drones": [],
+ "signal_threats": [
+  {
+   "t": "signal_threat",
+   "id": 1,
+   "basis": "signal_trend",
+   "src": "rf",
+   "src_id": 1,
+   "kind": "video",
+   "what": "Analog video 5740.0 MHz",
+   "nodes": [
+    1,
+    2
+   ],
+   "threat": {
+    "level": "warning",
+    "snoozed_s": null,
+    "held": false,
+    "friend": false,
+    "combined": false,
+    "reasons": [
+     {
+      "rule": "getting_louder",
+      "level": "warning",
+      "place": "",
+      "for_s": 11,
+      "kind": "video",
+      "db": 8,
+      "nodes": 2
+     }
+    ]
+   },
+   "first_ms": 100000,
+   "last_ms": 198000,
+   "age_ms": 1000
+  }
+ ],
+ "places": {
+  "profile": "home",
+  "crowd": null,
+  "visits": true,
+  "friends": 1,
+  "bubble_m": 250,
+  "areas": [
+   {
+    "name": "house",
+    "ceiling_m": 120,
+    "circle": {
+     "lat": 39.9521,
+     "lon": -75.1638,
+     "r_m": 150
+    }
+   },
+   {
+    "name": "yard",
+    "ceiling_m": 60,
+    "poly": [
+     [
+      39.9506,
+      -75.1652
+     ],
+     [
+      39.9512,
+      -75.1631
+     ],
+     [
+      39.9501,
+      -75.162
+     ],
+     [
+      39.9494,
+      -75.1641
+     ]
+    ]
+   }
+  ]
+ }
+}

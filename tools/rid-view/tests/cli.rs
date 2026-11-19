@@ -758,3 +758,41 @@ fn http_refuses_cross_site_and_rebound_requests() {
     let local = req(&format!("Host: localhost:{port}\r\n"), "application/json");
     assert_eq!(http(addr, &local).0, 200);
 }
+
+/// `--mock-state`: the phone page's fixtures (web/mock) served as
+/// `/api/state`, byte for byte, for working on the page; refused without
+/// `--http` or with inputs.
+#[test]
+fn mock_state_serves_the_fixture() {
+    use std::io::{BufRead, BufReader, Read};
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/mock/threat-state.json");
+    let no = Command::new(BIN).args(["--mock-state", fixture]).output().unwrap();
+    assert!(!no.status.success());
+    assert!(String::from_utf8_lossy(&no.stderr).contains("needs --http"));
+    let no = Command::new(BIN).args(["--http", "127.0.0.1:0", "--demo", "--mock-state", fixture]).output().unwrap();
+    assert!(!no.status.success());
+    let mut child = Command::new(BIN)
+        .args(["--http", "127.0.0.1:0", "--mock-state", fixture])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    err.read_line(&mut line).unwrap();
+    let addr = line.split("http://").nth(1).and_then(|s| s.split('/').next()).unwrap_or_else(|| panic!("{line}")).to_string();
+    let mut s = std::net::TcpStream::connect(&addr).unwrap();
+    write!(s, "GET /api/state HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").unwrap();
+    let mut resp = Vec::new();
+    s.read_to_end(&mut resp).unwrap();
+    child.kill().unwrap();
+    let _ = child.wait();
+    let at = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    assert!(resp.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&resp[..at]));
+    let body: serde_json::Value = serde_json::from_slice(&resp[at..]).unwrap();
+    let want: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+    assert_eq!(body, want);
+    // The fixture has what the page draws: places, levels, a signal.
+    assert_eq!(body["places"]["profile"], "home");
+    assert!(body["tracks"].as_array().unwrap().iter().any(|t| t["threat"]["level"] == "critical"));
+    assert_eq!(body["signal_threats"][0]["basis"], "signal_trend");
+}
