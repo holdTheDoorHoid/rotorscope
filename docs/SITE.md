@@ -151,11 +151,18 @@ trace, so every load writes evidence "setting" events:
    changed: node aa:bb:cc:dd:ee:01 at 39.9600000 -75.1638000 (was 39.9521000
    -75.1638000); spoof checks use it`. The same file loaded again changes
    nothing and logs only the summary.
-3. **Bounded.** However long the file (it is read a piece at a time; later
-   lines win), the hub holds at most 24 mutes and 16 node positions, so one
+3. **Bounded.** The hub holds at most 24 mutes and 16 node positions, so one
    load can change at most 80 things. At most 48 are logged one by one; the
    rest are counted in one more event (`site file changed: N more changes not
    logged one by one`). The hash always covers the whole file.
+4. **A file over 64 KB is not loaded.** The hub stops everything else while it
+   reads the file, so a very long one (planted, or damaged) must not be able
+   to stall it. It writes one event instead (`site file NOT loaded: N bytes is
+   over the limit of 65536 ...`), prints the same line, and uses nothing from
+   the file: no mutes, node positions or switches from the card. A file that
+   you and the hub wrote is a few hundred bytes; shorten a long one on a
+   computer (later lines win, so the old lines they replace can go). The
+   console names the first 8 ignored lines of a load and counts the rest.
 
 Changes to the control switches are logged as their own setting event when
 they take effect, as before.

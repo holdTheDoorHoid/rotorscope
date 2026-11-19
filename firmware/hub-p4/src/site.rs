@@ -92,6 +92,16 @@ impl Site {
         }
     }
 
+    /// The card's file was too long to read (`sd.rs`): logged, nothing
+    /// applied. Whatever the hub was using stays in use.
+    #[inline(never)]
+    pub fn too_big(&mut self, bytes: u32, ev: &mut Evidence) {
+        let big = site::TooBig { bytes };
+        let mut t: heapless::String<192> = heapless::String::new();
+        let _ = write!(t, "{big}");
+        ev.event(evidence::EventCode::Setting, t.as_bytes(), &big.data());
+    }
+
     /// What the card's file said at mount: logged (hash, summary, every
     /// change from what the hub was using), then applied.
     #[inline(never)]

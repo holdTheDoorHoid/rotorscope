@@ -456,6 +456,49 @@ impl SiteState {
 /// Longest line kept; a longer one is ignored as a whole.
 pub const MAX_LINE: usize = 160;
 
+/// The largest site file the hub reads. A file the hub and its owner write
+/// (a line per node, per mute, per switch) is a few hundred bytes; this is
+/// room for more than a thousand changes. A longer one is not read at all
+/// ([`TooBig`]): reading costs time on the card with the hub's main loop
+/// stopped, so a huge or planted file must not be able to stall the hub or
+/// trip its watchdog at every mount.
+pub const MAX_FILE_BYTES: u32 = 64 * 1024;
+
+/// Ignored lines named one by one on the console per load; the rest are
+/// only counted ([`more_ignored`]). A file of junk lines would otherwise
+/// keep the console (and the loop behind it) busy for minutes.
+pub const MAX_IGNORED_NAMED: u32 = 8;
+
+/// How many ignored lines of a load were not named on the console.
+pub fn more_ignored(ignored: u32) -> u32 {
+    ignored.saturating_sub(MAX_IGNORED_NAMED)
+}
+
+/// A site file longer than [`MAX_FILE_BYTES`]: not read, nothing in it used.
+/// Its text is the console line and the evidence "setting" event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooBig {
+    pub bytes: u32,
+}
+
+impl core::fmt::Display for TooBig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "site file NOT loaded: {} bytes is over the limit of {MAX_FILE_BYTES}; nothing in it is used (no mutes, node positions or switches from the card). Shorten it on a computer",
+            self.bytes
+        )
+    }
+}
+
+impl TooBig {
+    /// The event's data: tag 5, then the file's length (u32, little-endian).
+    pub fn data(&self) -> [u8; 5] {
+        let b = self.bytes.to_le_bytes();
+        [5, b[0], b[1], b[2], b[3]]
+    }
+}
+
 /// Splits a byte stream fed in pieces into lines.
 #[derive(Debug, Default)]
 pub struct Lines {
@@ -870,6 +913,18 @@ mod tests {
         let text = std::format!("{sum}");
         assert!(text.ends_with("; theme auto (day default, night glass-cockpit, switch sunrise, brightness default)"), "{text}");
         assert!(std::format!("{}", ThemeSite::default()).starts_with("theme default"));
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_named_with_its_size() {
+        let t = TooBig { bytes: 3_500_000 };
+        let text = std::format!("{t}");
+        assert!(text.starts_with("site file NOT loaded: 3500000 bytes is over the limit of 65536;"), "{text}");
+        assert!(text.len() <= 192, "fits the hub's event text buffer: {}", text.len());
+        assert_eq!(t.data(), [5, 0xe0, 0x67, 0x35, 0x00]);
+        // The limit leaves room for a long life of appended lines.
+        assert!(MAX_FILE_BYTES as usize / MAX_LINE >= 400);
+        assert_eq!((more_ignored(0), more_ignored(8), more_ignored(9), more_ignored(50_000)), (0, 0, 1, 49_992));
     }
 
     #[test]

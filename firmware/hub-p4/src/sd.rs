@@ -232,6 +232,9 @@ pub struct Logger {
     pub flarm_key_state: &'static str,
     /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
     site: Option<(tracker::site::SiteState, crate::site::FileFacts)>,
+    /// The length of a `SITE.TXT` too long to read, until the main loop
+    /// takes it ([`Logger::take_site_too_big`]).
+    site_too_big: Option<u32>,
     /// `ROTORSCP/GPSMEM.TXT` (remembered home and time) as read at mount,
     /// until the main loop takes it; `Some(None)`: no file.
     gps_mem: Option<Option<crate::gps::Memory>>,
@@ -359,6 +362,7 @@ impl Logger {
             flarm_keys: None,
             flarm_key_state: "none",
             site: None,
+            site_too_big: None,
             gps_mem: None,
             gps_mem_pending: None,
             gps_mem_writes: 0,
@@ -441,10 +445,18 @@ impl Logger {
         self.site.take()
     }
 
-    /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (it only
-    /// grows, so it can be any length; later lines win).
+    /// A site file too long to read, as found at mount (its length), until
+    /// the main loop takes it for the evidence log.
+    pub fn take_site_too_big(&mut self) -> Option<u32> {
+        self.site_too_big.take()
+    }
+
+    /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (later lines
+    /// win). The main loop is stopped while this runs, so it is bounded: a
+    /// file over `MAX_FILE_BYTES` is not read at all, the watchdog is fed at
+    /// every piece, and only the first few ignored lines are printed.
     fn load_site(&mut self) {
-        use tracker::site::{Lines, SiteState, finish_into, read_into};
+        use tracker::site::{Lines, MAX_FILE_BYTES, MAX_IGNORED_NAMED, SiteState, TooBig, finish_into, more_ignored, read_into};
         let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
         let f = match vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadOnly) {
             Ok(f) => f,
@@ -457,13 +469,30 @@ impl Logger {
                 return;
             }
         };
+        // A length that cannot be read counts as too long.
+        let len = vm.file_length(f).unwrap_or(u32::MAX);
+        if len > MAX_FILE_BYTES {
+            let _ = vm.close_file(f);
+            println!("hub-p4: {}", TooBig { bytes: len });
+            self.site_too_big = Some(len);
+            return;
+        }
         let (mut st, mut lines) = (SiteState::default(), Lines::default());
-        let refused = |n: u32, e: &str| println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
+        let named = core::cell::Cell::new(0u32);
+        let refused = |n: u32, e: &str| {
+            named.set(named.get().saturating_add(1));
+            if named.get() <= MAX_IGNORED_NAMED {
+                println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
+            }
+        };
         let mut buf = [0u8; 256];
         let mut total = 0usize;
         // The whole file is hashed as read, for the evidence log (WP-11b).
         let mut sha = evidence::Sha256Stream::new();
-        loop {
+        // The length was checked; the count guards a file that grows or a
+        // card that keeps answering.
+        while total <= MAX_FILE_BYTES as usize {
+            crate::fault::feed();
             match vm.read(f, &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(k) => {
@@ -475,6 +504,9 @@ impl Logger {
         }
         let _ = vm.close_file(f);
         finish_into(&mut st, &mut lines, refused);
+        if more_ignored(named.get()) > 0 {
+            println!("hub-p4: {SITE_NAME}: {} more lines ignored, not listed", more_ignored(named.get()));
+        }
         println!("hub-p4: {DIR}/{SITE_NAME} read ({total} bytes, {} lines)", lines.number);
         let facts = crate::site::FileFacts {
             sha256: sha.finish(),

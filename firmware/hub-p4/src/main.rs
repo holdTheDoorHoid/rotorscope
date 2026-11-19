@@ -552,6 +552,9 @@ fn main() -> ! {
         if let Some((st, facts)) = sdlog.take_site() {
             site.load(&st, &facts, &mut app, &mut ev, ms);
         }
+        if let Some(bytes) = sdlog.take_site_too_big() {
+            site.too_big(bytes, &mut ev);
+        }
         if let Some(home) = site.take_home() {
             gpsmem.placed(&mut gps, &mut sdlog, &mut ev, home, ms);
         }
