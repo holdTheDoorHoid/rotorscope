@@ -277,7 +277,7 @@ pub mod boot {
     /// than the build), source commit (20, SHA-1; zero unknown), source tree
     /// (1: [`GIT_CLEAN`], [`GIT_DIRTY`], [`GIT_UNKNOWN`]), boot counter
     /// source (1: [`COUNTER_NONE`], [`COUNTER_SD_FILE`],
-    /// [`COUNTER_SECURE_ELEMENT`]), how the boot id was made (1:
+    /// [`COUNTER_SECURE_ELEMENT`], [`COUNTER_HUB_FLASH`]), how the boot id was made (1:
     /// [`BOOT_ID_RNG`], [`BOOT_ID_MIXED`]).
     pub const LEN: usize = V1_LEN + 8 + 20 + 1 + 1 + 1;
 
@@ -295,6 +295,12 @@ pub mod boot {
     pub const COUNTER_SD_FILE: u8 = 1;
     /// A monotonic counter in a secure element (planned).
     pub const COUNTER_SECURE_ELEMENT: u8 = 2;
+    /// The hub's own flash (`rsboot`, `kitkeys::bootlog`), the same counter
+    /// that numbers the ESP-NOW link's epochs (docs/LINK-KEYS-DESIGN.md 12,
+    /// item 2): it survives a wiped or swapped card. The card's state files
+    /// still carry how far the previous boot's chain had reached it. Seeded
+    /// with a random value at provisioning, so it does not start at 1.
+    pub const COUNTER_HUB_FLASH: u8 = 3;
 
     /// The hardware random number generator alone (firmware before WP-14a).
     pub const BOOT_ID_RNG: u8 = 0;

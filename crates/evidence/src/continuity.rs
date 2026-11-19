@@ -51,6 +51,12 @@ pub const UNREADABLE: u8 = 2;
 pub const NOT_SAVED: u8 = 3;
 /// The store could not be read at all: counter unknown (0).
 pub const STORE_ERROR: u8 = 4;
+/// The counter comes from the unit itself (`format::boot::COUNTER_HUB_FLASH`),
+/// and the card's state names a boot that is not the one just before this
+/// one: boots in between ran with another card or none, or the card was in
+/// another unit. The `prev_*` fields name the boot the card last held
+/// (not checked as this boot's predecessor).
+pub const OTHER_CARD: u8 = 5;
 
 /// What a store holds about the latest boot that used it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -152,6 +158,7 @@ impl Continuity {
             UNREADABLE => "the stored counter was unreadable",
             NOT_SAVED => "the new counter could not be saved",
             STORE_ERROR => "the counter store could not be read",
+            OTHER_CARD => "the card was last used by a boot other than the one before this",
             _ => "unknown status",
         }
     }
