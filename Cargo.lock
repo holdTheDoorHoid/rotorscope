@@ -46,7 +46,6 @@ dependencies = [
  "heapless 0.8.0",
  "kitkeys",
  "link",
- "sha2 0.11.1",
 ]
 
 [[package]]
@@ -1453,7 +1452,6 @@ dependencies = [
 name = "link-key"
 version = "0.1.0"
 dependencies = [
- "airlink",
  "kitkeys",
 ]
 

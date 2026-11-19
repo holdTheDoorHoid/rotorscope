@@ -1,9 +1,6 @@
 //! HMAC-SHA256 (RFC 2104) on top of `sha2`, with the key's inner and outer
 //! pads absorbed once up front: each tag then costs the message's own SHA-256
 //! blocks plus one block for the outer hash, not two extra pad blocks.
-//!
-//! Shared with `build.rs` (which uses it to print the key ID), so it depends
-//! on nothing but `sha2`.
 
 use sha2::{Digest, Sha256};
 

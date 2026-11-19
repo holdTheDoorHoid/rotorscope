@@ -382,12 +382,12 @@ impl Link {
     }
 
     fn receive_open<'a>(&mut self, src: &Mac, data: &'a [u8], now_ms: u64) -> Rx<'a> {
-        let Some(pkt) = airlink::parse(data) else { return Rx::Nothing };
-        if pkt.sealed {
+        if v3::inspect(data) == Err(Reject::OldFirmware) {
             // Version 2: a board still on the kit-key firmware.
             self.counts.rejects.take(Verdict::Reject(Reject::OldFirmware));
             return Rx::Nothing;
         }
+        let Some(pkt) = airlink::parse(data) else { return Rx::Nothing };
         match pkt.kind {
             airlink::Kind::Frames => Rx::Nothing,
             airlink::Kind::Beacon => {

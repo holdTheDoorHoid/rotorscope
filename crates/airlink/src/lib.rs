@@ -1,62 +1,63 @@
-//! ESP-NOW between radio nodes and a gateway (protocol "RS" v1).
+//! ESP-NOW between radio nodes and a gateway (protocol "RS").
 //!
 //! The wired link is a byte stream of COBS-delimited `link` frames. Over the
 //! air we keep exactly those bytes and only add a 6-byte header: a node packs
-//! as many whole frames as fit into one ESP-NOW packet, and the gateway splits
-//! the payload back into frames and relays those a node may originate
+//! as many whole frames as fit into one ESP-NOW packet, the gateway relays
+//! the packet to the hub as it is ([`relay`]), and the hub splits the payload
+//! back into frames and keeps those a node may originate
 //! (`link::origin::node_batch`). One packet per batch rather
 //! than per frame is the main efficiency lever: every ESP-NOW packet costs a
 //! preamble, a MAC header, an ACK and a contention window regardless of size,
 //! and a Wi-Fi node is deaf to drones while it transmits.
 //!
 //! Three packet kinds:
-//! - [`Kind::Beacon`], gateway to broadcast, about twice a second on the
+//! - [`Kind::Beacon`], broadcast by the gateway, about twice a second on the
 //!   gateway channel. Nodes learn the gateway's address from it, then send
 //!   unicast, which gets a MAC-layer ACK and hardware retries (broadcast gets
 //!   neither).
-//! - [`Kind::Frames`], node to gateway: `seq` counts packets, so the gateway
-//!   can count what was lost after the radio's own retries gave up.
-//! - [`Kind::Command`], gateway to one node (unicast, MAC-acked): hub
-//!   commands (`link::Command`, COBS frames exactly as the hub wrote them,
-//!   minus the `To` that named the node). `seq` counts per node, so a node
-//!   can drop a retry it already has. Nodes built before this kind existed
-//!   do not parse it and ignore it.
+//! - [`Kind::Frames`], node to hub through the gateway: `seq` counts
+//!   packets, so the receiver can count what was lost after the radio's own
+//!   retries gave up.
+//! - [`Kind::Command`], hub to one node through the gateway (unicast,
+//!   MAC-acked): hub commands (`link::Command`, COBS frames exactly as the
+//!   hub wrote them). `seq` counts per node, so a node can drop a retry it
+//!   already has.
 //!
 //! Nothing here is secret: the same detections a node hears anyone nearby can
-//! hear. With a kit key configured (`tools/link.key`, see [`auth`]) every
-//! packet is sealed with a tag and a freshness stamp ([`auth::VERSION_AUTH`]),
-//! so forged and replayed packets are rejected both ways; without one the link
-//! is unauthenticated, as before (docs/ESPNOW.md, "Securing the link").
+//! hear. What this module builds is **version 1**, the unauthenticated packet
+//! an open kit uses. A sealed kit uses [`v3`] (docs/LINK-KEYS-DESIGN.md):
+//! per-node keys from `kitkeys`, kept in each board's provisioning partition
+//! and never in a firmware image, a tick clock, a multi-tag beacon, and a
+//! gateway that holds no key ([`relay`]).
 //!
-//! [`v3`] is the next version (docs/LINK-KEYS-DESIGN.md): per-node keys from
-//! `kitkeys`, a tick clock, a multi-tag beacon and a gateway that holds no
-//! key. It sits beside version 2 until the cut-over; nothing above changes.
+//! Version 2 (one kit key compiled into every image) is retired. No build
+//! carries a key any more, and nothing here can make or check a version 2
+//! tag. A version 2 packet is still recognised by its header alone and
+//! refused as `old_firmware` ([`v3::inspect`]): that is how a board still on
+//! the old firmware shows up.
 #![cfg_attr(not(test), no_std)]
 
-pub mod auth;
 pub mod relay;
 pub mod v3;
-mod hmac;
-/// The build script's key decision, compiled here for its tests only.
-#[cfg(test)]
-#[allow(dead_code)]
-mod keysrc;
 
 /// First two bytes of every packet.
 pub const MAGIC: [u8; 2] = *b"RS";
-/// Bump on any incompatible change. Version 1 is the unauthenticated packet;
-/// [`auth::VERSION_AUTH`] (2) is the same packet sealed with a trailer.
+/// Version 1: the unauthenticated (open-kit) packet this module builds.
 pub const VERSION: u8 = 1;
+/// Version 2: the retired kit-key packet (a header like version 1's, the
+/// payload, a 16-byte stamp and a 12-byte tag). Recognised by its header and
+/// refused as old firmware; never made or checked.
+pub const VERSION_KIT_KEY: u8 = 2;
 /// Header: magic (2), version (1), kind (1), sequence (2, little-endian).
 pub const HEADER: usize = 6;
 /// Largest packet we send. ESP-NOW v2 allows 1470 bytes; both ends here run
 /// the same Espressif blobs, which support v2. Past ~1 KB the airtime at the
 /// 1 Mbit/s default rate (~8 ms) starts to cost the sender real listening time.
 pub const MAX_PACKET: usize = 1024;
-/// Largest batch payload. Room for the [`auth::TRAILER`] is always kept, so
-/// a batch can be sealed or not without repacking.
-pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER - auth::TRAILER;
-/// A beacon before sealing: header plus the channel.
+/// Largest batch payload. Room for the version 3 trailer ([`v3::TRAILER`]) is
+/// always kept, so a batch can be sealed or not without repacking.
+pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER - v3::TRAILER;
+/// A version 1 beacon: header plus the channel.
 pub const BEACON_LEN: usize = HEADER + 1;
 /// The 2.4 GHz channel the gateway listens and beacons on. Nodes relayed
 /// through it can only send while tuned here, so every channel plan for
@@ -72,30 +73,23 @@ pub enum Kind {
     Command = 3,
 }
 
-/// A parsed packet. `payload` is the bytes after the header (and before the
-/// trailer of a sealed packet).
+/// A parsed version 1 packet. `payload` is the bytes after the header.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Packet<'a> {
     pub kind: Kind,
     pub seq: u16,
     pub payload: &'a [u8],
-    /// Version [`auth::VERSION_AUTH`]: it carries a stamp and tag, NOT yet
-    /// checked. A receiver with a key calls [`auth::verify`] before using it.
-    pub sealed: bool,
 }
 
-/// Parse a received ESP-NOW payload. `None` for anything that is not ours
-/// (other ESP-NOW users share the air) or is from another protocol version.
-/// Both unauthenticated and sealed packets parse; the tag is not checked here.
+/// Parse a received version 1 (open-kit) packet. `None` for anything else:
+/// not ours (other ESP-NOW users share the air), version 3 (read it with
+/// [`v3::inspect`]), or the retired version 2 ([`v3::inspect`] names it
+/// `old_firmware`).
 pub fn parse(data: &[u8]) -> Option<Packet<'_>> {
-    if data.len() < HEADER || data[..2] != MAGIC {
+    if data.len() < HEADER || data[..2] != MAGIC || data[2] != VERSION {
         return None;
     }
-    let (sealed, end) = match data[2] {
-        VERSION => (false, data.len()),
-        auth::VERSION_AUTH if data.len() >= HEADER + auth::TRAILER => (true, data.len() - auth::TRAILER),
-        _ => return None,
-    };
+    let end = data.len();
     let kind = match data[3] {
         1 => Kind::Beacon,
         2 => Kind::Frames,
@@ -103,7 +97,7 @@ pub fn parse(data: &[u8]) -> Option<Packet<'_>> {
         _ => return None,
     };
     let seq = u16::from_le_bytes([data[4], data[5]]);
-    Some(Packet { kind, seq, payload: &data[HEADER..end], sealed })
+    Some(Packet { kind, seq, payload: &data[HEADER..end] })
 }
 
 fn header(buf: &mut [u8], kind: Kind, seq: u16) {
@@ -115,7 +109,7 @@ fn header(buf: &mut [u8], kind: Kind, seq: u16) {
 
 /// Gateway beacon: header plus the gateway's channel, so a node that heard it
 /// on a neighbouring channel (2.4 GHz channels overlap) knows where to send.
-/// `buf` needs [`BEACON_LEN`] bytes, plus [`auth::TRAILER`] to seal it.
+/// `buf` needs [`BEACON_LEN`] bytes.
 pub fn beacon(buf: &mut [u8], seq: u16, channel: u8) -> &[u8] {
     header(buf, Kind::Beacon, seq);
     buf[HEADER] = channel;
@@ -129,11 +123,11 @@ pub fn beacon_channel(p: &Packet<'_>) -> Option<u8> {
 
 /// A command packet for one node: header plus `frames`, one or more whole
 /// COBS command frames. `None` if `frames` is not whole frames or does not
-/// fit in `buf` (leave [`auth::TRAILER`] more to seal it).
+/// fit in `buf` or in [`MAX_PAYLOAD`].
 pub fn command<'a>(buf: &'a mut [u8], seq: u16, frames: &[u8]) -> Option<&'a [u8]> {
     let whole = frames.last() == Some(&0);
     let len = HEADER + frames.len();
-    if !whole || len > buf.len() || len > MAX_PACKET - auth::TRAILER {
+    if !whole || len > buf.len() || len > HEADER + MAX_PAYLOAD {
         return None;
     }
     header(buf, Kind::Command, seq);
@@ -203,15 +197,6 @@ impl Batch {
         &self.buf[..self.len]
     }
 
-    /// The packet sealed by `src` (this node's address) with `stamp`
-    /// ([`auth::Node::next_up`]). Like [`Batch::packet`] otherwise.
-    pub fn sealed(&mut self, seq: u16, key: &auth::Key, src: &[u8; 6], stamp: auth::Stamp) -> &[u8] {
-        header(&mut self.buf, Kind::Frames, seq);
-        // Always fits: MAX_PAYLOAD leaves room for the trailer.
-        let n = auth::seal(key, src, &mut self.buf, self.len, stamp).unwrap_or(self.len);
-        &self.buf[..n]
-    }
-
     /// The batch as a version 3 packet sealed by `node` at node uptime
     /// `now_ms` ([`v3::Node::seal_frames`]). Call again for every retry: each
     /// attempt gets a fresh stamp. `None` while the node may not send yet.
@@ -271,7 +256,7 @@ mod tests {
         assert_eq!(b.frames(), 2);
         let pkt = b.packet(0x1234).to_vec();
         let p = parse(&pkt).unwrap();
-        assert_eq!(p, Packet { kind: Kind::Frames, seq: 0x1234, payload: &[1, 2, 3, 0, 9, 0], sealed: false });
+        assert_eq!(p, Packet { kind: Kind::Frames, seq: 0x1234, payload: &[1, 2, 3, 0, 9, 0] });
         b.clear();
         assert!(b.is_empty());
     }
@@ -303,7 +288,7 @@ mod tests {
         assert!(parse(b"").is_none());
         assert!(parse(b"XX\x01\x02\x00\x00").is_none());
         assert!(parse(b"RS\x03\x02\x00\x00").is_none(), "other version");
-        assert!(parse(b"RS\x02\x02\x00\x00").is_none(), "sealed but no room for a trailer");
+        assert!(parse(b"RS\x02\x02\x00\x00").is_none(), "version 2 (retired)");
         assert!(parse(b"RS\x01\x09\x00\x00").is_none(), "unknown kind");
     }
 

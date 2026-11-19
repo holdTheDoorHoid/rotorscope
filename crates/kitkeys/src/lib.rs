@@ -27,13 +27,11 @@
 //! a stack slot the compiler chose, which Rust gives no way to wipe without
 //! extra crates.
 //!
-//! The HMAC is airlink's (`crates/airlink/src/hmac.rs`), compiled into this
-//! crate by path, the same way airlink's `build.rs` uses it. A crate
-//! dependency is not possible: airlink will depend on this crate for its key
-//! types (package 13b), and the primitive stays one file.
+//! The HMAC is one small file (`src/hmac.rs`, over `sha2`) with the key's
+//! pads absorbed once; `airlink`'s version 3 tags use it through
+//! [`LinkKey`].
 #![cfg_attr(not(test), no_std)]
 
-#[path = "../../airlink/src/hmac.rs"]
 mod hmac;
 
 pub mod bootlog;

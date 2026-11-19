@@ -6,8 +6,8 @@ use super::{
     RELINK_MS, Reject, Shape, TICK_MS, TIMESYNC_SLACK, TRAILER, Verdict, beacon_tag, ct_eq, header, inspect,
     read_stamp, seal, split, verify12,
 };
+use super::Stamp;
 use crate::HEADER;
-use crate::auth::Stamp;
 
 /// A node's identity on the link and its two keys.
 #[derive(Debug)]

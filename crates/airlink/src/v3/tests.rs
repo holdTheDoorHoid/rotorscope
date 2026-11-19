@@ -5,7 +5,6 @@ use std::vec::Vec;
 
 use super::*;
 use crate::Batch;
-use crate::auth::Stamp;
 
 const KA: [u8; 32] = [0x11; 32];
 const KB: [u8; 32] = [0x22; 32];
@@ -304,8 +303,8 @@ fn beacon_with_other_slot_tag_rejected() {
     assert_eq!(nb.accept(&GW, &bc, 0, false).verdict(), Verdict::Accept);
 }
 
-/// A node batch held back is refused by the hub once 2 s old (fails on
-/// version 2, where the gateway checks order only).
+/// A node batch held back is refused by the hub once 2 s old (the retired
+/// version 2 checked order only).
 #[test]
 fn withheld_batch_late_at_hub() {
     for (hold, want) in [(2_000, Verdict::Accept), (2_100, Verdict::Reject(Reject::LateUplink)), (5_000, Verdict::Reject(Reject::LateUplink))] {
@@ -386,7 +385,7 @@ fn longest_hold(jam_ms: u64, timesync: bool) -> u64 {
 
 /// Jammed for J seconds before the recording and until its release: the
 /// bound grows by a ninth of a second (10 ticks / 90 a second) per jammed
-/// second, not by J (version 2: about J x (rate - 1) + 16 s). Past the 60 s
+/// second, not by J (the retired version 2: about J x (rate - 1) + 16 s). Past the 60 s
 /// relink the recording is dead outright.
 #[test]
 fn jammed_node_bound_is_tenth_of_jam() {
@@ -408,34 +407,47 @@ fn jammed_node_bound_is_tenth_of_jam() {
     assert_eq!(withheld(70_000, 0, false, true), Verdict::Reject(Reject::Replay));
 }
 
+/// A version 2 packet as the retired kit-key firmware sent it: a version 1
+/// packet with the version byte set to 2, then a 16-byte stamp and a 12-byte
+/// tag. The trailer bytes are arbitrary: nothing can check them any more.
+fn v2_like(v1: &[u8], fill: u8) -> Vec<u8> {
+    let mut p = v1.to_vec();
+    p[2] = crate::VERSION_KIT_KEY;
+    p.extend_from_slice(&[fill; 28]);
+    p
+}
+
+/// Mixed kit (section 9): a board still on the kit-key firmware is named
+/// `old_firmware` by both ends, from its header alone. No key is in this
+/// build and none is needed.
 #[test]
 fn v2_packet_is_old_firmware() {
-    use crate::auth;
-    let key = auth::Key::new(&KA);
     let mut b = Batch::new();
     b.push(&[1, 0]);
-    let st = Stamp { epoch: 7, clock: 1, session: 1, counter: 0 };
-    let v2 = b.sealed(1, &key, &MAC_A, st).to_vec();
-    assert_eq!(v2[2], auth::VERSION_AUTH);
-    assert_eq!(inspect(&v2), Err(Reject::OldFirmware));
+    let open = b.packet(1).to_vec();
     let mut k = Kit::new(7);
-    assert_eq!(k.hub_hears(&v2).0, Verdict::Reject(Reject::OldFirmware));
-    let mut buf = [0u8; crate::BEACON_LEN + auth::TRAILER];
-    let len = crate::beacon(&mut buf, 0, 6).len();
-    let n = auth::seal(&key, &GW, &mut buf, len, st).unwrap();
-    assert_eq!(k.hears(&buf[..n]), Verdict::Reject(Reject::OldFirmware));
+    for fill in [0x00, 0x5a, 0xff] {
+        let v2 = v2_like(&open, fill);
+        assert_eq!(v2[2], 2);
+        assert_eq!(inspect(&v2), Err(Reject::OldFirmware));
+        assert_eq!(k.hub_hears(&v2).0, Verdict::Reject(Reject::OldFirmware));
+        let bcn = v2_like(crate::beacon(&mut [0u8; 8], 0, 6), fill);
+        assert_eq!(k.hears(&bcn), Verdict::Reject(Reject::OldFirmware));
+        // Any length: even a bare header is old firmware, not malformed.
+        assert_eq!(inspect(&v2[..3]), Err(Reject::OldFirmware));
+        // Version 1 code does not take it for an open packet either.
+        assert!(crate::parse(&v2).is_none());
+    }
     // An open-kit (version 1) packet is named as such.
-    let open = b.packet(2).to_vec();
     assert_eq!(k.hub_hears(&open).0, Verdict::Reject(Reject::Unauthenticated));
     assert_eq!(k.hears(crate::beacon(&mut [0u8; 8], 0, 6)), Verdict::Reject(Reject::Unauthenticated));
-    // And version 2 firmware does not parse a version 3 packet at all.
+    // And a version 3 packet is not a version 1 packet.
     k.link();
     let c = k.command();
     let bc = k.beacon();
     let up = k.uplink().unwrap();
     for p in [&c, &bc, &up] {
         assert!(crate::parse(p).is_none());
-        assert!(auth::verify(&key, &GW, p).is_err());
     }
 }
 
@@ -1183,7 +1195,6 @@ fn unprovisioned_announcement_round_trip() {
 
 #[test]
 fn reject_codes_indexes_and_names() {
-    use crate::auth::Reject as R2;
     for (i, r) in Reject::ALL.iter().enumerate() {
         assert_eq!(r.index(), i);
         for o in &Reject::ALL[..i] {
@@ -1192,11 +1203,12 @@ fn reject_codes_indexes_and_names() {
         }
         assert!(![5, 6, 10].contains(&r.code()), "taken by others");
     }
-    // Codes shared with version 2 keep their numbers.
-    for (a, b) in [(Reject::BadTag, R2::BadTag), (Reject::Replay, R2::Replay), (Reject::Unauthenticated, R2::Unauthenticated), (Reject::Stale, R2::Stale), (Reject::Late, R2::Late)] {
-        assert_eq!(a.code(), b.code());
-        assert_eq!(a.name(), b.name());
-    }
+    // Codes kept from the retired version 2 keep their numbers (old logs and
+    // `ForgedLink` details read the same).
+    assert_eq!(
+        [Reject::BadTag, Reject::Replay, Reject::Unauthenticated, Reject::Stale, Reject::Late].map(Reject::code),
+        [1, 2, 3, 4, 7]
+    );
     assert_eq!(
         [Reject::OldFirmware, Reject::NotInRoster, Reject::LateUplink, Reject::FutureUplink].map(Reject::code),
         [8, 9, 11, 12],

@@ -66,16 +66,17 @@ impl Origin {
 }
 
 /// `ThreatKind::ForgedLink` `detail` for a frame refused because its sender
-/// may not originate that frame type (codes 1-4 are `airlink::auth::Reject`; 7, `Late`, is
-/// counted by nodes only and never reported by the gateway).
+/// may not originate that frame type (codes 1-4 are `airlink::v3::Reject`; 7, `Late`, is
+/// counted by nodes only and never reported).
 pub const FORGED_ORIGIN: u32 = 5;
-/// `ThreatKind::ForgedLink` `detail` for a genuine node packet a keyed
-/// gateway could not relay because its node table was full.
+/// `ThreatKind::ForgedLink` `detail` the retired version 2 gateway raised when
+/// its node table was full. Nothing raises it any more; kept so old logs and
+/// evidence still read.
 pub const FORGED_TABLE_FULL: u32 = 6;
 
 // Protocol 14 `ForgedLink` details (docs/LINK-KEYS-DESIGN.md 6.4; the same
 // numbers as `airlink::v3::Reject::code`, plus 10 for the gateway's budget).
-/// A version 2 (kit key) packet: a board that was not reflashed.
+/// A version 2 (retired kit key) packet: a board that was not reflashed.
 pub const FORGED_OLD_FIRMWARE: u32 = 8;
 /// The sender's address is not in the kit roster.
 pub const FORGED_NOT_IN_ROSTER: u32 = 9;
@@ -100,10 +101,10 @@ pub const fn forged_reason(detail: u32) -> Option<&'static str> {
     Some(match detail {
         1 => "bad tag: forged, or made with another key",
         2 => "replay: a genuine packet played back",
-        3 => "unauthenticated: no tag (a node built without a key)",
+        3 => "unauthenticated: no tag (a node left open)",
         4 => "stale: from before the last restart",
         FORGED_ORIGIN => "frame type the sender may not send",
-        FORGED_TABLE_FULL => "gateway node table full",
+        FORGED_TABLE_FULL => "gateway node table full (old firmware)",
         7 => "late: a genuine packet held back",
         FORGED_OLD_FIRMWARE => "old firmware: a board that was not reflashed",
         FORGED_NOT_IN_ROSTER => "not one of this kit's nodes",

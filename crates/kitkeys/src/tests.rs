@@ -84,8 +84,10 @@ fn check_vector(src: &mut SoftKeySource, ident: &NodeIdent, v: &Vector) {
 // ------------------------------------------------------------ derivation --
 
 #[test]
-fn hmac_matches_rfc4231_case_2() {
-    // Guards the borrowed primitive itself.
+fn hmac_matches_rfc4231_cases_1_and_2() {
+    // Guards the primitive itself.
+    let m = Hmac::new(&[0x0b; 20]).mac(&[b"Hi There"]);
+    assert_eq!(hex(&m), "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
     let m = Hmac::new(b"Jefe").mac(&[b"what do ya want ", b"for nothing?"]);
     assert_eq!(hex(&m), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
 }

@@ -1,10 +1,10 @@
 //! ESP-NOW packet version 3: per-node keys, a tick clock, and a gateway that
 //! holds no secret (docs/LINK-KEYS-DESIGN.md sections 6.1, 6.2 and 12.1).
 //!
-//! Version 2 ([`crate::auth`]) stays as it is until the cut-over package
-//! deletes it; nothing here changes how a version 2 packet is built or read.
-//! A version 3 receiver refuses a version 2 packet as
-//! [`Reject::OldFirmware`]: that is how an un-reflashed board shows up.
+//! Version 2 (one kit key compiled into every image) is retired: nothing can
+//! make or check one. A version 3 receiver recognises a version 2 packet by
+//! its header alone and refuses it as [`Reject::OldFirmware`]: that is how an
+//! un-reflashed board shows up.
 //!
 //! # Three roles, no shared secret
 //!
@@ -157,7 +157,6 @@
 
 use kitkeys::{LinkKey, Mac, NodeKey, SLOTS};
 
-use crate::auth::Stamp;
 use crate::{HEADER, MAGIC, MAX_PACKET};
 
 mod hub;
@@ -172,16 +171,40 @@ pub use node::{Down, Node, NodeKeys, NodeRejects, NodeVerdict};
 pub const VERSION_V3: u8 = 3;
 /// The open-kit (unauthenticated) version.
 pub const VERSION_OPEN: u8 = crate::VERSION;
-/// The kit-key version this one replaces.
-pub const VERSION_OLD: u8 = crate::auth::VERSION_AUTH;
+/// The retired kit-key version this one replaced: refused, never read.
+pub const VERSION_OLD: u8 = crate::VERSION_KIT_KEY;
 pub const STAMP_LEN: usize = 16;
+
+/// The freshness fields every sealed packet carries (16 bytes, four u32 LE,
+/// in this order). What each means, both ways, is in the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stamp {
+    pub epoch: u32,
+    pub clock: u32,
+    pub session: u32,
+    pub counter: u32,
+}
+
+impl Stamp {
+    pub(crate) fn write(&self, b: &mut [u8]) {
+        b[0..4].copy_from_slice(&self.epoch.to_le_bytes());
+        b[4..8].copy_from_slice(&self.clock.to_le_bytes());
+        b[8..12].copy_from_slice(&self.session.to_le_bytes());
+        b[12..16].copy_from_slice(&self.counter.to_le_bytes());
+    }
+
+    pub(crate) fn read(b: &[u8]) -> Self {
+        let w = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        Stamp { epoch: w(0), clock: w(4), session: w(8), counter: w(12) }
+    }
+}
 /// Tag on Sync, Frames and Command.
 pub const TAG_LEN: usize = 12;
 /// One beacon tag.
 pub const BEACON_TAG_LEN: usize = 8;
 /// Stamp and tag after a Frames or Command payload.
 pub const TRAILER: usize = STAMP_LEN + TAG_LEN;
-/// Largest Frames or Command payload (the same 990 as version 2).
+/// Largest Frames or Command payload (990, the same as version 1's).
 pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER - TRAILER;
 /// A Sync: header, channel, stamp, tag.
 pub const SYNC_LEN: usize = HEADER + 1 + STAMP_LEN + TAG_LEN;
@@ -245,9 +268,9 @@ impl Kind {
 }
 
 /// Why a packet was not taken. Every reason is its own count. `code` is the
-/// number for `link::ThreatKind::ForgedLink`'s `detail`: 1-4 and 7 as in
-/// version 2, 8, 9, 11 and 12 as the design names them; 13 and up are new here
-/// and need 13c to reserve them (5, 6 and 10 belong to others).
+/// number for `link::ThreatKind::ForgedLink`'s `detail`: 1-4 and 7 kept from
+/// the retired version 2, 8, 9, 11 and 12 as the design names them, 13 to 16
+/// reserved in `link::origin` (5, 6 and 10 belong to others).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Reject {
@@ -262,7 +285,7 @@ pub enum Reject {
     Stale = 4,
     /// Node: genuine, in order, but older than the floor allows.
     Late = 7,
-    /// A version 2 (kit key) packet: a board that was not reflashed.
+    /// A version 2 (retired kit key) packet: a board that was not reflashed.
     OldFirmware = 8,
     /// Hub: the sender's MAC is not in the roster.
     NotInRoster = 9,

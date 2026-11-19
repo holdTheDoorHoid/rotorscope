@@ -485,7 +485,7 @@ fn open_kit_takes_version_1_and_refuses_keyed_nodes() {
     assert_eq!(d[0], Down::Roster(StdVec::new()), "an open kit has no roster");
     let Down::Beacon(b) = &d[1] else { panic!("{d:?}") };
     let p = airlink::parse(b).unwrap();
-    assert_eq!((p.kind, p.sealed, airlink::beacon_channel(&p)), (airlink::Kind::Beacon, false, Some(6)));
+    assert_eq!((p.kind, airlink::beacon_channel(&p)), (airlink::Kind::Beacon, Some(6)));
     let mut v1 = airlink::Batch::new();
     assert!(v1.push(&[5, 6, 0]));
     let v1 = v1.packet(1).to_vec();
@@ -508,7 +508,7 @@ fn open_kit_takes_version_1_and_refuses_keyed_nodes() {
     for (_, to, _, _, data) in &t {
         assert_eq!(*to, MAC_X);
         let p = airlink::parse(data).unwrap();
-        assert_eq!((p.kind, p.sealed), (airlink::Kind::Command, false));
+        assert_eq!(p.kind, airlink::Kind::Command);
     }
 }
 

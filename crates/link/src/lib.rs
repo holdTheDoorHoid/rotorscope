@@ -527,50 +527,41 @@ pub enum ThreatKind {
     /// whatever the cause. `freq`/`width_khz` = the band's hops plus one
     /// capture's passband.
     Blinded,
-    /// Frames claiming to come from one of our own nodes failed
-    /// authentication (ESP-NOW gateway): someone is injecting fake nodes or
-    /// commands. `source` = the claimed node, `count` = rejected frames.
+    /// Packets or frames claiming to come from one of our own nodes were
+    /// refused: someone is injecting fake nodes or commands, or a board runs
+    /// firmware the kit no longer speaks. `source` = the claimed sender,
+    /// `count` = refused packets or frames.
     ///
-    /// Sent by a gateway built with the kit link key (`crates/airlink`
-    /// `auth`, docs/ESPNOW.md "Securing the link"), at most once a second per
-    /// claimed address and reason while it lasts, with no `Via` before it
-    /// (it is the gateway's own frame). `source` = the claimed node address
-    /// (all zero: more addresses than the gateway's table, e.g. random ones),
-    /// `target` = the gateway's own address, `channel` 6 / `freq` 24370,
-    /// `level` = strongest RSSI of the rejected packets, `window_ms` = the
-    /// window `count` covers. `detail` = why (`airlink::auth::Reject`):
-    /// - 1 **bad tag**: the authentication tag does not match: a forgery (or
-    ///   a packet made with another key);
-    /// - 2 **replay**: a genuine packet, but older than one already taken
-    ///   from that node: a recording played back;
-    /// - 3 **unauthenticated**: no tag at all: a node built without the key
-    ///   (a keyed gateway accepts keyed nodes only), or a forgery that does
-    ///   not try;
-    /// - 4 **stale**: a genuine packet from before the gateway's last
-    ///   restart, more than a minute after it (expected, and not reported,
-    ///   for the few seconds a node takes to resync after a restart);
+    /// Since protocol 14 (per-node keys, docs/LINK-KEYS-DESIGN.md) the **hub**
+    /// raises it, at most once a second per claimed address and reason while
+    /// it lasts (`origin::RefusalLog`), from its own checks of the packets the
+    /// gateway relays and from the gateway's [`gw::GwUp::Refused`] reports
+    /// (the gateway holds no key and checks only what needs none). The
+    /// report is the hub's own frame (node 0, the link): `target`, `channel`
+    /// and `freq` are 0, `level` = strongest RSSI of the refused packets,
+    /// `window_ms` = the window `count` covers. `detail` = why
+    /// (`airlink::v3::Reject` codes, plus 5, 6 and 10):
+    /// - 1 **bad tag**: the authentication tag does not match the slot's key:
+    ///   a forgery, a captured node speaking as another, or a board keyed for
+    ///   another kit or generation;
+    /// - 2 **replay**: a genuine packet, but not newer than one already taken
+    ///   from that node, or made for an earlier session: a recording played
+    ///   back;
+    /// - 3 **unauthenticated**: a version 1 (open-kit) packet at a sealed hub:
+    ///   a node left open, or a forgery that does not try;
+    /// - 4 **stale**: a genuine packet of an earlier hub epoch (from before
+    ///   the hub's last restart);
     /// - 5 **origin** ([`origin::FORGED_ORIGIN`]): a frame of a type the
     ///   sender may not originate ([`origin::origin`]): a node sending a
     ///   hub-only frame (`HubFix`, `Csbee`, `Flags`), a `Via` of its own,
-    ///   bus control, or the gateway's own `Hello` / `ForgedLink` report.
-    ///   Raised by the gateway (`source` = the node), and by the hub for
-    ///   what reaches it anyway (from an old or compromised gateway, or a
-    ///   wired-bus node). The hub's own report has `target`, `channel` and
-    ///   `freq` 0, and `source` all zero when the refused frame was the
-    ///   link's own (no `Via` before it);
-    /// - 6 **table full** ([`origin::FORGED_TABLE_FULL`]): a genuine node
-    ///   packet a keyed gateway dropped because its node table (16) was full.
-    ///
-    /// Codes 5 and 6 need no protocol change: the frame is the same and
-    /// `detail` was always a number; a hub that does not know them shows
-    /// the threat with an unknown reason.
-    ///
-    /// Protocol 14 (per-node keys, docs/LINK-KEYS-DESIGN.md): the hub
-    /// verifies node packets itself and raises these from its own checks or
-    /// from the gateway's [`gw::GwUp::Refused`] reports (code 7, **late**, is
-    /// a node's own count, in [`NodeHealth::rejects`]):
-    /// - 8 **old firmware**: a version 2 (kit key) packet, from a board that
-    ///   was not reflashed;
+    ///   bus control, or a gateway-only report. On the wired bus too;
+    /// - 6 **table full** ([`origin::FORGED_TABLE_FULL`]): raised only by the
+    ///   retired version 2 gateway (its node table was full); kept so old
+    ///   logs read;
+    /// - 7 **late** is a node's own count of hub packets held back, in
+    ///   [`NodeHealth::rejects`], never raised here;
+    /// - 8 **old firmware**: a version 2 packet (the retired kit key), from a
+    ///   board that was not reflashed;
     /// - 9 **not in roster**: the sender's address is not one of the kit's
     ///   nodes;
     /// - 10 **over budget**: a roster address sending more than its share
@@ -580,11 +571,12 @@ pub enum ThreatKind {
     ///   back and released late;
     /// - 12 **future uplink**: a genuine node batch claiming a hub clock more
     ///   than 0.5 s ahead;
-    /// - 13 **not for this slot**: a beacon with no tag for the node's slot;
-    /// - 14 **unproven**: genuine, but from an epoch the node has not been
-    ///   moved to yet;
+    /// - 13 **not for this slot**, 14 **unproven**: node-side reasons (a
+    ///   beacon without this node's tag; an epoch the node has not been
+    ///   moved to yet), counted in [`NodeHealth::rejects`];
     /// - 15 **malformed**: ours, but the wrong size, kind or direction;
-    /// - 16 **foreign**: not ours at all (other ESP-NOW users); not an attack.
+    /// - 16 **foreign**: not ours at all (other ESP-NOW users); not an attack,
+    ///   counted only.
     ///
     /// [`origin::forged_reason`] has each code's words.
     ForgedLink,

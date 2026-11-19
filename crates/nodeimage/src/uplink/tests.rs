@@ -15,6 +15,15 @@ const ME: Mac = [0x24, 0x58, 0x7c, 0, 0, 0x0a];
 const OTHER: Mac = [0x24, 0x58, 0x7c, 0, 0, 0x0b];
 const GW: Mac = [0x24, 0x58, 0x7c, 0, 0, 0x99];
 
+/// A version 2 packet as the retired kit-key firmware sent it (a version 1
+/// packet, version byte 2, then a 28-byte stamp and tag nobody can check).
+fn v2_like(v1: &[u8]) -> Vec<u8> {
+    let mut p = v1.to_vec();
+    p[2] = airlink::VERSION_KIT_KEY;
+    p.extend_from_slice(&[0x5a; 28]);
+    p
+}
+
 fn rng() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0x5000);
@@ -226,14 +235,13 @@ fn open_record_runs_the_open_link() {
     let mut batch = airlink::Batch::new();
     assert!(batch.push(&[1, 2, 0]));
     let pkt = l.packet(&mut batch, 3, 130).unwrap().to_vec();
-    assert_eq!(airlink::parse(&pkt).unwrap().sealed, false);
+    assert_eq!(pkt[2], airlink::VERSION);
+    assert!(airlink::parse(&pkt).is_some());
     // A version 2 (kit key) packet: old firmware. Version 3: not ours to read.
-    let k = airlink::auth::Key::new(&[9; 32]);
     let mut v2 = [0u8; 128];
     let n = airlink::command(&mut v2, 1, &frames[..]).map(<[u8]>::len).unwrap();
-    let st = airlink::auth::Stamp { epoch: 1, clock: 1, session: 1, counter: 1 };
-    let n = airlink::auth::seal(&k, &GW, &mut v2, n, st).unwrap();
-    assert_eq!(l.receive(&GW, &v2[..n], 140), Rx::Nothing);
+    let v2 = v2_like(&v2[..n]);
+    assert_eq!(l.receive(&GW, &v2, 140), Rx::Nothing);
     assert_eq!(reject(&l, Reject::OldFirmware), 1);
     let mut b = Bench::new();
     let v3b = b.beacon();
@@ -361,12 +369,9 @@ fn forged_and_foreign_packets_are_refused_and_counted() {
     assert_eq!(b.hears(b"hello world"), Rx::Nothing);
     assert_eq!(reject(&b.link, Reject::Foreign), 1);
     // Version 2 (an un-reflashed hub or gateway): old firmware.
-    let k = airlink::auth::Key::new(&[9; 32]);
     let mut v2 = [0u8; 128];
     let n = airlink::command(&mut v2, 1, &[4, 1, 2, 3, 0]).map(<[u8]>::len).unwrap();
-    let st = airlink::auth::Stamp { epoch: 1, clock: 1, session: 1, counter: 1 };
-    let n = airlink::auth::seal(&k, &GW, &mut v2, n, st).unwrap();
-    assert_eq!(b.hears(&v2[..n]), Rx::Nothing);
+    assert_eq!(b.hears(&v2_like(&v2[..n])), Rx::Nothing);
     assert_eq!(reject(&b.link, Reject::OldFirmware), 1);
     // None of it moved the gateway.
     assert_eq!(b.link.gateway(b.nt), Some((GW, 6)));

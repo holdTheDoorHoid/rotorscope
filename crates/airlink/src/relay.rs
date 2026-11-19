@@ -11,7 +11,7 @@
 //! 1. Not ours (no `"RS"` magic), or a hub-to-node kind (Sync, Command,
 //!    Beacon: another kit's gateway, or our own hub's packets heard back):
 //!    counted as foreign, not an attack.
-//! 2. Version 2 (the kit key this design retires): refused as
+//! 2. Version 2 (the retired kit-key firmware): refused as
 //!    [`Refuse::OldFirmware`]; how an un-reflashed board shows up.
 //! 3. Ours but malformed (bad size for its kind, unknown version or kind):
 //!    refused as [`Refuse::Malformed`].
@@ -561,7 +561,7 @@ impl<const SLOTS: usize> Uplink<SLOTS> {
             Err(Reject::Foreign) => Err(Drop::Foreign),
             Err(Reject::OldFirmware) => Err(Drop::Refused(Refuse::OldFirmware)),
             Err(Reject::Unauthenticated) => match crate::parse(data) {
-                Some(p) if p.kind == crate::Kind::Frames && !p.sealed && data.len() > HEADER => {
+                Some(p) if p.kind == crate::Kind::Frames && data.len() > HEADER => {
                     Ok(self.roster_lane(&src).unwrap_or(SHARED))
                 }
                 Some(_) => Err(Drop::Foreign),
@@ -1292,7 +1292,7 @@ mod tests {
         let mut u = up_with(&[A]);
         // Version 2: a board that was not reflashed, even from a roster address.
         let mut v2 = small(1);
-        v2[2] = crate::auth::VERSION_AUTH;
+        v2[2] = crate::VERSION_KIT_KEY;
         assert_eq!(u.offer(A, 0, &v2, 0, 0), Outcome::Dropped(Drop::Refused(Refuse::OldFirmware)));
         // Not ours.
         assert_eq!(u.offer(A, 0, b"hello world", 0, 0), Outcome::Dropped(Drop::Foreign));

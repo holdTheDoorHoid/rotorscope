@@ -439,7 +439,7 @@ impl HubLink {
             Mode::Keyed => {}
             Mode::Open => {
                 match (shape, airlink::parse(data)) {
-                    (_, Some(p)) if !p.sealed && p.kind == airlink::Kind::Frames => {
+                    (_, Some(p)) if p.kind == airlink::Kind::Frames => {
                         self.stats.open_batches += 1;
                         self.open_nodes.note(src, now);
                         out(Up::Batch { slot: None, mac: src, rssi, payload: p.payload });

@@ -5,8 +5,8 @@ use super::{
     TICK_MS, UPLINK_MAX_AGE, UPLINK_MAX_AHEAD, Verdict, beacon_len, beacon_tag, header, inspect, read_stamp, seal,
     split, verify12,
 };
+use super::Stamp;
 use crate::HEADER;
-use crate::auth::Stamp;
 
 /// What the hub knows about one slot's uplink.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
