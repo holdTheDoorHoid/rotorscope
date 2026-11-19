@@ -291,7 +291,7 @@ Besides the 320x240 names above (same states at 800x480):
 | `band_some_nodes_down`, `list_some_nodes_down` | One receiver down: "5 GHz RECEIVER DOWN · drones on 5 GHz won't be heard", "NOT ALL RECEIVERS LISTENING". |
 | `band_near_plane` | A drone 240 m from N911PH. |
 | `band_many_warnings`, `detail_with_band` | Jamming, fake IDs, faked GPS (own and area), a dead and a deaf node: the band with "+4 more", every chip, "+N" where they run out. |
-| `radar_jammed_empty`, `radar_links_without_id` | Empty radar while jammed; control links / video / Wi-Fi heard but no IDs: "+5 drone radio links without position (see Signals)". |
+| `radar_jammed_empty`, `radar_links_without_id` | Empty radar while jammed; control links / video / Wi-Fi heard but no IDs: "+8 radio links, no ID: see Signals" (the longest wording that fits). |
 | `health_down_and_deaf` | NOT RESPONDING with "last heard 2 min ago · drones on 5 GHz won't be heard · check power, cable, range"; HEARS NOTHING for a live node at 0 frames/s. |
 | `alert_close_sticky` | A new drone at 75 m: the banner stays until a key is pressed. |
 | `radar_swarm_chip`, `list_new_marks` | After a dismissal, new arrivals as a NEW 2 chip; NEW marks on the radar and in the list. |
