@@ -206,8 +206,19 @@ espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-
 ```
 
 On the bench the P4 started by itself straight after flashing; it may still need a press of
-its reset button on some runs. Because `dev-board.sh`'s lock does not cover the P4, make sure
-nothing else has its port open while you flash.
+its reset button on some runs.
+
+`dev-board.sh` does not build or flash the P4 itself, but it can hold the hub's lock while that
+command runs, so two sessions cannot flash it at once. Add the hub to `tools/boards.local` by
+hand once (step 9 shows the line), then run the same command through `--run`, with
+`"$BOARD_PORT"` in place of the port:
+
+```bash
+tools/dev-board.sh --run 'espflash flash --chip esp32p4 --port "$BOARD_PORT" -B 460800 --non-interactive --bootloader elecrow-bootloader.bin --partition-table tools/partitions-hub.csv firmware/hub-p4/target/rev103/riscv32imafc-unknown-none-elf/release/hub-p4' 300 p4
+```
+
+Run on the bench 2026-11-19. Without the `p4` line, make sure nothing else has the port open
+while you flash.
 
 ## 7. The test transmitter
 

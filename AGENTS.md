@@ -46,13 +46,18 @@ their reason in the same sentence or the next.
 - Boards are shared between sessions. Flash only with `tools/dev-board.sh` and
   `tools/flash-node.sh`; they take a per-board lock. Never run `espflash` or `cargo run` (its
   runner calls espflash) against a board directly. Two writers can ruin a board.
+- The P4 hub is flashed with the `espflash` command in `docs/get-going/kit-flash.md` (Elecrow's
+  bootloader and `tools/partitions-hub.csv`, never espflash's own), run through
+  `tools/dev-board.sh --run '<that command>' <seconds> p4` so the hub's lock is held.
 - Anything that could make a board unusable needs the owner's OK for that board, each time:
-  eFuses, secure boot, flash encryption, erasing flash, a first write to a flash area that has not
-  been written before. The P4 hub: write nothing until the owner confirms a full backup exists.
+  eFuses, secure boot, flash encryption, erasing flash, a new partition table, a first write to a
+  flash area that has not been written before. Reflashing an application the documented way is
+  routine. A P4 hub with no backup of its factory flash is not flashed at all.
 - Bench-only builds need `ROTORSCOPE_BENCH=1` and never stay on a board. Set it in that shell
   only. A bench image on a unit someone uses for real is a fault.
-- Rotorscope only listens. The one transmitter is the documented test beacon (`rid-beacon`, fake
-  identity). Never add or run anything else that transmits, jams or imitates.
+- Rotorscope detects; it sends nothing to a drone or a controller. Apart from the kit's own node
+  link, the one transmitter is the bench test beacon (`rid-beacon`: a fake identity at the lowest
+  power). Never add or run anything else that transmits, jams or imitates a drone or its pilot.
 
 ## Git and publishing
 
@@ -60,6 +65,8 @@ their reason in the same sentence or the next.
   its build output (`target/`); its owner may be mid-build.
 - Commit with explicit paths (`git add <paths>`), never `git add -A` or `git commit -a`, so you
   do not sweep up files that are not yours. Never force-push.
+- Do not run `cargo fmt` over the repository: it is not rustfmt-clean, and the reformatting
+  buries the real change.
 - Push, merge to `main`, tag, release, and open or comment on issues and pull requests only when
   the owner asks, for that item.
 - Never push to, or open a pull request against, anyone else's repository.
