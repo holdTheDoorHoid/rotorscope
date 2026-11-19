@@ -79,6 +79,7 @@
 - [A tour of the repository](dev/repo-tour.md)
 - [Set up your machine](dev/setup.md)
 - [Build, test and flash](dev/build-test-flash.md)
+- [Releases: build, check, sign](dev/release.md)
 - [Crate reference](dev/crates.md)
 - [Firmware reference](dev/firmware.md)
 - [Tools reference](dev/tools.md)

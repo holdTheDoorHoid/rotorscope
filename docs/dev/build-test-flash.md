@@ -98,6 +98,10 @@ the [firmware reference](firmware.md); the common builds are:
 | `rid-beacon`, S3 | `firmware/rid-beacon` | `cargo build --release` (after `. ~/export-esp.sh`) | `.../target/xtensa-esp32s3-none-elf/release/rid-beacon` |
 | `rid-beacon`, C5 | `firmware/rid-beacon` | `cargo +stable build --release --target riscv32imac-unknown-none-elf --no-default-features --features esp32c5` | `.../target/riscv32imac-unknown-none-elf/release/rid-beacon` |
 
+These builds carry the path of your checkout in their symbol names and debug info, so they are
+not byte for byte what someone else builds. For images anyone can rebuild and compare, use
+`tools/release-build.sh`: [Releases: build, check, sign](release.md).
+
 > [!WARNING]
 > As of 2026-11-18 the S3 hub firmware (`firmware/hub`, also the P4's web head) **does not link**:
 > `firmware/hub/README.md` records its static RAM 18,088 bytes over budget. That note is about
@@ -386,6 +390,7 @@ The line allows that one code point in that one file. As of 2026-11-19 the list 
 - `tools/link-key/src/main.rs`, `tools/partitions-*.csv`: the link keys and where they live on a board
 - `crates/link/src/benchfence.rs`: the bench fence every firmware build uses
 - `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/partitions-node.csv`: flashing
+- `tools/release-build.sh`, `tools/repro-env.sh`: reproducible release images
 - `tools/bench/run.py`, `tools/bench/judge.py`: the bench runner
 - `tools/droneid-hil/src/main.rs`, `tools/fetch-droneid-samples.sh`: DroneID on the chip
 - `.github/workflows/ci.yml`, `.github/workflows/docs.yml`: what CI runs

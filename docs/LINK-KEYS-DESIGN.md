@@ -569,13 +569,16 @@ commit differ, and the check deals with each:
   `--remap-path-prefix` to the firmware's own rustflags;
 * the checkout's directory itself: cargo hashes the location of every path dependency outside
   the firmware's workspace (every crate under `crates/`) into symbol names, and the linker lays
-  the image out differently. Nothing in rustflags undoes that on stable Rust, so identical
-  images need the same directory path (the check moves each checkout to one path in turn;
-  `--paths` shows the difference). Making it path-free would mean one firmware workspace that
-  contains `crates/`, or cargo's unstable `trim-paths`.
+  the image out differently. Nothing in rustflags undoes that on stable Rust. Since 2026-11-19
+  both checkouts are built through one fixed path, `/tmp/rotorscope-repro` (a link that cargo
+  does not resolve; `repro_link` in `repro-env.sh`), and the images and ELFs of two checkouts in
+  different directories are identical; `--paths` shows the difference without it.
 
-`tools/flash-node.sh` builds with `repro-env.sh`; the gateway and hub are built by hand, and
-the bench checklist gives the gateway command with it.
+The check also searches each image and ELF for the builder's home directory, user name and host
+name. `tools/release-build.sh` builds every shipped image this way, from a fresh clone of the
+commit ([Releases](dev/release.md)). `tools/flash-node.sh` builds with `repro-env.sh`'s remapping
+but not the fixed path; the gateway and hub are built by hand, and the bench checklist gives the
+gateway command with it.
 
 ## 11. Limits that remain
 
