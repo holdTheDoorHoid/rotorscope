@@ -23,6 +23,10 @@
 //! must leave a trace). `area here R` (console only) becomes an ordinary
 //! `area here circle LAT LON R` line at the hub's position before it is
 //! applied and saved.
+//!
+//! **The profile** (slice 16e, `profile NAME`): a change, from a load or
+//! the console, is a `Setting` event with the data byte [`EV_PROFILE`] and
+//! says what the profile does.
 
 use core::fmt::Write;
 
@@ -32,6 +36,10 @@ use crate::app::App;
 use crate::evlog::Evidence;
 use crate::links::GatewayLink;
 use crate::sd::Logger;
+
+/// The `Setting` evidence data byte for a threat-profile change (slice 16e;
+/// 3 is the site file, 4 the GPS memory, 5 the visit history).
+pub const EV_PROFILE: u8 = 6;
 
 /// What the hub keeps of the site file itself: node positions, the
 /// placed home and the control-link switches. The mute rules and the
@@ -139,11 +147,13 @@ impl Site {
             logged += 1;
         });
         // Areas, the bubble and friends: each change, within the same bound.
+        // A profile change has its own tag (6, slice 16e).
         site::place_changes(app.tracker.places(), &st.places, |c| {
             if logged < site::MAX_CHANGE_EVENTS {
                 let mut t: heapless::String<256> = heapless::String::new();
                 let _ = site::write_place_change(&mut t, &c);
-                ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+                let tag = if matches!(c, site::PlaceChange::Profile(..)) { EV_PROFILE } else { 3 };
+                ev.event(evidence::EventCode::Setting, t.as_bytes(), &[tag]);
                 crate::println!("hub-p4: {t}");
             }
             logged += 1;
@@ -203,7 +213,9 @@ impl Site {
             | SiteLine::Friend(_)
             | SiteLine::FriendClear { .. }
             | SiteLine::Crowd { .. }
-            | SiteLine::Visits { .. }) => {
+            | SiteLine::CrowdAuto
+            | SiteLine::Visits { .. }
+            | SiteLine::Profile(_)) => {
                 site::apply_place(app.tracker.places_mut(), &l);
             }
             SiteLine::AllNodesHere | SiteLine::AreaHere { .. } | SiteLine::Nothing => {}
@@ -235,6 +247,16 @@ impl Site {
         if let Err(e) = site::check_room(app.tracker.places(), &parsed) {
             crate::println!("hub-p4: site line refused: {e}");
             return;
+        }
+        // A profile change says what it does, with its own tag (slice 16e).
+        if let SiteLine::Profile(p) = parsed
+            && p != app.tracker.places().profile
+        {
+            let crowd_line = app.tracker.places().crowd_set;
+            let mut t: heapless::String<256> = heapless::String::new();
+            let _ = site::write_place_change(&mut t, &site::PlaceChange::Profile(p, crowd_line));
+            ev.event(evidence::EventCode::Setting, t.as_bytes(), &[EV_PROFILE]);
+            crate::println!("hub-p4: {t}");
         }
         let mut text: heapless::String<128> = heapless::String::new();
         let parsed = match parsed {

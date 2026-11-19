@@ -78,7 +78,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 1 | boot | key class (1), public key (65), chip revision major (1), minor (1). Always and only record #0. |
 | 2 | card_mounted | this file number (u32), previous file number (u32, 0 none), previous file length at mount (u32), SHA-256 of the previous file's last whole record (32), previous file status (1): 0 none, 1 ends on a whole record, 2 ends inside an incomplete record, 3 unreadable |
 | 3 | card_lost | queued bytes that go to the next file (u32) |
-| 4 | setting | new value (1); text says which setting. The P4 hub uses the byte as a tag for some: 3 site file, 4 GPS memory, 5 repeat-visitor history (`ROTORSCP/VISITS.DAT` read, discarded, wiped with console `W`, or switched by `visits on/off`; slice 16d) |
+| 4 | setting | new value (1); text says which setting. The P4 hub uses the byte as a tag for some: 3 site file, 4 GPS memory, 5 repeat-visitor history (`ROTORSCP/VISITS.DAT` read, discarded, wiped with console `W`, or switched by `visits on/off`; slice 16d), 6 threat profile changed (a `profile` line from the site file or the console; the text names the profile and what it does; slice 16e) |
 | 5 | clock | old UTC (u64, 0 none), new UTC (u64), step ms (i64), PPS-locked (1) |
 | 6 | gps_fix | (none) |
 | 7 | gps_lost | (none) |
