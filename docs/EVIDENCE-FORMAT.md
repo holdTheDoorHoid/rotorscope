@@ -257,6 +257,13 @@ written with class 2.
    must match that boot's log, and the counters must follow on (see
    "Continuity across boots").
 7. Re-decode each detection's raw bytes and compare with the summary.
+8. Time, with no outside reference (records with time source "none" or
+   "untrusted" carry no UTC and are left out): within a boot, UTC minus
+   uptime stays put except at a `clock` event (the hub logs every change of
+   0.5 s or more, within a second or so of the records that show it) and
+   drifts by no more than the hub's 20 ppm steering; no UTC is before the
+   build date in the boot event (the hub never writes such time as GPS
+   time); and a boot's first UTC is not before the previous boot's last.
 
 None of these checks can show that the log is complete: the newest boot's
 records after the last one copied off, the newest files deleted or a

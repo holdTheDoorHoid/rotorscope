@@ -310,8 +310,7 @@ struct ChainState {
     /// links across gaps).
     hashes: BTreeMap<u64, [u8; 32]>,
     last_uptime: u64,
-    last_utc: Option<(u64, u8)>,
-    clock_event_since: bool,
+    time: TimeTrack,
     last_checkpoint_uptime: Option<u64>,
     last_signed_end: Option<u64>,
     /// The key was refused (test key, or not an outside key): said once.
@@ -382,8 +381,7 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
                     head: [0; 32],
                     hashes: BTreeMap::new(),
                     last_uptime: 0,
-                    last_utc: None,
-                    clock_event_since: false,
+                    time: TimeTrack::default(),
                     last_checkpoint_uptime: None,
                     last_signed_end: None,
                     key_refused: false,
@@ -438,7 +436,11 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
             rep.add(Level::Fail, w, format!("EV{prev_no:06}.EVL's ending changed after the unit opened the next file"));
         }
     }
+    for c in &mut chains {
+        c.time.finish(&mut rep, c.sum.build.map(|b| b.built_unix_s));
+    }
     continuity_checks(&mut rep, &mut chains, opts);
+    time_across_boots(&mut rep, &chains, inputs.iter().all(|i| i.file_no.is_some()));
     let mut nos: Vec<u32> = file_tails.keys().copied().collect();
     nos.sort();
     for p in nos.windows(2) {
@@ -607,16 +609,10 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
             }
             c.sum.utc_first.get_or_insert(u);
             c.sum.utc_last = Some(u);
-            if let Some((prev, _)) = c.last_utc
-                && u + 2000 < prev
-                && !c.clock_event_since
-            {
-                rep.add(Level::Note, w.clone(), format!("UTC stepped back {} ms with no clock event logged", prev - u));
-            }
-            c.last_utc = Some((u, h.time_source));
-            c.clock_event_since = false;
+            c.time.utc(rep, h.uptime_ms, u, w);
         }
     }
+    c.time.tick(rep, h.uptime_ms);
     // "untrusted" is the one source that comes with no UTC (EVIDENCE-FORMAT.md:
     // GPS gave a time the hub withheld; the UTC field is 0).
     if h.utc_ms.is_none() && h.time_source != 0 && h.time_source != format::TimeSource::Untrusted as u8 {
@@ -658,7 +654,7 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
                         );
                     }
                 }
-                Some(EventCode::Clock) => c.clock_event_since = true,
+                Some(EventCode::Clock) => c.time.clock(h.uptime_ms),
                 Some(EventCode::Continuity) => match crate::continuity::Continuity::decode(e.data) {
                     Some(k) => {
                         c.sum.continuity.get_or_insert(k);
@@ -687,6 +683,152 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
         }
     }
     claim
+}
+
+/// A UTC jump against uptime bigger than this needs a clock event.
+const JUMP_MS: i128 = 2_000;
+/// A clock event this close (uptime) after a jump explains it (the hub
+/// logs clock changes once a second, so records can show the new time first).
+const CLOCK_GRACE_MS: u64 = 3_000;
+/// Drift of UTC against uptime, with no clock event, beyond this plus
+/// [`DRIFT_PER_MS`] per ms of uptime is noted (the hub steers its clock by at
+/// most 20 ppm, docs/GNSS-INTEGRITY.md; this allows 50 times that).
+const DRIFT_MS: i128 = 1_000;
+const DRIFT_PER_MS: i128 = 1_000;
+/// Drift is judged over at least this much uptime.
+const DRIFT_SPAN_MS: u64 = 60_000;
+
+/// Time plausibility within one chain (WP-14a, HB-11): UTC against the
+/// hub's own uptime. Only records with UTC count; "none" and "untrusted"
+/// records carry none and are left out (counted elsewhere).
+#[derive(Default)]
+struct TimeTrack {
+    /// The latest UTC record: UTC - uptime, uptime, and whether a clock
+    /// event came after it.
+    last: Option<(i128, u64)>,
+    clock_since: bool,
+    /// Start of the current stretch without clock events: offset, uptime.
+    run: Option<(i128, u64)>,
+    /// A jump not yet explained: where, by how much, at what uptime.
+    pending: Option<(Where, i128, u64)>,
+    /// Earliest UTC in the chain, and where.
+    min_utc: Option<(u64, Where)>,
+}
+
+impl TimeTrack {
+    fn utc(&mut self, rep: &mut Report, uptime: u64, utc: u64, w: &Where) {
+        if self.min_utc.as_ref().is_none_or(|(m, _)| utc < *m) {
+            self.min_utc = Some((utc, w.clone()));
+        }
+        let off = i128::from(utc) - i128::from(uptime);
+        if let Some((last, _)) = self.last
+            && !self.clock_since
+            && (off - last).abs() > JUMP_MS
+        {
+            self.emit(rep);
+            self.pending = Some((w.clone(), off - last, uptime));
+            self.run = None;
+        }
+        match self.run {
+            Some((o, t)) if uptime.saturating_sub(t) >= DRIFT_SPAN_MS => {
+                let span = i128::from(uptime - t);
+                let drift = off - o;
+                if drift.abs() > DRIFT_MS + span / DRIFT_PER_MS {
+                    rep.add(
+                        Level::Note,
+                        w.clone(),
+                        format!(
+                            "UTC drifted {drift} ms against the hub's own clock over {} s with no clock event ({} ppm; the hub steers its clock by at most 20 ppm): the time in these records is doubtful",
+                            span / 1000,
+                            drift * 1_000_000 / span
+                        ),
+                    );
+                    self.run = Some((off, uptime));
+                }
+            }
+            Some(_) => {}
+            None => self.run = Some((off, uptime)),
+        }
+        self.last = Some((off, uptime));
+        self.clock_since = false;
+    }
+
+    fn clock(&mut self, uptime: u64) {
+        if self.pending.as_ref().is_some_and(|p| uptime.saturating_sub(p.2) <= CLOCK_GRACE_MS) {
+            self.pending = None;
+        }
+        self.clock_since = true;
+        self.run = None;
+    }
+
+    /// Every record: a jump whose grace has passed is reported.
+    fn tick(&mut self, rep: &mut Report, uptime: u64) {
+        if self.pending.as_ref().is_some_and(|p| uptime.saturating_sub(p.2) > CLOCK_GRACE_MS) {
+            self.emit(rep);
+        }
+    }
+
+    fn emit(&mut self, rep: &mut Report) {
+        if let Some((w, d, _)) = self.pending.take() {
+            rep.add(
+                Level::Note,
+                w,
+                format!(
+                    "UTC jumped {} {} s against the hub's own clock with no clock event: the hub logs every clock change of 0.5 s or more, so the time from here on is doubtful",
+                    if d > 0 { "forward" } else { "back" },
+                    d.abs() / 1000
+                ),
+            );
+        }
+    }
+
+    /// End of the chain: what is still pending, and UTC before the build.
+    fn finish(&mut self, rep: &mut Report, built_unix_s: Option<u64>) {
+        self.emit(rep);
+        if let (Some(b), Some((m, w))) = (built_unix_s, self.min_utc.take())
+            && m < b.saturating_mul(1000)
+        {
+            rep.add(
+                Level::Fail,
+                w,
+                format!(
+                    "UTC {} is before this firmware was built ({}): the hub never writes time before its build date as GPS time (it records it as untrusted), so these records were not written as they stand by the firmware the boot event names",
+                    fmt_utc(m),
+                    fmt_utc(b.saturating_mul(1000))
+                ),
+            );
+        }
+    }
+}
+
+/// Time from one boot to the next (WP-14a): a boot's first UTC before the
+/// previous boot's last UTC. Boots are ordered by their continuity records
+/// where they have them, else (card files only) in the order supplied.
+fn time_across_boots(rep: &mut Report, chains: &[ChainState], files: bool) {
+    let by_boot: HashMap<[u8; 8], usize> = chains.iter().enumerate().map(|(i, c)| (c.sum.boot, i)).collect();
+    for (i, c) in chains.iter().enumerate() {
+        let prev = match c.sum.continuity {
+            Some(k) if k.has_prev() => by_boot.get(&k.prev_boot).copied(),
+            Some(_) => None,
+            None if files && i > 0 && chains[i - 1].sum.continuity.is_none() => Some(i - 1),
+            None => None,
+        };
+        let Some(p) = prev else { continue };
+        if let (Some(end), Some(start)) = (chains[p].sum.utc_last, c.sum.utc_first)
+            && start + 2_000 < end
+        {
+            rep.add(
+                Level::Note,
+                Where { boot: Some(c.sum.boot), ..Default::default() },
+                format!(
+                    "this boot's first UTC ({}) is earlier than the end of the boot before it ({}, boot {}): one of the two clocks was wrong",
+                    fmt_utc(start),
+                    fmt_utc(end),
+                    hex(&chains[p].sum.boot)
+                ),
+            );
+        }
+    }
 }
 
 /// Continuity across boots (WP-14a): each boot's `continuity` record names

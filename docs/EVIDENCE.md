@@ -38,6 +38,13 @@ laptop that built the firmware.
   it trusts, and its clock follows GPS by no more than a crystal could drift,
   but a spoofer present from the very first boot, or walking the time by
   under about 1.7-3.5 s a day, is not caught (docs/GNSS-INTEGRITY.md).
+  The verifier checks what it can without an outside reference (WP-14a):
+  UTC before the firmware's build date **fails** (the hub never writes such
+  time); a jump of UTC against the hub's own uptime with no clock event, a
+  drift beyond the hub's own steering, and a boot whose time starts before
+  the previous boot's ended are **noted** (they cast doubt on the time, not
+  on the records). A log from a hub that never had GPS time verifies as
+  before, its records marked "no UTC".
 
 **Still missing before it could be court-grade:**
 
