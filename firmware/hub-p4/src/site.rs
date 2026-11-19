@@ -30,6 +30,8 @@ pub struct Site {
     /// What last set `audio clips`: the main loop logs a change made by the
     /// file; one typed by the operator is logged by [`Site::save`] already.
     audio_from: From,
+    /// What last set the low-hum lines, for the same reason.
+    low_hum_from: From,
     /// The placed hub home changed (file load or an operator line): the
     /// main loop hands it to the GPS checks (`take_home`). `Some(None)`:
     /// cleared.
@@ -52,6 +54,18 @@ impl Site {
     /// What last set `audio clips`.
     pub fn audio_from(&self) -> From {
         self.audio_from
+    }
+
+    /// `low hum alerts on|off` and `low hum below <Hz>`: the recommended
+    /// setting (no alert below 140 Hz) unless the file or the operator
+    /// said otherwise.
+    pub fn low_hum(&self) -> tracker::sound::LowHum {
+        self.st.low_hum()
+    }
+
+    /// What last set the low-hum lines.
+    pub fn low_hum_from(&self) -> From {
+        self.low_hum_from
     }
 
     /// The placed hub home (`home` line), if it changed since the last call.
@@ -150,6 +164,9 @@ impl Site {
         self.st.control_ids = st.control_ids;
         self.st.control_content = st.control_content;
         self.st.audio_clips = st.audio_clips;
+        self.low_hum_from = From::File;
+        self.st.low_hum_alerts = st.low_hum_alerts;
+        self.st.low_hum_below = st.low_hum_below;
     }
 
     fn apply_line(&mut self, l: SiteLine, app: &mut App, now: u64) {
@@ -162,7 +179,9 @@ impl Site {
                 }
             }
             SiteLine::UnmuteAll => app.tracker.unmute_all(now),
-            l @ (SiteLine::Control { .. } | SiteLine::AudioClips(_)) => self.st.apply(l),
+            l @ (SiteLine::Control { .. } | SiteLine::AudioClips(_) | SiteLine::LowHumAlerts(_) | SiteLine::LowHumBelow(_)) => {
+                self.st.apply(l);
+            }
             l @ (SiteLine::Home { .. } | SiteLine::HomeClear) => {
                 self.st.apply(l);
                 self.home_changed = Some(self.st.home);
@@ -197,6 +216,9 @@ impl Site {
         let _ = writeln!(text, "{}", line.trim());
         if let SiteLine::AudioClips(_) = parsed {
             self.audio_from = From::Console;
+        }
+        if let SiteLine::LowHumAlerts(_) | SiteLine::LowHumBelow(_) = parsed {
+            self.low_hum_from = From::Console;
         }
         self.apply_line(parsed, app, now);
         self.save(&text, From::Console, sd, ev);

@@ -472,6 +472,7 @@ fn main() -> ! {
             if let Some(e) = ear.as_mut() {
                 audio_clips_setting(e, &site, &mut ev);
             }
+            low_hum_setting(&site, &mut app, &mut ev);
             ev.watch(&gps, &gw.nodes, faa.pack(), ms);
             gpsmem.tick(&mut gps, &mut sdlog, &mut ev, ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
@@ -672,6 +673,40 @@ fn audio_clips_setting(e: &mut ear::Ear, site: &site::Site, ev: &mut evlog::Evid
         } else {
             "the tape is wiped and no sound is kept"
         }
+    );
+}
+
+/// `low hum alerts on|off` and `low hum below <Hz>` from the site settings
+/// to the tracker's sound contacts. Logged like `audio_clips_setting`: a
+/// change made by the card's file here, one typed at the console when it
+/// was typed.
+#[inline(never)]
+fn low_hum_setting(site: &site::Site, app: &mut app::App, ev: &mut evlog::Evidence) {
+    let to = site.low_hum();
+    if app.tracker.low_hum() == to {
+        return;
+    }
+    app.tracker.set_low_hum(to);
+    let mut t: heapless::String<96> = heapless::String::new();
+    let from = site.low_hum_from();
+    let _ = core::fmt::Write::write_fmt(
+        &mut t,
+        format_args!("site ({}): low hum alerts {} below {} Hz", from.name(), if to.alerts { "on" } else { "off" }, to.below_hz),
+    );
+    if from == site::From::File {
+        let mut d = [to.alerts as u8, 0, 0];
+        d[1..].copy_from_slice(&to.below_hz.to_le_bytes());
+        ev.event(evidence::EventCode::Setting, t.as_bytes(), &d);
+    }
+    let rec = tracker::sound::LowHum::RECOMMENDED;
+    println!(
+        "hub-p4: {t}: {}{}",
+        if to.alerts {
+            "a sound at any pitch alerts"
+        } else {
+            "a sound heard mostly below the line is logged as a low hum and does not alert"
+        },
+        if to == rec { " (recommended)" } else { " (recommended: alerts off, below 140 Hz)" }
     );
 }
 
@@ -926,7 +961,7 @@ fn command(
         b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | audio clips on|off");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | audio clips on|off | low hum alerts on|off | low hum below <Hz>");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),

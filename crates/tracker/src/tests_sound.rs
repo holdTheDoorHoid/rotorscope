@@ -220,6 +220,31 @@ fn a_hum_that_rises_into_the_drone_range_and_stays_alerts() {
 }
 
 #[test]
+fn the_site_can_make_low_hums_alert_or_move_the_line() {
+    let mut tr: Tracker = Tracker::default();
+    assert_eq!(tr.low_hum(), LowHum::RECOMMENDED);
+    assert_eq!(LowHum::RECOMMENDED, LowHum { alerts: false, below_hz: 140 });
+    // Low hums alert: a 107 Hz contact is an ordinary unexplained sound.
+    tr.set_low_hum(LowHum { alerts: true, below_hz: 140 });
+    let id = listen(&mut tr, 1, 6, 107).unwrap();
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::NoRadio);
+    assert_eq!(tr.take_new_sound(6_000), Some(id));
+    // A higher line: a Mavic's 180 Hz is a low hum too (the owner's choice).
+    let mut tr: Tracker = Tracker::default();
+    tr.set_low_hum(LowHum { alerts: false, below_hz: 200 });
+    let id = listen(&mut tr, 1, 6, 180).unwrap();
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::LowHum);
+    assert_eq!(tr.take_new_sound(6_000), None);
+    // A lower line: 107 Hz alerts, 85 Hz does not.
+    let mut tr: Tracker = Tracker::default();
+    tr.set_low_hum(LowHum { alerts: false, below_hz: 100 });
+    let id = listen(&mut tr, 1, 6, 107).unwrap();
+    assert_eq!(tr.take_new_sound(6_000), Some(id));
+    let id = listen(&mut tr, 20, 26, 85).unwrap();
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::LowHum);
+}
+
+#[test]
 fn a_low_hum_with_a_drone_on_the_radio_is_still_with_radio() {
     let mut tr: Tracker = Tracker::default();
     let d = det(Transport::WifiBeacon, WIFI_MAC, -60, &[serial("SN-1"), location(CITY_HALL.0, CITY_HALL.1, 60.0)]);

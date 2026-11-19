@@ -27,6 +27,11 @@
 //!
 //! # Sound clips while a drone is heard (off unless a line says on):
 //! audio clips on
+//!
+//! # Low hums (fans, engines): a sound heard mostly below the line is
+//! # logged but does not alert. Recommended, and what you get with no line:
+//! low hum alerts off
+//! low hum below 140       # Hz, 80 to 400
 //! ```
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
@@ -101,6 +106,13 @@ pub enum SiteLine {
     /// saves a clip when a sound contact alerts (PLAN.md Phase 15). Off
     /// when never said (owner decision 2026-11-18).
     AudioClips(bool),
+    /// `low hum alerts on|off`: whether a sound heard mostly below the
+    /// low-hum line alerts like any other (`tracker::sound::LowHum`). Off
+    /// when never said, which is the recommended setting.
+    LowHumAlerts(bool),
+    /// `low hum below <Hz>`: the line, 80 to 400 Hz. 140 when never said,
+    /// which is the recommended setting.
+    LowHumBelow(u16),
     /// `home LAT LON [HEIGHT]`: where the hub itself stands, placed by the operator (WP-12).
     /// The strongest prior for the GPS spoofing checks: it replaces the home the hub learns.
     /// Height in metres above the WGS-84 ellipsoid, optional.
@@ -209,6 +221,32 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::AudioClips(on));
     }
+    if word.eq_ignore_ascii_case("low") {
+        const HOW: &str = "say: low hum alerts on|off, or low hum below <Hz> (80 to 400; 140 recommended)";
+        if !it.next().is_some_and(|w| w.eq_ignore_ascii_case("hum")) {
+            return Err(HOW);
+        }
+        let what = it.next().ok_or(HOW)?;
+        let value = it.next().ok_or(HOW)?;
+        if it.next().is_some_and(|w| !w.eq_ignore_ascii_case("hz")) || it.next().is_some() {
+            return Err(HOW);
+        }
+        if what.eq_ignore_ascii_case("alerts") {
+            return match value {
+                w if w.eq_ignore_ascii_case("on") => Ok(SiteLine::LowHumAlerts(true)),
+                w if w.eq_ignore_ascii_case("off") => Ok(SiteLine::LowHumAlerts(false)),
+                _ => Err(HOW),
+            };
+        }
+        if what.eq_ignore_ascii_case("below") {
+            use crate::sound::{LOW_HUM_MAX_HZ, LOW_HUM_MIN_HZ};
+            return match value.parse::<u16>() {
+                Ok(hz) if (LOW_HUM_MIN_HZ..=LOW_HUM_MAX_HZ).contains(&hz) => Ok(SiteLine::LowHumBelow(hz)),
+                _ => Err("low hum below needs a whole number of Hz from 80 to 400 (140 recommended)"),
+            };
+        }
+        return Err(HOW);
+    }
     if word.eq_ignore_ascii_case("home") {
         let a = it.next().ok_or("home needs a position (lat lon [height]) or clear")?;
         if a.eq_ignore_ascii_case("clear") {
@@ -267,7 +305,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, home, mute, unmute, control, audio)")
+    Err("unknown line (node, home, mute, unmute, control, audio, low hum)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -287,6 +325,11 @@ pub struct SiteState {
     /// `audio clips on|off` as the file last set it (`None`: never
     /// mentioned, which means off: [`SiteState::audio_clips_on`]).
     pub audio_clips: Option<bool>,
+    /// `low hum alerts on|off` and `low hum below <Hz>` as last set
+    /// (`None`: never mentioned, which means the recommended setting:
+    /// [`SiteState::low_hum`]).
+    pub low_hum_alerts: Option<bool>,
+    pub low_hum_below: Option<u16>,
     /// The hub's own placed position (`home` lines), `(lat, lon, height)`.
     pub home: Option<(f64, f64, Option<f64>)>,
     pub used: u32,
@@ -319,6 +362,16 @@ impl SiteState {
         self.audio_clips.unwrap_or(false)
     }
 
+    /// The low-hum setting: the recommended one (no alert below 140 Hz)
+    /// except where a line said otherwise.
+    pub fn low_hum(&self) -> crate::sound::LowHum {
+        let r = crate::sound::LowHum::RECOMMENDED;
+        crate::sound::LowHum {
+            alerts: self.low_hum_alerts.unwrap_or(r.alerts),
+            below_hz: self.low_hum_below.unwrap_or(r.below_hz),
+        }
+    }
+
     /// Apply one line. `AllNodesHere` needs a live position and is ignored
     /// here (the hub handles it).
     pub fn apply(&mut self, l: SiteLine) {
@@ -338,6 +391,8 @@ impl SiteState {
             SiteLine::Control { what: ControlSetting::Ids, on } => self.control_ids = Some(on),
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
             SiteLine::AudioClips(on) => self.audio_clips = Some(on),
+            SiteLine::LowHumAlerts(on) => self.low_hum_alerts = Some(on),
+            SiteLine::LowHumBelow(hz) => self.low_hum_below = Some(hz),
             SiteLine::Home { lat, lon, alt } => self.home = Some((lat, lon, alt)),
             SiteLine::HomeClear => self.home = None,
             SiteLine::AllNodesHere => {
@@ -608,7 +663,7 @@ impl core::fmt::Display for LoadSummary<'_> {
         let onoff = |v: Option<bool>| if v == Some(true) { "on" } else { "off" };
         write!(
             f,
-            ", {} bytes, {} lines ({} used, {} ignored); {} mutes for good, {} mute lines not honoured; {} node positions; control ids {}, control content {}, audio clips {}",
+            ", {} bytes, {} lines ({} used, {} ignored); {} mutes for good, {} mute lines not honoured; {} node positions; control ids {}, control content {}, audio clips {}; low hum alerts {} below {} Hz",
             self.bytes,
             self.lines,
             st.used,
@@ -619,6 +674,8 @@ impl core::fmt::Display for LoadSummary<'_> {
             onoff(st.control_ids),
             onoff(st.control_content),
             onoff(st.audio_clips),
+            onoff(Some(st.low_hum().alerts)),
+            st.low_hum().below_hz,
         )
     }
 }
@@ -692,6 +749,31 @@ mod tests {
     }
 
     /// Audio clips are off unless a line turns them on; the last line wins.
+    #[test]
+    fn low_hum_lines() {
+        use crate::sound::LowHum;
+        assert_eq!(parse_line("low hum alerts on"), Ok(SiteLine::LowHumAlerts(true)));
+        assert_eq!(parse_line("Low Hum Alerts OFF # recommended"), Ok(SiteLine::LowHumAlerts(false)));
+        assert_eq!(parse_line("low hum below 140"), Ok(SiteLine::LowHumBelow(140)));
+        assert_eq!(parse_line("low hum below 120 Hz"), Ok(SiteLine::LowHumBelow(120)));
+        assert_eq!(parse_line("low hum below 80"), Ok(SiteLine::LowHumBelow(80)));
+        assert_eq!(parse_line("low hum below 400"), Ok(SiteLine::LowHumBelow(400)));
+        for bad in ["low", "low hum", "low hum alerts", "low hum alerts maybe", "low hum below", "low hum below 79",
+            "low hum below 401", "low hum below 140.5", "low hum below -1", "low hum below 140 kHz", "low hum below 140 Hz more", "low hums below 140"]
+        {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
+        let mut st = SiteState::default();
+        assert_eq!(st.low_hum(), LowHum::RECOMMENDED, "no line: the recommended setting");
+        st.apply(parse_line("low hum below 110").unwrap());
+        assert_eq!(st.low_hum(), LowHum { alerts: false, below_hz: 110 });
+        st.apply(parse_line("low hum alerts on").unwrap());
+        assert_eq!(st.low_hum(), LowHum { alerts: true, below_hz: 110 });
+        st.apply(parse_line("low hum alerts off").unwrap());
+        st.apply(parse_line("low hum below 140").unwrap());
+        assert_eq!(st.low_hum(), LowHum::RECOMMENDED, "later lines win");
+    }
+
     #[test]
     fn audio_clips_are_off_unless_a_line_says_on() {
         let mut st = SiteState::default();
@@ -796,12 +878,12 @@ mod tests {
         let sum = LoadSummary { st: &st, sha256: &sha, bytes: text.len() as u32, lines: 4 };
         let s = std::format!("{sum}");
         assert!(s.starts_with("site file loaded: sha256 abababab"), "{s}");
-        assert!(s.contains("1 mutes for good, 1 mute lines not honoured; 1 node positions; control ids on, control content off, audio clips off"), "{s}");
+        assert!(s.contains("1 mutes for good, 1 mute lines not honoured; 1 node positions; control ids on, control content off, audio clips off; low hum alerts off below 140 Hz"), "{s}");
         assert_eq!(&sum.data()[32..], &[1, 1, 1, 1, 0, 0]);
         // The audio-clips switch is in the summary too (WP-07).
         let on = load("audio clips on\nhome 39.9521 -75.1638\n");
         let sum = LoadSummary { st: &on, sha256: &sha, bytes: 0, lines: 2 };
-        assert!(std::format!("{sum}").ends_with("control ids off, control content off, audio clips on"));
+        assert!(std::format!("{sum}").ends_with("control ids off, control content off, audio clips on; low hum alerts off below 140 Hz"));
         assert_eq!(&sum.data()[32..], &[0, 0, 0, 0, 0, 1]);
         assert_eq!(on.home, Some((39.9521, -75.1638, None)));
         assert_eq!((on.used, on.ignored), (2, 0));

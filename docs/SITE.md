@@ -185,6 +185,29 @@ the evidence log, from the file or the console. A microphone outdoors also hears
 Pennsylvania requires everyone's consent to record a conversation: turn clips on only where
 that is settled, and post a notice.
 
+## Low hums
+
+```
+low hum alerts off     # recommended, and the default: a low hum is logged but does not alert
+low hum alerts on      # a sound at any pitch alerts
+low hum below 140      # where "low" ends, in Hz (80 to 400). Recommended, and the default: 140
+```
+
+Fans, engines, compressors and crewed aircraft hum at low pitch; the camera and FPV drones the
+hub listens for do not (every drone recording we have is at 158 Hz or higher). A sound heard
+mostly below the line is shown and logged as "Low hum heard (fan, engine or aircraft)" and
+raises no alert and no clip, unless a drone is on the radio at the same time.
+
+- **Leave both alone** unless you have a reason. With no line you get the recommended setting.
+- **Raise the line** (say `low hum below 160`) if a machine at your site still alerts just
+  above 140 Hz. Above about 155 Hz you start to lose large camera drones.
+- **Lower the line**, or say `low hum alerts on`, if you need to hear heavy-lift drones (crop
+  sprayers, cargo and cinema hexacopters with propellers of about 20 inches or more), and
+  accept more false alarms from machinery.
+
+A change is logged in the evidence log, from the file or the console. docs/ACOUSTIC.md "Low
+hums" has the measurements behind 140 Hz.
+
 ## On the console
 
 Press `L`, type one line exactly as in the file, press Enter (Esc cancels).

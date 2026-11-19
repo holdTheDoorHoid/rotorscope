@@ -56,10 +56,40 @@ pub const RADIO_RECENT_MS: u64 = 15_000;
 /// A heuristic (after `audio-flyover-geolocation`'s 2.5-3 km).
 pub const AIRCRAFT_AUDIBLE_M: f64 = 3_000.0;
 /// A contact heard mostly below this pitch is a "low hum" and does not
-/// alert by itself. Lowest drone pitch in our recordings: 158 Hz (Mavic
-/// Pro); heavy-lift drones with 20 inch and larger propellers do sit below
-/// it and are the price (docs/ACOUSTIC.md "Low hums").
+/// alert by itself: the recommended line, and the one in force unless the
+/// site says otherwise ([`LowHum`]). Lowest drone pitch in our recordings:
+/// 158 Hz (Mavic Pro); heavy-lift drones with 20 inch and larger propellers
+/// do sit below it and are the price (docs/ACOUSTIC.md "Low hums").
 pub const LOW_HUM_BELOW_HZ: u16 = 140;
+/// The lowest and highest line a site may set (`low hum below <Hz>`).
+pub const LOW_HUM_MIN_HZ: u16 = 80;
+pub const LOW_HUM_MAX_HZ: u16 = 400;
+
+/// The site's low-hum setting (`low hum alerts on|off`, `low hum below
+/// <Hz>` in the site file, `tracker::site`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LowHum {
+    /// Low hums alert like any other unexplained sound. Off is recommended.
+    pub alerts: bool,
+    /// The line, Hz. [`LOW_HUM_BELOW_HZ`] is recommended.
+    pub below_hz: u16,
+}
+
+impl LowHum {
+    pub const RECOMMENDED: Self = Self { alerts: false, below_hz: LOW_HUM_BELOW_HZ };
+
+    /// Pitch below which a report counts as low: nothing does when low
+    /// hums are to alert.
+    const fn line(self) -> u16 {
+        if self.alerts { 0 } else { self.below_hz }
+    }
+}
+
+impl Default for LowHum {
+    fn default() -> Self {
+        Self::RECOMMENDED
+    }
+}
 
 /// Stable handle for a sound contact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -126,7 +156,7 @@ pub struct SoundContact {
     pub small_props: bool,
     /// Detector reports merged into this contact.
     pub reports: u32,
-    /// How many of them were below [`LOW_HUM_BELOW_HZ`].
+    /// How many of them were below the low-hum line ([`LowHum`]).
     pub low_reports: u32,
     /// The nearest audible aircraft when the contact was (last) explained
     /// by one, and its slant range, metres.
@@ -165,11 +195,12 @@ impl SoundContact {
 pub struct SoundTable {
     contacts: Vec<SoundContact, MAX_CONTACTS>,
     next_id: u32,
+    low_hum: LowHum,
 }
 
 impl SoundTable {
     pub const fn new() -> Self {
-        Self { contacts: Vec::new(), next_id: 1 }
+        Self { contacts: Vec::new(), next_id: 1, low_hum: LowHum::RECOMMENDED }
     }
 
     pub fn all(&self) -> &[SoundContact] {
@@ -237,7 +268,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         } else {
             None
         };
-        let low = u32::from(r.pitch_hz < LOW_HUM_BELOW_HZ);
+        let low = u32::from(r.pitch_hz < self.sounds.low_hum.line());
         // Unexplained: a low hum if most of the contact was heard low.
         let unexplained = |low_reports: u32, reports: u32| {
             if low_reports * 2 > reports { SoundKind::LowHum } else { SoundKind::NoRadio }
@@ -294,6 +325,17 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             announced: false,
         });
         Some(id)
+    }
+
+    /// The low-hum setting in force.
+    pub fn low_hum(&self) -> LowHum {
+        self.sounds.low_hum
+    }
+
+    /// Change the low-hum setting. Reports already counted keep the line
+    /// they were counted against.
+    pub fn set_low_hum(&mut self, to: LowHum) {
+        self.sounds.low_hum = to;
     }
 
     pub fn sounds(&self) -> &[SoundContact] {
