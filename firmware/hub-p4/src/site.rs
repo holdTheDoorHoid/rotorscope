@@ -75,10 +75,10 @@ impl Site {
     }
 
     /// Once a second: tell the tracker where each node it knows stands
-    /// (the tracker numbers relayed nodes from 1, in gateway order).
+    /// (by the node's number on the hub, `links::NodeStats::node`).
     pub fn apply(&self, app: &mut App, gw: &GatewayLink<'_>) {
-        for (i, n) in gw.nodes.iter().enumerate() {
-            let node = i as u8 + 1;
+        for n in gw.nodes.iter() {
+            let node = n.node;
             match self.st.nodes.iter().find(|p| p.0 == n.mac) {
                 Some(&(_, lat, lon)) => app.tracker.set_node_position(node, lat, lon),
                 None => app.tracker.clear_node_position(node),

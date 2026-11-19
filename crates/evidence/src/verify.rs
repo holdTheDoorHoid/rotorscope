@@ -869,7 +869,9 @@ fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options
             let w = Where { boot: Some(boot), seq: Some(seq), ..Default::default() };
             match c.status {
                 k::CONTINUED => {}
+                k::FRESH if c.source == format::boot::COUNTER_HUB_FLASH => rep.add(Level::Note, w.clone(), format!("boot counter {} (kept in the unit's flash, not on the card): the card held no state (a new or wiped card, or its state files were removed), so the previous boot's last records are not named here; the counter still places this boot among the unit's others", c.counter)),
                 k::FRESH => rep.add(Level::Note, w.clone(), format!("boot counter {}: the card held no counter (a new or wiped card, or its state files were removed): nothing links this boot to earlier ones", c.counter)),
+                k::OTHER_CARD => rep.add(Level::Note, w.clone(), format!("boot counter {} (kept in the unit's flash): the card was last used by boot {} ({} records), not by the boot just before this one; boots in between ran with another card or none, or the card came from another unit", c.counter, hex(&c.prev_boot), c.prev_records)),
                 k::UNREADABLE => rep.add(Level::Note, w.clone(), format!("boot counter {}: the card's counter was unreadable, so it started again: nothing links this boot to earlier ones", c.counter)),
                 k::NOT_SAVED => rep.add(Level::Note, w.clone(), format!("boot counter {}: the unit could not save it, so the next boot will not follow on from this one", c.counter)),
                 k::STORE_ERROR => rep.add(Level::Note, w.clone(), "the unit could not read its boot counter: this boot's place among the others is not shown"),

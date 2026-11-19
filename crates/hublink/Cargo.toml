@@ -1,0 +1,15 @@
+[package]
+name = "hublink"
+description = "The P4 hub's side of the keyed ESP-NOW link (WP-13e): kit records and boot counter from flash, per-slot keys, the gateway wire (protocol 14), beacons, commands and time syncs, the boot counter as the evidence log's"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+airlink = { path = "../airlink" }
+kitkeys = { path = "../kitkeys" }
+link.workspace = true
+# Only `continuity` and `format` (no features: no signer, no decode).
+evidence.workspace = true
+heapless.workspace = true
+postcard.workspace = true

@@ -34,7 +34,11 @@
 //! **Old gateways.** A device that streams without being polled (an ESP-NOW
 //! gateway, or one point-to-point node) is recognised
 //! (`Master::looks_legacy`) and the link drops back to plain reading: no
-//! polls, bytes straight to the ring, as before this module. After 10 s of
+//! polls, bytes straight to the ring, as before this module. A protocol 14
+//! gateway writes `link::gw` messages, not `link::Frame`s, so the master
+//! never sees it stream frames: its `Hello` is recognised here instead
+//! (`sniff_gateway`), with the same result, and `links.rs` reads the
+//! gateway messages. After 10 s of
 //! silence it tries the bus again. Build without the `wirebus` feature to
 //! never poll at all.
 
@@ -108,6 +112,16 @@ pub struct Shared {
     sync: Option<(u64, u64, bool)>,
     /// `TimeSync` commands written to the wire.
     pub syncs: u32,
+    /// Bus mode: watches unasked bytes for a protocol 14 gateway's `Hello`
+    /// (`link::gw`), which the bus master cannot read (it is not a
+    /// `link::Frame`); 48 bytes hold a whole `Hello`.
+    sniff: link::gw::GwDecoder<[u8; 48]>,
+    /// A protocol 14 gateway's `Hello` switched the link out of bus mode;
+    /// `links.rs` takes the flag and reads the gateway messages.
+    gw_hello: bool,
+    /// The line carries a protocol 14 gateway (`links.rs` sets it): its
+    /// time syncs are sealed per node there, never written here raw.
+    gw14: bool,
 }
 
 /// The state lives in `.bss` (`STORE`, ~8 KB); `BUS` points at it once set up.
@@ -142,6 +156,9 @@ pub fn init(epoch: u16) {
             started: false,
             sync: None,
             syncs: 0,
+            sniff: link::gw::GwDecoder::new([0; 48]),
+            gw_hello: false,
+            gw14: false,
         });
         BUS.borrow_ref_mut(cs).replace(shared);
     });
@@ -168,7 +185,9 @@ pub fn send(cs: CriticalSection<'_>, bytes: &[u8]) -> bool {
 /// replaces one not yet sent.
 pub fn time_sync(utc_ms: u64, at_us: u64, pps: bool) {
     critical_section::with(|cs| {
-        if let Some(s) = BUS.borrow_ref_mut(cs).as_mut() {
+        if let Some(s) = BUS.borrow_ref_mut(cs).as_mut()
+            && !s.gw14
+        {
             s.sync = Some((utc_ms, at_us, pps));
         }
     });
@@ -195,6 +214,13 @@ pub fn rx<const N: usize>(cs: CriticalSection<'_>, uart: &mut Uart<'static, Bloc
     if s.mode == Mode::Legacy {
         return push_all(ring, bytes);
     }
+    if sniff_gateway(s, bytes) {
+        s.mode = Mode::Legacy;
+        s.mode_since_us = now;
+        s.gw_hello = true;
+        let _ = s.notes.push_back(Note::Mode(Mode::Legacy));
+        return push_all(ring, bytes);
+    }
     let lost = {
         let Shared { master, attr, notes, frames, .. } = s;
         let mut lost = 0;
@@ -204,6 +230,45 @@ pub fn rx<const N: usize>(cs: CriticalSection<'_>, uart: &mut Uart<'static, Bloc
     s.ring_full += lost;
     service_locked(s, uart, ring, now, false);
     lost
+}
+
+/// A protocol 14 gateway's `Hello` among `bytes` (its firmware string starts
+/// "gw ", as every gateway build's does).
+fn sniff_gateway(s: &mut Shared, bytes: &[u8]) -> bool {
+    let mut seen = false;
+    s.sniff.feed_up(bytes, |r| {
+        if let Ok(link::gw::GwUp::Hello { protocol, firmware, .. }) = r {
+            seen |= protocol >= link::PROTOCOL_VERSION && firmware.starts_with("gw ");
+        }
+    });
+    seen
+}
+
+/// The link left bus mode because a protocol 14 gateway said `Hello` (once).
+pub fn take_gw_hello() -> bool {
+    critical_section::with(|cs| BUS.borrow_ref_mut(cs).as_mut().is_some_and(|s| core::mem::take(&mut s.gw_hello)))
+}
+
+/// The line carries a protocol 14 gateway: no raw `TimeSync` here.
+pub fn set_gateway14(on: bool) {
+    critical_section::with(|cs| {
+        if let Some(s) = BUS.borrow_ref_mut(cs).as_mut() {
+            s.gw14 = on;
+            if on {
+                s.sync = None;
+            }
+        }
+    });
+}
+
+/// Bus or legacy (plain reading).
+pub fn mode() -> Mode {
+    critical_section::with(|cs| BUS.borrow_ref(cs).as_ref().map_or(Mode::Legacy, |s| s.mode))
+}
+
+/// Nothing queued for the line: bytes queued now go out at once.
+pub fn tx_idle() -> bool {
+    critical_section::with(|cs| BUS.borrow_ref(cs).as_ref().is_some_and(|s| s.tx.is_empty() && !s.mid_frame && s.urgent.is_empty()))
 }
 
 fn push_all<const N: usize>(ring: &mut Deque<u8, N>, bytes: &[u8]) -> u32 {
@@ -341,6 +406,7 @@ fn pump_commands(s: &mut Shared, uart: &mut Uart<'static, Blocking>, now: u64) {
     // written. Its ~0.15 ms on the wire is below the ms resolution.
     if s.tx.is_empty()
         && !s.mid_frame
+        && !s.gw14
         && uart.write_ready()
         && let Some((utc_ms, at_us, pps)) = s.sync.take()
     {

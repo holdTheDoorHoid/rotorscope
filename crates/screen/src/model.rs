@@ -420,6 +420,82 @@ pub struct Caveats {
     pub silenced: Silenced,
     /// The legal / privacy switches the site file turned on.
     pub switches: Switches,
+    /// The keyed node link's problems (P4 hub, protocol 14): its own line.
+    pub link: LinkCaveats,
+}
+
+/// What is wrong with the keyed node link (docs/LINK-KEYS-DESIGN.md 4.4,
+/// 6.4): the hub's kit records, boards on old firmware, boards that are not
+/// provisioned. All clear by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LinkCaveats {
+    /// The hub's own kit records are not usable: the link is closed.
+    pub kit: Option<KitProblem>,
+    /// The gateway speaks an older protocol: refused.
+    pub old_gateway: bool,
+    /// Nodes heard on old (version 2) firmware in the last minute.
+    pub old_nodes: u8,
+    /// Distinct unprovisioned nodes announced in the last minute.
+    pub unprovisioned: u8,
+    /// The gateway is a bench build that forges traffic on purpose.
+    pub bench_gateway: bool,
+}
+
+/// Why the hub's kit records cannot key the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KitProblem {
+    /// Never provisioned (or flashed with a table that has no `rskit`).
+    Missing,
+    /// No good copy of a record.
+    Damaged,
+    /// The roster was made for another kit.
+    OtherKit,
+    /// No boot counter could be recorded this boot (missing, damaged, used
+    /// up, or not writable): no unique epoch, so no keyed link.
+    BootCounter,
+}
+
+impl KitProblem {
+    pub fn text(self) -> &'static str {
+        match self {
+            KitProblem::Missing => "NO KIT KEYS: link closed",
+            KitProblem::Damaged => "KIT RECORDS DAMAGED: link closed",
+            KitProblem::OtherKit => "ROSTER FROM OTHER KIT",
+            KitProblem::BootCounter => "NO BOOT COUNTER: link closed",
+        }
+    }
+}
+
+impl LinkCaveats {
+    /// The link line, `None` when all is well: kit problem first, then a
+    /// bench (forging) gateway, old firmware, unprovisioned nodes.
+    pub fn line(&self) -> Option<String<64>> {
+        use core::fmt::Write;
+        let mut s: String<64> = String::new();
+        let mut put = |t: core::fmt::Arguments<'_>| {
+            if !s.is_empty() {
+                let _ = s.push_str("  ");
+            }
+            let _ = s.write_fmt(t);
+        };
+        if let Some(k) = self.kit {
+            put(format_args!("{}", k.text()));
+        }
+        if self.bench_gateway {
+            put(format_args!("BENCH GATEWAY"));
+        }
+        match (self.old_gateway, self.old_nodes) {
+            (false, 0) => {}
+            (true, 0) => put(format_args!("OLD FIRMWARE: gateway")),
+            (false, 1) => put(format_args!("OLD FIRMWARE: 1 node")),
+            (false, n) => put(format_args!("OLD FIRMWARE: {n} nodes")),
+            (true, n) => put(format_args!("OLD FIRMWARE: gateway, {n} node{}", if n == 1 { "" } else { "s" })),
+        }
+        if self.unprovisioned > 0 {
+            put(format_args!("UNPROVISIONED NODE {}", self.unprovisioned));
+        }
+        (!s.is_empty()).then_some(s)
+    }
 }
 
 /// Mute rules in force (tracker `threats::MuteCounts`), for the strip.
@@ -511,11 +587,15 @@ impl EvidenceStopWhy {
 }
 
 impl Caveats {
-    /// The bottom strip's lines, top to bottom (`None`: no line). The first
-    /// is the evidence state (only while evidence is not being written),
-    /// the second the build marks (key class, bench build, open link), the
-    /// third the alarms silenced (`MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES
-    /// 3`), the fourth the collection switches that are on.
+    /// The bottom strip's lines, top to bottom (`None`: no line), at most
+    /// four, in this priority order: the evidence state (only while
+    /// evidence is not being written); the keyed link's problems (kit
+    /// records, `OLD FIRMWARE: <which>`, `UNPROVISIONED NODE <n>`, only
+    /// while there are any); the build marks (key class, bench build, open
+    /// link); the alarms silenced (`MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES
+    /// 3`); the collection switches that are on. When all five are present
+    /// the last two share the fourth line (silenced first; the renderer
+    /// cuts what does not fit), so nothing that holds is ever dropped whole.
     pub fn lines(&self) -> [Option<String<64>>; 4] {
         use core::fmt::Write;
         let ev = self.evidence.map(|e| {
@@ -576,7 +656,30 @@ impl Caveats {
         if w.audio_clips {
             on("audio clips");
         }
-        [ev, (!marks.is_empty()).then_some(marks), (!sil.is_empty()).then_some(sil), (!sw.is_empty()).then_some(sw)]
+        let link = self.link.line();
+        let marks = (!marks.is_empty()).then_some(marks);
+        let sil = (!sil.is_empty()).then_some(sil);
+        let sw = (!sw.is_empty()).then_some(sw);
+        if link.is_none() {
+            return [ev, marks, sil, sw];
+        }
+        if [&ev, &marks, &sil, &sw].iter().all(|l| l.is_some()) {
+            // Five lines: silenced and switches share the last.
+            let (mut a, b) = (sil.unwrap_or_default(), sw.unwrap_or_default());
+            let _ = a.push_str("  ");
+            for c in b.chars() {
+                if a.push(c).is_err() {
+                    break;
+                }
+            }
+            return [ev, link, marks, Some(a)];
+        }
+        // At most four present: keep the order, leave out the empty ones.
+        let mut out: [Option<String<64>>; 4] = [None, None, None, None];
+        for (i, l) in [ev, link, marks, sil, sw].into_iter().flatten().enumerate() {
+            out[i] = Some(l);
+        }
+        out
     }
 }
 

@@ -78,6 +78,11 @@ embedpack = []
 # default until the raw path has run with a real ADSBee on this hub.
 # (crates/modes itself is always built: aero nodes' 1090 frames use it.)
 modes = []
+# WP-13e bring-up (not a bench door: it only stops writes): read the kit
+# records and the boot counter from flash, never write. The keyed link then
+# stays closed (no new epoch). First step of the flash bring-up in
+# src/linkauth.rs; a normal build writes one boot-counter entry per boot.
+rskit-readonly = []
 # Bench only: on-chip loop-back test of `modes`. UART4's TX drives its own
 # RX pad (GPIO30) with Beast frames recorded from the owner's ADSBee on the
 # laptop (2026-11-15, real aircraft), at their recorded pace, looped. Leave
@@ -98,6 +103,11 @@ testpoint = []
 
 [dependencies]
 link = { path = "../../crates/link" }
+# WP-13e: the keyed ESP-NOW link's hub side (kit records, boot counter,
+# verifying and sealing; host-tested there), the v3 packets and the keys.
+hublink = { path = "../../crates/hublink" }
+airlink = { path = "../../crates/airlink" }
+kitkeys = { path = "../../crates/kitkeys" }
 # The wired bus master (Phase 5a).
 wirebus = { path = "../../crates/wirebus" }
 coverage = { path = "../../crates/coverage" }

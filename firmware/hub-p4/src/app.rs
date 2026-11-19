@@ -165,6 +165,22 @@ impl App {
     #[inline(never)]
     fn node_health(&mut self, gw: &mut GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
         use core::fmt::Write;
+        // Node numbers that changed hands (docs/LINK-KEYS-DESIGN.md 7.5):
+        // no mute or snooze follows a number to another board.
+        while let Some(n) = gw.forget.pop() {
+            let dropped = self.tracker.forget_node(n, now);
+            crate::println!("hub-p4: node {n} changed hands: its link history forgotten, {dropped} mute/snooze rule(s) naming it dropped");
+        }
+        // Delivery accounting (7.3): what was verified from each node, then
+        // what each node says it sent.
+        for (node, n) in gw.received.iter_mut().enumerate() {
+            if *n > 0 {
+                self.tracker.link_received(node as u8, core::mem::take(n));
+            }
+        }
+        while let Some((node, h)) = gw.health.pop_front() {
+            self.tracker.ingest_node_health(node, &h, now);
+        }
         while let Some(d) = gw.stats_due.pop() {
             if let Some(role) = d.role {
                 self.tracker.ingest_status(d.node, role, d.can, d.plan, now);
@@ -211,7 +227,7 @@ impl App {
         f: link::Frame,
         now: u64,
     ) {
-        let relay = node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| (n.mac, n.rssi));
+        let relay = gw.node(node).map(|n| (n.mac, n.rssi));
         ev.frame(node, relay, &f);
         self.tracker.ingest_frame(node, &f, now);
         match &f {
@@ -282,7 +298,7 @@ impl App {
     fn announce_threats(&mut self, gw: &GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
         use core::fmt::Write;
         use evidence::format::threat;
-        let mac_of = |node: u8| node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
+        let mac_of = |node: u8| gw.node(node).map(|n| n.mac).unwrap_or([0; 6]);
         while let Some(id) = self.tracker.take_new_threat(now) {
             let Some(t) = self.tracker.get_threat(id) else { continue };
             let mut text: heapless::String<384> = heapless::String::new();
@@ -292,6 +308,15 @@ impl App {
             if t.kind == link::ThreatKind::AreaGnss {
                 // Raised by the hub from aircraft and drones: its own text.
                 let _ = text.push_str(&tracker::area_gnss::describe(t));
+            } else if t.kind == link::ThreatKind::LinkLoss {
+                // Raised by the hub's delivery accounting (tracker
+                // `delivery`): the node says it sent far more than arrived.
+                let m = mac;
+                let _ = write!(
+                    text,
+                    "LINK LOSS: node {} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) says it delivered frames the hub never verified: {} % of what it sent over the last minute is missing (forged acknowledgements, a gateway dropping its packets, or heavy loss)",
+                    t.node, m[0], m[1], m[2], m[3], m[4], m[5], t.detail
+                );
             } else if t.kind == link::ThreatKind::IdFlood {
                 // Raised by the tracker itself (WP-09, `tracker::probation`):
                 // a flood of forged drone IDs, aircraft addresses or

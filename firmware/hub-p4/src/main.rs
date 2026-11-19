@@ -39,12 +39,14 @@ mod downlink;
 mod evlog;
 mod faa;
 mod fault;
+mod flashrom;
 mod gps;
 mod gpsmem;
 #[cfg(feature = "gpsloop")]
 mod gpsloop;
 #[cfg(feature = "modesloop")]
 mod modesloop;
+mod linkauth;
 mod links;
 mod psram_test;
 mod report;
@@ -239,6 +241,11 @@ fn main() -> ! {
 
     let psram = psram_test::run(p.PSRAM, esp_hal::psram::SpiRamFreq::Mhz80);
     println!("hub-p4: psram ok = {}", psram.is_some());
+    // WP-13e: kit records and boot counter from flash, keys derived once,
+    // the link's state in PSRAM. Before the node link's UART interrupt and
+    // the panel's DMA start (linkauth.rs, flashrom.rs).
+    let link_parts = linkauth::boot(psram);
+    let boot_counter = link_parts.counter.epoch();
 
     println!("hub-p4: i2c idle sda/scl high = {:?}", i2c.levels());
     for addr in 0x08u8..0x78 {
@@ -281,7 +288,7 @@ fn main() -> ! {
 
     // Node link on the UART1 header (RX GPIO48, TX GPIO47), driven by the
     // UART3 peripheral; the GPS has the UART3-IN header. Swapped 2026-11-17.
-    let mut gw = links::GatewayLink::new(p.UART3, unsafe_link_rx(), p.GPIO47);
+    let mut gw = links::GatewayLink::new(p.UART3, unsafe_link_rx(), p.GPIO47, link_parts);
     println!(
         "hub-p4: node link on the UART1 header RX GPIO48, TX GPIO47 at {} baud: {}",
         links::BAUD,
@@ -350,6 +357,8 @@ fn main() -> ! {
     let mut modesloop = modesloop::Loop::new();
     // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
     let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
+    // One boot counter: the rsboot value is also the evidence log's.
+    sdlog.set_boot_counter(boot_counter);
     // Phase 12: the airspace pack goes to PSRAM above the framebuffer.
     // SAFETY: taken exactly once, here (a static; the rule engine itself,
     // ~84 KB, is placed in PSRAM by Faa::new at faa::ENGINE_OFFSET).
@@ -380,7 +389,7 @@ fn main() -> ! {
     ev.boot(
         (chip.major, chip.minor),
         fault::reset_reason(),
-        evidence::format::boot::COUNTER_SD_FILE,
+        sdlog.counter_source(),
         evidence::format::boot::BOOT_ID_MIXED,
     );
     let mut note: Option<heapless::String<120>> = None;
@@ -466,7 +475,7 @@ fn main() -> ! {
             // nodes follow FLARM/OGN hops with it), on the bus or through
             // the gateway. Stamped again as it is written (bus.rs).
             if let (Some(a), Some(utc)) = (gps.time, gps.utc_ms(ms)) {
-                bus::time_sync(utc, ms * 1000, a.pps);
+                gw.time_sync(utc, ms, a.pps);
             }
             #[cfg(not(feature = "modes"))]
             app.aero.report(aero_es.as_deref_mut(), app.tracker, gw.feed.as_mut(), ms);
@@ -514,6 +523,9 @@ fn main() -> ! {
                 console::pump();
             });
         }
+        // The SD step can block ~0.6 s (the mount): a beacon first if the
+        // last is 250 ms old, so the beacon gap stays under 1 s.
+        gw.beacon_if_older(ms, 250);
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         if let Some((st, facts)) = sdlog.take_site() {
             site.load(&st, &facts, &mut app, &mut ev, ms);
@@ -654,7 +666,8 @@ fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -
             evidence::KeyClass::HardwareEfuse | evidence::KeyClass::SecureElement => screen::EvidenceKey::NotShown,
         },
         bench: !evlog::BENCH.is_empty(),
-        link_open: gw.stats.gw_open(),
+        link_open: gw.link_open(),
+        link: gw.link_caveats(app::now_ms()),
         evidence: sd.evidence_stop(ev),
         // Silenced alarms and the site switches: filled by `App::fill_state`
         // from the tracker and the control flags.
