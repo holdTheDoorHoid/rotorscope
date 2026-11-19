@@ -1,0 +1,3 @@
+# Synthetic Bitcoin block header for the test proofs (NOT a real block).
+# height  80-byte header, hex
+905000 00000020448dd6117ef8a27f6bf0bb7a6004dbe585f22827ee5bf117200d162f5576af7b09841e8efd37d2dc47addafd473758e66b4d9a5ec7fec25bd50db45f9a7fea5a3d8cfd6affff001d4e19a93d
