@@ -17,7 +17,7 @@ UAT, OGN and FLARM decoders (see [Built](#built-2026-11-17)), not yet tried on r
   (the "FLARM FAMP Public Protocol") with a free licence for **non-commercial, receive-only**
   use; commercial use needs a paid licence. **The owner reports having permission to use the
   FLARM legacy keys (2026-11-17)**, so Rotorscope now decodes FLARM legacy packets (receive
-  only, cargo feature `legacy`, off by default). The keys are **not** in the repository and
+  only, cargo feature `legacy`: off in the crate, always on in the P4 hub build, and idle until the owner's key file is on the SD card). The keys are **not** in the repository and
   never will be: they are loaded from a file at run time (see below). **Never transmit FLARM.**
 - **OGN tracker protocol, FANET, ADS-L** are open, but almost unused in the US. ADS-L is
   European by design (868 MHz only). All three can be received by an LR2021 or an SX1262.
@@ -116,7 +116,8 @@ feature `legacy`), with these rules:
    time from `ROTORSCP/FLARMKEY.TXT` on the hub's SD card (format below), and are never
    committed, printed, logged, or sent between boards (the same rule as the O4 key).
 3. **Off by default.** The hub opts in with the `legacy` feature and a key file; without the
-   file, FLARM stays presence-only as before.
+   file, FLARM stays presence-only as before. *Update 2026-11-18: the P4 hub build always enables
+   `legacy` (`firmware/hub-p4/Cargo.toml`), so in practice the key file is the only switch.*
 4. If Rotorscope units are ever sold, re-check the commercial terms (FLARM's FFPP licence and
    the key permission) before shipping FLARM decoding in them.
 

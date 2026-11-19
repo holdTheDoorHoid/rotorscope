@@ -1,7 +1,7 @@
 # node-sdr bring-up: first results (2026-11-12)
 
 Board `c5b`: XIAO ESP32-C5, chip revision v1.0, 48 MHz crystal, 8 MB flash, 8 MB PSRAM, MAC
-10:BD:A3:CE:C7:D4. Firmware at commit 17892d7, default features (`cargo fw`). Antenna: the board as
+AA:BB:CC:DD:EE:02. Firmware at commit 17892d7, default features (`cargo fw`). Antenna: the board as
 supplied. Logs and dumps are in `bench-logs/node-sdr-20261112/` (local, gitignored).
 
 | Step | Result | Evidence |

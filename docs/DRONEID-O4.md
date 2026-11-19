@@ -1,7 +1,10 @@
 # DJI O4 DroneID: what Rotorscope receives
 
 PLAN.md Phase 10. Status 2026-11-16: built and tested on synthetic signals only. No O4 drone or
-O4 recording has been through it yet.
+O4 recording has been through it yet. *Update 2026-11-18: O4 recordings have since been through
+the receiver: RFUAV recordings of a DJI Mini 4 Pro and an Avata 2 gave CRC-valid O4 records
+(INFP-10/11) on 2026-11-16, via `tools/rfuav-check` (docs/DJI-LINKS.md, "Validation against RFUAV
+recordings"). No real O4 drone yet.*
 
 DJI's newest video link (O4, also called "DroneID v3" in the spec below: Mini 4 Pro, Mini 5 Pro,
 Air 3, Avata 2, Neo, Flip, Mavic 4) still sends DroneID bursts, but the contents are encrypted.

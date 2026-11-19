@@ -47,21 +47,23 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 ## Buttons and pages
 
 ```
-          Up/Down                 Select              Select
- RADAR ⇄ LIST ⇄ HEALTH ⇄ SETTINGS ─────► choose a drone ─────► DETAIL
-   ▲                                        (cursor)          Up/Down: next drone
-   └──── hold Select (Back) ◄──────────────────┴──────◄──────── hold Select
+          Up/Down                                   Select              Select
+ RADAR ⇄ LIST ⇄ FLAGS ⇄ SIGNALS ⇄ HEALTH ⇄ SETTINGS ─────► choose a drone ─────► DETAIL
+   ▲                                                          (cursor)          Up/Down: next drone
+   └──── hold Select (Back) ◄────────────────────────────────────┴──────◄──────── hold Select
 ```
 
 - **Browse** (the default): Up/Down flip between pages, wrapping round. A page-name toast
-  shows for 1.5 s after each flip. Back from any page goes home to the radar.
+  shows for 1.5 s after each flip. Back from any page goes home to the radar. FLAGS is in the
+  cycle only when the hub supplies flags.
 - **Choose:** Select on the Radar or List puts a cursor on the nearest drone (on the newest one
   without a fix). Up/Down move it, Select opens the detail, Back leaves.
 - **Detail:** Up/Down step through drones in list order. Back returns to choosing, with the
   cursor on that drone.
 - **Settings:** Select to edit. Up/Down pick a row, Select changes it, Back finishes. The
   settings are theme (Night/Day), brightness 1-5, and buzzer on/off. The hub applies them
-  and may save them to flash.
+  and may save them to flash. Three more rows ask the hub to act: "Hub moved" (or "New home"
+  while the hub waits to accept one), "Alarms" (mute, snooze or unmute) and "Nodes at hub".
 - **Alert banner:** the first press goes to the banner. Select opens that drone's detail. Up,
   Down or Back only dismiss it, so a press meant for the page underneath never does
   something unexpected.
@@ -78,7 +80,7 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 | `radar_5_drones_day` | The same in the Day theme. |
 | `radar_pick` | Choosing a drone: the readout says **DRONE 3** in an inverse box instead of NEAREST. |
 | `list_5_drones`, `list_pick` | The list sorted by distance, with a stale divider and the selected row inverted. |
-| `no_fix`, `list_no_fix` | P4: list-first, a "NO POSITION - distances unavailable" bar, and signal bars instead of distance. |
+| `no_fix`, `list_no_fix` | No GPS position: the home page shows the drone list instead of the radar (the P4 layout), with a "NO POSITION - distances unavailable" bar, and signal bars instead of distance. |
 | `alert`, `alert_more` | The new-drone banner, with "+1 more new". |
 | `detail`, `detail_no_fix` | Full ID, drone and pilot direction, height, speed, operator ID, Self-ID, signal per radio, and when last heard. With no fix, the pilot row shows the drone-to-pilot distance, which still works. |
 | `health` | Per node: frames/s, RID frames found, drops, uptime. A dead node shows NOT RESPONDING. Below that: GPS, tracks, SD log and power. |

@@ -5,7 +5,7 @@ detector: `DroneDeauth`, `DroneTakeover`, `DroneNetClone`, `ControlContested`,
 `MavlinkAttack` and `AreaGnss` (`crates/link`, `ThreatKind`). Each has its own
 section here. They are threats like the Wi-Fi attacks and jamming the hub already
 lists: kept in the hub's threat table, logged as evidence, shown on screen (the
-"ATTACK" box in the status bar, muteable for two hours from Settings > Alarms, one alarm at a time, see docs/SITE.md) and in the JSON
+"ATTACK" box in the status bar, muteable for two hours from Settings > Alarms, one alarm at a time, see docs/SITE.md; `AreaGnss` is a safety kind and can only be snoozed, for five minutes) and in the JSON
 feed as `{"t":"threat",...}` lines. Area GPS interference also has its own
 AREA box and health-page line.
 

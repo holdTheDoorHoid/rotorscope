@@ -3,6 +3,8 @@
 PLAN.md Phase 13, first part (bench-safe). Status 2026-11-15: working on the
 P4 bench hub with a **development key**. Not yet evidence-grade.
 
+*Update 2026-11-18: a hub built without its own development key signs with the published test key and says so on screen and in every checkpoint; see [SD card and logs](use/sd-card.md#checking-an-evidence-log-with-evidence-verify).*
+
 **Whether a court accepts any of this is the court's decision. Have a lawyer
 review the method and these documents before relying on them.**
 
