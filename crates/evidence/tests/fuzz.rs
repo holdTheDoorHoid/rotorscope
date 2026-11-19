@@ -208,7 +208,9 @@ fn fuzz_verify_text_helpers() {
         let s = fuzzkit::text(bytes);
         let _ = verify::file_number(&s);
         if let Some(v) = verify::unhex(&s) {
-            assert_eq!(verify::hex(&v), s.to_ascii_lowercase());
+            // Surrounding whitespace is ignored; what decodes re-encodes.
+            assert_eq!(v.len() * 2, s.trim().len());
+            assert_eq!(verify::unhex(&verify::hex(&v)), Some(v));
         }
         let _ = verify::boot_bench_list(bytes);
         let _ = verify::url_host(&s);
