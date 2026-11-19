@@ -109,6 +109,8 @@ fn envelope(hub: &Hub, ctx: &Context, buf: &mut [u8]) -> usize {
         recording: sd::recording(),
         nodes: &nodes,
         adsb: adsbee::status(hub, now),
+        fix_held: gnss::fix_held(),
+        utc_held: gnss::utc_held(),
     };
     match json::state(&[], &[], &[], ctx, &status, buf) {
         // `...,"open_links":[],"tracks":[],"aircraft":[]}\n` -> `...,"open_links":[`
@@ -274,6 +276,8 @@ pub fn check_against_reference(hub: &Hub, now: u64) -> Option<(bool, usize)> {
         recording: sd::recording(),
         nodes: &nodes,
         adsb: adsbee::status(hub, now),
+        fix_held: gnss::fix_held(),
+        utc_held: gnss::utc_held(),
     };
     reference.resize(reference.len() + HUB_FIELDS_MAX, 0);
     let ref_len = json::state(tracker.tracks(), links, aircraft, &ctx, &status, &mut reference).ok()?;

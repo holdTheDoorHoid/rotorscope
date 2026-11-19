@@ -938,6 +938,13 @@ pub struct HubStatus<'a> {
     pub nodes: &'a [NodeStatus],
     /// The ADS-B receiver, if the hub has one built in.
     pub adsb: Option<AdsbStatus>,
+    /// Protocol 14: the GPS position in use is held, not live (the hub's GPS
+    /// checks stopped trusting the receiver and keep the last trusted fix;
+    /// `link::HubFix::held`). Ignored unless `own_source` is GPS.
+    pub fix_held: bool,
+    /// Protocol 14: `utc_ms` is held: GPS time is not trusted just now and
+    /// the clock runs on from the last trusted time (`link::HubFix::utc_held`).
+    pub utc_held: bool,
 }
 
 #[derive(Serialize)]
@@ -947,6 +954,10 @@ struct StateOwn {
     alt: Option<f64>,
     source: OwnSource,
     age_ms: u64,
+    /// A held GPS fix, not live. Only present when true (added with
+    /// protocol 14; `"v"` stays 1).
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    held: bool,
 }
 
 /// The part of the state object before the tracks. Serialized, then its
@@ -969,15 +980,19 @@ struct StateHead<'a> {
     /// Added with WP-09; `"v"` stays 1 (a new field, left out when null).
     #[serde(skip_serializing_if = "Option::is_none")]
     flood: Option<crate::probation::FloodStatus>,
+    /// `utc_ms` is held, not GPS time now. Only present when true (added
+    /// with protocol 14).
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    utc_held: bool,
 }
 
 /// Schema version of the state object (`"v"`). Bump on incompatible change.
 pub const STATE_VERSION: u8 = 1;
 
 /// Bytes the state object needs besides its nodes, open links, tracks and
-/// aircraft (worst case, with the empty arrays' brackets). 672 since the
-/// `flood` object (WP-09); 576 before.
-pub const STATE_HEAD_MAX: usize = 672;
+/// aircraft (worst case, with the empty arrays' brackets). 704 since the
+/// held flags (protocol 14); 672 since the `flood` object (WP-09); 576 before.
+pub const STATE_HEAD_MAX: usize = 704;
 /// Bytes one node entry needs (worst case, with its comma).
 pub const STATE_NODE_MAX: usize = 160;
 
@@ -1095,6 +1110,7 @@ pub fn state(
             alt: o.alt_m,
             source: hub.own_source,
             age_ms: ctx.now_ms.saturating_sub(o.fix_ms),
+            held: hub.fix_held && hub.own_source == OwnSource::Gps,
         }),
         manual: hub.manual,
         gps: hub.gps,
@@ -1102,6 +1118,7 @@ pub fn state(
         nodes: hub.nodes,
         adsb: hub.adsb,
         flood: ctx.flood,
+        utc_held: hub.utc_held && ctx.utc_ms.is_some(),
     };
     // `{...}` -> `{...,"open_links":[` : drop the closing brace and carry on.
     let mut n = serde_json_core::to_slice(&head, buf).map_err(|_| FormatError::BufferTooSmall)? - 1;

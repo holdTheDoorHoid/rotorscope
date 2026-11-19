@@ -980,6 +980,8 @@ fn run(o: Options) -> Result<(), String> {
                 recording: o.log.is_some(),
                 nodes: &nodes,
                 adsb: adsb_status(&view, now),
+                fix_held: false,
+                utc_held: false,
             };
             let mut buf = vec![
                 0u8;
