@@ -609,3 +609,51 @@ What was built differs from the text above in these places; the code and its mod
   `firmware/node-lr/src/uplink.rs`, `firmware/node-sdr/src/uplink.rs`), wire the deaf fall-back
   into node-sdr and node-lr (only node-wifi has it), grow the JSON buffers in node-wifi's
   `report.rs` for 49-hop plans, and carry `node_common::health()` in `NodeHealth`.
+
+## 14. Spike S0 results (2026-11-18) and what they change
+
+Measured on the real kit (P4 hub, C5 gateway, two C5 nodes) with a throwaway bench build
+(branch `spike/p3-s0`, never merged). The design holds, with the changes below.
+
+| Pass line | Result |
+|---|---|
+| Verify under 0.3 ms per full packet on the P4 | 0.24-0.25 ms in a warm loop; 0.3-0.8 ms per packet in the live path (cold cache). Hub CPU spent verifying: 0.9 % under the heaviest real flood, 2.8 % with full packets at line rate, 6.3 % with tiny packets at line rate |
+| Gateway UART under 70 % at the heaviest phase | 4.8 % at most with both nodes flooded at 1000/s (the nodes shed floods before the uplink). The line saturates at 87 full packets/s or about 1,500 tiny ones |
+| Beacon gap under 1 s | Longest gap 943 ms, once, at the boot SD mount; at most 546 ms while running. **Only with the gateway receive fix below** |
+
+Corrections to the text above: SHA-256 costs about 4,800 cycles a block on both chips (not
+2-3 k); a full verify is 0.24 ms on the P4 and 0.36 ms on the C5; a 16-tag beacon costs the
+hub about 0.55 ms. Time-sync path, hub write to the gateway's radio task: median 0.63 ms, worst
+80 ms (while the gateway was sending its own beacon), against a 150 ms tolerance.
+
+**Required changes**
+
+* **Gateway (13f).** Without the fix the gateway lost 45-58 % of the hub's 160-byte messages
+  (longest stretch without a beacon 12.9 s): its async UART read does not run within the
+  ~1.4 ms a 128-byte FIFO gives it, held up by the relay loop and by USB printing that masks
+  interrupts. Receive the hub UART in an interrupt into a ring of at least 4 KB with a FIFO
+  threshold of 32 bytes or less, and print over USB without masking interrupts (the nodes
+  already have an async writer). With both, nothing was lost in 1,486 beacons.
+* **Gateway budgets (13f).** Add a total cap of about 50 KB/s on the relay to the hub on top
+  of the per-MAC budget (40 packets/s, 16 KB/s) and the round-robin: four flooded roster MACs
+  would otherwise fill 70 % of the line.
+* **Hub receive path (13e).** A separate decoder for gateway messages with an 1,100-byte
+  buffer (static or in PSRAM, not in the main loop's frame: `link::Decoder` stops at
+  `MAX_FRAME` = 320); a receive ring of about 64 KB in PSRAM or drained in the interrupt (the
+  8 KB ring holds 89 ms at line rate and main-loop passes reach 190 ms, 600 ms at the SD
+  mount); budget 0.25-0.75 ms per full verify.
+* **Hub auto-detect (13e).** The wired-bus auto-detect recognises a gateway only by readable
+  `link::Frame`s, so a gateway speaking the new messages is never recognised and the hub stays
+  in bus mode. Recognise the gateway by its new Hello.
+* **Beacons (13e).** Sending from the main loop meets the line with 57 ms to spare at boot.
+  Also check the beacon timer from the screen-band callback the loop already uses, and split
+  the SD mount (it took 567-617 ms), so the margin does not depend on the card.
+* **Hub tracker queue (13e).** The 8-entry queue overflowed (`out_full` 2,400-2,670 per flood
+  phase) with the raw relay; not compared with today's relay. Measure, and size it.
+* **Flash script (13g).** `tools/flash-node.sh` defaults `NODE_SDR_ELF` to the wired node-sdr
+  build, which carries no key tag and so passes the key check: an ESP-NOW node can end up with
+  a keyless node-sdr slot. Default to the ESP-NOW build and refuse a mismatch.
+
+Not measured: on-air timing of hub-originated beacons and time syncs; the real `link::gw`
+message format (the spike used a simpler framing); whether the interrupt ring alone is enough
+without the quieter USB printing; 5 GHz node plans.
