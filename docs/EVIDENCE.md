@@ -200,6 +200,13 @@ the log (see "Who signed").
   it cannot flood the log; the records say when that happens and how many
   raises the episode held. A re-raised alarm counts as not yet seen on the
   screen, so "Mute seen alarms" does not silence it.
+- **Muted alarms are still on record** (fixed 2026-11-18): muting or
+  snoozing an alarm stops the alert, not the record. An alarm that starts
+  while a mute or a site-file rule already covers it gets its `threat`
+  record and its `threat_ended` record like any other, marked as silenced
+  and by which kind of rule. Before this, such an alarm left no record of
+  its own (only the node's raw frames, and nothing at all for alarms the
+  hub raises itself, such as "node blinded" or an ID flood).
 - **Which build and which airspace data** (WP-14a): the boot event names
   the build date, the source commit and whether the source had changes
   ("-dirty"); the verifier notes a changed or unknown source. The firmware
