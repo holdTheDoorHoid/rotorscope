@@ -315,6 +315,8 @@ How it behaves:
 - Boards are addressed by USB by-id path (it contains the MAC), never `/dev/ttyACMn`, never a
   serial number. Two names for one board share one lock. `--register` only finds boards under
   `/dev/serial/by-id/usb-Espressif_*`, and resets each new one to read its chip type.
+- No board is built in. A name that is not in `tools/boards.local` (including the default `s3`) is
+  refused with the advice to run `--register`.
 - The lock lives outside `/tmp` because a sandboxed program can have a private `/tmp`, giving each
   program its own "shared" lock. Waiting is capped at 10 minutes. A held lock records the PID,
   time and command, which `--list` shows.
@@ -658,12 +660,42 @@ P4 chip revision v3.0 and newer; the board carries v1.3).
 tools/p4-prepare.sh
 ```
 
-It reads the pinned esp-hal revision and the patch's SHA-256 from
-`firmware/patches/esp-hal-p4-pre-v3/manifest.json`, refuses a patch whose checksum differs, clones
-that one commit, applies the community pre-v3 patch, then every `rotorscope-*.patch` in the same
-folder. On an already prepared tree it applies only missing project patches; a tree at another
-commit is refused ("remove it and rerun"). **Writes:** `firmware/patches/esp-hal-p4-pre-v3/upstream/`
-(ignored by Git). Needs `git`, `python3`, `sha256sum` and network access.
+It reads `firmware/patches/esp-hal-p4-pre-v3/manifest.json`: the esp-hal commit (a full 40-hex
+commit id; a branch or tag name is refused), the SHA-256 of the community pre-v3 patch, and the
+SHA-256 of each of the project's own `rotorscope-*.patch` files, in the order they are applied. It
+stops before downloading anything if a checksum differs, a listed patch is missing, or a
+`rotorscope-*.patch` in the folder is not listed. It then fetches that one commit over https from
+the fixed address `https://github.com/esp-rs/esp-hal.git`, checks that the checkout is that
+commit, applies the patches and checks the result with `--verify`. If anything fails, it removes the
+half-made checkout. **Writes:** `firmware/patches/esp-hal-p4-pre-v3/upstream/` (ignored by Git).
+Needs `git`, `python3`, `sha256sum` and network access.
+
+An existing checkout is never patched further: it is checked with `--verify`, and if it is not
+exactly right the script stops and asks you to remove it and run again.
+
+To check a prepared checkout without the network:
+
+```bash
+tools/p4-prepare.sh --verify
+```
+
+```text
+verified .../upstream: esp-hal e02f3613e9f9ba1ce00070eb387e3bf4fde2267b + esp32p4-pre-v3.patch + rotorscope-pre-v3-memory.patch, 1137 tracked files hashed, nothing else changed
+```
+
+`--verify` only reads. It checks that the checkout is at the pinned commit, that its Git objects
+are intact (`git fsck`), that no file is hidden from Git, and that every file differs from the
+pinned commit exactly as the patches say, byte for byte, with nothing else changed or added. Files
+Git ignores, such as build output, are not checked. `--verify DIR` checks another folder.
+
+When you change a `rotorscope-*.patch` on purpose, or add one, record its checksum:
+
+```bash
+tools/p4-prepare.sh --update-sums
+```
+
+It rewrites the `local_patches` list in `manifest.json` (existing order kept, new patches last) and
+prints the sums. Review the change with `git diff` and commit it together with the patch.
 
 Source: `tools/p4-prepare.sh`; provenance in `firmware/patches/esp-hal-p4-pre-v3/PROVENANCE.md`.
 

@@ -1,8 +1,10 @@
 //! Station mode (PLAN.md O5, fixed sensor): join an existing network as a
 //! client, alongside the hotspot.
 //!
-//! Compiled only when `wifi.local.toml` exists at build time (`build.rs` sets
-//! `cfg(hub_station)`); otherwise none of this is in the firmware.
+//! Compiled only in a bench build with `wifi.local.toml` and
+//! `ROTORSCOPE_BENCH_STATION` (`build.rs` sets `cfg(hub_station)`); otherwise
+//! none of this is in the firmware. README.md "Station mode" has the planned
+//! run-time record that replaces the compiled-in credentials.
 //!
 //! esp-radio 1.0.0-beta.1 supports AP+STA (`Config::AccessPointStation`), and
 //! that is what runs. Two physical facts of a single-radio chip to know:

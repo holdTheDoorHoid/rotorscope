@@ -28,7 +28,7 @@ have_mermaid() {
 }
 if ! have_mermaid; then
     echo "Fetching Mermaid $MERMAID_VERSION (diagrams)..."
-    curl -fsSL -o "$MERMAID" \
+    curl -fsSL --proto '=https' --proto-redir '=https' -o "$MERMAID" \
         "https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js"
     have_mermaid || {
         rm -f "$MERMAID"

@@ -300,11 +300,14 @@ target, and an Xtensa build whose linker is not on `PATH`. `rust-version = "1.88
 | `adsbee` | | An ADSBee 1090's CSBee output on UART2 (S3 only; costs node link 2; excludes `gps-uart`) |
 | `webhead` | | Adds the aircraft table for the P4's forwarded ADS-B; every build already understands the P4's feed |
 
-**Build-time inputs** (`build.rs`). `ROTORSCOPE_BENCH`. **Station mode** is compiled in only when
-the gitignored file `firmware/hub/wifi.local.toml` exists, with `ssid` (1-32 bytes), `psk` (empty
-for an open network, else 8-63 characters) and optional `allow_writes` (let the station network
-change the own position and the CoT switch). After creating the file, touch `build.rs` or build once
-with `HUB_WIFI_RESCAN=1`. `demo` builds bake in the build time as a stand-in clock.
+**Build-time inputs** (`build.rs`). `ROTORSCOPE_BENCH`. **Station mode** is a bench build for
+now: it is compiled in only when the gitignored file `firmware/hub/wifi.local.toml` exists and the
+bench switch `ROTORSCOPE_BENCH_STATION` is set (with `ROTORSCOPE_BENCH=1`), because the file's
+`ssid` (1-32 bytes) and `psk` (empty for an open network, else 8-63 characters) end up inside the
+image. A build with the file but without the switch stops with an error. Optional `allow_writes`
+lets the station network change the own position and the CoT switch. After creating the file,
+touch `build.rs` or build once with `HUB_WIFI_RESCAN=1`. The planned run-time record that replaces
+the file is described in the hub README ("Station mode"). `demo` builds bake in the build time as a stand-in clock.
 
 **Tasks.** Core 0 runs a thread-mode embassy executor: ingest into the tracker, the 1 Hz tick and
 USB stream, USB commands, the network side (hotspot, DHCP, DNS, HTTP tasks, CoT, station mode)
@@ -659,17 +662,19 @@ and ROM.
 
 | File | What it is |
 |---|---|
-| `manifest.json` | The upstream esp-hal repository and pinned revision `e02f3613e9f9ba1ce00070eb387e3bf4fde2267b`, the patch's SHA-256, and the crates it covers: `esp-hal`, `esp-backtrace`, `esp-bootloader-esp-idf`, `esp-println` |
+| `manifest.json` | The upstream esp-hal repository and pinned revision `e02f3613e9f9ba1ce00070eb387e3bf4fde2267b`, the patch's SHA-256, the crates it covers (`esp-hal`, `esp-backtrace`, `esp-bootloader-esp-idf`, `esp-println`), and the SHA-256 of each `rotorscope-*.patch` (`local_patches`) |
 | `esp32p4-pre-v3.patch` | The community compatibility patch from naoNao89's esp32p4-pre-v3-kit 0.1.3 (about 1,700 lines). Among other things it derives a `esp32p4_rev_lt_v3` cfg from the configured minimum chip revision, since the wrong CSR access would trap before the revision can be read, and adds the pre-v3 ROM linker tables |
 | `rotorscope-pre-v3-memory.patch` | The project's own fix (20 lines) to `esp-hal/ld/esp32p4/memory.x`: RAM starts at 0x4FF40000 with length 0x80000 minus the L2 cache size, ESP-IDF 5.4.2's pre-v3 split. The kit's layout had put RAM and the stack inside the L2 cache, which sits at the top of L2 memory on pre-v3 chips; a 32 MB PSRAM sweep then overwrote the stack (found 2026-11-14). BRINGUP.md notes it should go upstream to the kit, after asking the owner |
 | `PROVENANCE.md` | Where the ROM tables come from: copied from ESP-IDF (two pinned commits) with SHA-256 for each, plus one local adaptation (`additional.ld`) and the esp-rs boilerplate files |
 | `LICENSE-MIT`, `LICENSE-APACHE` | The kit's licences (MIT/Apache-2.0). The ROM tables are Apache-2.0, as in ESP-IDF |
 
-**How it is applied.** `tools/p4-prepare.sh` checks the patch's SHA-256 against `manifest.json`,
-fetches that one esp-hal commit into `firmware/patches/esp-hal-p4-pre-v3/upstream/` (git-ignored),
-applies the kit's patch, then every `rotorscope-*.patch`. The kit's own tool is not run; the script
-does the same two steps in the open. Rerunning it on a prepared tree applies only patches not yet
-applied. `hub-p4/Cargo.toml` takes its esp-* crates from that `upstream/` directory by path.
+**How it is applied.** `tools/p4-prepare.sh` checks the kit's patch and every
+`rotorscope-*.patch` against the SHA-256 sums in `manifest.json` (`local_patches` lists the
+project's own, in order), fetches that one esp-hal commit by its full id into
+`firmware/patches/esp-hal-p4-pre-v3/upstream/` (git-ignored), checks the checkout is that commit,
+applies the patches and verifies the result. The kit's own tool is not run; the script does the
+same steps in the open. `tools/p4-prepare.sh --verify` checks a prepared tree offline;
+`--update-sums` records a changed patch's checksum ([tools](tools.md#p4-preparesh)). `hub-p4/Cargo.toml` takes its esp-* crates from that `upstream/` directory by path.
 
 ### `esp-radio/`: ESP-NOW receive length check and the C5 RF clock fix
 

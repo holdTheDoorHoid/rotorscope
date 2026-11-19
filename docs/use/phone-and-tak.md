@@ -168,8 +168,10 @@ a running DragonSync or a WarDragon. The hubs do not have this output; only `rid
 ## Station mode
 
 The S3 firmware can also join an existing Wi-Fi network as a fixed sensor and serve the same page
-and CoT there. It is compiled in only when the builder creates a private settings file, and it
-has not been run on hardware. On that network the page is read-only unless the builder allows
+and CoT there. For now this is a bench build only: the network's password is compiled into the
+firmware from a private settings file, so such an image must not be shared or fielded. Setting the
+network at run time, over USB, is planned. It has not been run on hardware (**built, not yet
+tried**). On that network the page is read-only unless the builder allows
 changes. See
 [`firmware/hub/README.md`](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/hub/README.md).
 

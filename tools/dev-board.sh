@@ -50,7 +50,8 @@
 # Boards are addressed by their USB by-id path (it contains the MAC), never by
 # /dev/ttyACMn and never by a serial number. Names (s3, s3b, c5a, c5b, ...) are
 # looked up in tools/boards.local (gitignored; created by --register; override
-# with $ROTORSCOPE_BOARDS). The built-in `s3` below is only a fallback.
+# with $ROTORSCOPE_BOARDS). There is no built-in board: a name that is not
+# registered is an error that says to run --register.
 #
 # Locks: one file per board, keyed on the by-id path (so two names for one board
 # share a lock), in $ROTORSCOPE_LOCK_DIR (default ~/.local/state/rotorscope/locks),
@@ -62,9 +63,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 boards_file=${ROTORSCOPE_BOARDS:-$here/boards.local}
 lock_dir=${ROTORSCOPE_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/rotorscope/locks}
 
-declare -A BOARDS=(
-  [s3]=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_E8:F6:0A:81:6D:F0-if00
-)
+declare -A BOARDS=()
 declare -A CHIPS=()
 if [[ -f $boards_file ]]; then
   while read -r bname bpath bchip _; do
@@ -78,6 +77,11 @@ chip_of() {  # chip_of <board>
   if [[ -n ${CHIPS[$1]:-} ]]; then echo "${CHIPS[$1]}"
   elif [[ $1 == c5* ]]; then echo esp32c5
   else echo esp32s3; fi
+}
+unknown_board() {  # unknown_board <name>: say what is registered and how to register, exit 1
+  local known=${!BOARDS[*]}
+  echo "unknown board $1 (registered: ${known:-none}). Register the attached boards with: tools/dev-board.sh --register (writes $boards_file)" >&2
+  exit 1
 }
 lock_name() { local b; b=$(basename "$1"); echo "${b//[^A-Za-z0-9_.:-]/_}.lock"; }
 
@@ -138,7 +142,14 @@ self_test() {
   printf 'xx link-key:0a1b2c3d xx' >"$t/oldkey.elf"
   out=$(ROTORSCOPE_LINK_KEY_FILE=$t/nonexistent run --dry-run "$t/oldkey.elf" 5 c5x)
   ! grep -qi 'link key\|link\.key' <<<"$out" && grep -q 'espflash flash ' <<<"$out"; check "no compiled-key check, no key file read" $?
-  # 7. The real espflash can read every table we ship. It panics on a data
+  # 7. No board is built in: an unregistered name, with or without a boards
+  #    file, is refused with the advice to register, and nothing is planned.
+  out=$(run --dry-run "$t/a.elf" 5 s3); rc=$?
+  [[ $rc == 1 ]] && grep -q 'unknown board s3 (registered: c5x).*--register' <<<"$out" && ! grep -q '\[dry-run\]' <<<"$out"
+  check "unregistered board refused, --register suggested" $?
+  out=$(ROTORSCOPE_BOARDS=$t/none ROTORSCOPE_LOCK_DIR=$t/locks ROTORSCOPE_BENCH= "$here/dev-board.sh" --resolve s3 2>&1); rc=$?
+  [[ $rc == 1 ]] && grep -q 'registered: none' <<<"$out"; check "no boards file: nothing is known" $?
+  # 8. The real espflash can read every table we ship. It panics on a data
   #    subtype it has no name for (found on the bench, 2026-11-19: `0x40`),
   #    which a dry run never shows. Skipped, and said so, without espflash.
   if command -v espflash >/dev/null; then
@@ -158,7 +169,7 @@ case ${1:-} in
   --self-test) self_test; exit $? ;;
   --resolve)
     b=${2:?usage: --resolve <board>}
-    [[ -n ${BOARDS[$b]:-} ]] || { echo "unknown board $b (known: ${!BOARDS[*]})" >&2; exit 1; }
+    [[ -n ${BOARDS[$b]:-} ]] || unknown_board "$b"
     echo "${BOARDS[$b]} $(chip_of "$b")"; exit 0 ;;
   --list)
     printf '%-6s %-8s %-9s %s\n' NAME CHIP STATE PORT
@@ -274,7 +285,7 @@ elif [[ -n $run && ( $# -lt 1 || ${1:-} =~ ^[0-9]+$ ) ]]; then elf=""; secs=${1:
 elif [[ ${1:-} == --log ]]; then elf=""; shift; secs=${1:-15}; board=${2:-s3}
 else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]  (or --register / --list)}; shift; secs=${1:-15}; board=${2:-s3}; fi
 port=${BOARDS[$board]:-}
-if [[ -z $port ]]; then echo "unknown board $board (known: ${!BOARDS[*]}). Run: tools/dev-board.sh --register" >&2; exit 1; fi
+[[ -n $port ]] || unknown_board "$board"
 chip=$(chip_of "$board")
 
 link_elfs=(); [[ -n $elf ]] && link_elfs+=("$elf")

@@ -141,7 +141,7 @@ serde-json-core  = { version = "0.6", default-features = false }
 libm             = "0.2"
 
 [build-dependencies]
-# Parses the owner's optional, gitignored wifi.local.toml (station mode).
+# Parses the owner's optional, gitignored wifi.local.toml (station mode, bench builds only).
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 serde = { version = "1", features = ["derive"] }
 

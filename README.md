@@ -160,4 +160,5 @@ including as kits, but whoever ships a changed version must publish their change
 same license.
 
 `third_party/opendroneid-core-c` keeps its own Apache-2.0 license and is used only by host-side
-tests.
+tests. Every copy of someone else's code, fonts or libraries in the repository, with its licence,
+version and origin, is listed in [Credits and licences](docs/project/credits.md).

@@ -81,9 +81,8 @@ If you forget, the S3 firmware's `build.rs` stops with a message telling you to 
 ### The ESP32-P4 needs a patched esp-hal
 
 The P4 board Rotorscope uses carries chip revision v1.3, and upstream esp-hal supports only v3.0
-and newer. `tools/p4-prepare.sh` clones one pinned esp-hal commit, checks the community
-compatibility patch against its recorded SHA-256, applies it and then the project's own patches
-on top. Run it once, from the repository folder:
+and newer. `tools/p4-prepare.sh` checks the community compatibility patch and the project's own patches
+against their recorded SHA-256 sums, clones one pinned esp-hal commit, and applies them. Run it once, from the repository folder:
 
 ```bash
 tools/p4-prepare.sh
@@ -91,7 +90,7 @@ tools/p4-prepare.sh
 
 It writes `firmware/patches/esp-hal-p4-pre-v3/upstream/` (ignored by Git). It needs `git`,
 `python3` and `sha256sum`, and network access to GitHub. Running it again on a prepared tree only
-applies any project patch that is missing. More in [Hard-won lessons](gotchas.md#esp32-p4).
+checks it; `tools/p4-prepare.sh --verify` does the same without changing anything. More in [Hard-won lessons](gotchas.md#esp32-p4).
 
 ## Flashing tools
 
