@@ -55,9 +55,11 @@ laptop that built the firmware.
    counter of WP-14a is behind the same interface and in the same format),
    so that missing newest boots show to a checker who reads the unit's
    current counter;
-3. outside time-stamping turned on, with two independent services (built
-   in WP-14c and automatic once on, but off by default, and only one free
-   service qualifies as a built-in default; see "Outside time-stamps");
+3. outside time-stamping turned on, with two independent witnesses (built
+   in WP-14c and WP-14d and automatic once on, but off by default: one free
+   RFC 3161 service qualifies as a built-in default, and OpenTimestamps,
+   anchored in Bitcoin, is the built-in second witness with `--stamp-ots`;
+   see "Outside time-stamps");
 4. reproducible firmware builds, plus secure boot, so the firmware hash in
    each record can be matched to published source and only that firmware
    can run.
@@ -228,7 +230,11 @@ the log (see "Who signed").
   on, the server has public RFC 3161 time-stamp services sign a fingerprint
   of each unit's access log after uploads, automatically, showing the whole
   log existed by then. Only the fingerprint leaves the server. Off unless
-  the server is started with `--stamp`. Details in "Outside time-stamps".
+  the server is started with `--stamp`. With `--stamp-ots` (WP-14d) the same
+  fingerprint, salted, also goes to OpenTimestamps calendars, whose proofs
+  are anchored in a Bitcoin block after some hours: a second witness that
+  needs no certificate authority, checked offline against a block header
+  the checker supplies. Details in "Outside time-stamps".
 
 ## What is NOT protected yet (be plain about this in any report)
 
@@ -259,9 +265,14 @@ the log (see "Who signed").
    secure-element counter would make that number trustworthy).
 4. **Time-stamps: off by default, one built-in service, no renewal.**
    Automatic stamping is built (WP-14c) but stays off until the server's
-   operator turns it on. Only one free service (FreeTSA) says on its own
-   pages that anyone may use it, so it is the only built-in one: with it
-   alone the server warns that it has fewer than two independent services.
+   operator turns it on. Only one free RFC 3161 service (FreeTSA) says on
+   its own pages that anyone may use it, so it is the only built-in one:
+   with it alone the server warns that it has fewer than two independent
+   witnesses. OpenTimestamps (WP-14d, `--stamp-ots`) is the second: its two
+   built-in calendars have one operator, its proofs take hours to complete
+   and show only a block's time (coarse), and reading proofs from the
+   reference client and the real calendars is untested (no real proof may be
+   downloaded here).
    A stamp shows the log existed by the service's time, which is after the
    upload, not when records were written. Old tokens are not re-stamped yet
    (see "Not built yet" under "Outside time-stamps").
@@ -284,7 +295,7 @@ the log (see "Who signed").
 9. **Over-the-air frames.** The node keeps the Remote ID messages, not the
    whole Wi-Fi or Bluetooth packet they came in.
 
-## Outside time-stamps (WP-14c)
+## Outside time-stamps (WP-14c, WP-14d)
 
 **What a stamp shows.** That the unit's access log on the server, and so
 every batch uploaded and every view, export and note logged up to that
@@ -422,6 +433,220 @@ not checked automatically (`openssl crl -in DIR/stamp-N.crl -noout -text`).
 No Rust code checks token signatures (no new dependencies); the reader in
 `crates/evidence/src/tsp.rs` only takes out the time, imprint and nonce.
 
+### OpenTimestamps: the second, independent witness (WP-14d)
+
+**Two kinds of witness.** An RFC 3161 stamp (above) is one service signing
+"this log existed by T" with its own clock and certificate, within seconds.
+An OpenTimestamps proof puts a fingerprint of the same log into a Bitcoin
+block: it shows "this log existed by the block's time", with no certificate
+authority and nothing that expires. Neither depends on the other; each is
+checked and reported on its own, and one failing does not touch the other.
+
+**What it shows, and how coarsely.** A proof is first **pending**: it holds
+only a calendar's promise and shows **no time at all**; the checker says
+"NOT YET ANCHORED" and never counts it. Calendars batch the submissions they
+receive into one Bitcoin transaction every so often (their own pages, read
+2026-11-18, gave an average time between their transactions over the last
+week of 1.3 h for Alice, 6.2 h for Finney, 9.3 h for Catallaxy); the
+transaction then has to be mined. So expect **hours** between an upload and a
+completed proof. The time a completed proof shows is **the block's time**,
+written into the block header by its miner: Bitcoin accepts block times
+that are off by up to about two hours, so the precision is tens of minutes
+to hours, never the second of the upload. It is a second witness to "the
+log existed by then", not a better clock.
+
+**What leaves the server.** Per stamp and calendar, one POST:
+
+```text
+POST /digest HTTP/1.1
+Host: <the calendar>
+User-Agent: ots-client
+Accept: application/vnd.opentimestamps.v1
+Content-Type: application/x-www-form-urlencoded
+Accept-Encoding: identity
+Content-Length: 32
+
+<32 bytes: SHA-256( imprint || 16 random bytes )>
+```
+
+The imprint is the same access-log imprint the RFC 3161 stamps use, but not
+even that leaves: the 16 random bytes (a fresh salt per stamp, kept inside
+the proof, as the reference client does) hide it. Later, to complete a
+proof, one GET per waiting proof, at most every 30 minutes:
+
+```text
+GET /timestamp/<hex of the calendar's commitment> HTTP/1.1
+Host: <the calendar>
+User-Agent: ots-client
+Accept: application/vnd.opentimestamps.v1
+Accept-Encoding: identity
+```
+
+The commitment is a value the calendar itself sent back. The GET goes only
+to the calendar URL configured on the server, never to a host named inside
+a reply; no cookies, no proxy settings from the environment, no redirects.
+The calendar sees the server's IP address and the times. A test checks the
+exact bytes and headers of both requests against a fake calendar on
+127.0.0.1.
+
+**What is kept.** A reply is read only if it is at most 10 000 bytes,
+uncompressed and of stated length, and parses within the proof limits
+(at most 256 operations deep, 4096 items, messages of at most 4096 bytes).
+The submit reply must lead from the digest sent to a pending promise from
+that calendar itself (or to a Bitcoin attestation); otherwise it is a
+failure, never a stamp. The pending proof is then kept at once as a line in
+`timestamps.log` with `kind` `ots` and an audit entry (`state`: pending).
+Each round, the worker asks each calendar about its waiting proofs that are
+due (30 minutes after the last ask; at most 20 per unit per round). A 404
+means not yet; a reply that does not lead from the commitment to a Bitcoin
+attestation is not a completion; a broken reply is a failure line ("completing
+the proof: ...") with the usual back-off. A completion is kept as a
+**further** line: the whole proof with the path to the block grafted on, the
+same imprint and entry number, and `upgrade_of` naming the pending line,
+which is never rewritten; plus its own audit entry (`state`: anchored, block
+N). The server cannot check the anchor itself (it has no block headers): the
+page says "anchored in Bitcoin block N" as the calendar's claim, to be
+checked with `evidence-verify`. A proof still pending after 7 days is no
+longer asked about, and the page says the calendar may have lost it. A
+pending proof does not clear the "waited too long for a stamp" alarm.
+
+**Turning it on.** OpenTimestamps is off unless the server's operator adds
+`--stamp-ots` (it needs `--stamp`, which turns stamping on at all):
+
+```text
+evidence-server serve --data DIR --token T --stamp --stamp-ots
+# other calendars (each replaces the built-in list):
+evidence-server serve ... --stamp --stamp-ots \
+  --stamp-ots-calendar https://alice.btc.calendar.opentimestamps.org \
+  --stamp-ots-calendar https://finney.calendar.eternitywall.com
+```
+
+**Counting witnesses.** The start-up and page warning "fewer than two
+independent witnesses" counts RFC 3161 services on different hosts, plus
+**one** for OpenTimestamps when it is on with at least one calendar (all
+calendars together are one witness: the anchor is the Bitcoin chain). With
+`--stamp` alone (FreeTSA) that is one, and the warning names `--stamp-ots`;
+with `--stamp --stamp-ots` it is two and the warning goes. Without `--stamp`,
+`--stamp-ots` turns nothing on and says so. The bundle's `stamping` lists
+the calendars separately (`ots_calendars`) and the checker counts the same
+way.
+
+**Calendars** (checked 2026-11-18 on the operators' pages; the server never
+contacted any calendar during development or tests). A calendar is built in
+only if its operator's own pages say public use is allowed.
+
+| calendar | operator | URL | public use stated by the operator? | built in |
+|---|---|---|---|---|
+| Alice | the OpenTimestamps project (run by Peter Todd, per the reference client's source: `# Run by Peter Todd`) | `https://alice.btc.calendar.opentimestamps.org` | **yes**, on the project's own site, which the calendar's domain belongs to: "These servers are free to use and they don't require any registration or api key." and "The following are the, free to use, default calendars used by OpenTimestamps." ([opentimestamps.org](https://opentimestamps.org/)); the calendar's own page states no terms, only a donation address | **yes** |
+| Bob | the same | `https://bob.btc.calendar.opentimestamps.org` | the same | **yes** |
+| Finney | Eternity Wall (Riccardo Casatta, per the reference client's source) | `https://finney.calendar.eternitywall.com` | not on its operator's own pages: its page states no terms (a donation address only); opentimestamps.org lists it among the "free to use" defaults, but that is not its operator's page | no: works technically; terms not confirmed |
+| Catallaxy | Catallaxy (Vincent Cloutier, per the reference client's source) | `https://ots.btc.catallaxy.com` | the same as Finney | no: works technically; terms not confirmed |
+| aggregators `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com` | as above | | the reference client submits to these, which forward to calendars | not used: the server submits straight to calendars, so it only ever asks back the calendar that made the promise |
+
+So **two** calendars qualify, but both have **one operator**: they are two
+for availability (one being down does not stop a proof), not two
+independent parties. That does not weaken the anchor (the Bitcoin chain),
+but a pending proof depends on that one operator until it is completed.
+
+**Checking it** (`evidence-verify`, offline). For each OpenTimestamps line
+the checker recomputes the imprint from the bundle's own access log (as for
+RFC 3161: a line naming a missing or changed entry, or a proof that is not
+over the stored imprint, **fails**), replays the proof's operations from
+the imprint, and for each Bitcoin attestation compares the message reached
+with the Merkle root of the block header **you supply** for that height:
+
+```text
+evidence-verify --key <hex> --btc-headers headers.txt bundle.json
+evidence-verify --key <hex> --btc-header 905000:<160 hex digits> bundle.json
+```
+
+`headers.txt` holds `HEIGHT HEX` per line (`#` comments). The checker never
+fetches a header. Get them from your own Bitcoin node
+(`bitcoin-cli getblockheader $(bitcoin-cli getblockhash HEIGHT) false` prints
+the 80-byte header in hex), or, failing that, the same header from two or
+more block explorers run by different people. The checker:
+
+- refuses a header that does not meet the proof-of-work target it states,
+  or whose target is easier than Bitcoin's main chain allows (**fail**);
+- **fails** a proof whose operations do not lead to that header's Merkle
+  root, or that is not over the imprint;
+- otherwise prints the block height, the block hash and the block time,
+  and says plainly that it checked against **your** header only: a header at
+  the easiest target can be made on one computer in minutes, so it is the
+  real block only if you got it from a source you trust; compare the block
+  hash;
+- for a pending proof, prints "NOT YET ANCHORED" (a note, never a pass);
+  for a completed proof whose header you did not supply, "NOT CHECKED" and
+  how to get it;
+- reports nothing as a stamp in either of those cases ("no readable outside
+  time-stamp" when there is no other).
+
+What it prints (from the tests, with the synthetic fixtures; wrapped):
+
+```text
+pending:
+NOTE  time-stamp 0 (https://alice.calendar.test): OpenTimestamps proof from
+      https://alice.calendar.test over the access log through entry #2 (...):
+      NOT YET ANCHORED. It holds only the promise of https://alice.calendar.test
+      to put it into a Bitcoin block (usually within hours); a pending proof
+      shows no time. The server fetches the completed proof later; export
+      again to get it
+NOTE  time-stamping: no readable outside time-stamp: nothing but the server's
+      own word shows when this log existed
+
+completed, header supplied:
+NOTE  time-stamp 0 (https://alice.calendar.test): the access log through entry
+      #2 (...) existed by about 2026-11-18T11:30:05.000Z: an OpenTimestamps
+      proof (via https://alice.calendar.test) leads from this log's imprint to
+      the Merkle root of Bitcoin block 905000 (block hash 00000000d52c84c0...,
+      block time 2026-11-18T11:30:05.000Z from the header you supplied).
+      Checked offline against your header only: that it is the real block
+      905000 is as good as the source you got it from, so compare the block
+      hash with a source you trust. The time is the block's, set by its miner
+      (it can be off by up to about two hours), not the upload's: it is
+      coarse. Block time 13 min after the newest upload it covers was stored
+      (server clock); 3 h 8 min after the newest GPS time in the records it
+      covers. A stamp shows the log existed by then; it does not show when
+      the records in it were written
+
+completed, no header supplied:
+NOTE  ... claims Bitcoin block 905000: NOT CHECKED, no header for block 905000
+      was supplied. Give it with --btc-header 905000:HEX or --btc-headers FILE
+      (from your own Bitcoin node: bitcoin-cli getblockheader $(bitcoin-cli
+      getblockhash 905000) false; or the same header from two or more block
+      explorers run by different people)
+
+failed (a header for another block, with valid work):
+FAIL  time-stamp 0 (https://alice.calendar.test): OpenTimestamps proof from
+      https://alice.calendar.test does not lead to the Merkle root of the
+      header supplied for Bitcoin block 905000: it does not show this log in
+      that block (a wrong header, or a proof that is not over this log)
+```
+
+A failure makes the whole check FAILED (exit 1), as a failed RFC 3161 stamp
+does; a pending or unchecked proof is a note and changes no verdict.
+
+With `--check-timestamps DIR`, each proof is also written as
+`DIR/stamp-N.ots` (a standard `.ots` file over the digest printed with it),
+for other OpenTimestamps tools.
+
+**What is not verified.** The parser, the builder and the checker were
+written from the OpenTimestamps project's published reference code and
+tested against proofs and a block header made independently by a script
+(`crates/evidence/tests/fixtures/ots`), all **synthetic**. Whether they read
+proofs made by the reference client and the real calendars, and whether the
+real calendars accept the server's requests, is **unverified**: nothing here
+may download a real proof or contact a calendar. A test that checks a real
+proof is ready (`cargo test -p evidence --test ots -- --ignored reference`;
+it says which files to put where). Not confirmed from a primary source:
+the order the reference code sorts several operations or attestations at
+one node in (it does not change what a proof proves, only its bytes); the
+content type a calendar expects (the server sends what the reference
+client's HTTP library sends); which operations today's calendars emit
+(SHA-256, append and prepend as far as the reference code shows; RIPEMD-160
+in early proofs, supported; SHA-1 and Keccak-256 are recognised but not
+computed: such a branch is reported, not followed).
+
 **Not built yet, and what that means.**
 
 - **Re-stamping (archive time-stamps, RFC 4998).** A token stays checkable
@@ -436,8 +661,6 @@ No Rust code checks token signatures (no new dependencies); the reader in
   were stamped again, by a fresh service, before it happened. Nothing does
   that yet; the `Stamper` trait in `tools/evidence-server/src/stamp.rs` is
   where a yearly re-stamp would go.
-- **OpenTimestamps** (a Bitcoin-anchored stamp with no certificate
-  authority): not built; it would be a second kind of `Stamper`.
 - Stamps are taken at the server, after upload: the hub has no network.
 
 ## Privacy
@@ -549,7 +772,22 @@ Every run also prints: "NOT PROVEN: that the log is complete."
   token signature and an untrusted root; version 1 bundles still verify;
   the DER reader on malformed input and 5000 random mutations of a token;
   a three-boot continuity chain (fixed in WP-14c: the checker now follows
-  the boots' continuity records, not their ids). End to end with the binaries: a two-boot
+  the boots' continuity records, not their ids). WP-14d (OpenTimestamps;
+  `crates/evidence/tests/ots.rs`, the same server and checker test files,
+  fake calendars on 127.0.0.1, never a real calendar or block explorer):
+  proofs built by the Rust code byte for byte equal to ones made separately
+  by a Python script, and checked against a synthetic, mined block header;
+  RIPEMD-160 against its published vectors and Python's; the exact bytes and
+  headers of the submit and the later fetch; a pending proof kept at once,
+  completed later as a further line, the first line unchanged; garbage,
+  oversized, too deep, trailing, a promise from another calendar, a 500 and
+  a redirect all failures, never stamps; giving up after a week; a pending
+  proof reported as not anchored, never a pass; a completed proof failing
+  over another digest, against a header with another Merkle root, and with
+  a header that does not meet its own target or the main chain's limit;
+  truncated proofs, 20 000 random mutations and 20 000 random inputs through
+  every parser, no panic and nothing wrongly accepted; the witness count
+  with and without OpenTimestamps. End to end with the binaries: a two-boot
   card through `evidence-upload` -> server -> export -> `evidence-verify`:
   VERIFIED, 0 gaps, boot 1's tail sent as its own batch; the 2026-11-18
   bench logs (`final-replay`, `spoofboot-stream`) upload and verify, and

@@ -7,8 +7,11 @@ OpenTimestamps left for later. **Built in WP-14c (2026-11-19):** steps 1 to
 6 of the implementation outline below (access-log imprint and bundle format
 2, queue, worker with pluggable services, chain and revocation list kept,
 verifier with `--check-timestamps`, page and alarm), off until the server's
-operator turns it on with `--stamp`. Not built: step 7 (OpenTimestamps) and
-step 8 (re-stamping). Only one free service (FreeTSA) states on its own
+operator turns it on with `--stamp`. Not built then: step 7 (OpenTimestamps) and
+step 8 (re-stamping). **Built in WP-14d (2026-11-18):** step 7, OpenTimestamps
+as the second, independent anchor (`--stamp-ots`; an in-house client, no
+crate), checked offline against block headers the checker supplies
+(docs/EVIDENCE.md, "OpenTimestamps"). Only one free service (FreeTSA) states on its own
 pages that general use is allowed, so the server ships with one and warns
 that it has fewer than two. How to use it, the services checked and their
 terms: docs/EVIDENCE.md, "Outside time-stamps". The manual `--tsa` option

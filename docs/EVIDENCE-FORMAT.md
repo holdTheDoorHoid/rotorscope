@@ -311,7 +311,13 @@ The hub prints each record on its USB console as one line:
 JSON, from evidence-server (`/api/devices/{id}/export`). Servers write
 format **2** (since WP-14c, 2026-11-19); the verifier reads 1 and 2 and
 refuses any other, so an older verifier refuses a version 2 bundle rather
-than skip what it does not know.
+than skip what it does not know. OpenTimestamps stamps (WP-14d) are
+**additive within format 2**: a time-stamp with `"kind": "ots"`, one new
+optional field per time-stamp (`upgrade_of`) and one in `stamping`
+(`ots_calendars`). A format-2 verifier from before WP-14d reads such a
+bundle and reports each OpenTimestamps line as a kind it cannot read (a
+note, never a pass); it still checks the imprint against the audit chain
+and that no logged stamp was removed.
 
 ```text
 { "format": "rotorscope-evidence-bundle/2",
@@ -322,6 +328,7 @@ than skip what it does not know.
   "firmware_hashes": [hex],
   "timestamps": [ <time-stamp>, ... ],
   "stamping": { "enabled": bool, "authorities": [url],          (version 2)
+                "ots_calendars": [url],                         (optional; OpenTimestamps on)
                 "outstanding": [ { "authority", "audit_n", "queued_utc_ms" } ],
                 "failures": [ { "authority", "audit_n", "utc_ms", "reason" } ] } }
 
@@ -332,6 +339,14 @@ than skip what it does not know.
     "token": base64 (the TimeStampResp exactly as received),
     "certs", "certs_from", "revocation", "revocation_from",   (optional)
     "evidence_note" }                                          (optional)
+
+<time-stamp>, OpenTimestamps (version 2, additive):
+  { "kind": "ots", "authority": calendar url, "covers": "audit-head",
+    "imprint": hex, "audit_n", "audit_hash": hex,
+    "queued_utc_ms", "requested_utc_ms",
+    "token": base64 (the whole proof as a .ots file, over digest = imprint),
+    "upgrade_of": hex }   (optional: SHA-256 of the token of the pending
+                           line this line completes)
 
 <time-stamp>, chain head (version 1; "covers" absent means this):
   { "kind": "rfc3161", "authority", "imprint", "boot", "seq", "head", "token" }
@@ -381,11 +396,29 @@ than skip what it does not know.
   (`openssl ts -reply -in token.tsr -text` shows genTime).
   `evidence-verify --check-timestamps DIR --tsa-ca root.pem bundle.json`
   does all of this.
+- **OpenTimestamps proofs** (`kind` = `ots`): `token` is a complete
+  `.ots` file in the OpenTimestamps project's published format (magic
+  `00 4f 70 65 6e 54 69 6d 65 73 74 61 6d 70 73 00 00 50 72 6f 6f 66 00 bf
+  89 e2 e8 84 e8 92 94`, version byte `01`, `08` for SHA-256, the 32-byte
+  digest, then the operations and attestations; docs/EVIDENCE.md,
+  "OpenTimestamps"). Its digest is `imprint`, computed as above. The server
+  appends 16 random bytes and hashes (that is what it sends: the proof's
+  first two operations are `append <salt>` and `sha256`); the calendar's
+  reply follows. A **pending** proof ends in a calendar's pending
+  attestation (its promise); a **completed** one also reaches a Bitcoin
+  block-header attestation: the message at that point must equal the
+  Merkle root (bytes 36..68 of the 80-byte header, as stored) of the block at
+  the named height. The server never rewrites a line: the completed proof is
+  a further line with the same imprint and `audit_n` and `upgrade_of` naming
+  the pending line's token. Each line has its own `timestamp` audit entry,
+  with `kind`, `state` (`pending`, or `anchored (Bitcoin block N, ...)`) and,
+  for a completed proof, `upgrade_of`; no `gen_time`.
 - **Chain-head time-stamps** (version 1, from the manual `--tsa` option,
   now removed): `imprint` = SHA-256(boot id ‖ seq as u64 LE ‖ record hash).
   Still checked when found in a bundle.
 - **`stamping`** is the server's own account (not proof): whether it was
-  set to stamp, with which services, which stamps it is still waiting for
+  set to stamp, with which RFC 3161 services (`authorities`) and which
+  OpenTimestamps calendars (`ots_calendars`, absent when it was off), which stamps it is still waiting for
   (per service, the newest one queued that it has not received; older ones
   are covered by it), and every failed attempt with its reason.
 - **Bundle hash**: SHA-256 of the bundle file. The server returns it in the
