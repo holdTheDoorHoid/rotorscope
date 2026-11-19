@@ -898,3 +898,379 @@ fn status_absent_manual_nocard() {
     st.sd = SdLog::NoCard;
     shot("status_manual_pos", &Ui::default(), &st);
 }
+
+// ---------------------------------------------------------------------------
+// The P4's native 800x480 layout (feature `wide`), in every theme
+// ---------------------------------------------------------------------------
+
+mod wide_shots {
+    use super::*;
+    use screen::wide::{self, Canvas};
+
+    const WW: usize = wide::W as usize;
+    const WH: usize = wide::H as usize;
+
+    /// The same screen in theme `t` (Auto keeps its rows; the one of its
+    /// two themes showing now is set to `t`).
+    fn in_theme(ui: &Ui, s: &UiState, t: Theme) -> Ui {
+        let mut ui = ui.clone();
+        let mut st = *ui.settings();
+        if st.theme == ThemeMode::Auto {
+            // Whichever of Auto's two themes is showing now becomes `t`.
+            match ui.auto_status(s) {
+                AutoStatus::Sun { day: true, .. } => st.day_theme = t,
+                _ => st.night_theme = t,
+            }
+        } else {
+            st.theme = ThemeMode::Fixed(t);
+        }
+        ui.set_settings(st);
+        ui
+    }
+
+    fn dir(t: Theme) -> &'static str {
+        match t {
+            Theme::GlassCockpit => "glass-cockpit",
+            Theme::FieldDay => "field-day",
+            Theme::RedNight => "red-night",
+        }
+    }
+
+    /// Full frame in one canvas; returns pixels and off-panel count.
+    fn full(ui: &Ui, s: &UiState, lit: Option<Button>) -> (Vec<u16>, u32) {
+        let mut px = vec![0u16; WW * WH];
+        let mut c = Canvas::new(&mut px, 0);
+        wide::render(ui, s, lit, &mut c);
+        let off = c.off_panel;
+        (px, off)
+    }
+
+    fn save(path: &std::path::Path, px: &[u16]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut rgb = Vec::with_capacity(px.len() * 3);
+        for &v in px {
+            let (r, g, b) = (v >> 11, (v >> 5) & 63, v & 31);
+            rgb.push(((r << 3) | (r >> 2)) as u8);
+            rgb.push(((g << 2) | (g >> 4)) as u8);
+            rgb.push(((b << 3) | (b >> 2)) as u8);
+        }
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), WW as u32, WH as u32);
+        enc.set_compression(png::Compression::Best);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&rgb).unwrap();
+    }
+
+    /// Write `snapshots/wide/<theme>/<name>.png` for all three themes.
+    fn shot(name: &str, ui: &Ui, s: &UiState, lit: Option<Button>) {
+        for t in Theme::ALL {
+            let ui = in_theme(ui, s, t);
+            let (px, off) = full(&ui, s, lit);
+            assert_eq!(off, 0, "{name} ({t:?}): drawn off the panel");
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("snapshots/wide").join(dir(t)).join(format!("{name}.png"));
+            save(&p, &px);
+        }
+    }
+
+    fn after(ui: &mut Ui, st: &UiState, b: &[Button], settle: bool) {
+        press(ui, st, b);
+        if settle {
+            ui.tick(NOW + 5_000);
+        }
+    }
+
+    /// Every case, also used by the banding test.
+    fn cases() -> Vec<(&'static str, Ui, UiState, Option<Button>)> {
+        let mut v: Vec<(&'static str, Ui, UiState, Option<Button>)> = Vec::new();
+        let mut empty = base(true);
+        empty.power = Power::Usb { battery_pct: None };
+        empty.sd = SdLog::Off;
+        v.push(("radar_0_drones", Ui::default(), empty, None));
+        v.push(("radar_1_drone", Ui::default(), one_drone(true), None));
+        v.push(("radar_5_drones", Ui::default(), five_drones(true), None));
+        // A key being pressed (lit) on the radar.
+        v.push(("radar_key_pressed", Ui::default(), five_drones(true), Some(Button::Select)));
+        let st = five_drones(true);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Select, Button::Down, Button::Down], false);
+        v.push(("radar_pick", ui, st, None));
+        let mut st = one_drone(true);
+        st.drones[0].disputed = true;
+        st.drones[0].other_claim = Some(Polar { distance_m: 1_900.0, bearing_deg: 80.0 });
+        st.drones[0].claims_apart_m = Some(1_640.0);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Select], false);
+        v.push(("radar_disputed", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Select], false);
+        v.push(("detail_disputed", ui, st, None));
+
+        let st = five_drones(true);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("list_5_drones", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Select, Button::Down], false);
+        v.push(("list_pick", ui, st, None));
+
+        // WP-09: a flood of forged IDs.
+        let mut st = five_drones(true);
+        for k in 0..6u32 {
+            let mut f = drone(100 + k, "FAKE00000000", k as f32, 10.0 * k as f32, 60.0, 0, &[Radio::WifiBeacon], -40);
+            f.unconfirmed = true;
+            f.first_seen_ms = NOW - 1_000;
+            st.drones.push(f).unwrap();
+        }
+        st.total_drones = 64;
+        st.total_unconfirmed = 58;
+        st.threats = Threats { active: 1, flood_per_s: 230, ..Threats::default() };
+        v.push(("radar_flood", Ui::default(), st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("list_flood", ui, st, None));
+
+        let mut st = five_drones(false);
+        st.nodes[1].alive = false;
+        v.push(("no_fix", Ui::default(), st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("list_no_fix", ui, st, None));
+
+        let st = five_drones(true);
+        let mut ui = Ui::default();
+        ui.new_drone(3, NOW);
+        v.push(("alert", ui.clone(), st.clone(), None));
+        ui.new_drone(2, NOW + 500);
+        v.push(("alert_more", ui, st, None));
+        let st = five_drones(false);
+        let mut ui = Ui::default();
+        ui.new_drone(1, NOW);
+        v.push(("alert_no_fix", ui, st, None));
+
+        let st = one_drone(true);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Select, Button::Select], false);
+        v.push(("detail", ui, st, None));
+        let st = one_drone(false);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Select, Button::Select], false);
+        v.push(("detail_no_fix", ui, st, None));
+        let mut st = five_drones(true);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Select, Button::Down, Button::Down, Button::Down, Button::Down, Button::Select], false);
+        st.drones[4].stale = true;
+        v.push(("detail_stale", ui, st, None));
+
+        let st = with_signals();
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down, Button::Down], true);
+        v.push(("signals", ui.clone(), st.clone(), None));
+        v.push(("signals_empty", ui, base(true), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("list_droneid", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Select, Button::Select], false);
+        v.push(("detail_droneid", ui, st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down, Button::Down, Button::Down], true);
+        v.push(("health_roles", ui, st, None));
+
+        let mut st = base(true);
+        let mut fl = FlagsView { pack: s("pack 2026-11-15"), total: 4, ..Default::default() };
+        for (who, level, rule, text, secs) in [
+            ("RSTEST-SD-0001", 3, "AREA", "Natl security UAS", 12),
+            ("RSTEST-SD-0001", 2, "HEIGHT", "853ft AGL", 41),
+            ("1581F5FJD2", 1, "VLOS", "640m from pilot", 9),
+            ("N12345", 2, "LOW", "520ft<1000 91.119", 33),
+        ] {
+            let _ = fl.rows.push(FlagRow { who: s(who), level, rule, text: s(text), secs });
+        }
+        st.flags = Some(fl);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down, Button::Down], true);
+        v.push(("flags", ui, st, None));
+
+        let mut st = five_drones(true);
+        st.nodes[1].alive = false;
+        st.power = Power::Usb { battery_pct: Some(100) };
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down, Button::Down, Button::Down], true);
+        v.push(("health", ui.clone(), st, None));
+        let mut st = five_drones(true);
+        st.nodes[2].kind = NodeKind::DroneId;
+        st.assigned.extend([
+            Some(Assigned { role: "Wi-Fi 2.4", plan: 0x5a3c, applied: true }),
+            None,
+            Some(Assigned { role: "DroneID", plan: 0x0b17, applied: false }),
+        ]);
+        v.push(("health_assigned", ui.clone(), st, None));
+        v.push(("health_aircraft", ui.clone(), with_aircraft(), None));
+        let mut st = with_aircraft();
+        st.threats = Threats { jammed: true, ..Threats::default() };
+        st.conflict = Some(ConflictView { level: 3, drone: 1, aircraft: s("N911PH"), range_m: 240.0, dz_m: Some(30.0), count: 1 });
+        v.push(("health_conflict", ui.clone(), st, None));
+        let mut st = with_aircraft();
+        st.area_gnss = Some(AreaGnssView { jamming: true, degraded: 4, counted: 6, own_agrees: true, ..Default::default() });
+        v.push(("health_area_gnss", ui.clone(), st.clone(), None));
+        st.area_gnss = Some(AreaGnssView { spoofing: true, drones_moved: 2, ..Default::default() });
+        v.push(("health_area_spoof", ui.clone(), st.clone(), None));
+        st.conflict = Some(ConflictView { level: 1, drone: 1, aircraft: s("N911PH"), range_m: 2400.0, dz_m: Some(300.0), count: 0 });
+        st.threats = Threats { active: 2, muted: 1, snoozable: 1, ..Threats::default() };
+        st.caveats.silenced = Silenced { snoozed: 1, snooze_left_s: 245, ..Silenced::default() };
+        // Five nodes: the busiest health page.
+        st.nodes.push(NodeStatus { kind: NodeKind::Lr, alive: true, frames_per_s: 3, rid_found: 0, drops: 0, uptime_s: 900 }).unwrap();
+        v.push(("health_busiest", ui, st, None));
+
+        let st = base(true);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Up], true);
+        v.push(("settings_browse", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Select, Button::Down], false);
+        v.push(("settings_edit", ui.clone(), st.clone(), None));
+        let mut auto = Ui::new(Settings { theme: ThemeMode::Auto, ..Settings::default() });
+        after(&mut auto, &st, &[Button::Up, Button::Select, Button::Down, Button::Down], false);
+        let mut day = st.clone();
+        day.position = Some((39.95, -75.16));
+        v.push(("settings_auto", auto.clone(), day, None));
+        let mut waiting = st.clone();
+        waiting.utc_ms = None;
+        v.push(("settings_auto_waiting_gps", auto.clone(), waiting, None));
+        let mut st2 = base(true);
+        st2.threats = Threats { active: 2, muted: 1, mutable: 2, ..Threats::default() };
+        let mut ui = Ui::default();
+        after(&mut ui, &st2, &[Button::Up, Button::Select, Button::Up, Button::Up], false);
+        v.push(("settings_alarms", ui.clone(), st2.clone(), None));
+        st2.threats = Threats { active: 1, jammed: true, muted: 2, snoozable: 1, ..Threats::default() };
+        v.push(("settings_snooze", ui.clone(), st2.clone(), None));
+        after(&mut ui, &st2, &[Button::Up, Button::Select], false);
+        let mut pend = st2.clone();
+        pend.gps.home_pending = true;
+        v.push(("settings_nodes_done", ui, pend, None));
+
+        let mut st = base(true);
+        st.gps.integrity = GpsIntegrity::Spoofing;
+        st.threats = Threats { active: 2, jammed: true, ..Threats::default() };
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], false);
+        v.push(("threat_warnings", ui, st, None));
+
+        let st = five_drones(true);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], false);
+        v.push(("page_toast", ui, st, None));
+
+        let mut st = one_drone(true);
+        st.gps = Gps { fix: Fix::Fix2D, sats: 4, ..Gps::default() };
+        st.power = Power::Battery { pct: 9 };
+        st.sd = SdLog::Error;
+        st.utc_ms = None;
+        for n in st.nodes.iter_mut() {
+            n.alive = false;
+        }
+        v.push(("status_warnings", Ui::default(), st, None));
+        let mut st = base(false);
+        st.gps.fix = Fix::Absent;
+        st.sd = SdLog::NoCard;
+        st.power = Power::Usb { battery_pct: None };
+        v.push(("status_gps_absent", Ui::default(), st, None));
+        let mut st = one_drone(true);
+        st.gps.fix = Fix::Manual;
+        st.sd = SdLog::NoCard;
+        v.push(("status_manual_pos", Ui::default(), st, None));
+
+        let mut st = five_drones(true);
+        st.caveats = Caveats {
+            key: EvidenceKey::Test,
+            bench: true,
+            link_open: true,
+            evidence: Some(EvidenceStop { why: EvidenceStopWhy::FileError, waiting: 1234, dropped: 56 }),
+            silenced: Silenced { muted: 2, mute_left_s: 7_140, snoozed: 1, snooze_left_s: 245, site: 1 },
+            switches: Switches { control_ids: true, control_content: true, audio_clips: false },
+        };
+        st.threats = Threats { active: 1, jammed: true, muted: 3, mutable: 1, ..Threats::default() };
+        v.push(("caveats_all", Ui::default(), st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("caveats_list", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Down, Button::Down], true);
+        v.push(("caveats_health", ui, st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Up, Button::Select], false);
+        ui.set_settings(Settings { theme: ThemeMode::Auto, ..Settings::default() });
+        v.push(("caveats_settings_auto", ui, st, None));
+        v
+    }
+
+    #[test]
+    fn wide_snapshots() {
+        for (name, ui, st, lit) in cases() {
+            shot(name, &ui, &st, lit);
+        }
+    }
+
+    /// Band by band gives exactly the full frame, at the P4's band height
+    /// and at awkward ones.
+    #[test]
+    fn wide_banded_matches_full_frame() {
+        for (name, ui, st, lit) in cases() {
+            let (whole, _) = full(&ui, &st, lit);
+            for rows in [wide::BAND_ROWS, 7, 1] {
+                let mut band = vec![0x1234u16; WW * rows];
+                let mut out = vec![0u16; WW * WH];
+                let mut next = 0;
+                wide::render_banded(&ui, &st, lit, &mut band, |top, px| {
+                    assert_eq!(top, next, "{name}: bands out of order");
+                    out[top as usize * WW..top as usize * WW + px.len()].copy_from_slice(px);
+                    next = top + (px.len() / WW) as i32;
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+                assert_eq!(next, wide::H);
+                if out != whole {
+                    let i = out.iter().zip(&whole).position(|(a, b)| a != b).unwrap();
+                    panic!("{name}: {rows}-row bands differ from the full frame at x {} y {}", i % WW, i / WW);
+                }
+            }
+        }
+    }
+
+    /// The keys say what the state machine does, and a touch lands on the
+    /// key under it (and nowhere in the page).
+    #[test]
+    fn keys_label_what_they_do_and_touches_hit_them() {
+        use wide::{key_at, key_labels};
+        let st = five_drones(true);
+        let mut ui = Ui::default();
+        let k = key_labels(&ui, &st);
+        assert_eq!((k[0].text.as_str(), k[1].text.as_str(), k[2].text.as_str()), ("SETTINGS", "Choose drone", "DRONE LIST"));
+        press(&mut ui, &st, &[Button::Select]);
+        let k = key_labels(&ui, &st);
+        assert_eq!((k[1].text.as_str(), k[1].hold), ("Open", Some("hold: back")));
+        press(&mut ui, &st, &[Button::Select]);
+        assert_eq!(ui.mode(), Mode::Detail);
+        let k = key_labels(&ui, &st);
+        assert_eq!((k[0].text.as_str(), k[1].text.as_str()), ("Prev drone", "Hold: back"));
+        // The banner: Select opens, the others only dismiss.
+        ui.new_drone(3, NOW);
+        let k = key_labels(&ui, &st);
+        assert_eq!((k[0].text.as_str(), k[1].text.as_str(), k[2].text.as_str()), ("Dismiss", "Show details", "Dismiss"));
+        // Settings while editing: the row's action, and "hold: done".
+        let mut ui = Ui::default();
+        press(&mut ui, &st, &[Button::Up, Button::Select]);
+        let k = key_labels(&ui, &st);
+        assert_eq!((k[1].text.as_str(), k[1].hold), ("Change", Some("hold: done")));
+        press(&mut ui, &st, &[Button::Up]);
+        assert_eq!(key_labels(&ui, &st)[1].text.as_str(), "Place all here");
+        // Empty radar: Select does nothing, and the key says so.
+        let k = key_labels(&Ui::default(), &base(true));
+        assert!(!k[1].active);
+
+        assert_eq!(key_at(10, 470), Some(Button::Up));
+        assert_eq!(key_at(400, 440), Some(Button::Select));
+        assert_eq!(key_at(799, 479), Some(Button::Down));
+        assert_eq!(key_at(266, 430), Some(Button::Up));
+        assert_eq!(key_at(267, 430), Some(Button::Select));
+        assert_eq!(key_at(400, 300), None, "the page is not a key");
+        assert_eq!(key_at(400, wide::TOUCH_TOP - 1), None);
+        assert_eq!(key_at(400, 480), None);
+    }
+}

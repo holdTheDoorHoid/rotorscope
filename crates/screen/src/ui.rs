@@ -291,6 +291,9 @@ pub enum AutoStatus {
     Sun { day: bool, next_utc_ms: Option<u64>, stale_position: bool },
 }
 
+/// (UTC minute, rule, position, the next change) Auto last computed.
+type NextMemo = (u64, SwitchAt, (f32, f32), Option<u64>);
+
 /// Auto's memory: the last position seen (positions come and go with the
 /// fix) and the last verdict, recomputed at most once a UTC minute.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -301,7 +304,7 @@ struct AutoMemo {
     day: Option<bool>,
     /// The next change, computed only when asked for (settings page), for
     /// the same key.
-    next: Option<(u64, SwitchAt, (f32, f32), Option<u64>)>,
+    next: Option<NextMemo>,
 }
 
 /// An action chosen on the settings page, for the hub to carry out
