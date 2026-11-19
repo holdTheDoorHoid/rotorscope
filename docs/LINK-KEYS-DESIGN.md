@@ -346,7 +346,7 @@ Hub to gateway (`GwDown`):
 | Message | Fields |
 |---|---|
 | `Roster` | up to 16 MACs (every 5 s and on change) |
-| `Beacon` | data (up to 152): broadcast as is. The hub sends a fresh one every 500 ms; the gateway never repeats one |
+| `Beacon` | data (up to 152): broadcast as is. The hub sends a fresh one in every 500 ms, at a place in that half second that varies from beacon to beacon (`hublink::link::beacon_place`): a node in the Bluetooth role listens to the link for 200 ms a second, and beacons exactly 500 ms apart left it deaf to them for up to 74 s on the bench (2026-11-19). The gateway never repeats one |
 | `Transmit` | id, to (6), urgent (bool), give_up_ms (u16), data (up to 1024): unicast, retried while the node is on channel, up to `give_up_ms` (commands 2,000; time syncs 300) |
 | `Cancel` | to (6): a newer command for this node replaces the queued one |
 

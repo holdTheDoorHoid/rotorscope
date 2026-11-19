@@ -219,7 +219,8 @@ fn roster_and_beacons_on_schedule() {
             }
         }
     }
-    assert_eq!(beacons, 20);
+    // About two a second (the spacing varies around 500 ms on purpose).
+    assert!((18..=22).contains(&beacons), "{beacons}");
     assert_eq!(rosters, 2);
     // Before the SD mount: a beacon now if the last is 250 ms old.
     k.wait(300);
@@ -227,6 +228,51 @@ fn roster_and_beacons_on_schedule() {
     assert_eq!(k.beacons().len(), 1);
     k.link.beacon_if_older(k.ht, 250, &mut k.wire);
     assert!(k.beacons().is_empty());
+}
+
+/// A node in the Bluetooth role lends the radio to the kit's link for 200 ms
+/// in every second (node-ble `WIFI_GAP_MS` / `SCAN_ON_MS`). Beacons exactly
+/// 500 ms apart keep a fixed place in that second: on the bench (2026-11-19)
+/// a node whose 200 ms did not hold one of the two places heard nothing for
+/// 74 s after an image switch, and 2 restarts in 5 found no gateway in 29 s.
+/// Each beacon therefore takes its own place in its half second, so no
+/// listening window stays empty: wherever the window sits, a beacon lands in
+/// it again and again, never more than half a minute apart.
+#[test]
+fn beacon_spacing_varies_so_a_brief_listener_hears_one_soon() {
+    let mut k = Kit::new(keyed(100));
+    k.up(hello(14));
+    k.wire.take();
+    // Beacon send times over two minutes, at 1 ms steps.
+    let t0 = k.ht;
+    let mut at = StdVec::new();
+    for _ in 0..120_000 {
+        k.wait(1);
+        k.tick();
+        if !k.beacons().is_empty() {
+            at.push(k.ht - t0);
+        }
+    }
+    let n = at.len() as u64;
+    assert!((238..=241).contains(&n), "one in every 500 ms: {n} in 120 s");
+    let gaps: StdVec<u64> = at.windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(gaps.iter().all(|g| *g < 1000), "never a second without one: {:?}", gaps.iter().max());
+    // A listener open for 200 ms in every 1000, at any offset: the longest
+    // it waits for a beacon inside its window.
+    let mut worst = 0;
+    for offset in (0..1000).step_by(10) {
+        let mut last = 0u64;
+        let mut longest = 0u64;
+        for &t in &at {
+            if (t + 1000 - offset) % 1000 < 200 {
+                longest = longest.max(t - last);
+                last = t;
+            }
+        }
+        longest = longest.max(120_000 - last);
+        worst = worst.max(longest);
+    }
+    assert!(worst <= 30_000, "a 200 ms listener waited {worst} ms for a beacon");
 }
 
 #[test]

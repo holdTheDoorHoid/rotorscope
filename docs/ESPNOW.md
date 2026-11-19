@@ -33,7 +33,8 @@ ends report version 2).
 
 Version 3 kinds:
 
-* **Beacon**, made and sealed by the hub every 500 ms, broadcast by the
+* **Beacon**, made and sealed by the hub twice a second (one in every 500 ms, at a place in it
+  that varies, so a node that listens only briefly each second cannot stay out of step), broadcast by the
   gateway on its channel (2.4 GHz ch 6). It carries one short tag per node,
   each under that node's key. Nodes learn the gateway's address from it.
 * **Frames** (a node batch), unicast to the gateway. Unicast gets the radio's

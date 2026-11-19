@@ -25,7 +25,8 @@
 //! 2. On every `Hello` (the gateway sends one at boot and every 5 s, and
 //!    relays no keyed node packet until it has a roster) and every
 //!    [`ROSTER_MS`] the hub sends `Roster`.
-//! 3. Every [`BEACON_MS`] the hub seals a fresh `Beacon` (the gateway
+//! 3. Once in every [`BEACON_MS`], at a place in it that varies
+//!    ([`beacon_place`]), the hub seals a fresh `Beacon` (the gateway
 //!    never repeats one). An empty roster on a keyed hub makes no beacon.
 //! 4. A node's first verified batch of a new session gets a `Sync` echoing
 //!    it (once; again after [`SYNC_RETRY_MS`] if the gateway reports it not
@@ -46,8 +47,27 @@ use kitkeys::{Mac, SLOTS};
 use link::gw::{self, GwDown, GwStats, GwUp, MAX_GW_FRAME, RefuseReason};
 use link::origin::{Refusal, RefusalLog};
 
-/// A fresh beacon this often.
+/// One beacon in every stretch of this long on the hub's clock: two a
+/// second.
 pub const BEACON_MS: u64 = 500;
+
+/// Where in its [`BEACON_MS`] stretch beacon number `seq` goes: a place that
+/// differs from one beacon to the next, from the number alone (no random
+/// source needed; the order only has to be unlike a clock).
+///
+/// A node in the Bluetooth role lends the radio to the link for 200 ms in
+/// every second. Beacons exactly 500 ms apart keep two fixed places in that
+/// second; a node whose 200 ms held neither heard none for over a minute
+/// (bench, 2026-11-19: 74 s after an image switch, and 2 restarts in 5 found
+/// no gateway in 29 s). Placed afresh each time, every beacon has an even
+/// chance of landing in any listening window.
+pub fn beacon_place(seq: u16) -> u64 {
+    let mut h = u32::from(seq).wrapping_mul(0x9E37_79B1);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    u64::from(h) % BEACON_MS
+}
 /// The roster again this often (and at once on a gateway `Hello`).
 pub const ROSTER_MS: u64 = 5_000;
 /// At most one answering `Sync` per slot this often.
@@ -242,6 +262,10 @@ pub struct HubLink {
     old_gateway: Option<u8>,
     beacon_seq: u16,
     last_beacon: Option<u64>,
+    /// When the next beacon is due ([`beacon_place`]); `None`: now.
+    next_beacon: Option<u64>,
+    /// The [`BEACON_MS`] stretch of the clock the last beacon belonged to.
+    beacon_stretch: u64,
     roster_at: Option<u64>,
     /// When this link first ran (hub uptime, ms): the start of
     /// [`STALE_GRACE_MS`].
@@ -276,6 +300,8 @@ impl HubLink {
             old_gateway: None,
             beacon_seq: 0,
             last_beacon: None,
+            next_beacon: None,
+            beacon_stretch: 0,
             roster_at: None,
             born: None,
             next_id: 0,
@@ -383,6 +409,7 @@ impl HubLink {
                 self.hub.set_gateway(mac);
                 if new {
                     self.last_beacon = None;
+                    self.next_beacon = None;
                 }
                 // The roster at every Hello: a gateway that rebooted (same
                 // address) relays no node packet until it has one.
@@ -609,7 +636,7 @@ impl HubLink {
 
     /// Whether a beacon is due at `now`.
     pub fn beacon_due(&self, now: u64) -> bool {
-        self.last_beacon.is_none_or(|t| now.saturating_sub(t) >= BEACON_MS)
+        self.next_beacon.is_none_or(|t| now >= t)
     }
 
     /// Send a beacon now if the last one is at least `min_ms` old: before a
@@ -617,7 +644,7 @@ impl HubLink {
     /// step plus `min_ms`, not that step plus a whole period.
     pub fn beacon_if_older(&mut self, now: u64, min_ms: u64, sink: &mut impl Sink) {
         if self.last_beacon.is_none_or(|t| now.saturating_sub(t) >= min_ms) {
-            self.last_beacon = None;
+            self.next_beacon = None;
             self.tick_beacon(now, sink);
         }
     }
@@ -633,7 +660,7 @@ impl HubLink {
                 Ok(n) => n,
                 Err(_) => {
                     // No slots (nothing to tag) or no clock: nothing to send.
-                    self.last_beacon = Some(now);
+                    self.beacon_sent(now);
                     return;
                 }
             },
@@ -643,8 +670,23 @@ impl HubLink {
         let m = GwDown::Beacon(&self.pkt[..n]);
         if Self::put(&mut self.enc, &mut self.stats, sink, &m) {
             self.stats.beacons += 1;
-            self.last_beacon = Some(now);
+            self.beacon_sent(now);
         }
+    }
+
+    /// A beacon went (or there was none to make) at `now`: the next goes in
+    /// the next [`BEACON_MS`] stretch of the clock, at its own place in it.
+    fn beacon_sent(&mut self, now: u64) {
+        self.last_beacon = Some(now);
+        // The stretch after the one this beacon belonged to; if the loop was
+        // held up past that one's place too, the first whose place is ahead.
+        let place = beacon_place(self.beacon_seq);
+        let mut k = (self.beacon_stretch + 1).max(now / BEACON_MS);
+        if k * BEACON_MS + place <= now {
+            k += 1;
+        }
+        self.beacon_stretch = k;
+        self.next_beacon = Some(k * BEACON_MS + place);
     }
 
     fn tick_roster(&mut self, now: u64, sink: &mut impl Sink) {
