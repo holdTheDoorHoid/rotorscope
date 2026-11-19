@@ -230,7 +230,7 @@ fn a_friend_does_not_make_a_crowd() {
     assert_eq!(seen.worst("CRWD-A"), Some(Level::Notice));
 }
 
-fn jamming() -> link::ThreatSighting {
+pub(crate) fn jamming() -> link::ThreatSighting {
     link::ThreatSighting {
         kind: link::ThreatKind::JamBroadband,
         channel: 0,

@@ -625,7 +625,7 @@ impl<const P: usize> Trends<P> {
                 let _ = hits.push(at(Rule::DarkDrone, Level::Warning).with_secs(s.last_ms.saturating_sub(since)));
             }
             let e = (!hits.is_empty()).then(|| {
-                let mut e: Eval = super::judge(hits, false);
+                let mut e: Eval = super::judge(hits, false, w.places.tuning());
                 e.heard_ms = s.last_ms;
                 e
             });

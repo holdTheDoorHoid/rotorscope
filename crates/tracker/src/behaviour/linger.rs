@@ -140,17 +140,18 @@ impl Linger {
     /// Work it out. `at` is where the drone is now (the average of its last
     /// few positions), `height_now` its height above the unit now, `ground`
     /// the height above the ellipsoid that counts as the ground (so a path
-    /// point's height is its altitude minus `ground`), when known.
+    /// point's height is its altitude minus `ground`), when known; `low_m`
+    /// the low-hover height ([`LOW_HOVER_M`] unless the profile says).
     #[inline(never)]
-    pub fn of(ring: &PathRing, at: (f64, f64), height_now: Option<f32>, ground: Option<f32>, now_ms: u64) -> Self {
+    pub fn of(ring: &PathRing, at: (f64, f64), height_now: Option<f32>, ground: Option<f32>, low_m: f32, now_ms: u64) -> Self {
         let Some(newest) = ring.last_ms() else { return Self::default() };
         let frame = Frame::at(at.0, at.1);
         let stay_ms = stay(ring.coarse().rev(), &frame, LOITER_RADIUS_M, newest, |_| true);
         let low = |p: &PathPoint| match (ground, p.alt_m()) {
-            (Some(g), Some(a)) => a - g < LOW_HOVER_M,
-            _ => height_now.is_some_and(|h| h < LOW_HOVER_M),
+            (Some(g), Some(a)) => a - g < low_m,
+            _ => height_now.is_some_and(|h| h < low_m),
         };
-        let low_ms = if height_now.is_some_and(|h| h < LOW_HOVER_M) {
+        let low_ms = if height_now.is_some_and(|h| h < low_m) {
             stay(ring.fine().rev(), &frame, HOVER_RADIUS_M, newest, low)
         } else {
             0

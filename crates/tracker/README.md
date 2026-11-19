@@ -460,12 +460,15 @@ Keep the manual position across reboots if you can; the page shows it as
 | `aircraft` | array | Every ADS-B aircraft, each exactly the `json::aircraft_line` object above (in table order). Added 2026-11-09; `"v"` stays 1 |
 | `rf` | array | **`json::state_full` only:** every RF emitter, each the `json::rf_line` object. Added 2026-11-14; readers treat a missing `rf` as empty |
 | `wifi_drones` | array | **`json::state_full` only:** every Wi-Fi drone, each the `json::wifi_drone_line` object. Added 2026-11-14 |
+| `signal_threats` | array | **`json::state_full` only:** every signal without a position that has a threat level (rules 12-13), each the `json::signal_threat_line` object. Added 2026-11-19 (slice 16c) |
+| `places` | object, optional | **`json::state_full` only, when the hub judges threat levels** (`json::places_json`): `profile` (`"default"` \| `"home"` \| `"facility"` \| `"event"` \| `"patrol"`), `crowd` (several at once counts from this many drones; null: not counted by number), `visits` (bool), `friends` (how many `friend` lines; never their serials), `bubble_m` (null: off), `areas` (each `name`, `ceiling_m`, and `circle` `{lat, lon, r_m}` or `poly` `[[lat, lon], ...]`; areas with no outline left out). At most `json::MAX_PLACES_JSON` bytes. Missing on hubs that judge no levels (the S3 hub, rid-view). Added 2026-11-19 (slice 16e) |
 
 `json::state` is unchanged (it still ends `],"aircraft":[...]}`), so the S3
 hub's piece-by-piece streaming of it keeps working. `json::state_full` writes
 the same object, then `json::STATE_AIRCRAFT_TO_RF`, the emitters,
-`json::STATE_RF_TO_WIFI`, the Wi-Fi drones and `json::STATE_END`; size its
-buffer with `json::state_full_max_len`. rid-view serves `state_full`.
+`json::STATE_RF_TO_WIFI`, the Wi-Fi drones, `json::STATE_WIFI_TO_SIGNAL_THREATS`,
+the signals' levels, then (when given) `json::STATE_SIGNAL_THREATS_TO_PLACES` and
+the places object, and the end; size its buffer with `json::state_full_max_len`. rid-view serves `state_full`.
 
 Example (tracks shortened):
 

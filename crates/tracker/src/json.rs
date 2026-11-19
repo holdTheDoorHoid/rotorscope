@@ -1219,10 +1219,14 @@ pub const STATE_RF_TO_WIFI: &[u8] = b"],\"wifi_drones\":[";
 /// [`state_full`] only: between the Wi-Fi drones and the signals' threat
 /// levels (slice 16c).
 pub const STATE_WIFI_TO_SIGNAL_THREATS: &[u8] = b"],\"signal_threats\":[";
+/// [`state_full`] only, when [`Signals::places`] is given: between the
+/// signals' threat levels and the places object (slice 16e).
+pub const STATE_SIGNAL_THREATS_TO_PLACES: &[u8] = b"],\"places\":";
 
 /// As [`state_max_len`], plus room for `rf` emitters and `wifi` Wi-Fi drones
-/// in [`state_full`], and for an empty `signal_threats` (add
-/// [`MAX_SIGNAL_THREAT_LINE`] + 1 for each signal threat to write).
+/// in [`state_full`], for an empty `signal_threats` (add
+/// [`MAX_SIGNAL_THREAT_LINE`] + 1 for each signal threat to write), and for
+/// the places object ([`MAX_PLACES_JSON`]).
 pub const fn state_full_max_len(
     tracks: usize,
     links: usize,
@@ -1237,6 +1241,8 @@ pub const fn state_full_max_len(
         + rf * (MAX_RF_LINE + 1)
         + wifi * (MAX_WIFI_DRONE_LINE + 1)
         + STATE_WIFI_TO_SIGNAL_THREATS.len()
+        + STATE_SIGNAL_THREATS_TO_PLACES.len()
+        + MAX_PLACES_JSON
 }
 
 /// The protocol-4 tables [`state_full`] adds after the aircraft.
@@ -1247,12 +1253,17 @@ pub struct Signals<'a> {
     /// Signals without a position with a threat level (slice 16c,
     /// `Tracker::signal_threats`; only those with a level are written).
     pub threats: &'a [crate::behaviour::SignalThreat],
+    /// The places the levels are judged against (slice 16e,
+    /// `Tracker::places`), written as `"places":{...}` ([`places_json`]);
+    /// `None` leaves the field out (a hub whose tracker judges no levels).
+    pub places: Option<&'a crate::behaviour::Places>,
 }
 
 /// [`state`], then `"rf":[...]` (each as [`rf_line`]),
 /// `"wifi_drones":[...]` (each as [`wifi_drone_line`]) and, since slice
 /// 16c, `"signal_threats":[...]` (each signal with a level, as
-/// [`signal_threat_line`]) after the aircraft.
+/// [`signal_threat_line`]) after the aircraft. Since slice 16e, when
+/// [`Signals::places`] is given, `"places":{...}` ([`places_json`]) last.
 /// `state` itself is unchanged, so a hub that streams it piece by piece
 /// keeps working; a reader treats missing `rf` / `wifi_drones` as empty.
 pub fn state_full(
@@ -1289,8 +1300,118 @@ pub fn state_full(
         let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
         n += signal_threat_line(t, ctx, rest)? - 1;
     }
-    put(buf, &mut n, STATE_END)?;
+    if let Some(p) = signals.places {
+        put(buf, &mut n, STATE_SIGNAL_THREATS_TO_PLACES)?;
+        let rest = buf.get_mut(n..).ok_or(FormatError::BufferTooSmall)?;
+        n += places_json(p, rest)?;
+        put(buf, &mut n, b"}\n")?;
+    } else {
+        put(buf, &mut n, STATE_END)?;
+    }
     Ok(n)
+}
+
+// ----------------------------------------------------------------- places --
+
+/// A buffer this size always holds the places object (8 polygon areas of
+/// 16 corners with the longest names and coordinates: 3,978 bytes; see
+/// the test in `behaviour::tests_profiles`).
+pub const MAX_PLACES_JSON: usize = 4608;
+
+/// One corner or centre, `[lat, lon]`, from 1e-7 degrees (divided, not
+/// multiplied, so `39.9521` prints as that and not `39.952100000000004`).
+fn deg(e7: i32) -> f64 {
+    f64::from(e7) / 1e7
+}
+
+struct PolyJ<'a>(&'a [crate::behaviour::Vertex]);
+
+impl Serialize for PolyJ<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        for v in self.0 {
+            seq.serialize_element(&(deg(v.lat_e7), deg(v.lon_e7)))?;
+        }
+        seq.end()
+    }
+}
+
+#[derive(Serialize)]
+struct CircleJ {
+    lat: f64,
+    lon: f64,
+    r_m: f32,
+}
+
+#[derive(Serialize)]
+struct AreaJ<'a> {
+    name: &'a str,
+    /// Metres above the unit (120 unless the site file says).
+    ceiling_m: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    circle: Option<CircleJ>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    poly: Option<PolyJ<'a>>,
+}
+
+struct AreasJ<'a>(&'a [crate::behaviour::Area]);
+
+impl Serialize for AreasJ<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use crate::behaviour::Shape;
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(None)?;
+        // An area named only by a `ceiling` line protects nothing yet.
+        for a in self.0.iter().filter(|a| a.shape.is_some()) {
+            let (circle, poly) = match &a.shape {
+                Some(Shape::Circle { lat, lon, radius_m }) => {
+                    // Rounded to 1e-7 degree, as the site file writes it.
+                    let v = crate::behaviour::Vertex::new(*lat, *lon);
+                    (Some(CircleJ { lat: deg(v.lat_e7), lon: deg(v.lon_e7), r_m: *radius_m }), None)
+                }
+                Some(Shape::Poly(v)) => (None, Some(PolyJ(v))),
+                None => (None, None),
+            };
+            seq.serialize_element(&AreaJ { name: &a.name, ceiling_m: a.ceiling(), circle, poly })?;
+        }
+        seq.end()
+    }
+}
+
+#[derive(Serialize)]
+struct PlacesJ<'a> {
+    /// `"default"`, `"home"`, `"facility"`, `"event"`, `"patrol"`.
+    profile: &'static str,
+    /// Several at once counts from this many drones; null: not counted by
+    /// number (`crowd off`, or the event profile). Jamming always counts.
+    crowd: Option<u8>,
+    /// The repeat-visitor history is kept.
+    visits: bool,
+    /// How many `friend` lines (their serials are not written here).
+    friends: usize,
+    /// The bubble's radius round the unit, metres; null: off.
+    bubble_m: Option<f32>,
+    areas: AreasJ<'a>,
+}
+
+/// Write the places the threat levels are judged against (slice 16e) as one
+/// JSON object, no newline: `{"profile":"home","crowd":3,"visits":true,
+/// "friends":1,"bubble_m":null,"areas":[{"name":"house","ceiling_m":120.0,
+/// "circle":{"lat":39.9521,"lon":-75.1638,"r_m":150.0}},{"name":"yard",
+/// "ceiling_m":120.0,"poly":[[39.952,-75.164],...]}]}`. Friends are counted,
+/// never listed: their serials would tell anyone on the hotspot which drone
+/// the owner flies (and lowers). Areas without an outline are left out.
+pub fn places_json(p: &crate::behaviour::Places, buf: &mut [u8]) -> Result<usize, FormatError> {
+    let j = PlacesJ {
+        profile: p.profile.name(),
+        crowd: p.crowd(),
+        visits: p.visits,
+        friends: p.friends.len(),
+        bubble_m: p.bubble_m,
+        areas: AreasJ(&p.areas),
+    };
+    serde_json_core::to_slice(&j, buf).map_err(|_| FormatError::BufferTooSmall)
 }
 
 /// Write the `/api/state` body: one JSON object followed by `\n`. Returns

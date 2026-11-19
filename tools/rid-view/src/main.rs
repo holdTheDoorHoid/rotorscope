@@ -996,6 +996,8 @@ fn run(o: Options) -> Result<(), String> {
                 emitters: tr.emitters(),
                 wifi_drones: tr.wifi_drones(),
                 threats: tr.signal_threats(),
+                // This tracker judges no levels (no path history): no places.
+                places: None,
             };
             if let Ok(n) = json::state_full(
                 tr.tracks(),

@@ -48,7 +48,8 @@ pub struct Follow {
 
 /// Whether the drone (its path `ring`, now at `drone_now`) has been
 /// following the unit (now at `own`, earlier along `trail`), staying within
-/// `range_m`.
+/// `range_m`, while the unit travelled at least `travel_m`
+/// ([`FOLLOW_TRAVEL_M`] unless the profile says).
 #[inline(never)]
 pub fn following<const P: usize>(
     ring: &PathRing,
@@ -56,6 +57,7 @@ pub fn following<const P: usize>(
     drone_now: (f64, f64),
     own: &OwnFix,
     range_m: f32,
+    travel_m: f32,
     now_ms: u64,
 ) -> Option<Follow> {
     let frame = Frame::at(own.lat, own.lon);
@@ -101,7 +103,7 @@ pub fn following<const P: usize>(
         let unit = (-u.0, -u.1);
         let drone = (d_now.0 - q.0, d_now.1 - q.1);
         let travelled = len(unit);
-        if travelled >= FOLLOW_TRAVEL_M
+        if travelled >= travel_m
             && len(drone) >= FOLLOW_KEEP_UP * travelled
             && super::angle_deg(unit, drone) <= FOLLOW_MAX_ANGLE_DEG
             && best.is_none_or(|b| travelled > b.travelled_m)

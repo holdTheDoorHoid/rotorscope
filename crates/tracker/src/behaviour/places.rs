@@ -12,6 +12,8 @@
 use heapless::{String, Vec};
 use libm::{cos, sqrtf};
 
+use super::profile::{Profile, Tuning};
+
 /// Fixed areas held.
 pub const MAX_AREAS: usize = 8;
 /// Corners of a polygon area, at most (and at least [`MIN_VERTICES`]).
@@ -114,6 +116,12 @@ pub struct Places {
     pub crowd_min: Option<u8>,
     /// Keep the repeat-visitor history (rule 17, `visits on|off`).
     pub visits: bool,
+    /// The preset of thresholds and level weights (slice 16e, `profile`
+    /// line, [`super::profile`]).
+    pub profile: Profile,
+    /// A `crowd` line set [`Self::crowd_min`]: it wins over the profile
+    /// (`crowd auto` clears it). See [`Self::crowd`].
+    pub crowd_set: bool,
 }
 
 impl Default for Places {
@@ -130,6 +138,8 @@ impl Places {
             friends: Vec::new(),
             crowd_min: Some(CROWD_DEFAULT),
             visits: true,
+            profile: Profile::Default,
+            crowd_set: false,
         }
     }
 
@@ -147,6 +157,20 @@ impl Places {
         self.bubble_m = o.bubble_m;
         self.crowd_min = o.crowd_min;
         self.visits = o.visits;
+        self.profile = o.profile;
+        self.crowd_set = o.crowd_set;
+    }
+
+    /// The profile's numbers (slice 16e).
+    pub fn tuning(&self) -> &'static Tuning {
+        self.profile.tuning()
+    }
+
+    /// How many drones at once make "several at once" (rule 15's count);
+    /// `None`: not counted. A `crowd` line wins; without one the profile
+    /// decides (`event` turns the count off), else [`CROWD_DEFAULT`].
+    pub fn crowd(&self) -> Option<u8> {
+        if self.crowd_set || self.tuning().crowd { self.crowd_min } else { None }
     }
 
     /// Areas with a shape, and whether the bubble is on: anything to protect.

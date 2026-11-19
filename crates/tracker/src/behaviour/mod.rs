@@ -92,6 +92,7 @@ pub mod follow;
 pub mod linger;
 pub mod path;
 pub mod places;
+pub mod profile;
 pub mod scenario;
 pub mod trend;
 pub mod visits;
@@ -107,6 +108,7 @@ pub use path::{OwnTrail, PathPoint, PathRing, PathStore};
 pub use trend::{RotorSound, SignalKind, SignalRise, SignalSrc, SignalThreat, SignalThreatId, Trends};
 pub use visits::Visits;
 pub use places::{Area, Frame, Friend, Local, Name, Places, Shape, Vertex};
+pub use profile::{Profile, Tuning};
 
 use crate::{OwnFix, Track, TrackId};
 
@@ -874,6 +876,8 @@ pub fn evaluate<const P: usize>(
         return None;
     }
     let friend = friend_of(t, places).is_some();
+    // The profile's numbers (slice 16e).
+    let tu = places.tuning();
     let (lat, lon, at_ms) = smoothed(ring, now_ms).unwrap_or((pos.lat, pos.lon, loc.rx_ms));
     let l = &loc.value;
     let reported = match (l.speed_horizontal, l.direction) {
@@ -901,7 +905,7 @@ pub fn evaluate<const P: usize>(
     // The lingering rules' view of the path (only when there is a place
     // to judge against).
     let ground = ground_alt(l, own);
-    let linger = ring.filter(|_| places.any()).map(|r| linger::Linger::of(r, (lat, lon), height, ground, now_ms));
+    let linger = ring.filter(|_| places.any()).map(|r| linger::Linger::of(r, (lat, lon), height, ground, tu.low_hover_m, now_ms));
     // In the bubble, a drone hovering low beside its own pilot is taking
     // off or landing.
     let by_pilot = pilot.is_some_and(|pp| {
@@ -965,7 +969,7 @@ pub fn evaluate<const P: usize>(
         if let Some(pp) = pilot {
             let q = f.xy(pp.lat, pp.lon);
             let out = tg.local.outside_by(q);
-            if out <= PILOT_NEAR_M {
+            if out <= tu.pilot_near_m {
                 add(Reason::new(Rule::PilotNear, place_level, &tg.name, out));
             }
             if inside && out > 0.0 {
@@ -984,7 +988,7 @@ pub fn evaluate<const P: usize>(
                 _ => lg.stay_ms,
             };
             if stay_ms >= linger::LOITER_CAUTION_MS && tg.local.outside_by(p) <= linger::LOITER_NEAR_M {
-                let long_low = stay_ms >= linger::LOITER_WARNING_MS && height.is_some_and(|h| h < linger::LOITER_LOW_M);
+                let long_low = stay_ms >= tu.loiter_warning_ms && height.is_some_and(|h| h < linger::LOITER_LOW_M);
                 let level = if long_low { warning } else { place_level };
                 add(Reason::new(Rule::Loitering, level, &tg.name, from_middle).with_height(height).with_secs(stay_ms));
             }
@@ -995,7 +999,7 @@ pub fn evaluate<const P: usize>(
                 add(Reason::new(Rule::Circling, place_level, &tg.name, o.radius_m).with_height(height).with_secs(o.turn_ms));
             }
             // 9: low and still inside (not beside its pilot in the bubble).
-            if inside && lg.low_ms >= linger::LOW_HOVER_MS && !(tg.name.is_empty() && by_pilot) {
+            if inside && lg.low_ms >= tu.low_hover_ms && !(tg.name.is_empty() && by_pilot) {
                 add(Reason::new(Rule::LowHover, warning, &tg.name, from_middle).with_height(height).with_secs(lg.low_ms));
             }
             // 10: down, a pause, up, with the bottom inside.
@@ -1031,7 +1035,7 @@ pub fn evaluate<const P: usize>(
         };
         let Some(eta) = eta else { continue };
         let r = Reason::new(Rule::Beeline, Level::Warning, &tg.name, from_middle).with_eta(eta).with_speed(closing);
-        if closing > FAST_MPS || (eta < SOON_S && closing >= SOON_MIN_MPS) {
+        if closing > tu.fast_mps() || (eta < tu.soon_s() && closing >= SOON_MIN_MPS) {
             let mut c = r;
             c.rule = Rule::FastInbound;
             c.level = Level::Critical;
@@ -1041,7 +1045,7 @@ pub fn evaluate<const P: usize>(
     }
     // 11: following the unit (the bubble only).
     if let (Some(r), Some(o), Some(tr), Some(radius)) = (ring, own, trail, places.bubble_m)
-        && let Some(fl) = follow::following(r, tr, (lat, lon), o, radius.max(follow::FOLLOW_MIN_RANGE_M), now_ms)
+        && let Some(fl) = follow::following(r, tr, (lat, lon), o, radius.max(follow::FOLLOW_MIN_RANGE_M), tu.follow_travel_m, now_ms)
     {
         let level = if friend { Level::Notice } else { Level::Warning };
         add(Reason::new(Rule::Following, level, &Name::new(), fl.travelled_m).with_secs(fl.ms));
@@ -1052,7 +1056,7 @@ pub fn evaluate<const P: usize>(
         let facts = across::Facts { key, id_key, friend, near: near.as_ref(), was_inside, inside_now, area_out, pilot };
         across::judge(&mut hits, t, ring, places, &facts, c, now_ms);
     }
-    let mut e = judge(hits, friend);
+    let mut e = judge(hits, friend, tu);
     e.heard_ms = loc.rx_ms;
     e.inside = inside_now;
     Some(e)
@@ -1062,7 +1066,20 @@ pub fn evaluate<const P: usize>(
 /// different signs each gave Caution. Loitering is the same sign as being
 /// in the area (it is being there, for longer); a pilot near the bubble is
 /// no sign towards the pair (a pilot nearby is normal in a park).
-fn judge<const H: usize>(mut hits: Vec<Reason, H>, friend: bool) -> Eval {
+///
+/// The profile's level weights ([`Tuning::weigh`]) are applied here, to
+/// every hit, before the pair is counted (slice 16e); the rules across
+/// drones have already run on the unweighted levels, so a weight never
+/// hides a spotter from rule 14. A repeat visitor's raise is worked out
+/// again on the weighted levels.
+fn judge<const H: usize>(mut hits: Vec<Reason, H>, friend: bool, tu: &Tuning) -> Eval {
+    for h in hits.iter_mut() {
+        h.level = tu.weigh(h.rule, h.level, h.alarm().is_some());
+    }
+    let others = hits.iter().filter(|h| h.rule != Rule::RepeatVisitor).map(|h| h.level).max().unwrap_or(Level::Notice);
+    for h in hits.iter_mut().filter(|h| h.rule == Rule::RepeatVisitor) {
+        h.level = if others >= Level::Caution { Level::Warning } else { Level::Notice };
+    }
     let mut cautions: Vec<Rule, 12> = Vec::new();
     for h in hits.iter().filter(|h| h.level == Level::Caution) {
         let sign = match h.rule {
@@ -1423,5 +1440,7 @@ mod tests;
 mod tests_across;
 #[cfg(test)]
 mod tests_linger;
+#[cfg(test)]
+mod tests_profiles;
 #[cfg(test)]
 mod tests_trend;

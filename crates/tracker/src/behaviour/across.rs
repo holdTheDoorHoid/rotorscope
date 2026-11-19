@@ -474,7 +474,7 @@ pub(crate) fn judge<const H: usize, const P: usize>(
         let level = if f.friend { Level::Notice } else { Level::Warning };
         if c.alarm != 0 {
             let _ = hits.push(at(n, Rule::Several, level).with_code(c.alarm));
-        } else if let Some(min) = places.crowd_min
+        } else if let Some(min) = places.crowd()
             && a.near_prev >= u16::from(min)
         {
             let _ = hits.push(at(n, Rule::Several, level).with_secs(u64::from(a.near_prev) * 1000));
@@ -516,7 +516,7 @@ pub(crate) fn judge<const H: usize, const P: usize>(
         let by_id = f.id_key.map_or(0, |k| a.visits.id_days(k, day));
         let by_spot = cell.map_or(0, |c| a.visits.spot_days(c, day));
         let days = by_id.max(by_spot);
-        if days >= visits::REPEAT_DAYS {
+        if days >= places.tuning().repeat_days {
             let others = hits.iter().map(|h| h.level).max().unwrap_or(Level::Notice);
             let level = if others >= Level::Caution { Level::Warning } else { Level::Notice };
             let r = at(n, Rule::RepeatVisitor, level).with_secs(u64::from(days) * 1000).with_code(u8::from(by_spot > by_id));
