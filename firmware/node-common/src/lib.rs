@@ -14,7 +14,14 @@
 //! its own roles and refuses to switch.
 //!
 //! Flash wear: `rsjob` is erased once per image switch; the hub's coordinator
-//! changes a node's role at most once a minute.
+//! changes a node's role at most once a minute, and the node limits itself
+//! as well, whatever it is asked (`nodeimage::switchlimit`: 60 s of uptime
+//! before a switch, doubling with each quick switch in a row, at most 1 h;
+//! the streak travels in the job record).
+//!
+//! Node robustness counters (WP-13 section 7, for `NodeHealth`): plans
+//! refused, deaf fall-backs ([`DeafWatch`]), switches refused and seconds
+//! until the next switch is allowed, read with [`health`].
 #![no_std]
 
 #[cfg(feature = "wirebus")]
@@ -25,8 +32,60 @@ use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
     self, AppPartitionSubType, DataPartitionSubType, FlashStorage, PARTITION_TABLE_MAX_LEN, PartitionType,
 };
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
+
 use link::{Assignment, NodeRole};
+pub use nodeimage::deaf::{DEAF_MS, DeafWatch};
+use nodeimage::switchlimit;
 use nodeimage::{HEAD_LEN, Image, JOB_LABEL, JOB_MAX};
+
+// Counters. Each has one writer (the image's control task), so a plain load
+// and store is enough: the C3 has no atomic read-modify-write.
+static PLANS_REFUSED: AtomicU32 = AtomicU32::new(0);
+static DEAF_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static SWITCHES_REFUSED: AtomicU32 = AtomicU32::new(0);
+/// The switch streak this image was started with (from the job record).
+static STREAK: AtomicU8 = AtomicU8::new(0);
+
+fn bump(c: &AtomicU32) {
+    c.store(c.load(Relaxed).wrapping_add(1), Relaxed);
+}
+
+/// A plan from the hub or the stored job was refused (it would make the
+/// node deaf to the gateway, or failed another check).
+pub fn count_plan_refused() {
+    bump(&PLANS_REFUSED);
+}
+
+/// The node fell back to its built-in plan ([`DeafWatch::check`]).
+pub fn count_deaf_fallback() {
+    bump(&DEAF_FALLBACKS);
+}
+
+/// Seconds since boot.
+pub fn uptime_s() -> u32 {
+    let s = esp_hal::time::Instant::now().duration_since_epoch().as_secs();
+    u32::try_from(s).unwrap_or(u32::MAX)
+}
+
+/// The node's robustness counters since boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    pub plans_refused: u32,
+    pub deaf_fallbacks: u32,
+    pub switches_refused: u32,
+    /// Seconds until an image switch is allowed (0: allowed now).
+    pub switch_wait_s: u32,
+}
+
+pub fn health() -> Health {
+    Health {
+        plans_refused: PLANS_REFUSED.load(Relaxed),
+        deaf_fallbacks: DEAF_FALLBACKS.load(Relaxed),
+        switches_refused: SWITCHES_REFUSED.load(Relaxed),
+        switch_wait_s: switchlimit::wait_s(STREAK.load(Relaxed), uptime_s()),
+    }
+}
 
 /// One app slot.
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +108,10 @@ pub enum SwitchError {
     NoJobSector,
     /// A flash operation failed.
     Flash,
+    /// Refused: this image has not been up long enough since the last
+    /// switch ([`health`]`().switch_wait_s` says how long is left). The
+    /// node keeps its role and plan.
+    TooSoon,
 }
 
 impl SwitchError {
@@ -58,6 +121,7 @@ impl SwitchError {
             SwitchError::NoOta => "no OTA slots",
             SwitchError::NoJobSector => "no rsjob sector",
             SwitchError::Flash => "flash error",
+            SwitchError::TooSoon => "too soon after the last switch",
         }
     }
 }
@@ -118,12 +182,16 @@ impl<'d> Images<'d> {
 
     /// The job this image was switched in for, if any (left in place: after a
     /// power cycle the same image starts with the same job; a newer command
-    /// from the hub replaces it in memory).
+    /// from the hub replaces it in memory). Also takes the switch streak
+    /// from the record (an old `RSJ1` record counts as streak 0), so call
+    /// it once at boot, before any switch.
     pub fn stored_job(&mut self) -> Option<Assignment> {
         let at = self.job_offset?;
         let mut raw = [0u8; JOB_MAX];
         flash_read(&mut self.flash, at, &mut raw).ok()?;
-        nodeimage::decode_job(&raw)
+        let stored = nodeimage::decode_job(&raw)?;
+        STREAK.store(stored.streak, Relaxed);
+        Some(stored.job)
     }
 
     /// The slot to start for `role`, if this board holds an image for it.
@@ -135,15 +203,24 @@ impl<'d> Images<'d> {
     }
 
     /// Store `job`, make its image the boot image and reset. Returns only on
-    /// failure, before anything that would change what boots next.
+    /// failure, before anything that would change what boots next. Refused
+    /// ([`SwitchError::TooSoon`], counted) until this image has been up for
+    /// `switchlimit::min_uptime_s(streak)`.
     pub fn switch(&mut self, job: &Assignment) -> SwitchError {
         let Some(slot) = self.slot_for(job.role) else { return SwitchError::NoImage };
         if !self.ota {
             return SwitchError::NoOta;
         }
         let Some(at) = self.job_offset else { return SwitchError::NoJobSector };
+        let (streak, up) = (STREAK.load(Relaxed), uptime_s());
+        if !switchlimit::allowed(streak, up) {
+            bump(&SWITCHES_REFUSED);
+            return SwitchError::TooSoon;
+        }
         let mut rec = [0u8; JOB_MAX];
-        let Some(raw) = nodeimage::encode_job(job, &mut rec) else { return SwitchError::NoJobSector };
+        let Some(raw) = nodeimage::encode_job(job, switchlimit::next_streak(streak, up), &mut rec) else {
+            return SwitchError::NoJobSector;
+        };
         // esp-storage's `write` erases the sector and read-modify-writes it.
         if self.flash.write(at, raw).is_err() {
             return SwitchError::Flash;

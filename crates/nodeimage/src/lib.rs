@@ -15,6 +15,9 @@
 //! glue is `firmware/node-common`.
 #![cfg_attr(not(test), no_std)]
 
+pub mod deaf;
+pub mod switchlimit;
+
 use link::{Assignment, NodeRole};
 
 /// First byte of an ESP-IDF app image.
@@ -100,36 +103,54 @@ pub fn image_of(head: &[u8]) -> Option<Image> {
 
 // ------------------------------------------------------------------ job --
 
-/// Start of a job record.
-pub const JOB_MAGIC: [u8; 4] = *b"RSJ1";
-/// Largest record: magic, length, postcard `Assignment` (at most ~200 bytes
-/// for 24 hops), CRC-32.
+/// Start of a job record. `RSJ2` adds one byte after the length: the
+/// switch streak ([`switchlimit`]).
+pub const JOB_MAGIC: [u8; 4] = *b"RSJ2";
+/// The record before the streak byte. Still read: as streak 0 (it was
+/// written by firmware that had no limit; the limit starts from scratch).
+pub const JOB_MAGIC_V1: [u8; 4] = *b"RSJ1";
+/// Largest record: magic, length, streak, postcard `Assignment` (at most
+/// ~200 bytes for 24 hops), CRC-32.
 pub const JOB_MAX: usize = 256;
 
-/// Serialize `job` into `buf`: magic, payload length (u16 LE), postcard
-/// payload, CRC-32 (IEEE, LE) over everything before it. Returns the bytes to
-/// write (pad to the flash write size with 0xFF; trailing bytes are ignored).
-pub fn encode_job<'a>(job: &Assignment, buf: &'a mut [u8; JOB_MAX]) -> Option<&'a [u8]> {
-    buf[..4].copy_from_slice(&JOB_MAGIC);
-    let n = postcard::to_slice(job, &mut buf[6..JOB_MAX - 4]).ok()?.len();
-    buf[4..6].copy_from_slice(&(n as u16).to_le_bytes());
-    let crc = crc32(&buf[..6 + n]);
-    buf[6 + n..10 + n].copy_from_slice(&crc.to_le_bytes());
-    Some(&buf[..10 + n])
+/// A job read back from `rsjob`: the assignment the node switched for, and
+/// the switch streak the switching image wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredJob {
+    pub job: Assignment,
+    pub streak: u8,
 }
 
-/// Read a job record back. `None` for erased flash or anything damaged.
-pub fn decode_job(raw: &[u8]) -> Option<Assignment> {
-    if raw.get(..4)? != JOB_MAGIC {
-        return None;
-    }
+/// Serialize `job` into `buf`: magic `RSJ2`, payload length (u16 LE),
+/// `streak` (u8), postcard payload, CRC-32 (IEEE, LE) over everything
+/// before it. Returns the bytes to write (pad to the flash write size with
+/// 0xFF; trailing bytes are ignored).
+pub fn encode_job<'a>(job: &Assignment, streak: u8, buf: &'a mut [u8; JOB_MAX]) -> Option<&'a [u8]> {
+    buf[..4].copy_from_slice(&JOB_MAGIC);
+    let n = postcard::to_slice(job, &mut buf[7..JOB_MAX - 4]).ok()?.len();
+    buf[4..6].copy_from_slice(&(n as u16).to_le_bytes());
+    buf[6] = streak;
+    let crc = crc32(&buf[..7 + n]);
+    buf[7 + n..11 + n].copy_from_slice(&crc.to_le_bytes());
+    Some(&buf[..11 + n])
+}
+
+/// Read a job record back: `RSJ2`, or an older `RSJ1` (no streak byte; read
+/// as streak 0). `None` for erased flash or anything damaged.
+pub fn decode_job(raw: &[u8]) -> Option<StoredJob> {
+    let head = match raw.get(..4)? {
+        m if m == JOB_MAGIC => 7,
+        m if m == JOB_MAGIC_V1 => 6,
+        _ => return None,
+    };
     let n = usize::from(u16::from_le_bytes(raw.get(4..6)?.try_into().ok()?));
-    let body = raw.get(..6 + n)?;
-    let crc = u32::from_le_bytes(raw.get(6 + n..10 + n)?.try_into().ok()?);
+    let body = raw.get(..head + n)?;
+    let crc = u32::from_le_bytes(raw.get(head + n..head + n + 4)?.try_into().ok()?);
     if crc32(body) != crc {
         return None;
     }
-    postcard::from_bytes(&body[6..]).ok()
+    let streak = if head == 7 { body[6] } else { 0 };
+    Some(StoredJob { job: postcard::from_bytes(&body[head..]).ok()?, streak })
 }
 
 /// CRC-32 (IEEE 802.3, reflected, as zlib). Bitwise: the record is tiny.
@@ -196,13 +217,14 @@ mod tests {
         while plan.push((u32::MAX, u16::MAX)).is_ok() {}
         let big = Assignment { role: NodeRole::DroneId, plan, id: u16::MAX };
         let small = Assignment { role: NodeRole::Ble, plan: heapless::Vec::new(), id: 0x1234 };
-        for job in [big, small] {
+        for (job, streak) in [(big, 0xFE), (small, 3)] {
             let mut buf = [0u8; JOB_MAX];
-            let raw = encode_job(&job, &mut buf).unwrap().to_vec();
+            let raw = encode_job(&job, streak, &mut buf).unwrap().to_vec();
             assert!(raw.len() <= JOB_MAX);
+            assert_eq!(raw[..4], *b"RSJ2");
             let mut sector = std::vec![0xFFu8; 4096];
             sector[..raw.len()].copy_from_slice(&raw);
-            assert_eq!(decode_job(&sector), Some(job.clone()));
+            assert_eq!(decode_job(&sector), Some(StoredJob { job: job.clone(), streak }));
             for i in 0..raw.len() {
                 let mut d = sector.clone();
                 d[i] ^= 0x40;
@@ -211,6 +233,25 @@ mod tests {
         }
         assert_eq!(decode_job(&[0xFF; 4096]), None);
         assert_eq!(decode_job(&[]), None);
+    }
+
+    /// An `RSJ1` record (written by firmware from before the switch limit)
+    /// is still read, as streak 0.
+    #[test]
+    fn old_rsj1_record_reads_as_streak_0() {
+        let job = Assignment { role: NodeRole::Wifi5, plan: heapless::Vec::from_slice(&[(149, 150), (6, 40)]).unwrap(), id: 77 };
+        // Exactly what the RSJ1 encoder wrote.
+        let mut raw = std::vec::Vec::from(*b"RSJ1");
+        let mut pbuf = [0u8; 256];
+        let payload = postcard::to_slice(&job, &mut pbuf).unwrap();
+        raw.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        raw.extend_from_slice(&payload);
+        let crc = crc32(&raw);
+        raw.extend_from_slice(&crc.to_le_bytes());
+        raw.resize(4096, 0xFF);
+        assert_eq!(decode_job(&raw), Some(StoredJob { job, streak: 0 }));
+        raw[7] ^= 1;
+        assert_eq!(decode_job(&raw), None, "damaged RSJ1");
     }
 
     #[test]
