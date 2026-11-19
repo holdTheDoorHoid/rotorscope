@@ -799,6 +799,38 @@ multiplication.
   heard as separate transmitters (different addresses, nodes or 6 dB of
   RSSI, born 2 s apart), moved together: AREA FAKE at confidence 60.
 
+## Forged traffic on the kit's own link
+
+Everything above is about forged *broadcasts*: the tracker cannot prove who
+sent a Remote ID or DroneID frame. The link between the kit's own boards is
+different: on a sealed kit (docs/ESPNOW.md, "Securing the link") every
+ESP-NOW node packet carries a tag under that node's own key, and the hub
+checks it before anything in the packet reaches the tracker. So a spoofer
+cannot simply speak *as one of the kit's nodes*:
+
+- A packet with a wrong tag, an old or replayed one, one held back for more
+  than 2 s, or one from an address that is not in the kit's roster is
+  refused (by the hub, or by the gateway for the roster and budget checks,
+  which reports it to the hub) and raised as **Forged node traffic** (`forged_link`),
+  naming the claimed node and the reason, at most once a second per node and
+  reason.
+- Someone who has taken one node can report made-up detections as that node,
+  and nothing more: not as another node, not as the gateway or the hub, and
+  not the hub-only frames (the kit's own position and time, aircraft from the
+  hub's receiver). Revoke its slot (`link-key revoke`), and its packets are
+  refused from then on.
+- The gateway holds no key: a captured gateway can drop, delay or repeat
+  packets, not forge them. Packets a node says it sent but the hub never got
+  raise **Node reports going missing** (`link_loss`).
+- Flooding one node's address makes the gateway's per-address budget drop
+  packets, the node's own among them. That is no worse than jamming and is
+  visible (`over_budget` refusals, the node going quiet, `link_loss`).
+
+On an **open** kit (`OPEN LINK` on the hub's screen) none of this holds:
+anyone in range can send packets the hub takes as a node's. A captured hub
+gives away the whole kit until a secure element is fitted, and the wired
+bus is not authenticated.
+
 ## Known false-alarm cases
 
 - **Two Autels sharing a fixed MAC.** `shared_address` at 25 (weak), or 45

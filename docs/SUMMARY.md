@@ -33,6 +33,7 @@
 - [SD card and logs](use/sd-card.md)
 - [Site settings (SITE.TXT)](SITE.md)
 - [The evidence log](EVIDENCE.md)
+  - [Outside time-stamps: the design](EVIDENCE-TIMESTAMPING-DESIGN.md)
 
 # How it works
 
@@ -40,6 +41,7 @@
 - [Nodes, gateway and hub](how/nodes-gateway-hub.md)
 - [The link between boards](how/link.md)
   - [ESP-NOW in depth](ESPNOW.md)
+    - [Link keys: the design as built](LINK-KEYS-DESIGN.md)
   - [The wired bus in depth](WIREBUS.md)
 - [The tracker](how/tracker.md)
 - [Who listens where: coverage](how/coverage.md)

@@ -128,6 +128,147 @@ The old lock lived in `/tmp`. A sandboxed program can have its own private `/tmp
 could each hold "the" lock without seeing each other. That is the most likely cause of the earlier
 report that the lock did not serialize (not proven; it could not be reproduced without hardware).
 
+## Link keys: bench checklist
+
+The per-node link keys (docs/LINK-KEYS-DESIGN.md, docs/ESPNOW.md "Securing the link") are
+host-tested and compile-checked; **nothing in this section has run on hardware yet**. It walks the
+design's test plan (section 9) on the bench kit: P4 hub `p4`, gateway `c5c`, nodes `c5a` and
+`c5b`. All forged traffic comes from our own boards through their normal radio path (the
+`forgetest` and `gwforge` builds); no other transmitter is used. Do the parts in order: each
+relies on the one before.
+
+### 0. On the computer, no board
+
+```sh
+RUSTC_WRAPPER= cargo test --workspace --locked      # all pass
+tools/check-wifi-blobs.sh                          # radio libraries and the patched esp-radio
+tools/check-image-identity.sh                      # images do not depend on the kit or the checkout
+tools/dev-board.sh --self-test && tools/flash-node.sh --self-test
+```
+
+The P4's USB port is a CH340, which `--register` does not look for. Add it to
+`tools/boards.local` by hand, so `tools/link-key` reaches it under the same lock as everything
+else (check the name with `ls /dev/serial/by-id/`):
+
+```text
+p4  /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0  esp32p4
+```
+
+The bench kit's files are `tools/kit.key` and `tools/kit.roster` (git-ignored). Never commit them
+or paste them anywhere. If an old `tools/link.key` is there, leave it: it is only needed to build
+the old-firmware board of step 5.
+
+### 1. Make the kit and provision the hub, read-only first
+
+1. `cargo run -p link-key -- kit new` (once; it refuses to replace an existing kit). Note the
+   kit id it prints.
+2. Build the hub with flash writes off: `(cd firmware/hub-p4 && cargo fw --features rskit-readonly)`.
+   Flash it as in docs/get-going/kit-flash.md, but with `--partition-table tools/partitions-hub.csv`
+   in place of `elecrow-partitions.bin` (its first four rows are Elecrow's, then `rskit` at
+   `0xC10000` and `rsboot` at `0xC12000`), keeping `--bootloader elecrow-bootloader.bin` and
+   `-B 460800`.
+3. `cargo run -p link-key -- hub p4 --dry-run`: it prints the `espflash read-flash` command that
+   reads the old boot counter and the `espflash write-bin` commands, and writes nothing. Then
+   `cargo run -p link-key -- hub p4`. Expected: "master and roster (0 entries) written", "boot
+   counter seed written (random (...))" the first time, "(above the old counter)" on any later
+   run whose counter still reads.
+4. Each node, dry run first. Read the MAC from `tools/dev-board.sh --list` or the board's label:
+   `cargo run -p link-key -- node c5a --dry-run --mac <c5a MAC> --label c5a`, then
+   `cargo run -p link-key -- node c5a --label c5a`; the same for `c5b`. Then
+   `cargo run -p link-key -- hub-roster p4` and `cargo run -p link-key -- show` (slots 0 and 1,
+   their key checks).
+5. Reset the P4. Console: `linkauth: rskit keyed, kit <id>, 2 node slot(s) loaded`, two `slot`
+   lines naming the nodes' MACs, `rsboot read-only latest=<N>`; the strip shows
+   `NO BOOT COUNTER: link closed` (expected in this build).
+
+### 2. Let the hub write its boot counter
+
+1. `(cd firmware/hub-p4 && cargo fw)` and flash it the same way.
+2. Console: `rsboot written <N+1> at +0x..., read back: this boot's epoch`; the strip no longer
+   says `NO BOOT COUNTER`. Power-cycle twice: the value goes up by one each time.
+3. Optional: read the partition back with `tools/dev-board.sh --run 'espflash read-flash --port
+   "$BOARD_PORT" --non-interactive 0xC12000 0x2000 /tmp/rsboot.bin' 120 p4` and check the entries
+   (`kitkeys::bootlog::read`).
+
+### 3. Gateway and nodes, normal running
+
+1. Gateway: `cd firmware/gateway && . ../../tools/repro-env.sh && cargo fw "${REPRO_CARGO_ARGS[@]}"`,
+   then `tools/dev-board.sh firmware/gateway/target/riscv32imac-unknown-none-elf/release/gateway 60 c5c`.
+   Its `hello` says `"protocol":14`, `"key":"none"`; within 5 s a `"t":"roster","n":2` line.
+   The P4: `node link now reads a protocol 14 gateway`.
+2. Nodes: `tools/flash-node.sh c5a` and `tools/flash-node.sh c5b`. Each ends with
+   `flash-node: link keyed: "auth":"kit:<id> slot:<n> gen:1 check:<c>"`, the check matching
+   `link-key show`.
+3. Run 5 minutes. P4 `hub-p4: gwlink` line: `pkts` and `ok` grow, `bad_tag`, `replay`, `stale`,
+   `old_fw`, `not_in_roster`, `late_uplink`, `future_uplink` stay 0; `beacons` about 2 a second,
+   `rosters` one per 5 s, `cmds` and `acked` grow (the `Assign`s). Both nodes report, their
+   `Status` echoes the hub's plan ids, and neither prints a `link_auth` line. The gateway's
+   `"t":"gw"` line: `relayed` grows, refusals 0, `uart_drops` 0. The strip has no link line.
+   This is also the bench check of the patched esp-radio on C5 boards that run Wi-Fi and BLE at
+   once: a node switched to the Bluetooth role (node-ble with ESP-NOW) must keep reporting adverts.
+
+### 4. Attacks (design section 9)
+
+Captured node: build node-wifi with `forgetest` and put it in c5a's first slot, keeping the table
+(a plain `tools/dev-board.sh <elf>` would use espflash's default table, which has no `rskey`, and
+the node would report `missing`):
+
+```sh
+export ROTORSCOPE_BENCH=1
+(cd firmware/node-wifi/c5 && cargo build --release --features esp32c5,band24,espnow,forgetest --target-dir ../target-espnow)
+tools/dev-board.sh --pt tools/partitions-node.csv \
+  --app ota_0=firmware/node-wifi/target-espnow/riscv32imac-unknown-none-elf/release/node-wifi --multi 90 c5a
+```
+
+Commands are typed on c5a's USB (`tools/dev-board.sh --log 20 c5a --send $'forge claim <c5b MAC>\r'`).
+
+| Row | Command | Expected |
+|---|---|---|
+| Speaks as another node | `forge claim <c5b MAC>` | P4 `bad_tag` +5 (c5b's slot), a `forged_link` naming c5b; nothing from c5a under c5b; c5b keeps reporting. If the line says the driver refused the MAC change, nothing was sent: note it |
+| Commands another node | `forge cmd <c5b MAC>` | c5b's `link_auth` line: `bad_tag` +1; c5b's plan unchanged |
+| Forges a beacon | `forge beacon` | c5b `bad_tag` +1, its gateway address unchanged |
+| Withheld batch | `forge hold 5` | P4 `late_uplink` +1; nothing from that batch in the tracker |
+| Flood on its own address | `forge spam 500`, then `forge spam 0` | gateway `over_budget` for c5a; c5b's delivery unchanged; P4 CPU in the `{"t":"hub"}` line under 10 % |
+| Frames it may not send | `forge hubfix`, `csbee`, `flags`, `via`, `hello`, `threat`, `join` | P4 `refused=` +1 each and its own `forged_link` detail 5 naming c5a; the gateway's counters do not move; nothing in the "Must never" column of "Origin checks" happens |
+
+Captured gateway: `ROTORSCOPE_BENCH=1` and `(cd firmware/gateway && cargo build --release --features gwforge)`,
+flashed to c5c as in step 3. The P4's strip shows `BENCH GATEWAY`. Typed on c5c's USB:
+
+| Command | Expected |
+|---|---|
+| `gwforge batch` | P4 `bad_tag` +1 for the first roster slot |
+| `gwforge flip <c5a MAC>` | c5a `bad_tag` +1 at the next command to it; its plan unchanged |
+| `gwforge replay` | P4 `replay` +1 |
+| `gwforge delay 1000` | the next `TimeSync` arrives late: an aero node (none on this bench) counts `late` +1; without one, check the P4's `ts_held_max` and that nothing else changes |
+| `gwforge drop <c5a MAC> 50` | within 60 s **Node reports going missing** (`link_loss`) for c5a on the P4; `gwforge drop off` ends it |
+
+Then flash the normal gateway and node builds again (step 3) and unset `ROTORSCOPE_BENCH`.
+
+### 5. Provisioning states and a mixed kit
+
+| Check | How | Expected |
+|---|---|---|
+| Missing record | erase c5b's key record on purpose: `tools/dev-board.sh --run 'espflash erase-region --port "$BOARD_PORT" --non-interactive 0x611000 0x1000' 60 c5b`, reset it | c5b prints `"auth":"none","why":"missing"` every 10 s and sends no reports; its LED blinks; the P4 strip `UNPROVISIONED NODE 1`. `tools/flash-node.sh c5b` exits 1 naming `missing` |
+| Damaged record | `ROTORSCOPE_BENCH=1 cargo run -p link-key -- node c5b --slot 1 --bench-corrupt`, then `hub-roster p4` | `why":"damaged"`, the same strip line |
+| Back to normal | `cargo run -p link-key -- node c5b --slot 1`, `hub-roster p4` | keyed again, generation one higher; the hub's node number for c5b is unchanged |
+| Revoke | `cargo run -p link-key -- revoke --slot 1`, `hub-roster p4` | the gateway drops c5b's packets as `not_in_roster` (the hub pushes only live slots), and its beacon tag is zero (c5b counts `not_for_this_slot`); provision it again afterwards |
+| Old node firmware | build node-wifi from a commit before the cut-over (`6651ecd`) in a scratch checkout with the old kit key, `ROTORSCOPE_LINK_KEY_FILE=<this checkout>/tools/link.key cargo fw24-now`, flash it to c5b | P4 `old_fw` grows, strip `OLD FIRMWARE: 1 node` |
+| Old gateway | the gateway from `6651ecd` the same way | strip `OLD FIRMWARE: gateway`; nothing relayed |
+| Hub re-provisioned | `cargo run -p link-key -- hub p4` again, reset the P4 | "above the old counter"; both nodes keep reporting without a 60 s gap |
+
+Reflash the current builds and provision c5b again before going on.
+
+### 6. Rows with no bench tool yet
+
+These rows of the design's test plan rely on host tests only, because the bench aid they name was
+not built: the hub console `bench switchstorm` (image-switch storm: `switch_backoff_doubles_and_caps`
+and the `nodeimage` tests), a hub command that sends a 24-hop 5 GHz plan and `floodtest`'s
+`job deaf` (deaf plans: `coverage` and node-wifi `role` tests), and a `faulttest` hook that asks
+for randomness before the radio starts (each board's boot line still shows `"rng":"radio"` on the
+C5 or `"trng"` on the S3 and C3). Node-number reuse is host-only by design. Held fix: stop the GPS
+emulator mid-run (docs/BENCH.md "GPS time and trust scenarios"); the phone page must show the fix
+as held, not live.
+
 ## End-to-end through the P4 (2026-11-15)
 
 Every signal we may legally send, through the whole chain: test transmitter (`c5b`, rid-beacon,
@@ -328,7 +469,7 @@ starts the line (Esc cancels).
 | node-lr | `cargo build --release --features faulttest` |
 | hub-p4 | `cargo build --release --features faulttest` (flash as in firmware/hub-p4/BRINGUP.md) |
 
-(`ROTORSCOPE_BENCH=1` exported for all of them; the ESP-NOW builds also need the link key or `ROTORSCOPE_LINK_KEY_FILE=none`, see "Bench builds".)
+(`ROTORSCOPE_BENCH=1` exported for all of them. Since the 2026-11-18 cut-over no build needs a key: an ESP-NOW node's key is in its `rskey` partition, see "Link keys: bench checklist".)
 
 ### The checklist (one board at a time)
 
@@ -409,10 +550,11 @@ Not fenced, on purpose: `rid-beacon` (it is the test transmitter; nothing fields
 `boot` line (it has no `hello` line) and in `/api/state`, where the phone page shows a striped
 **BENCH BUILD, NOT FOR USE** banner.
 
-**Link key (since the same date).** A firmware build with ESP-NOW and no `tools/link.key` stops
-(docs/ESPNOW.md "Securing the link"); `ROTORSCOPE_LINK_KEY_FILE=none` builds an open kit on purpose,
-and `tools/flash-node.sh` then wants `--open`. The bench tests in `tools/bench/run.py` build only
-wired images (no key needed).
+**Link keys.** Before the 2026-11-18 cut-over an ESP-NOW build needed the kit key
+(`tools/link.key`) or `ROTORSCOPE_LINK_KEY_FILE=none`. Now no build reads a key: each board's key or
+open record is written to its flash by `tools/link-key`, and `tools/flash-node.sh` wants `--open`
+only to call a node with an open record good ("Link keys: bench checklist"). The bench tests in
+`tools/bench/run.py` build only wired images.
 
 ### To check on hardware (not yet run)
 
@@ -427,9 +569,9 @@ only (2026-11-18, branch `sec/lane-a`). On the bench:
 3. **P4 screen, test key**: a strip at the bottom edge reads `TEST KEY: log not evidence` on every
    page (with a dev key: `DEV KEY: not evidence-grade`); a bench build adds `BENCH BUILD`. Check it
    is readable in both themes and does not hide anything needed (it covers the bottom 11 px).
-4. **Open gateway**: flash the gateway with `ROTORSCOPE_LINK_KEY_FILE=none`; the P4 shows
-   `OPEN LINK` within a few seconds of the gateway's Hello, and it goes away after the keyed gateway
-   is back (its next Hello).
+4. **Open link** (since the cut-over the hub's record decides, not the gateway build):
+   `link-key open p4 --hub`; the P4 shows `OPEN LINK` after its next boot, and it goes away after
+   `link-key hub p4` and a reboot.
 5. **Evidence not written**: (a) boot the P4 with no card: the strip shows
    `NO EVIDENCE (no SD): N waiting` with N growing; insert a card: the line goes away and REC shows.
    (b) On a spare card, create a *file* `ROTORSCP/EVIDENCE/EV000005.EVL` (any content) and a
@@ -456,6 +598,13 @@ only (2026-11-18, branch `sec/lane-a`). On the bench:
 ## Origin checks (2026-11-18, gateway case run on hardware)
 
 Item 1 below (keyed gateway, node-wifi `forgetest`) was run on 2026-11-18; see "Bench results, 2026-11-18". Items 2 to 7 were not run.
+
+*Since the cut-over (protocol 14, the same day) the gateway holds no key and does not read frames:
+the P4 hub verifies each node packet and does the origin check itself. Items 1 and 2 below, and
+item 5's "old gateway", describe the gateway before it; for the current link the expected results
+are in "Link keys: bench checklist" (the `forge` frame commands raise the hub's own `forged_link`
+detail 5 and its `refused=`, and the gateway's counters do not move). Item 7's gateway table no
+longer exists.*
 
 Who may send which frame type (docs/ESPNOW.md "Who may send what") is checked by the gateway, the P4
 hub, the P4's web-head feed, the S3 web head and the wired bus. Host tests cover the rules (`cargo test -p link -p
@@ -497,8 +646,9 @@ Flash it alone with `tools/dev-board.sh <elf> 90 <board>` (it refuses a bench EL
    naming `node 0` (the gateway reports it; IDs are not shown by default); later forgeries only raise
    that threat's count (detail 5), no new line; its `hub-p4: link` line's `refused=` does **not** move (the gateway already
    dropped the frames). Nothing in the "Must never" column happens on the P4 screen or the web head.
-2. **Gateway, open kit.** The same with the gateway and node built `ROTORSCOPE_LINK_KEY_FILE=none`
-   (`OPEN LINK` on the P4): the same refusals; the rules do not depend on the key.
+2. **Gateway, open kit.** The same with open records on the hub and the node (before the cut-over:
+   images built without a key) (`OPEN LINK` on the P4): the same refusals; the rules do not depend
+   on the key.
 3. **P4, wired bus (forgetest node on the bus).** After each command the `{"t":"hub"}` line's
    `"bus":{...,"refused":N}` goes up, and within a second `hub-p4: refused 1 frame(s) from <node
    MAC> ...` plus a `THREAT Forged node traffic` line. `forge via`: the `Stats` arrives under the
@@ -964,7 +1114,8 @@ refused at the gateway within about 1 s (`refused` 1 to 7, `"why":"origin"`). On
 with detail 5 reached the P4 and its count rose to 7; the P4's own `refused` stayed 0. The node's
 normal packets kept flowing with none lost.
 
-**Fail-closed tools.** `flash-node.sh` refused a keyless build, refused
+**Fail-closed tools** (the key checks named here were replaced at the cut-over by the boot-line
+check of "Link keys: bench checklist"). `flash-node.sh` refused a keyless build, refused
 `ROTORSCOPE_LINK_KEY_FILE=none` without `--open`, and refused a bench image without
 `ROTORSCOPE_BENCH=1`. `dev-board.sh` refused a bench gateway image. The cargo build refuses bench
 features and bench switches by itself.
