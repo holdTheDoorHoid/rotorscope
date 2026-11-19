@@ -13,7 +13,10 @@
 //! build), and the evidence boot event (`ROTORSCOPE_BENCH_LIST`, comma
 //! separated, empty for a normal build). Every image, hub-p4 included,
 //! also carries the tag `bench-build:<list>` (`ROTORSCOPE_BENCH_TAG`,
-//! `bench-build:none` for a normal build), so tools/flash-node.sh and
+//! `bench-build:none` for a normal build; measured 2026-11-19, a normal C5
+//! image ends up with no tag at all, because the string is only used when
+//! the list is not empty and the optimiser drops it, while hub-p4 prints it
+//! at boot and keeps it: tools treat "no tag" and `none` alike), so tools/flash-node.sh and
 //! tools/dev-board.sh can refuse to flash a bench image without
 //! `ROTORSCOPE_BENCH=1` by reading the ELF. On hub-p4 it sits in
 //! `BUILD_TAGS` (`firmware/hub-p4/src/main.rs`) beside the source commit.

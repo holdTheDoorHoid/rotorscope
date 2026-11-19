@@ -652,7 +652,7 @@ prints a warning and passes three values into the firmware:
 |---|---|---|
 | `ROTORSCOPE_BENCH_LIST` | Comma-separated list, empty for a normal build | The evidence boot event |
 | `ROTORSCOPE_BENCH_JSON` | JSON array, `[]` for a normal build | The `hello` line |
-| `ROTORSCOPE_BENCH_TAG` | `bench-build:<list>` or `bench-build:none` | Carried in every image except hub-p4's; `tools/flash-node.sh` finds it in the ELF and refuses to flash a bench image into a field node |
+| `ROTORSCOPE_BENCH_TAG` | `bench-build:<list>` or `bench-build:none` | Carried in every bench image; a normal C5 image ends up with no tag at all (the unused `none` is optimised away, measured 2026-11-19), and the tools treat no tag and `none` alike. hub-p4 keeps its own copy beside the source commit; `tools/flash-node.sh` finds it in the ELF and refuses to flash a bench image into a field node |
 
 Bench features and switches each firmware declares (from each `firmware/*/build.rs`):
 
