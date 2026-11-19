@@ -80,3 +80,12 @@ codegen-units = 1
 debug         = 2
 lto           = "fat"
 opt-level     = "s"
+
+# Patched esp-radio 1.0.0-beta.1, carried by every radio firmware (see
+# ../patches/README.md): its ESP-NOW receive callback drops and counts a
+# received length that is zero, negative or above the ESP-NOW v2 maximum
+# (CVE-2025-52471 defence in depth), and on the ESP32-C5 it keeps the shared RF
+# front-end clocks on while BLE is up. tools/check-wifi-blobs.sh checks both
+# the patched copy and the radio library blobs.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }
