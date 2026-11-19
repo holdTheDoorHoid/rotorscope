@@ -155,9 +155,15 @@ fn outstanding_failed_and_single_service_are_reported() {
     let r = verify::verify_bundle(&b.json(), &opts());
     assert!(fails(&r).is_empty(), "{:?}", fails(&r));
     let n = notes(&r);
-    assert!(n.iter().any(|n| n.contains("1 independent service(s)")), "{n:?}");
+    assert!(n.iter().any(|n| n.contains("1 independent witness(es)")), "{n:?}");
     assert!(n.iter().any(|n| n.contains("outstanding since")), "{n:?}");
     assert!(n.iter().any(|n| n.contains("3 attempt(s)") && n.contains("timed out 2")), "{n:?}");
+    // OpenTimestamps on (any number of calendars) counts as one more witness.
+    b.bundle.stamping.as_mut().unwrap().ots_calendars = vec!["https://cal-a.test".into(), "https://cal-b.test".into()];
+    let n = notes(&verify::verify_bundle(&b.json(), &opts()));
+    assert!(!n.iter().any(|n| n.contains("independent witness")), "{n:?}");
+    assert_eq!(verify::independent_witnesses(&["https://a.test/x".into()], &["https://c.test".into(), "https://d.test".into()]), 2);
+    assert_eq!(verify::independent_witnesses(&["https://a.test/x".into(), "http://A.test:80/y".into()], &[]), 1);
 }
 
 #[test]
