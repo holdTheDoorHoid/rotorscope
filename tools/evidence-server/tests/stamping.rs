@@ -6,6 +6,13 @@
 //! that each service is asked independently, that uploads never wait, that
 //! the queue survives a restart, the coalescing rule, and that the export
 //! bundle carries stamps the checker accepts.
+//!
+//! **No test here depends on the machine being idle.** Interleavings are
+//! forced with gates (a service that blocks until the test releases it),
+//! not with sleeps; the clock the worker sees is passed in; the only real
+//! deadline exercised (a service that never answers) is short against a
+//! hang that lasts until the client gives up, and the deadlines on every
+//! other exchange are far longer than any scheduling delay.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -44,8 +51,8 @@ enum Behave {
     Http500,
     /// 302 to another listener (whose requests are counted).
     Redirect(u16),
-    /// Answers after this long.
-    Slow(u64),
+    /// Never answers: holds the connection until the client closes it.
+    Hang,
 }
 
 struct Fake {
@@ -80,7 +87,7 @@ impl Fake {
 }
 
 fn read_request(c: &mut TcpStream) -> Option<Vec<u8>> {
-    c.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    c.set_read_timeout(Some(Duration::from_secs(60))).ok()?;
     let mut buf = Vec::new();
     let mut b = [0u8; 4096];
     loop {
@@ -154,9 +161,11 @@ fn serve(mut c: TcpStream, b: Behave, seen: &Mutex<Vec<Vec<u8>>>) {
         Behave::Redirect(port) => {
             let _ = write!(c, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/tsr\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
-        Behave::Slow(ms) => {
-            std::thread::sleep(Duration::from_millis(ms));
-            respond(&mut c, "200 OK", "application/timestamp-reply", &ok(&imprint, Some(&nonce)));
+        Behave::Hang => {
+            // Until the client gives up (read returns 0) or two minutes pass.
+            let _ = c.set_read_timeout(Some(Duration::from_secs(120)));
+            let mut b = [0u8; 64];
+            while matches!(c.read(&mut b), Ok(n) if n > 0) {}
         }
     }
 }
@@ -232,7 +241,8 @@ fn cfg(urls: &[String]) -> Config {
     Config {
         enabled: true,
         authorities: urls.iter().map(|u| Authority::parse(u).unwrap()).collect(),
-        timeout: Duration::from_secs(2),
+        // Far beyond any scheduling delay on loopback: only `Hang` meets it.
+        timeout: Duration::from_secs(30),
         min_gap_ms: 0,
         ..Config::default()
     }
@@ -423,16 +433,24 @@ fn a_reply_that_is_not_the_stamp_asked_for_is_a_failure_never_a_stamp() {
         (Behave::Unframed, "no length"),
         (Behave::Http500, "HTTP 500"),
         (Behave::Redirect(elsewhere.port), "HTTP 302"),
-        (Behave::Slow(4_000), "timed out"),
+        (Behave::Hang, "timed out"),
     ];
     for (i, (b, why)) in cases.into_iter().enumerate() {
         let fake = Fake::start(b);
-        let t = T::new(&format!("hostile{i}"), Some(Stamping::new(cfg(&[fake.url()]))));
+        let mut c = cfg(&[fake.url()]);
+        if b == Behave::Hang {
+            // The deadline under test: 1 s against a service that would
+            // hold the connection for two minutes.
+            c.timeout = Duration::from_secs(1);
+        }
+        let t = T::new(&format!("hostile{i}"), Some(Stamping::new(c)));
         let now = t0();
         t.upload(&boots()[0], now);
         let started = Instant::now();
         stamp::tick(&t.app, now);
-        assert!(started.elapsed() < Duration::from_secs(4), "{b:?}: the deadline holds ({:?})", started.elapsed());
+        // A generous bound: it only has to tell "cut off by the deadline"
+        // from "waited for the service" (120 s), whatever the load.
+        assert!(started.elapsed() < Duration::from_secs(60), "{b:?}: the deadline holds ({:?})", started.elapsed());
         assert!(t.stamps().is_empty(), "{b:?} was stored as a stamp");
         let f = t.failures();
         assert_eq!(f.len(), 1, "{b:?}");
@@ -447,49 +465,191 @@ fn a_reply_that_is_not_the_stamp_asked_for_is_a_failure_never_a_stamp() {
     assert!(elsewhere.requests().is_empty(), "a redirect was followed to another host");
 }
 
+// ---- gates: interleavings forced, not timed ------------------------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+
+/// How long a test waits for a step that must happen; reaching it means
+/// the step did not happen (a hang), never a slow machine.
+const STEP: Duration = Duration::from_secs(120);
+
+/// A stamp the server accepts for `imprint` (an unsigned reply).
+fn accepted(imprint: &[u8; 32]) -> stamp::Stamped {
+    let nonce = [0x11; 8];
+    let now = evidence_server::store::now_ms();
+    stamp::Stamped { token: reply(0, imprint, Some(&nonce)), nonce, gen_time_ms: now, requested_utc_ms: now, certs: None, revocation: None, evidence_note: None }
+}
+
+/// A service that says when it is asked, then blocks until the test says
+/// how it answers.
+struct Gate {
+    name: String,
+    entered: Mutex<mpsc::Sender<()>>,
+    answer: Mutex<mpsc::Receiver<Result<(), String>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+struct GateHandle {
+    entered: mpsc::Receiver<()>,
+    answer: mpsc::Sender<Result<(), String>>,
+    calls: Arc<AtomicUsize>,
+}
+
+fn gate(name: &str) -> (Gate, GateHandle) {
+    let (etx, erx) = mpsc::channel();
+    let (atx, arx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    (
+        Gate { name: name.into(), entered: Mutex::new(etx), answer: Mutex::new(arx), calls: calls.clone() },
+        GateHandle { entered: erx, answer: atx, calls },
+    )
+}
+
+impl Stamper for Gate {
+    fn authority(&self) -> &str {
+        &self.name
+    }
+    fn stamp(&self, imprint: &[u8; 32]) -> Result<stamp::Stamped, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let _ = self.entered.lock().unwrap().send(());
+        match self.answer.lock().unwrap().recv_timeout(STEP) {
+            Ok(Ok(())) => Ok(accepted(imprint)),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("the test never answered the gate".into()),
+        }
+    }
+}
+
+/// A service that says when its stamp has returned.
+struct Signals(Box<dyn Stamper>, Mutex<mpsc::Sender<()>>);
+
+impl Stamper for Signals {
+    fn authority(&self) -> &str {
+        self.0.authority()
+    }
+    fn stamp(&self, imprint: &[u8; 32]) -> Result<stamp::Stamped, String> {
+        let r = self.0.stamp(imprint);
+        let _ = self.1.lock().unwrap().send(());
+        r
+    }
+}
+
+/// A service whose code panics.
+struct Panics;
+
+impl Stamper for Panics {
+    fn authority(&self) -> &str {
+        "https://panics.test/tsr"
+    }
+    fn stamp(&self, _: &[u8; 32]) -> Result<stamp::Stamped, String> {
+        panic!("a stamper bug")
+    }
+}
+
+const GATE: &str = "https://gate.test/tsr";
+
 #[test]
 fn each_service_is_asked_independently_with_its_own_back_off() {
     let good = Fake::start(Behave::Good);
-    let slow = Fake::start(Behave::Slow(4_000));
-    let t = T::new("independent", Some(Stamping::new(cfg(&[slow.url(), good.url()]))));
+    let (g, h) = gate(GATE);
+    let (done_tx, done) = mpsc::channel();
+    let fast = Signals(Box::new(Rfc3161::new(Authority::parse(&good.url()).unwrap(), Duration::from_secs(30))), Mutex::new(done_tx));
+    let st = Stamping::with_stampers(cfg(&[GATE.into(), good.url()]), vec![Box::new(g), Box::new(fast)]);
+    let t = T::new("independent", Some(st));
     let now = t0();
     t.upload(&boots()[0], now);
-    stamp::tick(&t.app, now);
+    let app = t.app.clone();
+    let worker = std::thread::spawn(move || stamp::tick(&app, now));
+    // The gate is asked and holds; the other service finishes meanwhile.
+    h.entered.recv_timeout(STEP).expect("the gated service was asked");
+    done.recv_timeout(STEP).expect("the other service finished while the gated one was still blocked");
+    assert!(t.stamps().is_empty(), "nothing is kept before every service has answered");
+    h.answer.send(Err("refused by the test".into())).unwrap();
+    worker.join().unwrap();
     let s = t.stamps();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].authority, good.url());
-    assert_eq!(t.failures().len(), 1);
-    assert_eq!(t.failures()[0].authority, slow.url());
-    // Within the back-off nothing is asked again; after it, it is.
-    let before = slow.requests().len();
+    let f = t.failures();
+    assert_eq!(f.len(), 1);
+    assert_eq!((f[0].authority.as_str(), f[0].reason.as_str()), (GATE, "refused by the test"));
+    // Back-off on the worker's own clock: not asked again within a minute,
+    // asked again after it. (The answer is queued first, so the gate does
+    // not block if it is asked.)
+    h.answer.send(Err("refused again".into())).unwrap();
     stamp::tick(&t.app, now + 30_000);
-    assert_eq!(slow.requests().len(), before);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
     stamp::tick(&t.app, now + 61_000);
-    assert_eq!(slow.requests().len(), before + 1);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
     assert_eq!(t.failures().len(), 2);
     assert_eq!(good.requests().len(), 1, "what is received is not asked for again");
+}
+
+#[test]
+fn every_job_gets_exactly_one_result_even_when_a_stamper_panics() {
+    let good = Fake::start(Behave::Good);
+    let st = Stamping::with_stampers(
+        cfg(&["https://panics.test/tsr".into(), good.url()]),
+        vec![Box::new(Panics), Box::new(Rfc3161::new(Authority::parse(&good.url()).unwrap(), Duration::from_secs(30)))],
+    );
+    let t = T::new("panics", Some(st));
+    let now = t0();
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    assert_eq!(t.stamps().len(), 1, "the other service's stamp is kept");
+    let f = t.failures();
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].reason.contains("panic"), "{}", f[0].reason);
+    // Many units at once: still one result per unit and service.
+    let st = Stamping::with_stampers(cfg(&[good.url()]), vec![Box::new(Rfc3161::new(Authority::parse(&good.url()).unwrap(), Duration::from_secs(30)))]);
+    let t = T::new("many", Some(st));
+    let mut ids = vec![t.id.clone()];
+    for k in 1..6u8 {
+        let mut key = evidence::sign::SoftSigner::new(&[k; 32], evidence::KeyClass::DevelopmentSoftware).unwrap();
+        let info = t.app.lock().register(&hex(&key.public_key()), "u", "tester").unwrap();
+        let mut u = unit::Unit::new();
+        std::mem::swap(&mut u.signer, &mut key);
+        let b = u.boot(k, 6, 0, "x");
+        t.app.lock().device_mut(&info.key_id).unwrap().upload(&b.bytes, "uploader").unwrap();
+        t.app.stamping.as_ref().unwrap().on_upload(&info.key_id, now);
+        ids.push(info.key_id);
+    }
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    for id in &ids {
+        let s = t.app.lock();
+        let d = s.device(id).unwrap();
+        assert_eq!((d.timestamps.len(), d.stamp_failures.len()), (1, 0), "{id}");
+    }
 }
 
 // ---- uploads never wait ----------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_upload_never_waits_for_a_service() {
-    let hang = Fake::start(Behave::Slow(5_000));
-    let mut c = cfg(&[hang.url()]);
-    c.timeout = Duration::from_secs(5);
-    let t = T::new("nowait", Some(Stamping::new(c)));
+    let (g, h) = gate(GATE);
+    let t = T::new("nowait", Some(Stamping::with_stampers(cfg(&[GATE.into()]), vec![Box::new(g)])));
     let b = boots();
     let (s, _) = t.call("POST", &format!("/api/devices/{}/batches", t.id), Body::from(b[0].bytes.clone())).await;
     assert_eq!(s, StatusCode::CREATED);
-    // The worker is now waiting on the service.
     let app = t.app.clone();
     let worker = std::thread::spawn(move || stamp::tick(&app, t0()));
-    std::thread::sleep(Duration::from_millis(300));
-    let started = Instant::now();
-    let (s, body) = t.call("POST", &format!("/api/devices/{}/batches", t.id), Body::from(b[1].bytes.clone())).await;
+    // The worker is now inside the service, which answers only when told.
+    let h = tokio::task::spawn_blocking(move || {
+        h.entered.recv_timeout(STEP).expect("the service was asked");
+        h
+    })
+    .await
+    .unwrap();
+    // An upload while the service is blocked completes: if it waited for the
+    // service it could never finish, since the service waits for this test.
+    let up = tokio::time::timeout(STEP, t.call("POST", &format!("/api/devices/{}/batches", t.id), Body::from(b[1].bytes.clone()))).await;
+    let (s, body) = up.expect("the upload waited for the time-stamp service");
     assert_eq!(s, StatusCode::CREATED, "{}", String::from_utf8_lossy(&body));
-    assert!(started.elapsed() < Duration::from_secs(2), "the upload waited {:?}", started.elapsed());
-    worker.join().unwrap();
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    h.answer.send(Ok(())).unwrap();
+    tokio::task::spawn_blocking(move || worker.join().unwrap()).await.unwrap();
+    assert_eq!(t.stamps().len(), 1);
 }
 
 // ---- the queue -------------------------------------------------------------
@@ -507,7 +667,7 @@ fn the_queue_survives_a_restart() {
     let up = Fake::start(Behave::Good);
     // (Same URL key: point the new run's service at the working fake but keep
     // the outstanding entry by giving it the old URL's name.)
-    t.reopen(Some(Stamping::with_stampers(cfg(&[down.url()]), vec![Box::new(Renamed(Rfc3161::new(Authority::parse(&up.url()).unwrap(), Duration::from_secs(2)), down.url()))])));
+    t.reopen(Some(Stamping::with_stampers(cfg(&[down.url()]), vec![Box::new(Renamed(Rfc3161::new(Authority::parse(&up.url()).unwrap(), Duration::from_secs(30)), down.url()))])));
     assert_eq!((t.queue_len(), t.failures().len()), (1, 1), "queue and failures re-read");
     stamp::tick(&t.app, now + 1000);
     let s = t.stamps();

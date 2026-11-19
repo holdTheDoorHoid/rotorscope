@@ -445,32 +445,39 @@ pub fn tick(app: &crate::App, now: u64) {
         }
     }
     // 3. Ask, each service on its own thread, its jobs one after another.
-    let results: Vec<(Job, Result<Stamped, String>)> = std::thread::scope(|sc| {
+    // Every job gets exactly one result: the threads are joined before
+    // anything is kept, a panic in a stamper becomes that job's failure, and
+    // a job with no result (a thread that died outside a stamp) is a failure
+    // too. Nothing is dropped and nothing is recorded twice.
+    let mut slots: Vec<Option<Result<Stamped, String>>> = (0..jobs.len()).map(|_| None).collect();
+    std::thread::scope(|sc| {
         let handles: Vec<_> = (0..st.stampers.len())
             .map(|k| {
-                let mine: Vec<&Job> = jobs.iter().filter(|j| j.stamper == k).collect();
+                let mine: Vec<(usize, &Job)> = jobs.iter().enumerate().filter(|(_, j)| j.stamper == k).collect();
                 let sp = &st.stampers[k];
                 let gap = st.config.min_gap_ms;
                 sc.spawn(move || {
                     let mut out = Vec::new();
-                    for (i, j) in mine.into_iter().enumerate() {
-                        if i > 0 && gap > 0 {
+                    for (n, (i, j)) in mine.into_iter().enumerate() {
+                        if n > 0 && gap > 0 {
                             std::thread::sleep(Duration::from_millis(gap));
                         }
-                        out.push((j, sp.stamp(&j.imprint)));
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sp.stamp(&j.imprint)))
+                            .unwrap_or_else(|_| Err("the stamping code failed (panic); nothing kept".into()));
+                        out.push((i, r));
                     }
                     out
                 })
             })
             .collect();
-        let mut all = Vec::new();
         for h in handles {
-            for (j, r) in h.join().unwrap_or_default() {
-                all.push((Job { stamper: j.stamper, unit: j.unit.clone(), q: j.q.clone(), imprint: j.imprint }, r));
+            for (i, r) in h.join().unwrap_or_default() {
+                slots[i] = Some(r);
             }
         }
-        all
     });
+    let results: Vec<(Job, Result<Stamped, String>)> =
+        jobs.into_iter().zip(slots).map(|(j, r)| (j, r.unwrap_or_else(|| Err("no result from the stamping thread".into())))).collect();
     // 4. Keep.
     for (j, r) in results {
         let sp = &st.stampers[j.stamper];
