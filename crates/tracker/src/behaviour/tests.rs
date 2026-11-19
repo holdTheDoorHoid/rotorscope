@@ -25,7 +25,7 @@ pub(crate) type Tracker = crate::Tracker<64, { crate::aircraft::MAX_AIRCRAFT }, 
 /// The protected house (and the fixed unit standing at it).
 pub(crate) const SITE: (f64, f64) = (39.95210, -75.16380);
 /// The unit's own height above the ellipsoid.
-const OWN_ALT: f64 = 10.0;
+pub(crate) const OWN_ALT: f64 = 10.0;
 
 /// One made-up drone: its serial, how it flies (a plain function of time,
 /// seconds from the start), where its pilot stands, how rough its reported
@@ -35,6 +35,8 @@ pub(crate) struct Drone<'a> {
     pub path: &'a dyn Fn(f64) -> Sample,
     pub pilot: Option<(f64, f64)>,
     pub jitter_m: f64,
+    /// How rough its reported heights are (metres, deterministic).
+    pub alt_jitter_m: f64,
     /// Heard from `from_s` until (not including) `until_s`.
     pub from_s: u64,
     pub until_s: u64,
@@ -42,7 +44,7 @@ pub(crate) struct Drone<'a> {
 
 impl<'a> Drone<'a> {
     pub fn new(serial: &'a str, path: &'a dyn Fn(f64) -> Sample) -> Self {
-        Self { serial, path, pilot: None, jitter_m: 0.0, from_s: 0, until_s: u64::MAX }
+        Self { serial, path, pilot: None, jitter_m: 0.0, alt_jitter_m: 0.0, from_s: 0, until_s: u64::MAX }
     }
 }
 
@@ -58,7 +60,7 @@ pub(crate) struct Sim {
 }
 
 /// Hub time of second 0 (not zero, so "never" and "at start" differ).
-const T0: u64 = 100_000;
+pub(crate) const T0: u64 = 100_000;
 
 impl Sim {
     pub fn new(site_lines: &[&str]) -> Self {
@@ -101,6 +103,9 @@ impl Sim {
             if d.jitter_m > 0.0 {
                 let (e, n) = (self.noise() * d.jitter_m, self.noise() * d.jitter_m);
                 (p.lat, p.lon) = offset(p.lat, p.lon, e, n);
+            }
+            if d.alt_jitter_m > 0.0 {
+                p.alt_m += (self.noise() * d.alt_jitter_m) as f32;
             }
             let mac = [0x60, 0x60, 0x1f, 0, 0, i as u8 + 1];
             let det = det(Transport::WifiBeacon, mac, -60, &frame(d.serial, &p, d.pilot));
@@ -182,10 +187,10 @@ pub(crate) fn frame(serial: &str, p: &Sample, pilot: Option<(f64, f64)>) -> std:
     v
 }
 
-const HOUSE: &str = "area house circle 39.95210 -75.16380 150";
+pub(crate) const HOUSE: &str = "area house circle 39.95210 -75.16380 150";
 
 /// The highest level seen while running.
-fn worst(sim: &mut Sim, drones: &[Drone<'_>], to: u64, serial: &str) -> Option<Level> {
+pub(crate) fn worst(sim: &mut Sim, drones: &[Drone<'_>], to: u64, serial: &str) -> Option<Level> {
     let mut w = None;
     sim.run(drones, to, |s| w = w.max(s.level(serial)));
     w
@@ -440,7 +445,10 @@ fn position_jitter_does_not_flicker_levels() {
     for w in changes.windows(2).skip(1) {
         assert!(w[1].0 - w[0].0 >= DECAY_MS / 1000, "{changes:?}");
     }
-    assert!(changes.len() <= 6, "{changes:?}");
+    // (Slice 16b: from three minutes on it is also "lingering" just
+    // outside the fence, which holds it at Caution: one change more.)
+    assert!(changes.len() <= 7, "{changes:?}");
+    assert_eq!(changes.last().map(|c| c.1), Some(Some(Level::Caution)), "{changes:?}");
     // Just inside the fence (145 m): Caution from the start, and it stays.
     let edge = offset(SITE.0, SITE.1, 0.0, 145.0);
     let path = move |_t: f64| Flight::Hover { lat: edge.0, lon: edge.1, alt_m: 50.0 }.at(0.0);

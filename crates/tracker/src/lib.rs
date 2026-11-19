@@ -1012,6 +1012,9 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     own_motion: behaviour::OwnMotion,
     /// Areas, the bubble and friendly drones (site file; [`behaviour`]).
     places: behaviour::Places,
+    /// Where the unit itself has been, one point every five seconds (the
+    /// "following" rule; [`behaviour::OwnTrail`], 48 bytes a path ring).
+    own_trail: behaviour::OwnTrail<P>,
     /// Where each drone has been ([`behaviour::path`]): about 4.4 KB a
     /// track, the largest part of the tracker. Kept last.
     paths: behaviour::PathStore<P>,
@@ -1051,6 +1054,7 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             own: None,
             own_motion: behaviour::OwnMotion::new(),
             places: behaviour::Places::new(),
+            own_trail: behaviour::OwnTrail::new(),
             paths: behaviour::PathStore::new(),
             config,
         }
@@ -1076,6 +1080,7 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             Some((speed, course)) => self.own_motion.reported(lat, lon, time_ms, speed, course),
             None => self.own_motion.derived(lat, lon, time_ms),
         };
+        self.own_trail.record(lat, lon, time_ms);
         self.own = Some(OwnFix {
             lat,
             lon,
@@ -1785,7 +1790,7 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             }
         }
         for t in self.tracks.iter_mut() {
-            let e = behaviour::evaluate(t, self.paths.get(t.id), &self.places, own.as_ref(), now_ms);
+            let e = behaviour::evaluate(t, self.paths.get(t.id), &self.places, own.as_ref(), Some(&self.own_trail), now_ms);
             let has_position = t.location.as_ref().is_some_and(|l| l.value.position.is_some());
             t.threat.update(e, has_position, now_ms);
         }

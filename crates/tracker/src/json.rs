@@ -99,7 +99,11 @@ impl Serialize for ReasonsJ<'_> {
         use crate::behaviour::Rule;
         for r in self.0 {
             let approach = matches!(r.rule, Rule::Beeline | Rule::FastInbound | Rule::LastSeenInbound);
-            let high = matches!(r.rule, Rule::InArea | Rule::AboveCeiling);
+            let high = matches!(
+                r.rule,
+                Rule::InArea | Rule::AboveCeiling | Rule::Loitering | Rule::Circling | Rule::LowHover | Rule::Drop
+            );
+            let lasting = matches!(r.rule, Rule::Loitering | Rule::Circling | Rule::LowHover | Rule::Following);
             seq.serialize_element(&ReasonJ {
                 rule: r.rule.name(),
                 level: r.level.name(),
@@ -108,7 +112,8 @@ impl Serialize for ReasonsJ<'_> {
                 eta_s: r.eta_s().filter(|_| approach),
                 mps: r.speed_mps().filter(|_| approach),
                 h_m: r.height_m().filter(|_| high),
-                ago_s: r.ago_s().filter(|_| r.rule == Rule::LastSeenInbound),
+                ago_s: r.ago_s().filter(|_| matches!(r.rule, Rule::LastSeenInbound | Rule::Drop)),
+                for_s: r.for_s().filter(|_| lasting),
             })?;
         }
         seq.end()
@@ -117,8 +122,11 @@ impl Serialize for ReasonsJ<'_> {
 
 /// One reason. Only the numbers that rule has are written: `m` always
 /// (metres, see `crate::behaviour::Reason`), `h_m` (height above the unit)
-/// for in_area and above_ceiling, `eta_s` and `mps` (closing speed) for
-/// beeline, fast_inbound and last_seen_inbound, `ago_s` for the last.
+/// for in_area, above_ceiling, loitering, circling, low_hover and drop,
+/// `eta_s` and `mps` (closing speed) for beeline, fast_inbound and
+/// last_seen_inbound, `ago_s` for last_seen_inbound and drop, `for_s` (how
+/// long) for loitering, circling, low_hover and following. Slice 16b added
+/// the last five rules and `for_s`.
 #[derive(Serialize)]
 struct ReasonJ<'a> {
     rule: &'static str,
@@ -134,6 +142,8 @@ struct ReasonJ<'a> {
     h_m: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ago_s: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    for_s: Option<u16>,
 }
 
 fn threat_json(t: &Track, now: u64) -> Option<ThreatJ<'_>> {
@@ -480,7 +490,8 @@ struct Own {
 /// protocol 8 added `dji.o4`; 2432 before the `spoof` and `cont` objects,
 /// which add up to 373 bytes; 2816 before WP-10's `claims` object, which
 /// adds up to 195; 3008 before slice 16a's `threat` object, which adds up
-/// to 489; worst case now 3386 bytes.)
+/// to 489 (515 with slice 16b's lingering rules); worst case now 3412
+/// bytes.)
 pub const MAX_LINE: usize = 3456;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.

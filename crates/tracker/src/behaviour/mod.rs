@@ -1,5 +1,5 @@
 //! Threat levels: what each drone is *doing*, judged against the places
-//! the owner protects (docs/THREAT-PROFILES.md, slice 16a).
+//! the owner protects (docs/THREAT-PROFILES.md, slices 16a and 16b).
 //!
 //! Every drone that reports its position (Remote ID, DJI DroneID, MAVLink
 //! telemetry) gets one level, the highest any rule gives it, and up to
@@ -26,8 +26,22 @@
 //! 6. **Fast inbound** (Critical): as 5, closing faster than [`FAST_MPS`]
 //!    or arriving in under [`SOON_S`].
 //!
+//! Slice 16b adds the lingering rules, worked out from the path history
+//! ([`linger`], [`follow`]; drones without a history get none of them):
+//! 7. **Loitering** (Caution; Warning when long and low): staying in one
+//!    spot for minutes, in or just outside a place.
+//! 8. **Circling** (Caution): a full circle round a point in a place, or a
+//!    circle that reaches into one.
+//! 9. **Low hover** (Warning): inside a place, low and nearly still.
+//! 10. **Drop pattern** (Warning): inside a place, down, a pause, up again.
+//! 11. **Following** (Warning): keeping near the unit while it travels (the
+//!     bubble only).
+//!
 //! Two or more *different* Caution rules at once make a Warning (one sign
-//! rarely proves anything; two together are worth more).
+//! rarely proves anything; two together are worth more), with two
+//! exceptions: loitering is the same sign as being in the area (it is
+//! being there, for longer), and in the bubble a pilot near you does not
+//! count towards the pair (a pilot nearby is normal in a park).
 //!
 //! **How the level moves** (human-factors choices, see the design):
 //! - It goes up at once and comes down only after [`DECAY_MS`] without the
@@ -35,8 +49,9 @@
 //! - A drone at Warning or Critical that stops being heard while it was
 //!   heading in keeps its level for [`DECAY_MS`], with the reason "last
 //!   seen inbound" (losing a low drone behind trees is when it matters).
-//! - A `friend` is lowered, never hidden: rules 1-4 give a friend only
-//!   Notice, but rules 5 and 6 are never lowered (serials can be faked).
+//! - A `friend` is lowered, never hidden: rules 1-4 and 7-11 give a friend
+//!   only Notice (a follow-me selfie drone is the classic friendly case),
+//!   but rules 5 and 6 are never lowered (serials can be faked).
 //! - A drone's level can be snoozed for [`SNOOZE_MS`] (the alert stops;
 //!   the level is still shown and logged), never switched off.
 //!
@@ -49,6 +64,8 @@
 //! Only confirmed tracks ([`crate::probation`]) with a position heard in
 //! the last [`FRESH_MS`] are judged; a drone with no position gets no level.
 
+pub mod follow;
+pub mod linger;
 pub mod path;
 pub mod places;
 pub mod scenario;
@@ -58,7 +75,7 @@ use core::fmt::Write;
 use heapless::{String, Vec};
 use libm::{acosf, sqrtf};
 
-pub use path::{PathPoint, PathRing, PathStore};
+pub use path::{OwnTrail, PathPoint, PathRing, PathStore};
 pub use places::{Area, Frame, Friend, Local, Name, Places, Shape, Vertex};
 
 use crate::{OwnFix, Track, TrackId};
@@ -159,6 +176,11 @@ pub enum Rule {
     AboveCeiling = 4,
     Beeline = 5,
     FastInbound = 6,
+    Loitering = 7,
+    Circling = 8,
+    LowHover = 9,
+    Drop = 10,
+    Following = 11,
     /// Not a rule of its own: a Warning or Critical drone lost while it
     /// was heading in, held for [`DECAY_MS`].
     LastSeenInbound = 20,
@@ -173,23 +195,43 @@ impl Rule {
             Rule::AboveCeiling => "above_ceiling",
             Rule::Beeline => "beeline",
             Rule::FastInbound => "fast_inbound",
+            Rule::Loitering => "loitering",
+            Rule::Circling => "circling",
+            Rule::LowHover => "low_hover",
+            Rule::Drop => "drop",
+            Rule::Following => "following",
             Rule::LastSeenInbound => "last_seen_inbound",
         }
     }
 
-    /// The level the rule gives.
+    /// The level the rule gives (loitering: at first; it rises to Warning
+    /// when long and low).
     pub const fn level(self) -> Level {
         match self {
             Rule::InArea | Rule::PilotNear | Rule::PilotOutside | Rule::AboveCeiling => Level::Caution,
+            Rule::Loitering | Rule::Circling => Level::Caution,
+            Rule::LowHover | Rule::Drop | Rule::Following => Level::Warning,
             Rule::Beeline => Level::Warning,
             Rule::FastInbound => Level::Critical,
             Rule::LastSeenInbound => Level::Warning,
         }
     }
 
-    /// Rules about places (1-4): a friend gets only Notice from them.
+    /// Rules about places and lingering (1-4, 7-11): a friend gets only
+    /// Notice from them. The approach rules (5, 6) are never lowered.
     pub const fn is_place_rule(self) -> bool {
-        matches!(self, Rule::InArea | Rule::PilotNear | Rule::PilotOutside | Rule::AboveCeiling)
+        matches!(
+            self,
+            Rule::InArea
+                | Rule::PilotNear
+                | Rule::PilotOutside
+                | Rule::AboveCeiling
+                | Rule::Loitering
+                | Rule::Circling
+                | Rule::LowHover
+                | Rule::Drop
+                | Rule::Following
+        )
     }
 }
 
@@ -204,6 +246,16 @@ impl Rule {
 ///   `speed_mps` how fast it is closing.
 /// - last seen inbound: the beeline's numbers when last heard, and
 ///   `ago_s` since then.
+/// - loitering: `range_m` from the middle, `height_m` above the unit,
+///   `for_s` how long it has stayed.
+/// - circling: `range_m` the circle's radius, `height_m`, `for_s` how long
+///   the last full turn took.
+/// - low hover: `range_m` from the middle, `height_m`, `for_s` how long it
+///   has been low and still.
+/// - drop: `range_m` how far it came down, `height_m` the bottom's height
+///   above the unit, `ago_s` since it left the bottom.
+/// - following: `range_m` how far the unit has travelled with it near,
+///   `for_s` for how long.
 ///
 /// Kept compact (26 bytes: whole metres, tenths of seconds and of m/s),
 /// because every track holds up to [`MAX_REASONS`] and the S3 hub keeps
@@ -222,7 +274,9 @@ pub struct Reason {
     speed_dms: u16,
     /// Whole metres; `i16::MIN` unknown.
     height_m: i16,
-    ago_s: u16,
+    /// Seconds: `ago_s` or `for_s` (see the list above); [`NONE_U16`]
+    /// unknown.
+    secs: u16,
 }
 
 const NONE_U16: u16 = u16::MAX;
@@ -243,8 +297,13 @@ impl Reason {
             eta_ds: NONE_U16,
             speed_dms: NONE_U16,
             height_m: i16::MIN,
-            ago_s: NONE_U16,
+            secs: NONE_U16,
         }
+    }
+
+    fn with_secs(mut self, ms: u64) -> Self {
+        self.secs = (ms / 1000).min(u64::from(NONE_U16 - 1)) as u16;
+        self
     }
 
     fn with_eta(mut self, s: f32) -> Self {
@@ -290,8 +349,14 @@ impl Reason {
         (self.height_m != i16::MIN).then(|| f32::from(self.height_m))
     }
 
+    /// Seconds since (last seen inbound, drop).
     pub fn ago_s(&self) -> Option<u16> {
-        (self.ago_s != NONE_U16).then_some(self.ago_s)
+        (self.secs != NONE_U16).then_some(self.secs)
+    }
+
+    /// Seconds for (loitering, circling, low hover, following).
+    pub fn for_s(&self) -> Option<u16> {
+        self.ago_s()
     }
 }
 
@@ -366,13 +431,13 @@ impl TrackThreat {
         let name = Name::try_from("abcdefghijkl").unwrap();
         let wide = |rule| {
             let mut r = Reason::new(rule, Level::Critical, &name, 1.0e9).with_eta(1.0e9).with_speed(1.0e9).with_height(Some(-1.0e9));
-            r.ago_s = NONE_U16 - 1;
+            r.secs = NONE_U16 - 1;
             r
         };
         let mut reasons = Vec::new();
-        // The widest set a drone can have at once (a held drone has only
-        // its one "last seen inbound" reason, which is shorter).
-        for rule in [Rule::FastInbound, Rule::Beeline, Rule::AboveCeiling, Rule::InArea] {
+        // The four widest reasons (wider than any set a drone can have at
+        // once; a held drone has only its one "last seen inbound" reason).
+        for rule in [Rule::FastInbound, Rule::Beeline, Rule::Loitering, Rule::LowHover] {
             let _ = reasons.push(wide(rule));
         }
         Self {
@@ -467,7 +532,7 @@ impl TrackThreat {
             let mut held = *r;
             held.rule = Rule::LastSeenInbound;
             held.level = level;
-            held.ago_s = now_ms.saturating_sub(self.last_heard_ms).div_ceil(1000).min(u64::from(NONE_U16 - 1)) as u16;
+            held.secs = now_ms.saturating_sub(self.last_heard_ms).div_ceil(1000).min(u64::from(NONE_U16 - 1)) as u16;
             self.held = true;
             self.reasons.clear();
             let _ = self.reasons.push(held);
@@ -671,9 +736,33 @@ struct Target {
     ceiling_m: f32,
 }
 
+/// The height above the ellipsoid that counts as the ground for a drone's
+/// heights: the unit's own (when both it and the drone have a GPS height),
+/// else the drone's take-off point or the ground under it (its altitude
+/// minus the height it broadcasts above them). Path heights minus this are
+/// heights above the unit, as rule 4 measures.
+fn ground_alt(l: &rid::message::Location, own: Option<&OwnFix>) -> Option<f32> {
+    let g = l.altitude_geodetic?;
+    match own.and_then(|o| o.alt_m) {
+        Some(o) => Some(o as f32),
+        None => l
+            .height
+            .filter(|_| matches!(l.height_type, rid::message::HeightType::AboveTakeoff | rid::message::HeightType::AboveGround))
+            .map(|h| g - h),
+    }
+}
+
 /// Judge one drone against every place. `None` when it is not judged: not
 /// confirmed, no position, or the position is older than [`FRESH_MS`].
-pub fn evaluate(t: &Track, ring: Option<&PathRing>, places: &Places, own: Option<&OwnFix>, now_ms: u64) -> Option<Eval> {
+/// `trail` is the unit's own trail (for "following").
+pub fn evaluate<const P: usize>(
+    t: &Track,
+    ring: Option<&PathRing>,
+    places: &Places,
+    own: Option<&OwnFix>,
+    trail: Option<&OwnTrail<P>>,
+    now_ms: u64,
+) -> Option<Eval> {
     let was_inside = t.threat.inside;
     if !t.confirmed() {
         return None;
@@ -708,9 +797,28 @@ pub fn evaluate(t: &Track, ring: Option<&PathRing>, places: &Places, own: Option
         .as_ref()
         .filter(|s| now_ms.saturating_sub(s.rx_ms) <= PILOT_FRESH_MS)
         .and_then(|s| s.value.operator_position);
+    // The lingering rules' view of the path (only when there is a place
+    // to judge against).
+    let ground = ground_alt(l, own);
+    let linger = ring.filter(|_| places.any()).map(|r| linger::Linger::of(r, (lat, lon), height, ground, now_ms));
+    // In the bubble, a drone hovering low beside its own pilot is taking
+    // off or landing.
+    let by_pilot = pilot.is_some_and(|pp| {
+        let (x, y) = Frame::at(lat, lon).xy(pp.lat, pp.lon);
+        sqrtf(x * x + y * y) <= linger::TAKEOFF_PILOT_M
+    });
+    // One hit per rule for the fixed areas and one for the bubble (the
+    // most serious, then the nearest), so the list never overflows.
     let mut hits: Vec<Reason, 24> = Vec::new();
-    let mut add = |r: Reason| {
-        let _ = hits.push(r);
+    let mut add = |r: Reason| match hits.iter_mut().find(|o| o.rule == r.rule && o.is_bubble() == r.is_bubble()) {
+        Some(o) => {
+            if r.level > o.level || (r.level == o.level && r.range_m < o.range_m) {
+                *o = r;
+            }
+        }
+        None => {
+            let _ = hits.push(r);
+        }
     };
     let bubble = places.bubble_m.zip(own).map(|(r, o)| Target {
         local: Local::circle(o.lat, o.lon, r),
@@ -753,6 +861,41 @@ pub fn evaluate(t: &Track, ring: Option<&PathRing>, places: &Places, own: Option
                 add(Reason::new(Rule::PilotOutside, place_level, &tg.name, out));
             }
         }
+        if let Some(lg) = &linger {
+            let warning = if friend { Level::Notice } else { Level::Warning };
+            // 7: in one spot for minutes, in the place or just outside. The
+            // bubble moves: there only the time the unit itself stood about
+            // counts.
+            let stay_ms = match (tg.name.is_empty(), own, trail) {
+                (true, Some(o), Some(tr)) if lg.stay_ms >= linger::LOITER_CAUTION_MS => {
+                    lg.stay_ms.min(follow::own_still_ms(tr, o, linger::LOITER_RADIUS_M))
+                }
+                _ => lg.stay_ms,
+            };
+            if stay_ms >= linger::LOITER_CAUTION_MS && tg.local.outside_by(p) <= linger::LOITER_NEAR_M {
+                let long_low = stay_ms >= linger::LOITER_WARNING_MS && height.is_some_and(|h| h < linger::LOITER_LOW_M);
+                let level = if long_low { warning } else { place_level };
+                add(Reason::new(Rule::Loitering, level, &tg.name, from_middle).with_height(height).with_secs(stay_ms));
+            }
+            // 8: a circle whose middle is in the place, or that reaches it.
+            if let Some(o) = &lg.orbit
+                && tg.local.outside_by(f.xy(o.lat, o.lon)) < o.radius_m
+            {
+                add(Reason::new(Rule::Circling, place_level, &tg.name, o.radius_m).with_height(height).with_secs(o.turn_ms));
+            }
+            // 9: low and still inside (not beside its pilot in the bubble).
+            if inside && lg.low_ms >= linger::LOW_HOVER_MS && !(tg.name.is_empty() && by_pilot) {
+                add(Reason::new(Rule::LowHover, warning, &tg.name, from_middle).with_height(height).with_secs(lg.low_ms));
+            }
+            // 10: down, a pause, up, with the bottom inside.
+            if let Some(d) = &lg.dip
+                && tg.local.outside_by(f.xy(d.lat, d.lon)) <= EDGE_MARGIN_M
+            {
+                add(Reason::new(Rule::Drop, warning, &tg.name, d.depth_m)
+                    .with_height(ground.map(|g| d.bottom_alt_m - g))
+                    .with_secs(d.ago_ms));
+            }
+        }
         // Approach: relative to the place (the bubble moves with the unit).
         let Some(v) = approach_vel else { continue };
         let rel = (v.0 - tg.vel.0, v.1 - tg.vel.1);
@@ -785,6 +928,13 @@ pub fn evaluate(t: &Track, ring: Option<&PathRing>, places: &Places, own: Option
         }
         add(r);
     }
+    // 11: following the unit (the bubble only).
+    if let (Some(r), Some(o), Some(tr), Some(radius)) = (ring, own, trail, places.bubble_m)
+        && let Some(fl) = follow::following(r, tr, (lat, lon), o, radius.max(follow::FOLLOW_MIN_RANGE_M), now_ms)
+    {
+        let level = if friend { Level::Notice } else { Level::Warning };
+        add(Reason::new(Rule::Following, level, &Name::new(), fl.travelled_m).with_secs(fl.ms));
+    }
     let mut e = judge(hits, friend);
     e.heard_ms = loc.rx_ms;
     e.inside = inside_now;
@@ -792,12 +942,19 @@ pub fn evaluate(t: &Track, ring: Option<&PathRing>, places: &Places, own: Option
 }
 
 /// The level from the rules' hits: the highest, raised to Warning when two
-/// different rules each gave Caution.
+/// different signs each gave Caution. Loitering is the same sign as being
+/// in the area (it is being there, for longer); a pilot near the bubble is
+/// no sign towards the pair (a pilot nearby is normal in a park).
 fn judge<const H: usize>(mut hits: Vec<Reason, H>, friend: bool) -> Eval {
-    let mut cautions: Vec<Rule, 8> = Vec::new();
+    let mut cautions: Vec<Rule, 12> = Vec::new();
     for h in hits.iter().filter(|h| h.level == Level::Caution) {
-        if !cautions.contains(&h.rule) {
-            let _ = cautions.push(h.rule);
+        let sign = match h.rule {
+            Rule::PilotNear if h.is_bubble() => continue,
+            Rule::Loitering => Rule::InArea,
+            r => r,
+        };
+        if !cautions.contains(&sign) {
+            let _ = cautions.push(sign);
         }
     }
     let top = hits.iter().map(|h| h.level).max().unwrap_or(Level::Notice);
@@ -892,6 +1049,62 @@ pub fn write_reason(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
             place_text(w, r)?;
             write!(w, ", {} m away, {} s ago", r.range_m, r.ago_s().unwrap_or(0))
         }
+        Rule::Loitering => {
+            w.write_str(if r.is_bubble() { "lingering near you for " } else { "lingering at " })?;
+            if !r.is_bubble() {
+                write!(w, "{} for ", r.place())?;
+            }
+            duration_text(w, r.for_s())?;
+            height_text(w, r)
+        }
+        Rule::Circling => {
+            w.write_str("circling ")?;
+            place_text(w, r)?;
+            write!(w, " ({} m radius), a full turn in ", r.range_m)?;
+            duration_text(w, r.for_s())?;
+            height_text(w, r)
+        }
+        Rule::LowHover => {
+            w.write_str(if r.is_bubble() { "hovering low near you" } else { "hovering low over " })?;
+            if !r.is_bubble() {
+                w.write_str(r.place())?;
+            }
+            height_text(w, r)?;
+            w.write_str(", for ")?;
+            duration_text(w, r.for_s())
+        }
+        Rule::Drop => {
+            write!(w, "dropped {} m ", r.range_m)?;
+            w.write_str(if r.is_bubble() { "near you" } else { "over " })?;
+            if !r.is_bubble() {
+                w.write_str(r.place())?;
+            }
+            if let Some(h) = r.height_m() {
+                write!(w, " (down to {h:.0} m up)")?;
+            }
+            write!(w, " and climbed again, {} s ago", r.ago_s().unwrap_or(0))
+        }
+        Rule::Following => {
+            write!(w, "following you for {} m (", r.range_m)?;
+            duration_text(w, r.for_s())?;
+            w.write_str(")")
+        }
+    }
+}
+
+/// `45 s`, `4 min`.
+fn duration_text(w: &mut impl Write, s: Option<u16>) -> core::fmt::Result {
+    match s.unwrap_or(0) {
+        s if s < 120 => write!(w, "{s} s"),
+        s => write!(w, "{} min", s / 60),
+    }
+}
+
+/// `, 30 m up` when the height is known.
+fn height_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
+    match r.height_m() {
+        Some(h) => write!(w, ", {h:.0} m up"),
+        None => Ok(()),
     }
 }
 
@@ -963,6 +1176,11 @@ pub fn strip_text(t: &Track) -> Option<String<64>> {
                     })
             }
             Rule::LastSeenInbound => write!(s, "lost inbound {place} {}s ago", r.ago_s().unwrap_or(0)),
+            Rule::Loitering => write!(s, "lingering {place} {}min", r.for_s().unwrap_or(0) / 60),
+            Rule::Circling => write!(s, "circling {place} {}m", r.range_m),
+            Rule::LowHover => write!(s, "low over {place} {:.0}m", r.height_m().unwrap_or(0.0)),
+            Rule::Drop => write!(s, "drop at {place} {}m", r.range_m),
+            Rule::Following => write!(s, "following you {}m", r.range_m),
         };
     }
     Some(s)
@@ -970,3 +1188,5 @@ pub fn strip_text(t: &Track) -> Option<String<64>> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_linger;
