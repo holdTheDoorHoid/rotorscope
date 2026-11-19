@@ -721,7 +721,7 @@ mod tests {
         let mut newer = good.clone();
         newer[4] = 9;
         bad.push((newer, LoadError::Version(9)));
-        bad.push((b"node 10:bd:a3:ce:bd:18 39.95 -75.16\n".to_vec(), LoadError::NotOurs));
+        bad.push((b"node 02:00:00:00:00:18 39.95 -75.16\n".to_vec(), LoadError::NotOurs));
         bad.push((Vec::new(), LoadError::Short));
         bad.push((b"RSV".to_vec(), LoadError::Short));
         // Counts claiming far more than is there.
