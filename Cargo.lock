@@ -54,6 +54,7 @@ dependencies = [
 name = "airspace"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "libm",
 ]
 
@@ -861,6 +862,7 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "airspace",
+ "fuzzkit",
  "heapless 0.8.0",
  "libm",
  "link",
