@@ -18,3 +18,6 @@ pub mod flash;
 pub mod kit;
 pub mod link;
 pub mod parttable;
+
+#[cfg(test)]
+mod fuzz_tests;
