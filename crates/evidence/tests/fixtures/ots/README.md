@@ -12,10 +12,10 @@ builder produces exactly these bytes.
 | file | what |
 |---|---|
 | `pending.ots` | a pending proof of `imprint` (the fixed test bundle's access-log imprint, `../tsa/imprint.hex`): append a fixed 16-byte salt, SHA-256, then a calendar's prepend / append / SHA-256 and a pending attestation for `https://alice.calendar.test` |
-| `complete.ots` | the same proof completed: at the calendar's commitment, the pending attestation stays and a path follows through a calendar tree, a transaction (including a RIPEMD-160, as early real proofs have) and a block Merkle tree to a Bitcoin attestation at height 905000 |
+| `complete.ots` | the same proof completed: at the calendar's commitment, the pending attestation stays and a path follows through a calendar tree, a transaction (including a RIPEMD-160, as early real proofs have) and a block Merkle tree to a Bitcoin attestation at height 500000 |
 | `submit-reply.bin` | what a calendar returns for the submitted digest (no file header) |
 | `upgrade-reply.bin` | what a calendar returns later for its commitment |
-| `headers.txt` | the 80-byte header "of block 905000": **not a real block**. Its Merkle root is the one `complete.ots` leads to; it was mined here at the easiest difficulty Bitcoin's main chain allows (bits `1d00ffff`), so it meets its stated target |
+| `headers.txt` | the 80-byte header "of block 500000": **not a real block**. Its Merkle root is the one `complete.ots` leads to; it was mined here at the easiest difficulty Bitcoin's main chain allows (bits `1d00ffff`), so it meets its stated target |
 | `expected.txt` | the values the script computed (submitted digest, commitment, Merkle root, block hash, block time) |
 | `make-fixtures.py` | the script that made all of the above |
 
@@ -40,6 +40,14 @@ python3 -I crates/evidence/tests/fixtures/ots/make-fixtures.py "$(cat crates/evi
 ```
 
 Any header with that Merkle root that meets bits `1d00ffff` would do.
+
+The proof names height **500,000**, below the checker's first height-based
+difficulty floor (600,000; `evidence::ots::DIFFICULTY_FLOORS`), because the
+header was mined at difficulty 1: at a floored height the checker refuses
+it, and a test shows exactly that. (The height is in the proof only, not in
+the header, so changing it did not need a new header: `complete.ots`,
+`upgrade-reply.bin`, `headers.txt` and `expected.txt` were remade with
+`--header` and the same header.)
 
 ## What these do NOT show
 

@@ -828,7 +828,7 @@ struct FakeCal {
     anchored: Arc<AtomicBool>,
 }
 
-const HEIGHT: u64 = 905_000;
+const HEIGHT: u64 = 500_000;
 
 impl FakeCal {
     fn start(b: Cal) -> FakeCal {
@@ -1038,7 +1038,7 @@ fn a_pending_proof_is_completed_later_as_a_further_line() {
     assert_eq!(p.walk().pending().len(), 1);
     let audit = t.app.lock().device(&t.id).unwrap().audit.clone();
     let last: bundle::AuditEntry = serde_json::from_str(&audit.last().unwrap().entry).unwrap();
-    assert!(last.detail["state"].as_str().unwrap().starts_with("anchored (Bitcoin block 905000"), "{}", last.detail);
+    assert!(last.detail["state"].as_str().unwrap().starts_with("anchored (Bitcoin block 500000"), "{}", last.detail);
     assert_eq!(last.detail["upgrade_of"], done.upgrade_of.clone().unwrap());
     // Nothing more to ask.
     stamp::tick(&t.app, now + 200 * MIN);
@@ -1080,7 +1080,7 @@ async fn the_export_carries_both_witnesses_and_the_checker_reports_each() {
     assert!(fails.is_empty(), "{fails:?}");
     let notes: Vec<&str> = r.findings.iter().filter(|f| f.level == Level::Note).map(|f| f.what.as_str()).collect();
     assert!(notes.iter().any(|n| n.contains("existed by") && n.contains(&tsa.url())), "{notes:?}");
-    assert!(notes.iter().any(|n| n.contains("claims Bitcoin block 905000: NOT CHECKED")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("claims Bitcoin block 500000: NOT CHECKED")), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("pending form") && n.contains("completed form")), "{notes:?}");
     assert!(!notes.iter().any(|n| n.contains("independent witness")), "{notes:?}");
     // With a header that does not carry this proof's Merkle root (a real

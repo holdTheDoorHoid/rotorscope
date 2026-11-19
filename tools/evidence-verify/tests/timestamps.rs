@@ -177,7 +177,7 @@ fn an_opentimestamps_proof_is_checked_offline_against_a_supplied_header() {
     let out = d.join("stamps");
     let (code, text) = run(&["--allow-test-key", "--btc-headers", &format!("{OTS}/headers.txt"), "--check-timestamps", s(&out), s(&b)], Some(""));
     assert_eq!(code, 0, "{text}");
-    assert!(text.contains("existed by about") && text.contains("Bitcoin block 905000") && text.contains("block hash ") && text.contains("compare the block hash"), "{text}");
+    assert!(text.contains("existed by about") && text.contains("Bitcoin block 500000") && text.contains("block hash ") && text.contains("compare the block hash"), "{text}");
     assert!(out.join("stamp-0.ots").exists(), "{text}");
     eprintln!("{text}");
     assert_eq!(std::fs::read(out.join("stamp-0.ots")).unwrap(), std::fs::read(format!("{OTS}/complete.ots")).unwrap());
@@ -199,7 +199,7 @@ fn a_pending_or_unchecked_opentimestamps_proof_is_said_to_be_so() {
     eprintln!("{text}");
     let b = ots_bundle(&d, "complete.ots");
     let (_, text) = run(&["--allow-test-key", s(&b)], Some(""));
-    assert!(text.contains("NOT CHECKED, no header for block 905000"), "{text}");
+    assert!(text.contains("NOT CHECKED, no header for block 500000"), "{text}");
     let _ = std::fs::remove_dir_all(d);
 }
 
@@ -215,13 +215,14 @@ fn a_bad_or_wrong_header_fails_and_bad_arguments_do_not_run() {
     let (code, text) = run(&["--allow-test-key", "--btc-header", &bad, s(&b)], Some(""));
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("is refused"), "{text}");
-    // Bitcoin's genesis header supplied as block 905000: valid work, wrong root.
+    // Bitcoin's genesis header supplied as block 500000: valid work, wrong root.
     let genesis = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c";
     let (code, text) = run(&["--allow-test-key", "--btc-header", &format!("{h}:{genesis}"), s(&b)], Some(""));
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("does not lead to the Merkle root"), "{text}");
+    assert!(text.contains("FAILED (TIME-STAMP): the log's own records and signatures check out") && !text.contains("not what its signer wrote"), "{text}");
     eprintln!("{text}");
-    for bad_arg in [vec!["--btc-header", "905000:00"], vec!["--btc-header", "nope"], vec!["--btc-headers", "/nonexistent/headers.txt"]] {
+    for bad_arg in [vec!["--btc-header", "500000:00"], vec!["--btc-header", "nope"], vec!["--btc-headers", "/nonexistent/headers.txt"]] {
         let mut a: Vec<&str> = bad_arg.clone();
         a.push(s(&b));
         let (code, text) = run(&a, Some(""));

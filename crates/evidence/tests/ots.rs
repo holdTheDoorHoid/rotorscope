@@ -40,7 +40,7 @@ fn salt() -> Vec<u8> {
     unhex("00112233445566778899aabbccddeeff").unwrap()
 }
 const URI: &str = "https://alice.calendar.test";
-const HEIGHT: u64 = 905_000;
+const HEIGHT: u64 = 500_000;
 
 fn server_ops() -> Vec<Op> {
     vec![Op::Append(salt()), Op::Sha256]
@@ -197,7 +197,7 @@ fn without_a_header_a_completed_proof_is_not_checked() {
     let r = check(&[fixture("complete.ots")], vec![]);
     assert!(fails(&r).is_empty(), "{:?}", fails(&r));
     let n = notes(&r);
-    assert!(n.iter().any(|x| x.contains("NOT CHECKED") && x.contains(&format!("--btc-header {HEIGHT}:")) && x.contains("bitcoin-cli getblockhash 905000")), "{n:?}");
+    assert!(n.iter().any(|x| x.contains("NOT CHECKED") && x.contains(&format!("--btc-header {HEIGHT}:")) && x.contains("bitcoin-cli getblockhash 500000")), "{n:?}");
     assert!(n.iter().any(|x| x.contains("no readable outside time-stamp")), "{n:?}");
 }
 
@@ -213,6 +213,30 @@ fn a_header_that_does_not_meet_its_own_target_is_refused() {
     easy.0[72..76].copy_from_slice(&0x207f_ffffu32.to_le_bytes());
     let r = check(&[fixture("complete.ots")], vec![(height, easy)]);
     assert!(fails(&r).iter().any(|f| f.contains("easier than Bitcoin's main chain allows")), "{:?}", fails(&r));
+}
+
+#[test]
+fn an_easy_header_is_refused_at_a_height_with_a_difficulty_floor() {
+    // The fixture header (difficulty 1, made on a laptop) for a proof that
+    // names block 850,000: refused, whatever its Merkle root.
+    let (_, hd) = header();
+    let mut p = ots::parse_proof(&fixture("complete.ots")).unwrap();
+    p.timestamp = Timestamp::chain([server_ops(), calendar_ops(), upgrade_ops()].concat(), Attestation::Bitcoin { height: 850_000 });
+    let r = check(&[p.to_bytes()], vec![(850_000, hd)]);
+    let f = fails(&r);
+    assert!(f.iter().any(|f| f.contains("block 850000 is refused") && f.contains("below the floor") && f.contains("from height 800000")), "{f:?}");
+    // The same header at the height the fixture names (500,000, before the
+    // first floor) passes the work check, and the checker says no floor
+    // applied that far back.
+    let r = check(&[fixture("complete.ots")], vec![header()]);
+    assert!(fails(&r).is_empty(), "{:?}", fails(&r));
+    let n = notes(&r);
+    assert!(n.iter().any(|x| x.contains("existed by about") && x.contains("no height-based floor") && x.contains("compare the block hash")), "{n:?}");
+    // At a floored height a header must meet the floor for that height
+    // (exactly at the floor: ots::tests::difficulty_floors, on targets).
+    assert_eq!(ots::floor_for(599_999), None);
+    assert_eq!(ots::floor_for(600_000), Some((600_000, 1_000_000_000_000)));
+    assert_eq!(ots::floor_for(2_000_000), Some((800_000, 10_000_000_000_000)));
 }
 
 #[test]

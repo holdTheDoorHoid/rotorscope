@@ -590,6 +590,78 @@ impl BlockHeader {
     }
 }
 
+/// Height-based floors on a header's difficulty: `(from height, least
+/// difficulty)`, ascending. A header supplied for a block at or after
+/// `from height` whose difficulty is lower is refused: real blocks there
+/// carry far more work, and a header that easy is cheap to forge for any
+/// Merkle root. Chosen with a clear margin below the real chain's lowest
+/// difficulty since each height, so no genuine header is refused:
+///
+/// - from 600,000: 10^12. Real: 13.0 x 10^12 at block 600,000 (October
+///   2019, blockchain.com explorer); the lowest since was about 13.67 x 10^12
+///   (July 2021, after China's mining ban; reported by The Block and
+///   CoinDesk as the lowest since January 2020). Margin about 13x.
+/// - from 800,000: 10^13. Real: 53.9 x 10^12 at block 800,000 (July 2023,
+///   blockchain.com explorer); the lowest since was about 52.3 x 10^12
+///   (the epoch adjusted on 9 August 2023, reported by Bitcoin.com News);
+///   difficulty has been above 100 x 10^12 since late 2024. Margin about 5x.
+///
+/// Below 600,000 only the main chain's easiest target applies.
+pub const DIFFICULTY_FLOORS: &[(u64, u64)] = &[(600_000, 1_000_000_000_000), (800_000, 10_000_000_000_000)];
+
+/// The floor that applies at `height`: (from height, least difficulty).
+pub fn floor_for(height: u64) -> Option<(u64, u64)> {
+    DIFFICULTY_FLOORS.iter().rev().find(|(from, _)| height >= *from).copied()
+}
+
+/// The target a difficulty of `d` means: the easiest main-chain target
+/// divided by `d` (rounded down).
+pub fn floor_target(d: u64) -> [u8; 32] {
+    let limit = target_be(POW_LIMIT_BITS).unwrap_or([0; 32]);
+    let mut out = [0u8; 32];
+    let mut rem: u128 = 0;
+    let d = u128::from(d.max(1));
+    for (i, b) in limit.iter().enumerate() {
+        let cur = (rem << 8) | u128::from(*b);
+        out[i] = (cur / d) as u8;
+        rem = cur % d;
+    }
+    out
+}
+
+fn as_f64(t: &[u8; 32]) -> f64 {
+    t.iter().fold(0.0, |a, b| a * 256.0 + f64::from(*b))
+}
+
+/// The difficulty a compact target means (the easiest main-chain target
+/// divided by it), approximately; 0 for an invalid target.
+pub fn difficulty(bits: u32) -> f64 {
+    match (target_be(bits), target_be(POW_LIMIT_BITS)) {
+        (Some(t), Some(l)) => as_f64(&l) / as_f64(&t),
+        _ => 0.0,
+    }
+}
+
+/// Check the target a header states (`bits`) against the floor for the
+/// height a proof names. `Ok(None)`: at or above the floor. `Ok(Some(note))`:
+/// no floor applies at that height (said so). `Err`: below the floor.
+pub fn check_floor(bits: u32, height: u64) -> Result<Option<String>, String> {
+    let Some(target) = target_be(bits) else { return Err(format!("the header's target (bits {bits:08x}) is not a valid target")) };
+    let Some((from, d)) = floor_for(height) else {
+        return Ok(Some(format!(
+            "block {height} is before height {}: this checker has no height-based floor on a header's work that far back, so the header is checked only against Bitcoin's easiest target",
+            DIFFICULTY_FLOORS[0].0
+        )));
+    };
+    if target > floor_target(d) {
+        return Err(format!(
+            "the header's difficulty is about {:.3e}, below the floor of {d:.0e} this checker sets for blocks from height {from} on (real blocks there carry far more work): a header that easy is cheap to forge for any proof",
+            difficulty(bits)
+        ));
+    }
+    Ok(None)
+}
+
 /// A compact target as a 256-bit big-endian number; `None` if negative,
 /// zero or too large to represent.
 pub fn target_be(bits: u32) -> Option<[u8; 32]> {
@@ -739,6 +811,37 @@ mod tests {
 
     /// Bitcoin's genesis block header (published everywhere; height 0).
     pub const GENESIS: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c";
+
+    #[test]
+    fn difficulty_floors() {
+        assert!((difficulty(POW_LIMIT_BITS) - 1.0).abs() < 1e-9);
+        // The real targets at blocks 600,000 and 800,000 (bits from the
+        // blockchain.com explorer) pass their floors, with the stated margin.
+        assert_eq!(check_floor(0x1715_a35c, 600_000), Ok(None));
+        assert_eq!(check_floor(0x1705_3894, 800_000), Ok(None));
+        assert!((difficulty(0x1715_a35c) / 1e12 - 13.008).abs() < 0.01, "{}", difficulty(0x1715_a35c));
+        assert!((difficulty(0x1705_3894) / 1e12 - 53.911).abs() < 0.01, "{}", difficulty(0x1705_3894));
+        // The easiest target: refused from 600,000 on, a note below.
+        assert!(check_floor(POW_LIMIT_BITS, 600_000).unwrap_err().contains("below the floor"));
+        assert!(check_floor(POW_LIMIT_BITS, 599_999).unwrap().unwrap().contains("no height-based floor"));
+        // Exactly at the floor (the floor target in compact form, rounded
+        // down so it is not easier) passes; one step easier is refused.
+        for &(from, d) in DIFFICULTY_FLOORS {
+            let t = floor_target(d);
+            let first = t.iter().position(|&b| b != 0).unwrap();
+            let exp = (32 - first) as u32;
+            let mant = u32::from_be_bytes([0, t[first], t[first + 1], t[first + 2]]);
+            assert_eq!(mant & 0x80_0000, 0, "positive mantissa");
+            let at = (exp << 24) | mant;
+            assert!(target_be(at).unwrap() <= t);
+            assert_eq!(check_floor(at, from), Ok(None), "at the floor from {from}");
+            assert!(check_floor(at + 1, from).is_err(), "one step easier than the floor from {from}");
+            // A header at an earlier floor is refused under a later one.
+            if let Some(&(later, _)) = DIFFICULTY_FLOORS.iter().find(|(f, _)| *f > from) {
+                assert!(check_floor(at, later).is_err());
+            }
+        }
+    }
 
     #[test]
     fn genesis_header() {

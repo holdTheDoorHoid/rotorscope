@@ -144,6 +144,13 @@ impl Options {
     }
 }
 
+/// A finding about one outside time-stamp (named "time-stamp N (service)").
+fn is_stamp_finding(f: &Finding) -> bool {
+    let Some(rest) = f.at.source.strip_prefix("time-stamp ") else { return false };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(" (") && f.at.offset.is_none() && f.at.boot.is_none()
+}
+
 /// Printed with every verdict: what the checker cannot see.
 pub const NOT_PROVEN: &str = "NOT PROVEN: that the log is complete. Records after the last one checked, newer files, a reformatted card or a boot never uploaded leave no trace here.";
 
@@ -244,13 +251,35 @@ impl Report {
 
     /// The one-line verdict for [`exit_code`](Self::exit_code). Always print
     /// [`NOT_PROVEN`] with it.
-    pub fn verdict(&self) -> &'static str {
+    ///
+    /// When the only failures are outside time-stamps (an RFC 3161 token or
+    /// an OpenTimestamps proof), the verdict says so: what the log's own
+    /// records and signatures showed, and which stamp did not check out.
+    /// The exit code is still a failure.
+    pub fn verdict(&self) -> String {
+        let fails: Vec<&Finding> = self.findings.iter().filter(|f| f.level == Level::Fail).collect();
+        if !fails.is_empty() && fails.iter().all(|f| is_stamp_finding(f)) {
+            let mut which: Vec<&str> = fails.iter().map(|f| f.at.source.as_str()).collect();
+            which.dedup();
+            let rest = self.findings.iter().filter(|f| f.level != Level::Fail).map(|f| f.level).max();
+            let records = match (self.signer_checked(), rest) {
+                (true, Some(Level::Gap)) => "the log's own records and signatures check out against a key you supplied, with gaps (see GAP lines)",
+                (true, _) => "the log's own records and signatures check out against a key you supplied",
+                (false, _) => "the log's own records link and are signed consistently, but the signer was not checked (no key supplied from outside the log)",
+            };
+            return format!(
+                "FAILED (TIME-STAMP): {records}; but {} did not check out: {}. A stamp fails when its token or proof is bad, or when the server's access log it covers was changed after it was stamped; either way, what that stamp would show (that the log existed by its time) is not shown. See the FAIL lines above.",
+                if which.len() == 1 { "a time-stamp" } else { "time-stamps" },
+                which.join("; ")
+            );
+        }
         match self.exit_code() {
             0 => "VERIFIED: every record links, every signature checks against a key you supplied, and a signature covers every record checked.",
             1 => "FAILED: the log is not what its signer wrote, or it cannot be accepted. See the FAIL lines above.",
             3 => "SIGNER CHECKED, WITH GAPS: what is signed checks against a key you supplied, but some records are missing or not covered by a signature (see GAP lines). Missing records may have been removed; that cannot be told apart from records never written or never received.",
             _ => "SELF-CONSISTENT, SIGNER NOT CHECKED: anyone could have made this log. The key it was checked against came from the log itself; give the expected key with --key HEX or --keys FILE.",
         }
+        .to_string()
     }
 
     /// [`NOT_PROVEN`], with what the boot counters let the checker say
@@ -1868,6 +1897,19 @@ fn check_ots(rep: &mut Report, t: &bundle::Timestamp, tok: &[u8], imprint: &[u8;
             rep.add(Level::Fail, at.clone(), format!("the header you supplied for Bitcoin block {height} is refused: {e}"));
             continue;
         }
+        // Real blocks at recent heights carry far more work than a header
+        // made on one computer: refuse one below the floor for its height.
+        let floor = match ots::check_floor(header.bits(), height) {
+            Err(e) => {
+                rep.add(Level::Fail, at.clone(), format!("the header you supplied for Bitcoin block {height} is refused: {e}"));
+                continue;
+            }
+            Ok(None) => format!(
+                "Its work is at or above this checker's floor for that height (difficulty {:.3e}), so forging it would cost what real mining at that height costs; that still does not prove it is on the real chain.",
+                ots::difficulty(header.bits())
+            ),
+            Ok(Some(note)) => format!("Note: {note}; a header that easy can be made on one computer in under an hour."),
+        };
         if msg.len() != 32 || msg[..] != header.merkle_root() {
             rep.add(
                 Level::Fail,
@@ -1890,7 +1932,7 @@ fn check_ots(rep: &mut Report, t: &bundle::Timestamp, tok: &[u8], imprint: &[u8;
             Level::Note,
             at.clone(),
             format!(
-                "{} existed by about {}: an OpenTimestamps proof (via {cal}) leads from this log's imprint to the Merkle root of Bitcoin block {height} (block hash {}, block time {} from the header you supplied). Checked offline against your header only: that it is the real block {height} is as good as the source you got it from, so compare the block hash with a source you trust. The time is the block's, set by its miner (it can be off by up to about two hours), not the upload's: it is coarse.{delays} A stamp shows the log existed by then; it does not show when the records in it were written",
+                "{} existed by about {}: an OpenTimestamps proof (via {cal}) leads from this log's imprint to the Merkle root of Bitcoin block {height} (block hash {}, block time {} from the header you supplied). Checked offline against your header only: that it is the real block {height} is as good as the source you got it from, so compare the block hash with a source you trust. {floor} The time is the block's, set by its miner (it can be off by up to about two hours), not the upload's: it is coarse.{delays} A stamp shows the log existed by then; it does not show when the records in it were written",
                 c.what,
                 fmt_utc(time_ms),
                 header.hash_hex(),
