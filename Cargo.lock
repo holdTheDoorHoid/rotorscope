@@ -64,6 +64,7 @@ version = "0.1.0"
 dependencies = [
  "airspace",
  "faarules",
+ "fuzzkit",
  "heapless 0.8.0",
  "rid",
  "serde_json",
@@ -856,6 +857,7 @@ name = "evidence-verify"
 version = "0.1.0"
 dependencies = [
  "evidence",
+ "fuzzkit",
  "serde_json",
 ]
 
@@ -919,6 +921,7 @@ name = "flarm-keys"
 version = "0.1.0"
 dependencies = [
  "flarm",
+ "fuzzkit",
 ]
 
 [[package]]
