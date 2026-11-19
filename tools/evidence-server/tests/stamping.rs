@@ -478,7 +478,7 @@ const STEP: Duration = Duration::from_secs(120);
 fn accepted(imprint: &[u8; 32]) -> stamp::Stamped {
     let nonce = [0x11; 8];
     let now = evidence_server::store::now_ms();
-    stamp::Stamped { token: reply(0, imprint, Some(&nonce)), nonce, gen_time_ms: now, requested_utc_ms: now, certs: None, revocation: None, evidence_note: None }
+    stamp::Stamped { token: reply(0, imprint, Some(&nonce)), nonce: Some(nonce.to_vec()), gen_time_ms: Some(now), requested_utc_ms: now, certs: None, revocation: None, evidence_note: None }
 }
 
 /// A service that says when it is asked, then blocks until the test says
@@ -793,4 +793,392 @@ async fn stamp_now_by_hand() {
     tokio::task::spawn_blocking(move || stamp::tick(&app, now + 1000)).await.unwrap();
     assert_eq!(t.queue_len(), 2, "queued at once, not after ten minutes");
     assert_eq!(t.stamps().len(), 2);
+}
+
+// ---- OpenTimestamps (WP-14d): a fake calendar on 127.0.0.1 ------------------
+
+use evidence::ots::{self as otsfmt, Attestation, Op, Timestamp as OtsTs};
+use evidence_server::ots;
+use std::sync::atomic::AtomicBool;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Cal {
+    /// Pending proofs; completed (`anchored`) only once the test says so.
+    Good,
+    Garbage,
+    /// A reply longer than any calendar reply taken.
+    Oversize,
+    /// Nested deeper than any checker allows.
+    Deep,
+    /// A promise only from another calendar.
+    OtherHost,
+    /// Valid, then a stray byte.
+    Trailing,
+    Http500,
+    Redirect(u16),
+    /// Pending works; completing it returns garbage.
+    BadUpgrade,
+    /// Pending works; completing it returns only another promise.
+    PromiseAgain,
+}
+
+struct FakeCal {
+    port: u16,
+    seen: Arc<Mutex<Vec<Vec<u8>>>>,
+    anchored: Arc<AtomicBool>,
+}
+
+const HEIGHT: u64 = 905_000;
+
+impl FakeCal {
+    fn start(b: Cal) -> FakeCal {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let anchored = Arc::new(AtomicBool::new(false));
+        let (s2, a2) = (seen.clone(), anchored.clone());
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let Ok(c) = c else { continue };
+                let (seen, anchored) = (s2.clone(), a2.clone());
+                std::thread::spawn(move || serve_cal(c, b, port, &seen, &anchored));
+            }
+        });
+        FakeCal { port, seen, anchored }
+    }
+
+    fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    fn requests(&self) -> Vec<Vec<u8>> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn gets(&self) -> usize {
+        self.requests().iter().filter(|r| r.starts_with(b"GET ")).count()
+    }
+}
+
+fn calendar_ops() -> Vec<Op> {
+    vec![Op::Prepend(vec![0x5f, 0x2a, 0x1c, 0x00]), Op::Append(vec![0xa1; 8]), Op::Sha256]
+}
+
+fn serve_cal(mut c: TcpStream, b: Cal, port: u16, seen: &Mutex<Vec<Vec<u8>>>, anchored: &AtomicBool) {
+    let Some(req) = read_request(&mut c) else { return };
+    seen.lock().unwrap().push(req.clone());
+    let respond = |c: &mut TcpStream, status: &str, body: &[u8]| {
+        let _ = write!(c, "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        let _ = c.write_all(body);
+    };
+    let me = format!("http://127.0.0.1:{port}");
+    if req.starts_with(b"POST /digest ") {
+        let pending = OtsTs::chain(calendar_ops(), Attestation::Pending { uri: me.clone() }).to_bytes();
+        match b {
+            Cal::Good | Cal::BadUpgrade | Cal::PromiseAgain => respond(&mut c, "200 OK", &pending),
+            Cal::Garbage => respond(&mut c, "200 OK", b"<html>calendar</html>"),
+            Cal::Oversize => respond(&mut c, "200 OK", &vec![0x08; otsfmt::MAX_REPLY + 100]),
+            Cal::Deep => {
+                let mut v = vec![0x08u8; 400];
+                v.push(0);
+                v.extend_from_slice(&otsfmt::BITCOIN_TAG);
+                v.extend_from_slice(&[1, 1]);
+                respond(&mut c, "200 OK", &v)
+            }
+            Cal::OtherHost => respond(&mut c, "200 OK", &OtsTs::chain(calendar_ops(), Attestation::Pending { uri: "https://elsewhere.test".into() }).to_bytes()),
+            Cal::Trailing => respond(&mut c, "200 OK", &[pending, vec![0]].concat()),
+            Cal::Http500 => respond(&mut c, "500 Internal Server Error", b"down"),
+            Cal::Redirect(p) => {
+                let _ = write!(c, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{p}/digest\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        }
+        return;
+    }
+    if let Some(rest) = req.strip_prefix(b"GET /timestamp/") {
+        let hexpart: Vec<u8> = rest.iter().take_while(|c| c.is_ascii_hexdigit()).copied().collect();
+        let commitment = verify::unhex(std::str::from_utf8(&hexpart).unwrap()).unwrap();
+        if b == Cal::BadUpgrade {
+            return respond(&mut c, "200 OK", b"\xff\xff\xff");
+        }
+        if b == Cal::PromiseAgain {
+            return respond(&mut c, "200 OK", &OtsTs::chain(vec![Op::Sha256], Attestation::Pending { uri: me }).to_bytes());
+        }
+        if !anchored.load(Ordering::SeqCst) {
+            return respond(&mut c, "404 Not Found", b"Pending confirmation in Bitcoin blockchain");
+        }
+        let _ = commitment;
+        let up = OtsTs::chain(vec![Op::Append(vec![0xb0; 32]), Op::Sha256, Op::Sha256], Attestation::Bitcoin { height: HEIGHT });
+        return respond(&mut c, "200 OK", &up.to_bytes());
+    }
+    respond(&mut c, "404 Not Found", b"");
+}
+
+fn ots_cfg(rfc: &[String], cals: &[String]) -> Config {
+    Config { ots: true, ots_calendars: cals.to_vec(), ..cfg(rfc) }
+}
+
+fn ots_lines(t: &T) -> Vec<bundle::Timestamp> {
+    t.stamps().into_iter().filter(|s| s.kind == bundle::KIND_OTS).collect()
+}
+
+/// Header lines: name -> value, and the request line.
+fn head_of(req: &[u8]) -> (String, Vec<(String, String)>) {
+    let end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = std::str::from_utf8(&req[..end]).unwrap();
+    let mut lines = head.split("\r\n");
+    let first = lines.next().unwrap().to_string();
+    (first, lines.map(|l| l.split_once(':').unwrap()).map(|(n, v)| (n.to_ascii_lowercase(), v.trim().to_string())).collect())
+}
+
+const MIN: u64 = 60_000;
+
+#[test]
+fn opentimestamps_sends_only_a_salted_fingerprint_and_keeps_the_pending_proof() {
+    let cal = FakeCal::start(Cal::Good);
+    let t = T::new("ots-bytes", Some(Stamping::new(ots_cfg(&[], &[cal.url()]))));
+    let now = t0();
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+
+    let reqs = cal.requests();
+    assert_eq!(reqs.len(), 1, "one request per stamp");
+    let (first, headers) = head_of(&reqs[0]);
+    assert_eq!(first, "POST /digest HTTP/1.1");
+    let expect = [
+        ("host", format!("127.0.0.1:{}", cal.port)),
+        ("user-agent", "ots-client".into()),
+        ("accept", "application/vnd.opentimestamps.v1".into()),
+        ("content-type", "application/x-www-form-urlencoded".into()),
+        ("accept-encoding", "identity".into()),
+        ("content-length", "32".into()),
+    ];
+    assert_eq!(headers.len(), expect.len(), "{headers:?}");
+    for (n, v) in expect {
+        assert_eq!(headers.iter().find(|(k, _)| *k == n).map(|(_, v)| v.as_str()), Some(v.as_str()), "{n}");
+    }
+    // The body: exactly SHA-256(imprint || the salt kept in the proof).
+    let body = body_of(&reqs[0]);
+    let lines = ots_lines(&t);
+    assert_eq!(lines.len(), 1);
+    let l = &lines[0];
+    let (imprint, key_id) = {
+        let s = t.app.lock();
+        let d = s.device(&t.id).unwrap();
+        (bundle::audit_imprint(&d.info.key_id, 1, &verify::unhex(&d.audit[1].hash).unwrap().try_into().unwrap()), d.info.key_id.clone())
+    };
+    assert_eq!(l.imprint, hex(&imprint));
+    let proof = otsfmt::parse_proof(&evidence::b64::decode_vec(&l.token).unwrap()).unwrap();
+    assert_eq!(proof.digest, imprint);
+    let Op::Append(salt) = &proof.timestamp.ops[0].0 else { panic!("the proof starts with the salt") };
+    assert_eq!(salt.len(), 16);
+    assert_eq!(body, ots::submitted_digest(&imprint, &salt.as_slice().try_into().unwrap()).as_slice());
+    assert!(!reqs[0].windows(32).any(|w| w == imprint), "the imprint itself does not leave");
+    for secret in [key_id.as_bytes(), b"bench P4", b"back garden", b"tester", b"uploader"] {
+        assert!(!reqs[0].windows(secret.len()).any(|w| w == secret), "{:?} left the server", String::from_utf8_lossy(secret));
+    }
+    // Kept at once, as a pending proof, with its audit entry.
+    assert_eq!((l.covers.as_str(), l.audit_n, l.authority.as_str(), l.upgrade_of.as_deref()), (bundle::COVERS_AUDIT_HEAD, Some(1), cal.url().as_str(), None));
+    assert_eq!(ots::state(&evidence::b64::decode_vec(&l.token).unwrap()), "pending");
+    let audit = t.app.lock().device(&t.id).unwrap().audit.clone();
+    let last: bundle::AuditEntry = serde_json::from_str(&audit.last().unwrap().entry).unwrap();
+    assert_eq!((last.action.as_str(), last.detail["kind"].as_str(), last.detail["state"].as_str()), ("timestamp", Some("ots"), Some("pending")));
+    assert!(last.detail.get("gen_time").is_none(), "a pending proof has no time");
+    // The page: a pending proof is a promise, and does not clear the alarm.
+    let st = t.app.stamping.as_ref().unwrap();
+    let s = t.app.lock();
+    let d = s.device(&t.id).unwrap();
+    let v = st.status(d, now);
+    assert_eq!(v["services"][0]["kind"], "ots");
+    assert!(v["services"][0]["newest"].is_null(), "{v}");
+    assert_eq!(v["services"][0]["pending"]["count"], 1);
+    assert!(st.stale(d, now + 25 * 3_600_000), "a pending proof is not a stamp");
+}
+
+#[test]
+fn a_pending_proof_is_completed_later_as_a_further_line() {
+    let cal = FakeCal::start(Cal::Good);
+    let t = T::new("ots-upgrade", Some(Stamping::new(ots_cfg(&[], &[cal.url()]))));
+    let now = t0();
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    let first = ots_lines(&t)[0].clone();
+    // Not asked again before 30 minutes on the worker's clock.
+    stamp::tick(&t.app, now + 29 * MIN);
+    assert_eq!(cal.gets(), 0);
+    // Asked: not complete yet (404). Nothing kept, nothing failed.
+    stamp::tick(&t.app, now + 30 * MIN);
+    assert_eq!(cal.gets(), 1);
+    let (first_line, headers) = head_of(cal.requests().iter().find(|r| r.starts_with(b"GET ")).unwrap());
+    let commitment = ots::pending_calendars(&evidence::b64::decode_vec(&first.token).unwrap());
+    assert_eq!(commitment, vec![cal.url()]);
+    let proof = otsfmt::parse_proof(&evidence::b64::decode_vec(&first.token).unwrap()).unwrap();
+    let c = hex(&proof.walk().pending()[0].1);
+    assert_eq!(first_line, format!("GET /timestamp/{c} HTTP/1.1"));
+    let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["host", "user-agent", "accept", "accept-encoding"], "{headers:?}");
+    assert_eq!((ots_lines(&t).len(), t.failures().len()), (1, 0));
+    // The calendar anchors it; the next ask (30 minutes later) completes it.
+    cal.anchored.store(true, Ordering::SeqCst);
+    stamp::tick(&t.app, now + 59 * MIN);
+    assert_eq!(cal.gets(), 1);
+    stamp::tick(&t.app, now + 60 * MIN);
+    assert_eq!(cal.gets(), 2);
+    let lines = ots_lines(&t);
+    assert_eq!(lines.len(), 2, "a further line");
+    assert_eq!(serde_json::to_string(&lines[0]).unwrap(), serde_json::to_string(&first).unwrap(), "the pending line is not rewritten");
+    let done = &lines[1];
+    let old_tok = evidence::b64::decode_vec(&first.token).unwrap();
+    assert_eq!(done.upgrade_of.as_deref(), Some(hex(&evidence::sha256(&old_tok)).as_str()));
+    assert_eq!((done.imprint.as_str(), done.audit_n, done.requested_utc_ms), (first.imprint.as_str(), first.audit_n, Some(now + 60 * MIN)));
+    let tok = evidence::b64::decode_vec(&done.token).unwrap();
+    assert_eq!(ots::anchors(&tok), Some(vec![HEIGHT]));
+    // Still holds the pending attestation, and the same start.
+    let p = otsfmt::parse_proof(&tok).unwrap();
+    assert_eq!(p.digest, proof.digest);
+    assert_eq!(p.walk().pending().len(), 1);
+    let audit = t.app.lock().device(&t.id).unwrap().audit.clone();
+    let last: bundle::AuditEntry = serde_json::from_str(&audit.last().unwrap().entry).unwrap();
+    assert!(last.detail["state"].as_str().unwrap().starts_with("anchored (Bitcoin block 905000"), "{}", last.detail);
+    assert_eq!(last.detail["upgrade_of"], done.upgrade_of.clone().unwrap());
+    // Nothing more to ask.
+    stamp::tick(&t.app, now + 200 * MIN);
+    assert_eq!(cal.gets(), 2);
+    // The page shows the anchored proof; the alarm counts it as a stamp.
+    let st = t.app.stamping.as_ref().unwrap();
+    let s = t.app.lock();
+    let d = s.device(&t.id).unwrap();
+    let v = st.status(d, now);
+    assert_eq!(v["services"][0]["newest"]["heights"][0], HEIGHT);
+    assert_eq!(v["services"][0]["pending"]["count"], 0);
+    assert!(!st.stale(d, now + 25 * 3_600_000));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_export_carries_both_witnesses_and_the_checker_reports_each() {
+    let tsa = Fake::start(Behave::Good);
+    let cal = FakeCal::start(Cal::Good);
+    let t = T::new("ots-export", Some(Stamping::new(ots_cfg(&[tsa.url()], &[cal.url()]))));
+    let now = t0();
+    t.upload(&boots()[0], now);
+    let app = t.app.clone();
+    tokio::task::spawn_blocking(move || stamp::tick(&app, now)).await.unwrap();
+    cal.anchored.store(true, Ordering::SeqCst);
+    let app = t.app.clone();
+    tokio::task::spawn_blocking(move || stamp::tick(&app, now + 30 * MIN)).await.unwrap();
+    let (s, json) = t.call("GET", &format!("/api/devices/{}/export", t.id), Body::empty()).await;
+    assert_eq!(s, StatusCode::OK);
+    let b: bundle::Bundle = serde_json::from_slice(&json).unwrap();
+    assert_eq!(b.format, bundle::FORMAT, "OpenTimestamps is additive within format 2");
+    let st = b.stamping.as_ref().unwrap();
+    assert_eq!((st.authorities.clone(), st.ots_calendars.clone()), (vec![tsa.url()], vec![cal.url()]));
+    assert_eq!(b.timestamps.iter().filter(|x| x.kind == "ots").count(), 2);
+    // Without a header: the RFC 3161 stamp is read, the completed proof is
+    // reported as not checked, the pending one as completed later. Two
+    // witnesses: no "too few" note.
+    let r = verify::verify_bundle(&json, &verify::Options { allow_test_key: true, ..Default::default() });
+    let fails: Vec<_> = r.findings.iter().filter(|f| f.level == Level::Fail).collect();
+    assert!(fails.is_empty(), "{fails:?}");
+    let notes: Vec<&str> = r.findings.iter().filter(|f| f.level == Level::Note).map(|f| f.what.as_str()).collect();
+    assert!(notes.iter().any(|n| n.contains("existed by") && n.contains(&tsa.url())), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("claims Bitcoin block 905000: NOT CHECKED")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("pending form") && n.contains("completed form")), "{notes:?}");
+    assert!(!notes.iter().any(|n| n.contains("independent witness")), "{notes:?}");
+    // With a header that does not carry this proof's Merkle root (a real
+    // one, valid work): the proof fails.
+    let genesis = evidence::ots::BlockHeader::from_hex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c").unwrap();
+    let r = verify::verify_bundle(&json, &verify::Options { allow_test_key: true, btc_headers: vec![(HEIGHT, genesis)], ..Default::default() });
+    assert!(r.findings.iter().any(|f| f.level == Level::Fail && f.what.contains("does not lead to the Merkle root")), "{:?}", r.findings);
+    // The page is told what each witness shows.
+    let (_, body) = t.call("GET", "/api/stamping", Body::empty()).await;
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["independent"], 2);
+    assert_eq!(v["ots_calendars"][0], cal.url());
+    assert!(v["warnings"].as_array().unwrap().is_empty(), "{v}");
+    assert!(v["witnesses"].as_str().unwrap().contains("independent"));
+    let shows = v["ots_shows"].as_str().unwrap();
+    assert!(shows.contains("PENDING") && shows.contains("hours") && shows.contains("block's time") && shows.contains("coarse"), "{shows}");
+}
+
+#[test]
+fn a_calendar_reply_that_is_not_a_proof_of_what_was_sent_is_a_failure_never_a_stamp() {
+    let elsewhere = FakeCal::start(Cal::Good);
+    let cases = [
+        (Cal::Garbage, "not a timestamp"),
+        (Cal::Oversize, "longer than"),
+        (Cal::Deep, "deeper"),
+        (Cal::OtherHost, "no promise from 127.0.0.1"),
+        (Cal::Trailing, "after the end"),
+        (Cal::Http500, "HTTP 500"),
+        (Cal::Redirect(elsewhere.port), "HTTP 302"),
+    ];
+    for (i, (b, why)) in cases.into_iter().enumerate() {
+        let cal = FakeCal::start(b);
+        let t = T::new(&format!("ots-hostile{i}"), Some(Stamping::new(ots_cfg(&[], &[cal.url()]))));
+        let now = t0();
+        t.upload(&boots()[0], now);
+        stamp::tick(&t.app, now);
+        assert!(t.stamps().is_empty(), "{b:?} was kept");
+        let f = t.failures();
+        assert_eq!(f.len(), 1, "{b:?}");
+        assert!(f[0].reason.contains(why), "{b:?}: {}", f[0].reason);
+        assert!(t.app.lock().device(&t.id).unwrap().outstanding_for(&cal.url()).is_some(), "{b:?}: still owed");
+    }
+    assert!(elsewhere.requests().is_empty(), "a redirect was followed");
+}
+
+#[test]
+fn completing_a_proof_fails_safely_and_gives_up_after_a_week() {
+    // A broken completion is a failure line, with back-off; the pending
+    // proof stays as it was.
+    let cal = FakeCal::start(Cal::BadUpgrade);
+    let t = T::new("ots-badup", Some(Stamping::new(ots_cfg(&[], &[cal.url()]))));
+    let now = t0();
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    stamp::tick(&t.app, now + 30 * MIN);
+    assert_eq!(cal.gets(), 1);
+    let f = t.failures();
+    assert_eq!(f.len(), 1);
+    assert!(f[0].reason.starts_with("completing the proof:"), "{}", f[0].reason);
+    assert_eq!(ots_lines(&t).len(), 1);
+    // Another promise is not a completion: nothing kept, no failure.
+    let cal = FakeCal::start(Cal::PromiseAgain);
+    let t = T::new("ots-again", Some(Stamping::new(ots_cfg(&[], &[cal.url()]))));
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    stamp::tick(&t.app, now + 30 * MIN);
+    assert_eq!((cal.gets(), ots_lines(&t).len(), t.failures().len()), (1, 1, 0));
+    // A week on, a proof still pending is no longer asked about.
+    let cal = FakeCal::start(Cal::Good);
+    let t = T::new("ots-giveup", Some(Stamping::new(ots_cfg(&[], &[cal.url()]))));
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    let later = now + 8 * 24 * 3_600_000;
+    stamp::tick(&t.app, later);
+    assert_eq!(cal.gets(), 0);
+    let st = t.app.stamping.as_ref().unwrap();
+    let s = t.app.lock();
+    assert_eq!(st.status(s.device(&t.id).unwrap(), later)["services"][0]["pending"]["given_up"], 1);
+}
+
+#[test]
+fn opentimestamps_is_off_unless_asked_for_and_independent_of_rfc3161() {
+    // --stamp without --stamp-ots: no calendar is ever contacted.
+    let cal = FakeCal::start(Cal::Good);
+    let tsa = Fake::start(Behave::Good);
+    let c = Config { ots: false, ots_calendars: vec![cal.url()], ..cfg(&[tsa.url()]) };
+    let t = T::new("ots-off", Some(Stamping::new(c)));
+    let now = t0();
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    assert!(cal.requests().is_empty());
+    assert_eq!(t.stamps().len(), 1);
+    // On: one calendar failing does not hold up the RFC 3161 service.
+    let down = FakeCal::start(Cal::Http500);
+    let t = T::new("ots-indep", Some(Stamping::new(ots_cfg(&[tsa.url()], &[down.url()]))));
+    t.upload(&boots()[0], now);
+    stamp::tick(&t.app, now);
+    let s = t.stamps();
+    assert_eq!((s.len(), s[0].kind.as_str()), (1, "rfc3161"));
+    assert_eq!(t.failures().len(), 1);
 }

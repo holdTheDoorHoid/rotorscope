@@ -31,21 +31,35 @@ function dur(ms) {
 }
 // Outside time-stamps of this unit's access log: what each service has
 // stamped, what is still owed, what failed. Never as proof of when the
-// records were written.
+// records were written. RFC 3161 services and OpenTimestamps calendars are
+// shown as two independent kinds of witness; a pending OpenTimestamps
+// proof is shown as a promise, never as a stamp.
 function stampLines(d) {
   const out = [];
   if (!stamping) return out;
-  out.push(stamping.what_it_shows);
+  out.push(stamping.what_it_shows + ' ' + (stamping.witnesses || ''));
   const st = d && d.stamping;
   if (!stamping.enabled || !st) return out;
+  let ots = false;
   for (const s of st.services || []) {
     const n = s.newest;
-    let line = esc(s.authority) + ': ';
-    line += n ? `access log through entry #${esc(n.audit_n)} existed by ${esc(utc(n.gen_time_ms))} (stamped ${esc(dur(n.delay_ms))} after the upload)` : 'no stamp yet';
+    let line;
+    if (s.kind === 'ots') {
+      ots = true;
+      line = '<b>OpenTimestamps</b> ' + esc(s.authority) + ': ';
+      line += n ? `access log through entry #${esc(n.audit_n)} anchored in Bitcoin block ${esc((n.heights || []).join(', '))} (completed proof received ${esc(utc(n.received_utc_ms))}; it proves the block's time, which evidence-verify reads from a block header you supply)` : 'no completed proof yet';
+      const p = s.pending || {};
+      if (p.count > 0) line += `; ${esc(p.count)} proof(s) PENDING: a calendar's promise, not yet proof of any time; the oldest sent ${esc(utc(p.oldest_utc_ms))}`;
+      if (p.given_up > 0) line += `; ${esc(p.given_up)} pending for more than a week and no longer asked about: the calendar may have lost them`;
+    } else {
+      line = '<b>RFC 3161</b> ' + esc(s.authority) + ': ';
+      line += n ? `access log through entry #${esc(n.audit_n)} existed by ${esc(utc(n.gen_time_ms))} (stamped ${esc(dur(n.delay_ms))} after the upload)` : 'no stamp yet';
+    }
     if (s.outstanding) line += `; a stamp of entry #${esc(s.outstanding.audit_n)} is outstanding since ${esc(utc(s.outstanding.queued_utc_ms))}`;
     if (s.failures_since_last_stamp > 0 && s.last_failure) line += `; ${esc(s.failures_since_last_stamp)} failed attempt(s) since the last stamp, latest ${esc(utc(s.last_failure.utc_ms))}: ${esc(s.last_failure.reason)}`;
     out.push(line);
   }
+  if (ots && stamping.ots_shows) out.push(esc(stamping.ots_shows));
   return out;
 }
 // What the server knows is wrong or weak about this unit's stored log.

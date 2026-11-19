@@ -5,14 +5,18 @@
 //!                 [--tls-cert cert.pem --tls-key key.pem] [--token T]
 //!                 [--name NAME] [--open-registration]
 //!                 [--stamp [--stamp-tsa URL[,chain=URL][,crl=URL]]...
-//!                  [--stamp-every MIN] [--stamp-idle SEC] [--stamp-alarm-hours H]]
+//!                  [--stamp-every MIN] [--stamp-idle SEC] [--stamp-alarm-hours H]
+//!                  [--stamp-ots [--stamp-ots-calendar URL]...]]
 //! evidence-server keygen --out FILE
 //! ```
 //!
 //! Outside time-stamping is off unless `--stamp` is given: it sends a
 //! SHA-256 fingerprint of each unit's access log (nothing else) to the
 //! services listed, by default the built-in ones (`stamp::default_authorities`).
-//! Each `--stamp-tsa` replaces the built-in list. See docs/EVIDENCE.md.
+//! Each `--stamp-tsa` replaces the built-in list. `--stamp-ots` adds
+//! OpenTimestamps (Bitcoin-anchored, a second independent witness) with the
+//! built-in calendars (`ots::default_calendars`); each
+//! `--stamp-ots-calendar` replaces that list. See docs/EVIDENCE.md.
 //!
 //! Registering a unit needs the token. Without `--token` the server refuses
 //! to register anything unless `--open-registration` is given (a bench
@@ -43,7 +47,8 @@ fn main() {
         Some("keygen") => keygen(&args),
         _ => {
             eprintln!("usage: evidence-server serve --data DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--token T] [--name NAME] [--open-registration]");
-            eprintln!("         [--stamp [--stamp-tsa URL[,chain=URL][,crl=URL]]... [--stamp-every MIN] [--stamp-idle SEC] [--stamp-alarm-hours H]]");
+            eprintln!("         [--stamp [--stamp-tsa URL[,chain=URL][,crl=URL]]... [--stamp-every MIN] [--stamp-idle SEC] [--stamp-alarm-hours H]");
+            eprintln!("                  [--stamp-ots [--stamp-ots-calendar URL]...]]");
             eprintln!("       evidence-server keygen --out FILE");
             std::process::exit(2);
         }
@@ -111,6 +116,10 @@ fn serve(args: &[String]) {
         let list: Vec<&str> = cfg.authorities.iter().map(|a| a.url.as_str()).collect();
         eprintln!("evidence-server: outside time-stamping ON: {} (one stamp per unit at most every {} min while uploading, and when uploads stop)", list.join(", "), cfg.every_ms / 60_000);
         eprintln!("evidence-server: it sends only a SHA-256 fingerprint of each unit's access log; the services also see this server's address");
+        let cals = cfg.active_calendars();
+        if !cals.is_empty() {
+            eprintln!("evidence-server: OpenTimestamps ON: {} (a salted fingerprint; pending proofs are completed in Bitcoin after some hours)", cals.join(", "));
+        }
     }
     for w in cfg.warnings() {
         eprintln!("evidence-server: WARNING: {w}");
@@ -154,6 +163,22 @@ fn stamp_config(args: &[String]) -> evidence_server::stamp::Config {
             .collect();
         if !c.enabled {
             eprintln!("evidence-server: --stamp-tsa given without --stamp: outside time-stamping stays OFF");
+        }
+    }
+    c.ots = args.iter().any(|a| a == "--stamp-ots");
+    let cals = args_all(args, "--stamp-ots-calendar");
+    if !cals.is_empty() {
+        c.ots_calendars = cals
+            .iter()
+            .map(|s| {
+                evidence_server::ots::parse_calendar(s).unwrap_or_else(|e| {
+                    eprintln!("--stamp-ots-calendar {e}");
+                    std::process::exit(2)
+                })
+            })
+            .collect();
+        if !c.ots {
+            eprintln!("evidence-server: --stamp-ots-calendar given without --stamp-ots: OpenTimestamps stays OFF");
         }
     }
     let num = |name: &str, unit: u64, default: u64| -> u64 {

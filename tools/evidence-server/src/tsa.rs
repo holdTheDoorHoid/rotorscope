@@ -49,10 +49,15 @@ pub fn read_capped(r: impl std::io::Read, max: usize) -> Result<Vec<u8>, String>
 /// the host configured), and a deadline on the whole exchange, body
 /// included, so a slow authority cannot hold a worker.
 pub fn agent(timeout: std::time::Duration) -> ureq::Agent {
+    agent_with(timeout, USER_AGENT)
+}
+
+/// The same client with another fixed user agent (OpenTimestamps calendars).
+pub fn agent_with(timeout: std::time::Duration, user_agent: &str) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
         .try_proxy_from_env(false)
-        .user_agent(USER_AGENT)
+        .user_agent(user_agent)
         .timeout_connect(timeout)
         .timeout(timeout)
         .max_idle_connections(0)
@@ -76,11 +81,17 @@ pub fn post_query(agent: &ureq::Agent, url: &str, req: &[u8]) -> Result<Vec<u8>,
         .set("Accept-Encoding", "identity")
         .send_bytes(req)
         .map_err(short_error)?;
+    checked_body(resp, MAX_REPLY)
+}
+
+/// A `200` reply's body, uncompressed, of stated length, at most `max`
+/// bytes; anything else is an error.
+pub fn checked_body(resp: ureq::Response, max: usize) -> Result<Vec<u8>, String> {
     if resp.status() != 200 {
         return Err(format!("HTTP {} (redirects are not followed)", resp.status()));
     }
     plain_body(&resp)?;
-    read_capped(resp.into_reader(), MAX_REPLY)
+    read_capped(resp.into_reader(), max)
 }
 
 /// Refuse a reply that is compressed, or whose length is not stated.
@@ -112,15 +123,11 @@ fn plain_body(resp: &ureq::Response) -> Result<(), String> {
 /// GET a published file (certificate chain, revocation list), capped.
 pub fn get_capped(agent: &ureq::Agent, url: &str, max: usize) -> Result<Vec<u8>, String> {
     let resp = agent.get(url).set("Accept-Encoding", "identity").call().map_err(short_error)?;
-    if resp.status() != 200 {
-        return Err(format!("HTTP {} (redirects are not followed)", resp.status()));
-    }
-    plain_body(&resp)?;
-    read_capped(resp.into_reader(), max)
+    checked_body(resp, max)
 }
 
 /// A transport error, without the body an authority may have sent.
-fn short_error(e: ureq::Error) -> String {
+pub fn short_error(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, _) => format!("HTTP {code}"),
         ureq::Error::Transport(t) => {

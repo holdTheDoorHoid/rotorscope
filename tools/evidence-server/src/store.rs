@@ -668,16 +668,29 @@ impl Device {
 
     /// Keep a stamp, then log it in the audit chain (so removing it from
     /// `timestamps.log` shows).
-    pub fn record_stamp(&mut self, t: Timestamp, gen_time_ms: u64) -> Result<(), StoreError> {
+    ///
+    /// OpenTimestamps: a pending proof and, later, its completed form are
+    /// each a stamp line and an audit entry (`state`, and `upgrade_of` for the
+    /// completed one); the pending line is never rewritten.
+    pub fn record_stamp(&mut self, t: Timestamp, gen_time_ms: Option<u64>) -> Result<(), StoreError> {
         let token = evidence::b64::decode_vec(&t.token).unwrap_or_default();
-        let detail = serde_json::json!({
+        let mut detail = serde_json::json!({
             "authority": t.authority,
             "covers": t.covers,
             "audit_n": t.audit_n,
             "imprint": t.imprint,
             "token_sha256": hex(&evidence::sha256(&token)),
-            "gen_time": verify::fmt_utc(gen_time_ms),
         });
+        if let Some(g) = gen_time_ms {
+            detail["gen_time"] = verify::fmt_utc(g).into();
+        }
+        if t.kind == evidence::verify::bundle::KIND_OTS {
+            detail["kind"] = t.kind.clone().into();
+            detail["state"] = crate::ots::state(&token).into();
+            if let Some(u) = &t.upgrade_of {
+                detail["upgrade_of"] = u.clone().into();
+            }
+        }
         self.add_timestamp(t)?;
         self.audit("time-stamper", "timestamp", detail)?;
         Ok(())
