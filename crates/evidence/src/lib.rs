@@ -24,6 +24,8 @@
 //! - [`files`]: evidence file names on the card and the next one to create.
 //! - [`tsp`]: a minimal reader for RFC 3161 time-stamp replies (outside
 //!   time-stamps of a server's access log; signature not checked here).
+//! - [`ots`] (feature `verify`): OpenTimestamps proofs, the second,
+//!   independent kind of outside time-stamp (Bitcoin-anchored).
 //! - [`continuity`]: the boot counter and the previous boot's head, behind
 //!   the [`continuity::BootCounter`] trait (SD card state file now).
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
@@ -44,6 +46,10 @@ pub mod format;
 pub mod sign;
 #[cfg(feature = "decode")]
 pub mod summary;
+/// OpenTimestamps proofs (feature `verify`): parse, build, check against a
+/// Bitcoin block header the checker supplies.
+#[cfg(feature = "verify")]
+pub mod ots;
 pub mod tsp;
 #[cfg(feature = "verify")]
 pub mod verify;
