@@ -211,3 +211,42 @@ fn a_contested_link_without_identifiers_mutes_only_that_link() {
     tr.ingest_threat(4, &s2, 2_000);
     assert_eq!(announced(&mut tr, 2_000).len(), 1);
 }
+
+/// docs/LINK-KEYS-DESIGN.md 7.5: a node number can change hands (a slot
+/// re-provisioned at a higher generation, a different wired board, an
+/// evicted table entry). The operator's mute or snooze was for the board
+/// that had the number, never for whichever board gets it next.
+#[test]
+fn mute_does_not_follow_number_to_new_node() {
+    let mut tr: Tracker = Tracker::default();
+    // Node 3: a deauth flood (one entry per node) muted, a blinded snoozed.
+    let flood = tr.ingest_threat(3, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 1_000).unwrap();
+    let blind = tr.threats.ingest(3, true, &blinded(), 1_000).unwrap();
+    // Node 4: the same, muted too; and a site-file rule naming no node.
+    let other = tr.ingest_threat(4, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 1_000).unwrap();
+    announced(&mut tr, 1_000);
+    for id in [flood, blind, other] {
+        assert!(tr.silence(id, 1_000).is_some());
+    }
+    let site = Mute { source: [0x02, 0, 0, 0, 0, 9], ssid: "Cafe".try_into().unwrap(), ..Mute::empty(ThreatKind::EvilTwin) };
+    assert_eq!(tr.mute(site.clone(), 1_000), Ok(true));
+    assert_eq!(tr.mutes().len(), 4);
+
+    // Node 3 falls silent; a minute later its number goes to another board.
+    tr.forget_node(3, 70_000);
+    assert_eq!(tr.mutes().len(), 2, "node 3's mute and snooze are gone");
+    assert!(tr.mutes().iter().all(|m| m.node != 3));
+    assert!(tr.mutes().contains(&site), "a rule naming no node stays");
+
+    // The new node 3 reports a deauth flood and is blinded: both sound.
+    let f = tr.ingest_threat(3, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 71_000).unwrap();
+    let b = tr.threats.ingest(3, true, &blinded(), 71_000).unwrap();
+    assert!(!tr.get_threat(f).unwrap().muted);
+    assert!(!tr.get_threat(b).unwrap().muted);
+    let new = announced(&mut tr, 71_000);
+    assert!(new.contains(&f) && new.contains(&b), "{new:?}");
+    // Node 4 is still muted.
+    let o = tr.ingest_threat(4, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 71_000).unwrap();
+    assert!(tr.get_threat(o).unwrap().muted);
+    assert!(!announced(&mut tr, 71_000).contains(&o));
+}

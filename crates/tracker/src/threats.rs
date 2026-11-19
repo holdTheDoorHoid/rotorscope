@@ -830,6 +830,21 @@ impl ThreatTable {
         &self.v
     }
 
+    /// Node number `node` changed hands (docs/LINK-KEYS-DESIGN.md 7.5):
+    /// drop every mute and snooze that names it, so none lands on the board
+    /// that gets the number next. Rules naming no node stay. Threats that
+    /// were silenced only by those rules sound again if still active.
+    /// Returns how many rules were dropped.
+    pub fn forget_node(&mut self, node: u8, now_ms: u64) -> usize {
+        let before = self.mutes.len();
+        self.mutes.retain(|m| !(m.key() & key::NODE != 0 && m.node == node));
+        let dropped = before - self.mutes.len();
+        if dropped > 0 {
+            self.remute(now_ms);
+        }
+        dropped
+    }
+
     pub(crate) fn ingest(&mut self, node: u8, by_hub: bool, s: &ThreatSighting, now_ms: u64) -> Option<ThreatId> {
         let per_node = is_flood_kind(s.kind) && !self.sighting_muted(s, now_ms);
         let i = match self.v.iter().position(|t| t.same(node, by_hub, per_node, s)) {
@@ -1367,6 +1382,17 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         }
         self.threats.remute(now_ms);
         refused
+    }
+
+    /// Node number `node` now belongs to another board (an ESP-NOW slot
+    /// re-provisioned at a higher generation, a different wired board, or
+    /// an evicted entry; docs/LINK-KEYS-DESIGN.md 7.5). Every mute and
+    /// snooze naming the number is dropped ([`ThreatTable::forget_node`]),
+    /// and what the hub learned about the old board's link (its normal frame
+    /// rate) is forgotten. Returns the rules dropped.
+    pub fn forget_node(&mut self, node: u8, now_ms: u64) -> usize {
+        self.deaf.reset(node);
+        self.threats.forget_node(node, now_ms)
     }
 
     /// Drop the operator's mutes and snoozes, keep the site file's.
