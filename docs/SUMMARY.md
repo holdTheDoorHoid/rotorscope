@@ -87,6 +87,7 @@
 - [Evidence log format](EVIDENCE-FORMAT.md)
 - [Hard-won lessons](dev/gotchas.md)
 - [Contributing](dev/contributing.md)
+- [Agents, dependencies and review](dev/agents.md)
 - [Writing these docs](dev/docs-style.md)
 
 # Project
