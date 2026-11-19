@@ -51,6 +51,11 @@ jobs:
       - name: Documentation links
         run: python3 -I tools/docs-check.py
 
+      - name: Dependency gate (self-test, then every lockfile and workflow)
+        run: |
+          python3 -I tools/check-deps.py --self-test
+          python3 -I tools/check-deps.py
+
       - name: dev-board.sh self-test (dry runs, no board)
         run: tools/dev-board.sh --self-test
 
@@ -59,6 +64,11 @@ jobs:
 
       - name: check-wifi-blobs.sh self-test (fake data)
         run: tools/check-wifi-blobs.sh --self-test
+
+      - name: Release recipe self-tests (build nothing)
+        run: |
+          python3 -I tools/release-parts.py --self-test
+          tools/release-build.sh --self-test
 
   # Host tests of the root workspace (crates/ and tools/).
   test:
@@ -106,7 +116,9 @@ jobs:
         run: tools/ci-lockfiles.sh list
 
       - name: Prepare the P4 hub's patched esp-hal (pinned commit, patch SHA-256 checked)
-        run: tools/p4-prepare.sh
+        run: |
+          tools/p4-prepare.sh
+          tools/p4-prepare.sh --verify
 
       - name: Resolve every lockfile with --locked
         run: tools/ci-lockfiles.sh resolve

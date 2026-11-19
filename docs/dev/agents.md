@@ -8,7 +8,8 @@ repository is public, so anyone can write text an agent might read. Three things
 unnoticed: the files that steer agents could be weakened, a new dependency could bring in hostile
 code, and instructions hidden in an outsider's text could be obeyed. This page says what the
 project does about each. Status as of 2026-11-19: the rules, the check and the review file exist;
-the check has a self-test on made-up files and has not run in automatic CI.
+the check has a self-test on made-up files and is a step of the CI workflow
+(`.github/workflows/ci.yml`, "What CI checks" in [Build, test, flash](build-test-flash.md)).
 
 ## `AGENTS.md`
 
