@@ -2649,6 +2649,7 @@ dependencies = [
  "adsb",
  "ctrlwatch",
  "droneid",
+ "fuzzkit",
  "heapless 0.8.0",
  "libm",
  "link",
