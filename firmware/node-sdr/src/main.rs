@@ -186,6 +186,10 @@ async fn main(spawner: Spawner) -> ! {
         );
     }
 
+    // The link key: from the board's rskey partition, never from this image.
+    #[cfg(feature = "espnow")]
+    let keystore = node_common::keystore::read(peripherals.FLASH);
+
     // On the heap, not in main's future: the main stack also carries the
     // DroneID decoder (~30 KiB) and sits right above SRAM block 1, so every
     // byte kept here is a byte closer to the capture bank (2026-11-14: with
@@ -309,7 +313,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let hub = new_hub(radio.role);
     #[cfg(feature = "espnow")]
-    let up = wifi.as_ref().map(|w| new_uplink(w.esp_now()));
+    let up = wifi.as_ref().map(move |w| new_uplink(w.esp_now(), keystore));
     #[cfg(not(feature = "espnow"))]
     let up: Option<()> = None;
     println!(
@@ -464,6 +468,12 @@ async fn capture_loop(mut radio: alloc::boxed::Box<radio::Radio>, mut hub: alloc
             radio.stats_paced();
             radio.poll();
             link_line(&mut radio, &hub);
+            // The deaf fall-back: a hub plan whose dwells keep the windows
+            // away from the gateway for a minute is dropped (uplink.rs).
+            #[cfg(feature = "espnow")]
+            if let Some(u) = up.as_mut() {
+                u.deaf_tick(&mut radio, &mut hub);
+            }
             #[cfg(feature = "wirebus")]
             out::paced(node_common::bus::json_line().as_str(), 128, || radio.probe());
         }
@@ -494,8 +504,8 @@ fn new_hub(role: link::NodeRole) -> alloc::boxed::Box<hub::Hub> {
 
 #[cfg(feature = "espnow")]
 #[inline(never)]
-fn new_uplink(now: esp_radio::esp_now::EspNow) -> alloc::boxed::Box<uplink::Uplink> {
-    alloc::boxed::Box::new(uplink::Uplink::new(now))
+fn new_uplink(now: esp_radio::esp_now::EspNow, ks: node_common::keystore::Keystore) -> alloc::boxed::Box<uplink::Uplink> {
+    alloc::boxed::Box::new(uplink::Uplink::new(now, ks))
 }
 
 #[inline(never)]
