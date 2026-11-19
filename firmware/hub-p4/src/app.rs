@@ -172,8 +172,9 @@ impl App {
     fn announce_levels(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
         while let Some(r) = self.tracker.take_level_rise(now) {
             let Some(t) = self.tracker.get(r.track) else { continue };
-            // The drone's ID arrived over the air.
-            let text: heapless::String<256> = clean(&tracker::behaviour::describe(t, now));
+            // The drone's ID (and a spotter's or an earlier track's, rules
+            // 14 and 19) arrived over the air.
+            let text: heapless::String<256> = clean(&self.tracker.describe_level(r.track, now).unwrap_or_default());
             let data = tracker::behaviour::rise_data(t, &r);
             ev.event(evidence::format::EventCode::ThreatLevel, text.as_bytes(), &data);
             crate::println!("hub-p4: LEVEL {}", text);

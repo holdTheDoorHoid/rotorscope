@@ -106,7 +106,7 @@ const GPS_FIND_MS: u64 = 8_000;
 
 /// Directories: root, ROTORSCP, EVIDENCE. Files: CSV, pack, evidence (and
 /// the previous evidence file briefly at mount).
-type Vm = VolumeManager<SdDev, GpsClock, 4, 4, 1>;
+pub(crate) type Vm = VolumeManager<SdDev, GpsClock, 4, 4, 1>;
 type FsError = embedded_sdmmc::Error<sdnative::Error>;
 
 /// UTC (Unix ms) at hub time (ms), set from the GPS by [`set_clock`].
@@ -368,6 +368,26 @@ impl Logger {
             println!("hub-p4: {DIR}/{GPS_MEM_NAME} write failed; home and time not remembered this time");
         }
         true
+    }
+
+    /// For the small state files other modules keep in `ROTORSCP`
+    /// (`visits.rs`): the volume and the folder, while recording and the
+    /// card is not busy programming a block. Open files there with care: at
+    /// most one at a time, closed before returning (the volume holds four).
+    pub(crate) fn folder(&self) -> Option<(&Vm, RawDirectory)> {
+        if self.state != State::Recording {
+            return None;
+        }
+        let vm = self.vm.as_ref()?;
+        if vm.device(|d| d.card.borrow_mut().is_busy()) {
+            return None;
+        }
+        Some((vm, self.open.as_ref()?.dir))
+    }
+
+    /// Recording: a card is mounted and in use.
+    pub(crate) fn recording(&self) -> bool {
+        self.state == State::Recording
     }
 
     /// The site file read at mount, once.

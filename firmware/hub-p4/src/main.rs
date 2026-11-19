@@ -54,6 +54,7 @@ mod sdbb;
 mod site;
 mod touch;
 mod uartring;
+mod visits;
 mod webhead;
 #[cfg(feature = "webheadloop")]
 mod webheadloop;
@@ -369,6 +370,8 @@ fn main() -> ! {
     let mut site_line: Option<heapless::String<120>> = None;
     let mut site = site::Site::default();
     let mut gpsmem = gpsmem::GpsMem::default();
+    // The repeat-visitor history on the card (threat rule 17, visits.rs).
+    let mut visits = visits::VisitsSd::default();
     #[cfg(feature = "gpsloop")]
     gpsloop::boot_scenario(&mut gps);
 
@@ -434,7 +437,7 @@ fn main() -> ! {
         adsbee.tick(app.tracker, ms, gw.feed.as_mut());
         #[cfg(feature = "webheadloop")]
         whloop.tick(&mut adsbee, app.tracker, &mut gw, ms);
-        let mut lines = Lines { note: &mut note, site: &mut site_line, gm: &mut gpsmem };
+        let mut lines = Lines { note: &mut note, site: &mut site_line, gm: &mut gpsmem, vs: &mut visits };
         if let Some(line) = command(&mut app, &mut gps, faa, &mut ev, &mut sdlog, &mut down, &mut lines, ms) {
             let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
             site.operator_line(&line, &mut app, &gw, own, &mut sdlog, &mut ev, ms);
@@ -505,6 +508,8 @@ fn main() -> ! {
         if let Some(m) = sdlog.take_gps_mem() {
             gpsmem.loaded(&mut gps, &mut ev, m);
         }
+        // After the site file (its `visits` switch decides whether to read).
+        visits.tick(&mut app, &sdlog, &mut ev, ms, utc);
         if let Some(k) = sdlog.take_o4_key() {
             let fp = k.fingerprint();
             app.o4.set_key(k);
@@ -683,6 +688,8 @@ struct Lines<'a> {
     site: &'a mut Option<heapless::String<120>>,
     /// GPS memory and the operator's GPS decisions (`m`, `H`, `T`).
     gm: &'a mut gpsmem::GpsMem,
+    /// The repeat-visitor history (`W` wipes it).
+    vs: &'a mut visits::VisitsSd,
 }
 
 /// `faulttest` builds: the console line being typed after `f`.
@@ -806,7 +813,11 @@ fn command(
         return None;
     }
     ev.set_context(app, gps, now);
+    if c != b'W' {
+        lines.vs.cancel_wipe();
+    }
     match c {
+        b'W' => lines.vs.wipe_key(app, sdlog, ev, now),
         b'n' => {
             *note = Some(heapless::String::new());
             println!("hub-p4: cmd type the note, then Enter (Esc cancels)");
@@ -873,11 +884,11 @@ fn command(
         b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | area <name> circle <lat> <lon> <m> | area <name> poly <lat> <lon> ... | area <name> ceiling <m> | area <name> clear | area here <m> | bubble <m> | bubble off | friend <serial> [label] | friend <serial> clear");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | area <name> circle <lat> <lon> <m> | area <name> poly <lat> <lon> ... | area <name> ceiling <m> | area <name> clear | area here <m> | bubble <m> | bubble off | friend <serial> [label] | friend <serial> clear | crowd <n>|on|off | visits on|off");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
-        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off / area / bubble / friend), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off / area / bubble / friend / crowd / visits), W=wipe the repeat-visitor history (press twice), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

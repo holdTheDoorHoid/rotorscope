@@ -26,6 +26,7 @@
 //!   `H` accept the new GPS home the hub found (after a "NOT adopted" line)
 //!   `T` accept GPS time as it is now (after a time jump / time floor alarm)
 //!   `L` type one site line (node position, mute an alarm; `tracker::site`)
+//!   `W` wipe the repeat-visitor history (twice within 5 s; `visits.rs`)
 //!   `h` / `?` help
 
 use core::cell::RefCell;
