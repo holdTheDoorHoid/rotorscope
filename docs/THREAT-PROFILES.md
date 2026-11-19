@@ -1,6 +1,10 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
-Status: **design draft, 2026-11-18, branch `threat-profiles`.** Nothing built yet.
+Status: **design accepted 2026-11-18, branch `threat-profiles`; slice 16a in progress.**
+
+Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
+repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
+from the hub; build 16a next.
 Research behind it: [THREAT-TACTICS.md](THREAT-TACTICS.md) (sourced catalogue of hostile and
 criminal drone tactics, counter-drone products, and lightweight trajectory methods).
 
