@@ -103,17 +103,26 @@ impl Serialize for ReasonsJ<'_> {
                 r.rule,
                 Rule::InArea | Rule::AboveCeiling | Rule::Loitering | Rule::Circling | Rule::LowHover | Rule::Drop
             );
-            let lasting = matches!(r.rule, Rule::Loitering | Rule::Circling | Rule::LowHover | Rule::Following);
+            let lasting = matches!(
+                r.rule,
+                Rule::Loitering | Rule::Circling | Rule::LowHover | Rule::Following | Rule::Probing | Rule::PilotMoving
+            );
+            let since = matches!(r.rule, Rule::LastSeenInbound | Rule::Drop | Rule::SpotterStriker | Rule::IdentityChanged);
             seq.serialize_element(&ReasonJ {
                 rule: r.rule.name(),
                 level: r.level.name(),
                 place: r.place(),
                 m: r.range_m(),
                 eta_s: r.eta_s().filter(|_| approach),
-                mps: r.speed_mps().filter(|_| approach),
+                mps: r.speed_mps().filter(|_| approach || r.rule == Rule::PilotMoving),
                 h_m: r.height_m().filter(|_| high),
-                ago_s: r.ago_s().filter(|_| matches!(r.rule, Rule::LastSeenInbound | Rule::Drop)),
+                ago_s: r.ago_s().filter(|_| since),
                 for_s: r.for_s().filter(|_| lasting),
+                other: r.other().map(|o| o.0),
+                n: r.count().filter(|_| r.rule == Rule::Several),
+                alarm: r.alarm().map(|a| if a == crate::behaviour::across::ALARM_GNSS { "gps" } else { "jamming" }),
+                days: r.count().filter(|_| r.rule == Rule::RepeatVisitor),
+                by: (r.rule == Rule::RepeatVisitor).then_some(if r.by_pilot_spot() { "pilot_spot" } else { "drone" }),
             })?;
         }
         seq.end()
@@ -126,7 +135,15 @@ impl Serialize for ReasonsJ<'_> {
 /// `eta_s` and `mps` (closing speed) for beeline, fast_inbound and
 /// last_seen_inbound, `ago_s` for last_seen_inbound and drop, `for_s` (how
 /// long) for loitering, circling, low_hover and following. Slice 16b added
-/// the last five rules and `for_s`.
+/// the last five rules and `for_s`. Slice 16d added: spotter_striker
+/// (`ago_s` since the spotter last lingered, `other` the spotter's track
+/// id), spotter (`other` the striker), several_at_once (`n` drones, or
+/// `alarm`: `"jamming"` or `"gps"`), probing (`for_s` how long it was
+/// away), repeat_visitor (`days` in two weeks, `by`: `"drone"` or
+/// `"pilot_spot"`), pilot_moving (`mps` the pilot's speed, `for_s` over how
+/// long), identity_changed (`ago_s` since the change, `other` the earlier
+/// track when it was a new track). For these `m` is the distance from the
+/// place's middle (the striker's own distance for spotter_striker).
 #[derive(Serialize)]
 struct ReasonJ<'a> {
     rule: &'static str,
@@ -144,6 +161,16 @@ struct ReasonJ<'a> {
     ago_s: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     for_s: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    other: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alarm: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    days: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    by: Option<&'static str>,
 }
 
 fn threat_json(t: &Track, now: u64) -> Option<ThreatJ<'_>> {
@@ -490,8 +517,8 @@ struct Own {
 /// protocol 8 added `dji.o4`; 2432 before the `spoof` and `cont` objects,
 /// which add up to 373 bytes; 2816 before WP-10's `claims` object, which
 /// adds up to 195; 3008 before slice 16a's `threat` object, which adds up
-/// to 489 (515 with slice 16b's lingering rules); worst case now 3412
-/// bytes.)
+/// to 489 (515 with slice 16b's lingering rules, 546 with slice 16d's rules
+/// across drones and days); worst case now 3443 bytes.)
 pub const MAX_LINE: usize = 3456;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.

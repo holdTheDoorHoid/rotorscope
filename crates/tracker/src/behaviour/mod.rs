@@ -1,5 +1,5 @@
 //! Threat levels: what each drone is *doing*, judged against the places
-//! the owner protects (docs/THREAT-PROFILES.md, slices 16a and 16b).
+//! the owner protects (docs/THREAT-PROFILES.md, slices 16a, 16b and 16d).
 //!
 //! Every drone that reports its position (Remote ID, DJI DroneID, MAVLink
 //! telemetry) gets one level, the highest any rule gives it, and up to
@@ -37,6 +37,19 @@
 //! 11. **Following** (Warning): keeping near the unit while it travels (the
 //!     bubble only).
 //!
+//! Slice 16d adds the rules across drones and days ([`across`], with the
+//! repeat-visitor history in [`visits`] and the pilot's trail in [`watch`]):
+//! 14. **Spotter then striker** (Critical): a different drone heads for a
+//!     place within 10 min of another lingering there.
+//! 15. **Several at once** (Warning): 3 or more drones at the places, or a
+//!     drone at a place during jamming or GPS interference.
+//! 16. **Probing** (Caution): back in an area it left 30 s to 30 min ago.
+//! 17. **Repeat visitor**: the same drone or pilot spot on 3 or more days
+//!     in two weeks; raises the other reasons by one level (to Warning at
+//!     most), a reason at Notice on its own.
+//! 18. **Pilot on the move** (Caution): the pilot moving over 5 m/s.
+//! 19. **Identity changes** (Warning): a new ID mid-flight near a place.
+//!
 //! Two or more *different* Caution rules at once make a Warning (one sign
 //! rarely proves anything; two together are worth more), with two
 //! exceptions: loitering is the same sign as being in the area (it is
@@ -64,18 +77,23 @@
 //! Only confirmed tracks ([`crate::probation`]) with a position heard in
 //! the last [`FRESH_MS`] are judged; a drone with no position gets no level.
 
+pub mod across;
 pub mod follow;
 pub mod linger;
 pub mod path;
 pub mod places;
 pub mod scenario;
+pub mod visits;
+pub mod watch;
 
 use core::fmt::Write;
 
 use heapless::{String, Vec};
 use libm::{acosf, sqrtf};
 
+pub use across::{Across, Cross};
 pub use path::{OwnTrail, PathPoint, PathRing, PathStore};
+pub use visits::Visits;
 pub use places::{Area, Frame, Friend, Local, Name, Places, Shape, Vertex};
 
 use crate::{OwnFix, Track, TrackId};
@@ -186,9 +204,19 @@ pub enum Rule {
     LowHover = 9,
     Drop = 10,
     Following = 11,
+    /// Slice 16d ([`across`]): a different drone heads for a place soon
+    /// after a spotter lingered there (on the striker).
+    SpotterStriker = 14,
+    Several = 15,
+    Probing = 16,
+    RepeatVisitor = 17,
+    PilotMoving = 18,
+    IdentityChanged = 19,
     /// Not a rule of its own: a Warning or Critical drone lost while it
     /// was heading in, held for [`DECAY_MS`].
     LastSeenInbound = 20,
+    /// Part of rule 14, on the spotter: a striker followed it.
+    Spotter = 21,
 }
 
 impl Rule {
@@ -205,25 +233,35 @@ impl Rule {
             Rule::LowHover => "low_hover",
             Rule::Drop => "drop",
             Rule::Following => "following",
+            Rule::SpotterStriker => "spotter_striker",
+            Rule::Several => "several_at_once",
+            Rule::Probing => "probing",
+            Rule::RepeatVisitor => "repeat_visitor",
+            Rule::PilotMoving => "pilot_moving",
+            Rule::IdentityChanged => "identity_changed",
             Rule::LastSeenInbound => "last_seen_inbound",
+            Rule::Spotter => "spotter",
         }
     }
 
     /// The level the rule gives (loitering: at first; it rises to Warning
-    /// when long and low).
+    /// when long and low; a repeat visitor: on its own, else it raises).
     pub const fn level(self) -> Level {
         match self {
             Rule::InArea | Rule::PilotNear | Rule::PilotOutside | Rule::AboveCeiling => Level::Caution,
-            Rule::Loitering | Rule::Circling => Level::Caution,
+            Rule::Loitering | Rule::Circling | Rule::Probing | Rule::PilotMoving => Level::Caution,
             Rule::LowHover | Rule::Drop | Rule::Following => Level::Warning,
-            Rule::Beeline => Level::Warning,
-            Rule::FastInbound => Level::Critical,
+            Rule::Beeline | Rule::Several | Rule::IdentityChanged | Rule::Spotter => Level::Warning,
+            Rule::FastInbound | Rule::SpotterStriker => Level::Critical,
             Rule::LastSeenInbound => Level::Warning,
+            Rule::RepeatVisitor => Level::Notice,
         }
     }
 
-    /// Rules about places and lingering (1-4, 7-11): a friend gets only
-    /// Notice from them. The approach rules (5, 6) are never lowered.
+    /// Rules about places and lingering (1-4, 7-11; from 16d also several
+    /// at once, probing and pilot on the move): a friend gets only Notice
+    /// from them. The approach rules (5, 6, 14 on the striker) and identity
+    /// changes (19) are never lowered.
     pub const fn is_place_rule(self) -> bool {
         matches!(
             self,
@@ -236,6 +274,9 @@ impl Rule {
                 | Rule::LowHover
                 | Rule::Drop
                 | Rule::Following
+                | Rule::Several
+                | Rule::Probing
+                | Rule::PilotMoving
         )
     }
 }
@@ -261,6 +302,18 @@ impl Rule {
 ///   above the unit, `ago_s` since it left the bottom.
 /// - following: `range_m` how far the unit has travelled with it near,
 ///   `for_s` for how long.
+/// - slice 16d (all but the striker's: `range_m` from the middle of the
+///   place it is at or near):
+///   - spotter then striker: the striker's distance, `ago_s` since the
+///     spotter last lingered, [`Reason::other`] the spotter;
+///   - spotter: [`Reason::other`] the striker;
+///   - several at once: [`Reason::count`] drones, or [`Reason::alarm`];
+///   - probing: `for_s` how long it was away;
+///   - repeat visitor: [`Reason::count`] days, [`Reason::by_pilot_spot`];
+///   - pilot on the move: `speed_mps` the pilot's speed, `for_s` over how
+///     long;
+///   - identity changes: `ago_s` since the change, [`Reason::other`] the
+///     earlier track (none when the serial changed within this track).
 ///
 /// Kept compact (26 bytes: whole metres, tenths of seconds and of m/s),
 /// because every track holds up to [`MAX_REASONS`] and the S3 hub keeps
@@ -378,6 +431,10 @@ pub struct Eval {
     /// Which places it counts as inside (bit 0 the bubble, bit 1 + n area
     /// n), for the edge margin next time.
     pub inside: u16,
+    /// Areas it is probing (rule 16, bits as `inside`), and how long it was
+    /// away (seconds).
+    pub probing: u16,
+    pub probe_away_s: u16,
 }
 
 /// One drone's threat level, as shown, and what it needs to move slowly.
@@ -399,6 +456,9 @@ pub struct TrackThreat {
     last_heard_ms: u64,
     /// Places it counts as inside ([`Eval::inside`]).
     inside: u16,
+    /// Areas it is probing, and how long it was away ([`Eval::probing`]).
+    probing: u16,
+    probe_away_s: u16,
     /// The latest approach reason while the drone was heard.
     inbound: Option<Reason>,
     snoozed_until_ms: u64,
@@ -430,20 +490,31 @@ impl TrackThreat {
         self.rise
     }
 
+    /// One reason of `rule` with every field at its widest.
+    #[cfg(test)]
+    pub(crate) fn wide_for_tests(rule: Rule) -> Reason {
+        let name = Name::try_from("abcdefghijkl").unwrap();
+        let mut r = Reason::new(rule, Level::Critical, &name, 1.0e9).with_eta(1.0e9).with_speed(1.0e9).with_height(Some(-1.0e9));
+        r.secs = NONE_U16 - 1;
+        if matches!(rule, Rule::Several | Rule::RepeatVisitor) {
+            // The alarm's name, the pilot spot: wider than the numbers.
+            r.eta_ds = 1;
+        }
+        r
+    }
+
+    /// The four widest reasons (checked in `tests_across`).
+    #[cfg(test)]
+    pub(crate) const WORST_RULES: [Rule; 4] = [Rule::IdentityChanged, Rule::SpotterStriker, Rule::RepeatVisitor, Rule::FastInbound];
+
     /// The longest JSON and CoT this can produce: every field at its widest.
     #[cfg(test)]
     pub(crate) fn worst_for_tests(now_ms: u64) -> Self {
-        let name = Name::try_from("abcdefghijkl").unwrap();
-        let wide = |rule| {
-            let mut r = Reason::new(rule, Level::Critical, &name, 1.0e9).with_eta(1.0e9).with_speed(1.0e9).with_height(Some(-1.0e9));
-            r.secs = NONE_U16 - 1;
-            r
-        };
         let mut reasons = Vec::new();
         // The four widest reasons (wider than any set a drone can have at
         // once; a held drone has only its one "last seen inbound" reason).
-        for rule in [Rule::FastInbound, Rule::Beeline, Rule::Loitering, Rule::LowHover] {
-            let _ = reasons.push(wide(rule));
+        for rule in Self::WORST_RULES {
+            let _ = reasons.push(Self::wide_for_tests(rule));
         }
         Self {
             level: Some(Level::Critical),
@@ -479,6 +550,8 @@ impl TrackThreat {
         self.held = false;
         self.last_heard_ms = e.heard_ms;
         self.inside = e.inside;
+        self.probing = e.probing;
+        self.probe_away_s = e.probe_away_s;
         self.friend = e.friend;
         self.inbound = e.reasons.iter().find(|r| matches!(r.rule, Rule::Beeline | Rule::FastInbound)).copied();
         match self.level {
@@ -510,6 +583,16 @@ impl TrackThreat {
     /// Places it counted as inside at the last judgement.
     pub fn inside(&self) -> u16 {
         self.inside
+    }
+
+    /// Areas it is probing (rule 16; bits as [`Eval::inside`]).
+    pub fn probing(&self) -> u16 {
+        self.probing
+    }
+
+    /// How long it was away before coming back (rule 16), seconds.
+    pub fn probe_away_s(&self) -> u16 {
+        self.probe_away_s
     }
 
     fn unheard(&mut self, has_position: bool, now_ms: u64) {
@@ -759,13 +842,16 @@ fn ground_alt(l: &rid::message::Location, own: Option<&OwnFix>) -> Option<f32> {
 
 /// Judge one drone against every place. `None` when it is not judged: not
 /// confirmed, no position, or the position is older than [`FRESH_MS`].
-/// `trail` is the unit's own trail (for "following").
+/// `trail` is the unit's own trail (for "following"); `cross` what the
+/// rules across drones and days keep (slice 16d; `None`: those rules are
+/// not run).
 pub fn evaluate<const P: usize>(
     t: &Track,
     ring: Option<&PathRing>,
     places: &Places,
     own: Option<&OwnFix>,
     trail: Option<&OwnTrail<P>>,
+    cross: Option<&mut Cross<'_, P>>,
     now_ms: u64,
 ) -> Option<Eval> {
     let was_inside = t.threat.inside;
@@ -814,7 +900,7 @@ pub fn evaluate<const P: usize>(
     });
     // One hit per rule for the fixed areas and one for the bubble (the
     // most serious, then the nearest), so the list never overflows.
-    let mut hits: Vec<Reason, 24> = Vec::new();
+    let mut hits: Vec<Reason, 32> = Vec::new();
     let mut add = |r: Reason| match hits.iter_mut().find(|o| o.rule == r.rule && o.is_bubble() == r.is_bubble()) {
         Some(o) => {
             if r.level > o.level || (r.level == o.level && r.range_m < o.range_m) {
@@ -836,6 +922,9 @@ pub fn evaluate<const P: usize>(
     });
     let place_level = if friend { Level::Notice } else { Level::Caution };
     let mut inside_now = 0u16;
+    // The nearest place it is at or near (slice 16d).
+    let mut near: Option<across::Near> = None;
+    let mut area_out = [f32::MAX; places::MAX_AREAS];
     // Bit 0 the bubble (when on), bit 1 + n area n.
     let bits = (places.bubble_m.is_some() && own.is_some()).then_some(1u16).into_iter().chain(
         places.areas.iter().enumerate().filter(|(_, a)| a.shape.is_some()).map(|(i, _)| 2u16 << i),
@@ -849,6 +938,13 @@ pub fn evaluate<const P: usize>(
         }
         let from_middle = sqrtf(p.0 * p.0 + p.1 * p.1);
         let inside = tg.local.contains(p) || (was_inside & bit != 0 && tg.local.outside_by(p) <= EDGE_MARGIN_M);
+        let out = if inside { 0.0 } else { tg.local.outside_by(p) };
+        if bit > 1 {
+            area_out[(bit.trailing_zeros() - 1) as usize] = out;
+        }
+        if out <= tg.local.size_m.max(across::NEAR_MIN_M) && near.as_ref().is_none_or(|n| out < n.out_m) {
+            near = Some(across::Near { name: tg.name.clone(), from_middle, out_m: out });
+        }
         if inside {
             inside_now |= bit;
             add(Reason::new(Rule::InArea, place_level, &tg.name, from_middle).with_height(height));
@@ -940,9 +1036,17 @@ pub fn evaluate<const P: usize>(
         let level = if friend { Level::Notice } else { Level::Warning };
         add(Reason::new(Rule::Following, level, &Name::new(), fl.travelled_m).with_secs(fl.ms));
     }
+    // 14-19: across drones and days.
+    let mut probing = (0, 0);
+    if let Some(c) = cross {
+        let (key, id_key) = across::keys(t);
+        let facts = across::Facts { key, id_key, friend, near: near.as_ref(), was_inside, inside_now, area_out, pilot };
+        probing = across::judge(&mut hits, t, ring, places, &facts, c, now_ms);
+    }
     let mut e = judge(hits, friend);
     e.heard_ms = loc.rx_ms;
     e.inside = inside_now;
+    (e.probing, e.probe_away_s) = probing;
     Some(e)
 }
 
@@ -980,7 +1084,7 @@ fn judge<const H: usize>(mut hits: Vec<Reason, H>, friend: bool) -> Eval {
             break;
         }
     }
-    Eval { level, reasons, combined, friend, heard_ms: 0, inside: 0 }
+    Eval { level, reasons, combined, friend, heard_ms: 0, inside: 0, probing: 0, probe_away_s: 0 }
 }
 
 // ------------------------------------------------------------- wording --
@@ -1016,9 +1120,42 @@ fn area_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
     if r.is_bubble() { w.write_str("your bubble") } else { w.write_str(r.place()) }
 }
 
+/// `at house`, `near you`.
+fn at_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
+    if r.is_bubble() { w.write_str("near you") } else { write!(w, "at {}", r.place()) }
+}
+
+/// The other drone of a rule-14 or rule-19 reason: its ID when the caller
+/// knows it (`name`), else `drone #12` (its track number).
+fn other_text(w: &mut impl Write, r: &Reason, name: Option<&str>) -> core::fmt::Result {
+    match (name.filter(|n| !n.is_empty()), r.other()) {
+        (Some(n), _) => write!(w, "drone {n}"),
+        (None, Some(id)) => write!(w, "drone #{}", id.0),
+        (None, None) => w.write_str("another drone"),
+    }
+}
+
+/// `3rd`, `4th`.
+fn ordinal(w: &mut impl Write, n: u16) -> core::fmt::Result {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    write!(w, "{n}{suffix}")
+}
+
 /// One reason in words: `heading for house, 180 m away at 12 m/s, there in
 /// about 14 s`.
 pub fn write_reason(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
+    write_reason_named(w, r, None)
+}
+
+/// As [`write_reason`], naming the other drone of a rule-14 or rule-19
+/// reason by `other` (its ID, cleaned by the caller) when given.
+pub fn write_reason_named(w: &mut impl Write, r: &Reason, other: Option<&str>) -> core::fmt::Result {
     match r.rule {
         Rule::InArea if r.is_bubble() => write!(w, "within your bubble, {:.0} m from you", r.range_m()),
         Rule::InArea => write!(w, "over {}", r.place()),
@@ -1094,6 +1231,61 @@ pub fn write_reason(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
             duration_text(w, r.for_s())?;
             w.write_str(")")
         }
+        Rule::SpotterStriker => {
+            w.write_str("follows spotter ")?;
+            other_text(w, r, other)?;
+            w.write_str(" (lingered ")?;
+            at_text(w, r)?;
+            w.write_str(" ")?;
+            duration_text(w, r.ago_s())?;
+            w.write_str(" ago)")
+        }
+        Rule::Spotter => {
+            w.write_str("spotter: ")?;
+            other_text(w, r, other)?;
+            w.write_str(" is rushing to ")?;
+            place_text(w, r)
+        }
+        Rule::Several => match r.alarm() {
+            Some(a) => {
+                at_text(w, r)?;
+                w.write_str(if a == across::ALARM_GNSS { " during GPS interference" } else { " while jamming is heard" })
+            }
+            None => {
+                write!(w, "one of {} drones ", r.count().unwrap_or(0))?;
+                at_text(w, r)?;
+                w.write_str(" at once")
+            }
+        },
+        Rule::Probing => {
+            write!(w, "back over {} after ", r.place())?;
+            duration_text(w, r.for_s())?;
+            w.write_str(" away (probing)")
+        }
+        Rule::RepeatVisitor => {
+            ordinal(w, r.count().unwrap_or(0))?;
+            w.write_str(" day in 2 weeks ")?;
+            at_text(w, r)?;
+            w.write_str(if r.by_pilot_spot() { " (same pilot spot)" } else { " (same drone)" })
+        }
+        Rule::PilotMoving => {
+            write!(w, "pilot on the move at {:.0} m/s while it flies ", r.speed_mps().unwrap_or(0.0))?;
+            at_text(w, r)
+        }
+        Rule::IdentityChanged => match r.other() {
+            Some(_) => {
+                w.write_str("new identity mid-flight ")?;
+                at_text(w, r)?;
+                w.write_str(" (was ")?;
+                other_text(w, r, other)?;
+                write!(w, ", {} s ago)", r.ago_s().unwrap_or(0))
+            }
+            None => {
+                w.write_str("serial changed mid-flight ")?;
+                at_text(w, r)?;
+                write!(w, ", {} s ago", r.ago_s().unwrap_or(0))
+            }
+        },
     }
 }
 
@@ -1118,6 +1310,12 @@ fn height_text(w: &mut impl Write, r: &Reason) -> core::fmt::Result {
 /// about 14 s; over yard`. The drone's ID arrived over the air: the hub
 /// cleans it before printing or logging.
 pub fn describe(t: &Track, now_ms: u64) -> String<256> {
+    describe_with(t, now_ms, |_| None)
+}
+
+/// As [`describe`], naming the other drones of rules 14 and 19 by
+/// `name_of` (their IDs; the hub cleans the whole text before printing).
+pub fn describe_with<'a>(t: &Track, now_ms: u64, name_of: impl Fn(TrackId) -> Option<&'a str>) -> String<256> {
     let mut s: String<256> = String::new();
     let th = &t.threat;
     let _ = write!(s, "{}: drone ", th.level.map_or("No level", |l| l.label()));
@@ -1134,7 +1332,7 @@ pub fn describe(t: &Track, now_ms: u64) -> String<256> {
     }
     for (i, r) in th.reasons.iter().enumerate() {
         let _ = s.push_str(if i == 0 { " " } else { "; " });
-        let _ = write_reason(&mut s, r);
+        let _ = write_reason_named(&mut s, r, r.other().and_then(&name_of));
     }
     if th.combined {
         let _ = s.push_str("; two signs at once");
@@ -1186,6 +1384,16 @@ pub fn strip_text(t: &Track) -> Option<String<64>> {
             Rule::LowHover => write!(s, "low over {place} {:.0}m", r.height_m().unwrap_or(0.0)),
             Rule::Drop => write!(s, "drop at {place} {}m", r.range_m),
             Rule::Following => write!(s, "following you {}m", r.range_m),
+            Rule::SpotterStriker => write!(s, "after spotter to {place}"),
+            Rule::Spotter => write!(s, "spotter for #{}", r.other().map_or(0, |o| o.0)),
+            Rule::Several => match r.alarm() {
+                Some(a) => write!(s, "at {place} {}", if a == across::ALARM_GNSS { "GPS jam" } else { "jamming" }),
+                None => write!(s, "{} at once {place}", r.count().unwrap_or(0)),
+            },
+            Rule::Probing => write!(s, "probing {place}"),
+            Rule::RepeatVisitor => ordinal(&mut s, r.count().unwrap_or(0)).and_then(|_| write!(s, " day {place}")),
+            Rule::PilotMoving => write!(s, "pilot moving {:.0}m/s", r.speed_mps().unwrap_or(0.0)),
+            Rule::IdentityChanged => write!(s, "new identity {place}"),
         };
     }
     Some(s)
@@ -1193,5 +1401,7 @@ pub fn strip_text(t: &Track) -> Option<String<64>> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_across;
 #[cfg(test)]
 mod tests_linger;

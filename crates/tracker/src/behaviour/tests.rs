@@ -40,11 +40,29 @@ pub(crate) struct Drone<'a> {
     /// Heard from `from_s` until (not including) `until_s`.
     pub from_s: u64,
     pub until_s: u64,
+    /// A pilot that moves (slice 16d): where it stands at each second; wins
+    /// over `pilot`.
+    pub pilot_at: Option<&'a dyn Fn(f64) -> (f64, f64)>,
+    /// From this second on it sends this serial instead (slice 16d).
+    pub rename: Option<(u64, &'a str)>,
+    /// A second Basic ID it sends: a CAA registration (slice 16d).
+    pub reg: Option<&'a str>,
 }
 
 impl<'a> Drone<'a> {
     pub fn new(serial: &'a str, path: &'a dyn Fn(f64) -> Sample) -> Self {
-        Self { serial, path, pilot: None, jitter_m: 0.0, alt_jitter_m: 0.0, from_s: 0, until_s: u64::MAX }
+        Self {
+            serial,
+            path,
+            pilot: None,
+            jitter_m: 0.0,
+            alt_jitter_m: 0.0,
+            from_s: 0,
+            until_s: u64::MAX,
+            pilot_at: None,
+            rename: None,
+            reg: None,
+        }
     }
 }
 
@@ -56,6 +74,9 @@ pub(crate) struct Sim {
     pub s: u64,
     /// The unit's own path (`None`: standing at [`SITE`]).
     pub own: Option<std::boxed::Box<dyn Fn(f64) -> Sample>>,
+    /// UTC (Unix ms) at second 0, given to the tracker every second as GPS
+    /// time would be (`None`: no UTC). Slice 16d.
+    pub utc0: Option<u64>,
     seed: u32,
 }
 
@@ -70,7 +91,14 @@ impl Sim {
             st.apply(site::parse_line(l).unwrap_or_else(|e| panic!("{l}: {e}")));
         }
         tr.set_places(&st.places);
-        Self { tr, s: 0, own: None, seed: 12345 }
+        Self { tr, s: 0, own: None, utc0: None, seed: 12345 }
+    }
+
+    /// Jump the clock `secs` ahead without hearing anything (a night, a
+    /// day: the tracker forgets the drones on the next second, as the hub
+    /// would after ten minutes).
+    pub fn skip(&mut self, secs: u64) {
+        self.s += secs;
     }
 
     pub fn now(&self) -> u64 {
@@ -88,6 +116,9 @@ impl Sim {
     pub fn step(&mut self, drones: &[Drone<'_>]) {
         let now = self.now();
         let t = self.s as f64;
+        if let Some(u) = self.utc0 {
+            self.tr.set_utc(u + self.s * 1000, now);
+        }
         match &self.own {
             None => self.tr.set_own_fix(SITE.0, SITE.1, Some(OWN_ALT), now, Some((0.0, None))),
             Some(f) => {
@@ -108,7 +139,23 @@ impl Sim {
                 p.alt_m += (self.noise() * d.alt_jitter_m) as f32;
             }
             let mac = [0x60, 0x60, 0x1f, 0, 0, i as u8 + 1];
-            let det = det(Transport::WifiBeacon, mac, -60, &frame(d.serial, &p, d.pilot));
+            let serial = match d.rename {
+                Some((from, s)) if self.s >= from => s,
+                _ => d.serial,
+            };
+            let pilot = d.pilot_at.map(|f| f(t)).or(d.pilot);
+            let mut msgs = frame(serial, &p, pilot);
+            if let Some(reg) = d.reg {
+                msgs.push(
+                    encode::message(&Message::BasicId(BasicId {
+                        id_type: IdType::CaaRegistration,
+                        ua_type: UaType::HelicopterOrMultirotor,
+                        uas_id: FixedStr::new(reg.as_bytes()).unwrap(),
+                    }))
+                    .unwrap(),
+                );
+            }
+            let det = det(Transport::WifiBeacon, mac, -60, &msgs);
             self.tr.ingest(0, &det, now);
         }
         self.tr.expire(now);
@@ -663,7 +710,8 @@ fn the_tracker_with_path_history_stays_under_a_mebibyte() {
         size_of::<Track>(),
     );
     assert!(hub < 1 << 20, "{hub}");
-    assert!(size_of::<PathRing>() <= 4_500);
+    // 16d added the pilot's trail and the serials (~170 B) to each ring.
+    assert!(size_of::<PathRing>() <= 4_600, "{}", size_of::<PathRing>());
     assert_eq!(size_of::<PathPoint>(), 12);
 }
 

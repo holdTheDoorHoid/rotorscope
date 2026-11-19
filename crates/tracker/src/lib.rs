@@ -1015,6 +1015,10 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     /// Where the unit itself has been, one point every five seconds (the
     /// "following" rule; [`behaviour::OwnTrail`], 48 bytes a path ring).
     own_trail: behaviour::OwnTrail<P>,
+    /// What the rules across drones and days keep (slice 16d,
+    /// [`behaviour::across`]): spotters, drones that left an area, the
+    /// repeat-visitor history. About 10 KB with path rings, nothing without.
+    across: behaviour::Across<P>,
     /// Where each drone has been ([`behaviour::path`]): about 4.4 KB a
     /// track, the largest part of the tracker. Kept last.
     paths: behaviour::PathStore<P>,
@@ -1055,6 +1059,7 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             own_motion: behaviour::OwnMotion::new(),
             places: behaviour::Places::new(),
             own_trail: behaviour::OwnTrail::new(),
+            across: behaviour::Across::new(),
             paths: behaviour::PathStore::new(),
             config,
         }
@@ -1788,12 +1793,69 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
             {
                 self.paths.record(t.id, p.lat, p.lon, l.value.altitude_geodetic, l.rx_ms);
             }
+            // The pilot's trail and the serials (slice 16d).
+            if let Some(w) = self.paths.watch_mut(t.id) {
+                w.note(t, now_ms);
+            }
         }
+        // UTC day (repeat visitors) and the alarms that make any drone at a
+        // place a warning (several at once), for the rules across drones.
+        let today = self
+            .spoof_cfg
+            .utc_offset_ms
+            .map(|o| behaviour::visits::day_of((now_ms as i64).saturating_add(o).max(0) as u64));
+        let alarm = self.level_alarm(now_ms);
+        self.across.begin_tick(&self.places, today, now_ms);
+        let mut cross = behaviour::Cross { across: &mut self.across, alarm, today };
         for t in self.tracks.iter_mut() {
-            let e = behaviour::evaluate(t, self.paths.get(t.id), &self.places, own.as_ref(), Some(&self.own_trail), now_ms);
+            let e = behaviour::evaluate(
+                t,
+                self.paths.get(t.id),
+                &self.places,
+                own.as_ref(),
+                Some(&self.own_trail),
+                Some(&mut cross),
+                now_ms,
+            );
             let has_position = t.location.as_ref().is_some_and(|l| l.value.position.is_some());
             t.threat.update(e, has_position, now_ms);
         }
+    }
+
+    /// Rule 15's alarms, read from the threat table (never changed here):
+    /// jamming or a blinded node ([`behaviour::across::ALARM_JAMMING`]), else
+    /// GPS interference in the area ([`behaviour::across::ALARM_GNSS`]); 0
+    /// none. Muted or snoozed alarms still count: the jamming is still there.
+    fn level_alarm(&self, now_ms: u64) -> u8 {
+        let mut alarm = 0;
+        for t in self.threats.all().iter().filter(|t| t.active(now_ms)) {
+            if t.kind.is_jamming() {
+                return behaviour::across::ALARM_JAMMING;
+            }
+            if t.kind == link::ThreatKind::AreaGnss {
+                alarm = behaviour::across::ALARM_GNSS;
+            }
+        }
+        alarm
+    }
+
+    /// The repeat-visitor history (rule 17, [`behaviour::visits`]).
+    pub fn visits(&self) -> &behaviour::Visits<P> {
+        self.across.visits()
+    }
+
+    /// Change it: the hub reads it from its card, wipes it, and writes it
+    /// when it changed ([`behaviour::Visits::take_dirty`]).
+    pub fn visits_mut(&mut self) -> &mut behaviour::Visits<P> {
+        &mut self.across.visits
+    }
+
+    /// The evidence and console text for a drone's level
+    /// ([`behaviour::describe`]), naming the other drones of rules 14 and
+    /// 19 by their IDs (as heard over the air: the hub cleans the text).
+    pub fn describe_level(&self, id: TrackId, now_ms: u64) -> Option<heapless::String<256>> {
+        let t = self.get(id)?;
+        Some(behaviour::describe_with(t, now_ms, |o| self.get(o).and_then(|o| o.primary_id()).and_then(|u| u.id.as_str())))
     }
 
     /// The next drone whose level rose to Caution or above, for the

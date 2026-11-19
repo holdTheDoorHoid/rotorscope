@@ -12,7 +12,10 @@
 //! stack. Each ring is tagged with the [`TrackId`] that owns it instead.
 //!
 //! The unit's own trail ([`OwnTrail`], one point every five seconds) is
-//! kept here too, for the "following" rule.
+//! kept here too, for the "following" rule; and with each ring, what the
+//! rules across drones and days (slice 16d) keep per drone
+//! ([`super::watch::Watch`]: the pilot's recent positions, the drone's
+//! serials).
 
 use heapless::Deque;
 
@@ -81,11 +84,25 @@ pub struct PathRing {
     last_coarse_ms: u64,
     fine: Deque<PathPoint, FINE_POINTS>,
     coarse: Deque<PathPoint, COARSE_POINTS>,
+    /// The pilot's trail and the drone's serials (slice 16d).
+    watch: super::watch::Watch,
 }
 
 impl PathRing {
     pub const fn new() -> Self {
-        Self { owner: 0, last_ms: 0, last_coarse_ms: 0, fine: Deque::new(), coarse: Deque::new() }
+        Self {
+            owner: 0,
+            last_ms: 0,
+            last_coarse_ms: 0,
+            fine: Deque::new(),
+            coarse: Deque::new(),
+            watch: super::watch::Watch::new(),
+        }
+    }
+
+    /// The pilot's trail and the drone's serials (slice 16d).
+    pub fn watch(&self) -> &super::watch::Watch {
+        &self.watch
     }
 
     pub fn owner(&self) -> Option<TrackId> {
@@ -199,6 +216,11 @@ impl<const N: usize> PathStore<N> {
             }
         };
         self.rings[i].push(PathPoint::new(lat, lon, alt_m, at_ms), at_ms);
+    }
+
+    /// What slice 16d keeps for `id`, if it has a ring.
+    pub(crate) fn watch_mut(&mut self, id: TrackId) -> Option<&mut super::watch::Watch> {
+        self.rings.iter_mut().find(|r| r.owner == id.0 && r.owner != 0).map(|r| &mut r.watch)
     }
 
     /// Free the rings of tracks that no longer exist.
