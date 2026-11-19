@@ -1,8 +1,8 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
-Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a and 16b built (host
-tests and P4 firmware compile; not yet on the bench). See "Slice 16a as built" and "Slice 16b as
-built" at the end.**
+Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a, 16b and 16d built
+(host tests and P4 firmware compile; not yet on the bench). See "Slice 16a as built", "Slice 16b as
+built" and "Slice 16d as built" at the end.**
 
 Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
 repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
@@ -305,3 +305,116 @@ Where it differs from the design above, or needs a word:
   the area at walking pace was Critical (it "arrives within 30 s"). Now "under 30 s to arrival"
   makes Critical only when the drone is also closing at 10 m/s or more; slower passes stay at
   Warning (rule 5). Faster than 25 m/s is Critical at any distance, as before.
+
+## Slice 16d as built (2026-11-18)
+
+Rules 14-19 (across drones and days), for drones that report their position, confirmed tracks
+only, on hubs that keep path history (the P4; the S3 hub and the laptop viewer keep none of it).
+Code: `crates/tracker/src/behaviour/across.rs` (rules 14-19 and what they keep between seconds),
+`visits.rs` (the repeat-visitor history and its file), `watch.rs` (per drone: the pilot's trail
+and the serials), wired into `evaluate` in `mod.rs`; tests in `tests_across.rs` (the 16a
+simulation gained UTC, a way to jump days, moving pilots, a serial change and a second ID). On the
+hub: `firmware/hub-p4/src/visits.rs` (the file on the card and the console wipe); `sd.rs` only
+gained an accessor for the folder. Site lines `crowd` and `visits`: [SITE.md](SITE.md).
+
+The numbers in use (in `across.rs`, `visits.rs`, `watch.rs`; to tune on the bench):
+
+| Rule | What | Value |
+|---|---|---|
+| all | "at or near a place" | inside it, or beyond its edge by at most its own size (a circle's radius, a polygon's farthest corner from its middle), and at least 50 m |
+| 14 Spotter then striker | the spotter | lingering (rule 7 or 8, at Caution or above, not a friend) at a place |
+| | the striker | a *different* drone (another track, another ID, not the continuation of the spotter) on a beeline or fast inbound (rules 5, 6) to the same place |
+| | within | 10 min of the spotter's last lingering; Critical on the striker, whose reason names the spotter |
+| | the spotter is marked | Warning, while a striker it led was seen in the last 5 s (then the usual 30 s hold) |
+| 15 Several at once | a crowd | 3 drones at or near the places at once (`crowd N`, 2-20; `crowd off`), friends not counted; counted the second before |
+| | or an alarm | any drone at or near a place while jamming (broadband, tone, sweep, pulsed), a blinded node or GPS interference in the area is active; muted alarms count (the jamming is still there). `crowd off` leaves this on |
+| 16 Probing | left an area, went | at least 50 m beyond its edge |
+| | and came back after | at least 30 s and at most 30 min; shown while it stays in |
+| 17 Repeat visitor | seen at or near a place on | 3 different UTC days within 14 (today included) |
+| | the same pilot spot | 25 m squares; spots up to two squares apart match (any two within 50 m do) |
+| | kept | 30 days; 4 drone IDs and 2 pilot spots per path ring (256 and 128), the least recently seen one makes room |
+| 18 Pilot on the move | the pilot's trail | up to 10 broadcast pilot positions at least 4.9 s apart, the newest under 15 s old, spanning at least 30 s |
+| | moving | the average of its newest third at least 5 m/s from its oldest third, each half at least 3 m/s, and two thirds of the single steps at 2.5 m/s or more (one jump of a bad position is not a drive) |
+| 19 Identity changes | (a) | the track continues an earlier one under another ID mid-flight (`continuity.rs` sets that, read only here) |
+| | (b) | its Remote ID serial or DJI serial changed within the track |
+| | counts for | 10 min after the change, while at or near a place |
+
+How the new rules combine and what they give (decisions made here, open to change):
+
+- **Probing and "in the area" are two signs**, as recommended: re-entry after leaving is the "test
+  the response" pattern CISA lists, so a drone back over the area is a Warning.
+- **Pilot on the move and "in the area" are two signs** too (a drone over the house flown from a
+  moving car is the Orem stalking case): Warning. Near but outside, it is Caution.
+- **Repeat visitor** raises the drone's other reasons by one level, never above Warning: a Caution
+  becomes a Warning; Warning and Critical stay as they are; on its own it is a reason at Notice
+  ("3rd day in 2 weeks at house (same drone)"). It is never a Critical.
+- **Friends**: a friend is never a spotter, never counted in a crowd and never recorded as a visitor
+  (its ID is not stored at all). Several at once, probing and pilot on the move give a friend only
+  Notice (as the place rules). The striker's reason (14) is never lowered, like rules 5 and 6.
+  **Identity changes are never lowered either**: switching to a friend's serial mid-flight is
+  exactly how a faked friend would look.
+- Policy as before: rises at once, comes down 30 s after the rule stops, reasons stay shown while it
+  is held; snooze as in 16a.
+
+The repeat-visitor history (owner decision: 30 days, wipeable):
+
+- **What is kept**: for a drone, a 64-bit fingerprint of its ID (its serial, a registration, or
+  its DJI serial; not the ID itself), and for a pilot spot the 25 m square, each with the UTC days
+  it was seen at a place as bits. No times of day, no paths. Session and UTM IDs are new every
+  flight and are not kept. Days older than 30 are dropped every day and when the file is read.
+  Without GPS time nothing is recorded.
+- **On the card**: `ROTORSCP/VISITS.DAT`, version 1: a 16-byte header, one 16-byte record per
+  entry, an FNV-1a checksum; at most about 4.8 KB. Read once per card mount, after the site file.
+  Written when it changed, at most every 5 min, and at once on a new UTC day, a wipe, `visits off`
+  or after a bad file. A file with a wrong checksum, length or version is discarded whole and
+  logged; it never crashes the hub.
+- **Wiping**: console `W` twice within 5 s; `visits off` in the site file also wipes. There is no
+  screen action: the Settings page's six rows fill the screen. Every load, discard, wipe and
+  switch is an evidence `Setting` event (code 4) with the data byte 5; **no new evidence code**.
+
+Where it differs from the design, or needs a word:
+
+- **Probing is for fixed areas only.** The bubble moves with the unit, so drones go in and out of
+  it as the carrier walks.
+- **Spotter marking** happens only while the spotter is still heard. A spotter long gone is named
+  in the striker's reason (and the JSON's `other`) only.
+- **Several at once, "appearing"**: any drone at or near a place while an alarm is active counts,
+  not only one that first appeared during it.
+- **Identity change (c)** (Remote ID stops while the drone's radio link carries on) is not built:
+  slice 16a's lost-track hold already keeps an inbound drone's level for 30 s, and tying a
+  Remote ID track to a control link needs the link work. Future work.
+- **A serial changing on the same transmitter** usually becomes a new track (the tracker keys
+  drones by ID), which continuity links to the old one: rule 19 (a). (b) catches the case where
+  the transmitter keeps another ID (a registration) and the track takes the new serial.
+- **16c hook**: `Across::striker(track, key, previous, place, now)` is what a striker without a
+  position (an FPV signal getting louder fast, rule 12) will call with the place it closes on; it
+  gets the same answer and marks the spotter the same way.
+- **Words and outputs**: reasons like `follows spotter drone SPOT-1 (lingered at house 3 min ago)`,
+  `spotter: drone #15 is rushing to house`, `one of 4 drones at house at once`,
+  `at house while jamming is heard`, `back over house after 5 min away (probing)`,
+  `4th day in 2 weeks at house (same pilot spot)`, `pilot on the move at 15 m/s while it flies at
+  house`, `new identity mid-flight at house (was drone IDA-1, 40 s ago)`. The console and evidence
+  text name the other drone by its ID; CoT remarks by its track number. JSON reasons gain `other`
+  (a track id), `n`, `alarm` (`"jamming"`, `"gps"`), `days`, `by` (`"drone"`, `"pilot_spot"`), and
+  `ago_s`, `for_s`, `mps` for the new rules (see `json.rs`). Evidence code 28 carries the rule
+  numbers 14-19 and 21 ("spotter for a striker"); [EVIDENCE-FORMAT.md](EVIDENCE-FORMAT.md).
+- **Expected false alarms** (THREAT-TACTICS.md §6):
+  - 14: a second hobbyist heading for the place within 10 min of another's hover (two friends in
+    a park; with the bubble on, drones playing near you). Critical. `friend` lines for your own.
+  - 15: events, light shows, racing meets (`crowd off`); a jamming alarm that is itself false
+    makes every drone near a place a Warning; a big bubble in a busy park.
+  - 16: hobbyists who do not know the boundary; a survey drone whose passes cross the fence and go
+    50 m beyond it more than 30 s apart.
+  - 17: a neighbour who flies every day; delivery routes; a popular take-off field near the site
+    (different pilots, the same spot).
+  - 18: follow-me from a vehicle, boats, a pilot on a bus or train.
+  - 19: a drone whose Remote ID restarts mid-flight with a new session ID; two drones taking turns
+    on the same path (a relay), which is arguably worth a warning anyway.
+- **Measured**: the P4 tracker is 393,904 bytes (16b: 371,864; the cross-drone state 10,768, of
+  which the visit table 6,152; the per-drone pilot trail and serials 176 bytes a path ring). The S3
+  tracker (`Tracker<64, 32>`) grew 24 bytes (87,728). The P4 firmware compiles; the main stack frame
+  is 68,112 bytes (16b: 68,080); the once-a-second housekeeping frame grew from 3,008 to 3,712
+  bytes (the rules are judged inside it, as in 16a and 16b; taking the judging out of line made the
+  sum larger), and rules 14-19 run in their own 544-byte frame below it. The card file's reading
+  runs in a 720-byte frame from the main loop, its writing in 608. The worst-case JSON line is 3,443
+  bytes (the buffer is 3,456, unchanged). Host tests: 1,547 passed, 5 ignored (16b: 1,523).
