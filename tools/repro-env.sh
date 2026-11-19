@@ -17,6 +17,8 @@
 #     config sets rustflags there (which replaces `build.rustflags`), else under
 #     `build.rustflags`. Rustflags do not change symbol names (measured 2026-11-19, cargo
 #     1.99), so the remapped paths themselves do not make images differ.
+#     The toolchain's own copy of the standard library's source (rust-src) is mapped back to
+#     /rustc/<commit>, the name rustc uses when that component is not installed.
 #   - With REPRO_LINK set (see repro_link below): the same remap for that path, and a
 #     `--manifest-path` through it.
 #
@@ -31,7 +33,8 @@
 # images built so are identical whatever directory the checkout is in.
 #
 # Argument: the target triple being built (default riscv32imac-unknown-none-elf).
-# Environment: REPRO_ROOT, the checkout being built (default: the one holding this script).
+# Environment: REPRO_ROOT, the checkout being built (default: the one holding this script);
+# REPRO_TOOLCHAIN, the rustup toolchain the build uses when it is given as cargo +<toolchain>.
 
 REPRO_FIXED=/tmp/rotorscope-repro
 
@@ -56,6 +59,17 @@ repro_args() {
   # The last prefix that matches wins, so the most specific come last.
   flags="\"--remap-path-prefix=$HOME=/home\""
   flags+=", \"--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup\""
+  # With the rust-src component installed, rustc names the standard library's sources by their
+  # real place in the toolchain folder (so the toolchain's name, "stable-..." or "1.99.1-...",
+  # ends up in panic messages), and without it by the virtual /rustc/<commit>/. Map the real
+  # place back to the virtual one, so both builds agree.
+  local rc=(rustc) sysroot hash
+  [[ -n ${REPRO_TOOLCHAIN:-} ]] && rc+=("+$REPRO_TOOLCHAIN")
+  sysroot=$("${rc[@]}" --print sysroot 2>/dev/null || true)
+  hash=$("${rc[@]}" -vV 2>/dev/null | awk '$1 == "commit-hash:" { print $2 }' || true)
+  if [[ -n $sysroot && -n $hash ]]; then
+    flags+=", \"--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$hash\""
+  fi
   flags+=", \"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\""
   flags+=", \"--remap-path-prefix=$root=/rotorscope\""
   [[ -n ${REPRO_LINK:-} ]] && flags+=", \"--remap-path-prefix=$REPRO_LINK=/rotorscope\""
@@ -91,8 +105,8 @@ repro_link() {
 }
 
 # repro_leaks <file>...: report (by kind, never the value) the builder's home directory path,
-# user name or host name, or any path in the array REPRO_LEAK_PATHS, found in the files; 1 when
-# any is. User and host name are matched as whole words of 3 or more characters;
+# user name or host name, a rustup toolchain folder, or any path in the array REPRO_LEAK_PATHS,
+# found in the files; 1 when any is. User and host name are matched as whole words of 3 or more characters;
 # ROTORSCOPE_RELEASE_IGNORE_NAMES=1 skips them (for a name that is a common word).
 REPRO_LEAK_PATHS=()
 repro_leaks() {
@@ -105,6 +119,7 @@ repro_leaks() {
       if (( ${#u} >= 3 )) && grep -aqwF -- "$u" "$f"; then echo "$(basename "$f"): holds the builder's user name"; bad=1; fi
       if (( ${#h} >= 3 )) && grep -aqwF -- "$h" "$f"; then echo "$(basename "$f"): holds the builder's host name"; bad=1; fi
     fi
+    if grep -aqF -- "/rustup/toolchains/" "$f"; then echo "$(basename "$f"): names a rustup toolchain folder (a standard library path not mapped back)"; bad=1; fi
     for p in "${REPRO_LEAK_PATHS[@]}"; do
       if [[ -n $p ]] && grep -aqF -- "$p" "$f"; then echo "$(basename "$f"): holds a build folder path"; bad=1; fi
     done

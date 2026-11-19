@@ -200,6 +200,8 @@ self_test() {
   if (( $(id -un | wc -c) > 3 )); then repro_leaks "$t/user.bin" >/dev/null && r=1 || r=0; check "the user name is found" $r; fi
   if (( $( (hostname 2>/dev/null || uname -n) | wc -c) > 3 )); then repro_leaks "$t/host.bin" >/dev/null && r=1 || r=0; check "the host name is found" $r; fi
   repro_leaks "$t/folder.bin" >/dev/null && r=1 || r=0; check "the build folder path is found" $r
+  printf 'x /rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/x.rs' >"$t/tc.bin"
+  repro_leaks "$t/tc.bin" >/dev/null && r=1 || r=0; check "a rustup toolchain folder name is found" $r
   REPRO_LEAK_PATHS=()
 
   # Cargo settings outside the repository.
@@ -238,6 +240,7 @@ self_test() {
       [[ ${REPRO_CARGO_ARGS[*]} == *"target.riscv32imac-unknown-none-elf.rustflags="* &&
          ${REPRO_CARGO_ARGS[*]} == *"--remap-path-prefix=$t/fixed=/rotorscope"* &&
          ${REPRO_CARGO_ARGS[*]} == *"--remap-path-prefix=$t/src1=/rotorscope"* &&
+         ${REPRO_CARGO_ARGS[*]} == *"/lib/rustlib/src/rust=/rustc/"* &&
          ${REPRO_CARGO_ARGS[*]} == *"--manifest-path $t/fixed/fw/Cargo.toml" ]]
   ); check "cargo gets the manifest through the fixed path, and every path remapped" $?
 
@@ -375,6 +378,7 @@ for l in "${selected[@]}"; do
   tdir=$REPRO_LINK/target-release
   (
     cd "$src/$dir"
+    REPRO_TOOLCHAIN=$toolchain
     repro_args "$triple"
     "${clean_env[@]}" cargo "+$toolchain" build --release --locked --offline "${args[@]}" \
       --target-dir "$tdir" "${REPRO_CARGO_ARGS[@]}" >"$work/$name.log" 2>&1 ||
