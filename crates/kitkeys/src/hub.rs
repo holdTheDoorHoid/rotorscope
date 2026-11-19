@@ -237,6 +237,7 @@ pub fn read_master(partition: &[u8]) -> MasterState {
 
 /// Outcome of reading the roster record.
 #[derive(Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // no heap to box into; read once at boot
 pub enum RosterState {
     Good(Roster),
     /// Both copies erased (a keyed hub with no nodes yet).
