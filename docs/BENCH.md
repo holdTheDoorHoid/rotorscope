@@ -1300,3 +1300,55 @@ built with `ROTORSCOPE_BENCH_CAN=wifi24` (so the hub gives it Wi-Fi 2.4; without
   ends and is raised again before it is removed (10 min) is not announced again. Not changed here.
 * The GPS hold note could not be seen: no GPS module was attached.
 
+
+## Bench results, 2026-11-19 (a muted alarm stays on record)
+
+Checks the fix for an alarm that starts while a mute or snooze already covers it. Before the fix
+such an alarm left no `threat` record and no `threat_ended` record in the evidence log; for an
+alarm the hub raises itself (no node frame behind it) nothing of it was kept at all. Now muting
+or snoozing stops the alert only: the record is written, marked as silenced (`threat` data byte
+13, docs/EVIDENCE-FORMAT.md), and its episode gets an end record.
+
+**Set-up.** P4 hub on `4aaa433` (normal build, `bench: []`, contains the fix), nodes `c5a` and
+`c5b` on their normal keyed builds, gateway `c5c` on the `gwforge` bench build for the test and
+back on the normal build afterwards. The alarm used is the hub's own **Node reports going
+missing** (`link_loss`): `gwforge drop <c5a MAC> 80 steady` removes every packet that carries
+`c5a`'s health report, and the hub raises the alarm once a report is 30 s overdue. It is a
+safety-critical kind, so it can only be snoozed (5 min), and only from the screen: there is no
+console command for Mute or Snooze. Someone has to be at the bench to tap **Settings → Alarms →
+Snooze**. The hub's console was read for the whole run, with its evidence records streamed as
+`@EV1` lines. The logs are kept off the repository.
+
+| Step | Console | Evidence record |
+|---|---|---|
+| Drop armed | `THREAT LINK LOSS: node 1 ...` after about 35 s | `threat`, episode 1, first raise, byte 13 = 0 (alerted) |
+| Snooze tapped on the screen | `screen: snooze 6 min: Node reports going missing; node 1; ends at hub uptime 802 s` | `setting` |
+| `gwforge drop off` | `THREAT ended: ... episode 1: active 90.7 s` | `threat_ended`, episode 1 |
+| Drop armed again, inside the snooze | `THREAT LINK LOSS: ... - raised again (episode 2; 1 raises within a minute) - silenced: snoozed, no alert` | `threat`, episode 2, raised again, byte 13 = 1 (snoozed). **The case the fix is for** |
+| Snooze ran out at 802 s, drop still on | at 803 s: `THREAT LINK LOSS: ... - still sounding after its mute or snooze ended` | `threat`, episode 2, raise kind 2, byte 13 = 0 |
+| `gwforge drop off` | `THREAT ended: ... episode 2: active 135.7 s` | `threat_ended`, episode 2 (a silenced episode had no end record before) |
+| Reports back | `THREAT LINK LOSS: ... 57 % of what it sent over the last five minutes is missing - raised again (episode 3; ...)`, ended after 4.6 s | `threat` and `threat_ended`, episode 3, alerted |
+
+Episode 3 is expected: the first report after the drop covers the five minutes that included
+it. The run also shows that an alarm that ends and comes back inside the 10 minutes its entry is
+kept is now announced again (episodes 2 and 3), which the slow-flood run above (2026-11-18) did
+not see.
+
+`evidence-verify --allow-test-key` over the 31 streamed records: 0 failures and 1 gap, the newest
+record, written after the last signed checkpoint (every live log has one). The kit signs with
+the published test key, so this checks the chain, not that it is evidence.
+
+**Found on the way, not changed:**
+
+* `tools/dev-board.sh --log <s> c5c --send '<command>\r'` never reached the `gwforge` console on
+  `c5c` (three tries; none answered `armed` or `err`, even with the window long enough for its
+  typing at 0.4 s a key). Writing the whole line at once on the open port, through
+  `tools/dev-board.sh --run`, worked first time. Opening the port still restarts the C5.
+* `--send u` on the P4 (evidence stream on/off) did not register either: no `cmd evidence
+  stream` line. The stream is on by default, so it changed nothing.
+
+**Boards afterwards:** P4 on `4aaa433` (restarted once, when its console was first opened;
+no settings changed; the snooze has expired). `c5c` on a normal gateway build from `af6b350`
+(`"bench":[]`, protocol 14, roster of 2); its only change from the build before is a stricter
+address parser for `gwforge` commands. Afterwards both nodes' `delivery` lines showed `claimed`
+equal to `received`, and every refusal counter was 0.
