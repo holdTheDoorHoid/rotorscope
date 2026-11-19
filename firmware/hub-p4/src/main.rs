@@ -376,7 +376,7 @@ fn main() -> ! {
     ev.boot(
         (chip.major, chip.minor),
         fault::reset_reason(),
-        evidence::format::boot::COUNTER_NONE,
+        evidence::format::boot::COUNTER_SD_FILE,
         evidence::format::boot::BOOT_ID_RNG,
     );
     let mut note: Option<heapless::String<120>> = None;

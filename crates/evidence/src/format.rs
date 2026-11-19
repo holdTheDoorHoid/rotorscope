@@ -256,6 +256,13 @@ pub enum EventCode {
     /// `threat` record that raised it. Data: [`threat_ended`] layout. Text:
     /// what it totalled.
     ThreatEnded = 26,
+    /// Where this boot stands among the unit's boots (WP-14a): the boot
+    /// counter and how far the previous boot's chain had reached durable
+    /// storage. Written once a boot as soon as the counter store answers
+    /// (the SD card's state file: at the first card mount; a secure
+    /// element: right after the boot event), and again when a card with
+    /// another counter is mounted. Data: [`crate::continuity::Continuity`].
+    Continuity = 27,
 }
 
 /// Data of the `boot` event (1). Format version 1 started with 68 bytes;
@@ -435,6 +442,7 @@ impl EventCode {
             22 => AircraftConflict,
             25 => IdDisputed,
             26 => ThreatEnded,
+            27 => Continuity,
             _ => return None,
         })
     }
@@ -465,6 +473,7 @@ impl EventCode {
             AircraftConflict => "aircraft_conflict",
             IdDisputed => "id_disputed",
             ThreatEnded => "threat_ended",
+            Continuity => "continuity",
         }
     }
 }

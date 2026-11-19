@@ -19,8 +19,12 @@ to an existing file. A file is just records
 back to back, no file header.
 
 File numbers are **not** unique over the card's life: if the newest files
-are deleted, the next mount reuses their numbers. Nothing on the card
-records how many files or boots there have been.
+are deleted, the next mount reuses their numbers. The boot counter (below,
+"Continuity across boots") is what numbers the boots.
+
+The same folder holds the boot counter's two state files, `CHAINA.STA` and
+`CHAINB.STA` (96 bytes each, below). They are rewritten as the hub runs;
+they are not evidence files and are not signed.
 
 ## Record
 
@@ -100,6 +104,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 23, 24 | (reserved) | taken by the acoustic work: 23 `sound`, 24 `sound_clip` (on the acoustic branch) |
 | 25 | id_disputed | drone track id (u32 LE), what (1: bit 0 position, 1 Self-ID, 2 operator ID, 3 a second ID), other claim's source (1: 0 Remote ID, 1 DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none); text: two transmitters claim this ID, how far apart, neither verified (tracker `claims`, docs/SPOOFING.md) |
 | 26 | threat_ended | kind (1), node station address (6), episode (u32), active ms (u64: first to last report of the episode), frames (u64), reports (u32), peak level (i8: dBm, dB above the floor for jamming), raises in the episode (u32), flags (1: bit 0 held as flapping, bit 1 its alarm entry was removed while it was still sounding), end records lost before this one (u32). Text: the same in words. Closes the latest `threat` record (17) of the same alarm |
+| 27 | continuity | source (1: 1 SD card state file, 2 secure element), status (1: 0 continued, 1 fresh: no counter on the card, 2 the stored counter was unreadable, 3 the new counter could not be saved, 4 the store could not be read), boot counter (u64; 0 unknown), previous boot id (8; zero none), the previous boot's records known stored (u64: its next sequence number), SHA-256 of the last of them (32). Text: the same in words. See "Continuity across boots" |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 Fields added at the end of an event's data by a later firmware are
@@ -119,6 +124,49 @@ no report, and the raises in between are counted into that episode
 text says the hold begins. Records per alarm entry are thus at most about
 four a minute. A silenced (muted or snoozed) alarm is not raised and so
 has no end record; its raw frames are logged as before.
+
+### Continuity across boots
+
+The hub keeps a **boot counter** and, for the latest boot, how far its
+chain has reached the card (record count and the hash of the last record
+flushed). Each boot records where it stands in a `continuity` event (27):
+its counter and what it found about the boot before it. Where the counter
+lives is named in the boot event (data byte 97) and in the event:
+
+- **SD card state file** (source 1, today). Read, advanced and saved at
+  the boot's first card mount, so the event comes after the `card_mounted`
+  event, not at boot; a card with a different counter mounted later in the
+  same boot gets its own `continuity` event. After each flush of the
+  evidence file (at most every 10 s, and at once after an eject) the hub
+  rewrites the state with this boot's record count and head. Two files,
+  written in turn, so a power cut during a write leaves the other.
+- **Secure element** (source 2, planned): a monotonic counter, read right
+  after the boot event. Same event, same layout.
+
+State file, 96 bytes: magic `52 53 43 53` ("RSCS"), version `01`, 3 zero
+bytes, counter (u64), boot id (8), records stored (u64), hash of the last
+(32), SHA-256 of bytes 0..63 (32: catches a torn write, not an edit). The
+newer of the two valid files (higher counter, then more records) counts.
+
+**What a checker does with it.** For a boot whose `continuity` event names
+a previous boot with *n* records and head *h*: if that boot's records are
+supplied, record *n-1* must be there and hash to *h*. A previous log that
+ends before *n-1* was cut short (or not supplied in full), a different
+record *n-1* was changed: both failures. A previous boot not supplied while
+earlier boots are is a missing boot (a failure, or with `--allow-gaps` a
+gap). The earliest boot supplied has its predecessor named, outside what
+was checked. A previous boot's records after its own last checkpoint, up
+to *n-1*, are covered by the next boot's signature once its `continuity`
+record is signed (it names their head).
+
+**What it cannot show.** The state file is on the card, which its holder
+can rewrite or delete (the next boot then says "fresh" and starts again at
+1). It shows that the boots supplied follow each other and that an older
+boot's log was not cut after a later boot had recorded its head. It cannot
+show that nothing came after the newest boot supplied (the newest files
+deleted, a wiped card), nor protect the newest boot's last records before
+the next boot starts. A secure-element counter that cannot go back, with
+its current value read off the unit by whoever checks, closes the first.
 
 ### Kind 2: detection
 
@@ -205,11 +253,16 @@ written with class 2.
 4. Records after the last checkpoint are linked but not yet signed.
 5. Files: in file *n*'s card_mounted event, the previous file's length and
    last whole record must match file *n-1* exactly.
-6. Re-decode each detection's raw bytes and compare with the summary.
+6. Boots: each `continuity` event's previous boot, record count and head
+   must match that boot's log, and the counters must follow on (see
+   "Continuity across boots").
+7. Re-decode each detection's raw bytes and compare with the summary.
 
-None of these checks can show that the log is complete: records cut off at
-a checkpoint, the newest files deleted, a reformatted card or a boot never
-copied off leave nothing behind to check.
+None of these checks can show that the log is complete: the newest boot's
+records after the last one copied off, the newest files deleted or a
+reformatted card leave nothing behind to check. The boot counters show
+whether boots are missing *between* the ones you have, and whether an older
+boot's log was cut after the next boot started.
 
 ## Console stream
 

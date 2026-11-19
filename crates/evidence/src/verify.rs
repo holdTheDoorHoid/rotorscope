@@ -177,6 +177,12 @@ pub struct ChainSummary {
     pub missing: Vec<(u64, u64)>,
     /// What the boot event says about the build (firmware from WP-14a).
     pub build: Option<format::boot::Ext>,
+    /// The chain's first `continuity` record (WP-14a): its boot counter
+    /// and the previous boot it names.
+    pub continuity: Option<crate::continuity::Continuity>,
+    /// Records of this chain after its own last checkpoint that the next
+    /// boot's signed `continuity` record vouches for (it names their head).
+    pub vouched_by_next: Option<u64>,
 }
 
 /// "1 record has" / "N records have".
@@ -243,6 +249,19 @@ impl Report {
         }
     }
 
+    /// [`NOT_PROVEN`], with what the boot counters let the checker say
+    /// about the newest boot it saw.
+    pub fn not_proven(&self) -> String {
+        let newest = self.chains.iter().filter_map(|c| c.continuity.map(|k| (k.counter, c.boot))).filter(|(n, _)| *n > 0).max();
+        match newest {
+            None => NOT_PROVEN.to_string(),
+            Some((n, b)) => format!(
+                "{NOT_PROVEN} The newest boot checked is boot counter {n} (boot {}): later boots, or this boot's records after the last one supplied, would leave no trace here. The counter is kept on the unit's SD card, which whoever holds it can rewrite or wipe; the unit prints its counter on its console at each card mount, so ask for the current one to see whether later boots exist.",
+                hex(&b)
+            ),
+        }
+    }
+
     fn add(&mut self, level: Level, at: Where, what: impl Into<String>) {
         self.findings.push(Finding { level, at, what: what.into() });
     }
@@ -297,6 +316,8 @@ struct ChainState {
     last_signed_end: Option<u64>,
     /// The key was refused (test key, or not an outside key): said once.
     key_refused: bool,
+    /// Every `continuity` record: its sequence number and data.
+    continuity: Vec<(u64, crate::continuity::Continuity)>,
 }
 
 /// The bench features a boot event's text names (`...; bench: a,b`, as
@@ -366,6 +387,7 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
                     last_checkpoint_uptime: None,
                     last_signed_end: None,
                     key_refused: false,
+                    continuity: Vec::new(),
                 });
                 chains.len() - 1
             });
@@ -416,6 +438,7 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
             rep.add(Level::Fail, w, format!("EV{prev_no:06}.EVL's ending changed after the unit opened the next file"));
         }
     }
+    continuity_checks(&mut rep, &mut chains, opts);
     let mut nos: Vec<u32> = file_tails.keys().copied().collect();
     nos.sort();
     for p in nos.windows(2) {
@@ -636,6 +659,13 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
                     }
                 }
                 Some(EventCode::Clock) => c.clock_event_since = true,
+                Some(EventCode::Continuity) => match crate::continuity::Continuity::decode(e.data) {
+                    Some(k) => {
+                        c.sum.continuity.get_or_insert(k);
+                        c.continuity.push((h.seq, k));
+                    }
+                    None => rep.add(Level::Fail, w.clone(), "continuity record too short"),
+                },
                 _ => {}
             }
         }
@@ -657,6 +687,114 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
         }
     }
     claim
+}
+
+/// Continuity across boots (WP-14a): each boot's `continuity` record names
+/// its counter and how far the boot before it had reached the card. Given
+/// that boot too, its log must reach that far with that very record;
+/// a boot missing between two supplied ones is a missing boot. Run after
+/// every input is read, before the chains' gap lines.
+fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options) {
+    use crate::continuity::{self as k, Continuity};
+    let by_boot: HashMap<[u8; 8], usize> = chains.iter().enumerate().map(|(i, c)| (c.sum.boot, i)).collect();
+    // Counters the supplied boots have (any of their continuity records).
+    let counters: Vec<u64> = chains.iter().flat_map(|c| c.continuity.iter().map(|(_, k)| k.counter)).filter(|&n| n > 0).collect();
+    let (missing_level, why) = if opts.gaps_allowed {
+        (Level::Gap, "; it may have been removed, which cannot be told apart from one never supplied")
+    } else {
+        (Level::Fail, " (fails unless --allow-gaps)")
+    };
+    for ci in 0..chains.len() {
+        let boot = chains[ci].sum.boot;
+        if chains[ci].continuity.is_empty() {
+            if chains[ci].sum.build.is_some_and(|b| b.counter_source != format::boot::COUNTER_NONE) {
+                rep.add(
+                    Level::Note,
+                    Where { boot: Some(boot), ..Default::default() },
+                    "this boot keeps a boot counter but no continuity record of it was checked (no card mounted while it ran, or its records after the mount were not supplied): its place among the unit's boots is not shown",
+                );
+            }
+            continue;
+        }
+        let list: Vec<(u64, Continuity)> = chains[ci].continuity.clone();
+        for (seq, c) in list {
+            let w = Where { boot: Some(boot), seq: Some(seq), ..Default::default() };
+            match c.status {
+                k::CONTINUED => {}
+                k::FRESH => rep.add(Level::Note, w.clone(), format!("boot counter {}: the card held no counter (a new or wiped card, or its state files were removed): nothing links this boot to earlier ones", c.counter)),
+                k::UNREADABLE => rep.add(Level::Note, w.clone(), format!("boot counter {}: the card's counter was unreadable, so it started again: nothing links this boot to earlier ones", c.counter)),
+                k::NOT_SAVED => rep.add(Level::Note, w.clone(), format!("boot counter {}: the unit could not save it, so the next boot will not follow on from this one", c.counter)),
+                k::STORE_ERROR => rep.add(Level::Note, w.clone(), "the unit could not read its boot counter: this boot's place among the others is not shown"),
+                n => rep.add(Level::Note, w.clone(), format!("continuity record with unknown status {n} (newer firmware?)")),
+            }
+            if !c.has_prev() {
+                continue;
+            }
+            let prev = hex(&c.prev_boot);
+            let before = c.counter.saturating_sub(1);
+            let Some(&pi) = by_boot.get(&c.prev_boot) else {
+                if counters.iter().any(|&n| n < c.counter) {
+                    rep.add(
+                        missing_level,
+                        w.clone(),
+                        format!("boot counter {before} (boot {prev}, {} records) was not supplied, but boots before and after it were{why}", c.prev_records),
+                    );
+                } else {
+                    rep.add(
+                        Level::Note,
+                        w.clone(),
+                        format!("this is boot counter {}: the boot before it (counter {before}, boot {prev}, {} records stored) is outside what was checked", c.counter, c.prev_records),
+                    );
+                }
+                continue;
+            };
+            let p = &chains[pi];
+            if !p.continuity.is_empty() && !p.continuity.iter().any(|(_, pk)| pk.counter == before) {
+                rep.add(
+                    Level::Fail,
+                    w.clone(),
+                    format!("boot {prev} is named as boot counter {before}, but its own continuity record says otherwise: the boots do not follow each other"),
+                );
+            }
+            if c.prev_records == 0 {
+                continue;
+            }
+            let last = c.prev_records - 1;
+            match p.hashes.get(&last) {
+                Some(h) if *h == c.prev_head => {
+                    // That head is now vouched for by this boot's chain: by
+                    // its signature, once this record is signed.
+                    let signed_here = chains[ci].last_signed_end.is_some_and(|e| e >= seq);
+                    let p = &mut chains[pi];
+                    if signed_here && p.last_signed_end.is_none_or(|e| e < last) {
+                        let from = p.last_signed_end.map_or(0, |e| e + 1);
+                        p.last_signed_end = Some(last);
+                        p.sum.vouched_by_next = Some(last);
+                        rep.add(
+                            Level::Note,
+                            Where { boot: Some(p.sum.boot), seq: Some(from), ..Default::default() },
+                            format!("records #{from}..#{last} come after this boot's last checkpoint; the next boot's signed continuity record names their head, so its signature covers them"),
+                        );
+                    }
+                }
+                Some(_) => rep.add(
+                    Level::Fail,
+                    w.clone(),
+                    format!("record #{last} of boot {prev} is not the one the unit had stored when this boot began (changed afterwards)"),
+                ),
+                None if p.sum.last_seq.is_none_or(|l| l < last) => rep.add(
+                    missing_level,
+                    w.clone(),
+                    format!(
+                        "boot {prev} ends at record #{}, but when this boot began the card held its records through #{last}: the end of its log was cut off, or not supplied{why}",
+                        p.sum.last_seq.map_or("-".to_string(), |l| l.to_string())
+                    ),
+                ),
+                // Records missing inside the chain: reported with the chain.
+                None => {}
+            }
+        }
+    }
 }
 
 /// What the boot event says about the build, as notes.

@@ -23,10 +23,14 @@ laptop that built the firmware.
   so a log checked only against the key it names proves nothing about who
   made it: the verifier says **VERIFIED** only when you give it the unit's
   key from outside the log (`--key` or `--keys`, see "Who signed" below).
-- **that the log is complete.** Nothing records, across power-cycles or
-  card changes, how much was written. A log cut off at a checkpoint, the
-  newest card files deleted, a reformatted card, or a whole boot never
-  uploaded leave no trace in what is left. The verifier says so on every run.
+- **that the log is complete.** Since WP-14a each boot records a boot
+  counter and how far the boot before it had reached the card, so a boot
+  missing *between* the ones supplied, or an older boot's log cut short
+  after the next boot started, now fails. But the counter is kept on the SD
+  card, which whoever holds it can rewrite or wipe: the newest boot's last
+  records, the newest card files deleted, or a wiped card still leave no
+  trace. The verifier says so on every run, naming the newest boot counter
+  it saw.
 - **that the times are true.** Times come from the unit's own GPS receiver
   and clock; nothing outside the unit vouches for them unless someone asked
   the server for an outside time-stamp, and that only shows the records
@@ -39,8 +43,10 @@ laptop that built the firmware.
 
 1. a signing key held in hardware, which software cannot read (design
    below, nothing burned yet);
-2. a counter that survives reboots and card changes, written into every
-   boot, so missing boots and missing newest files show;
+2. a counter that cannot be set back (a secure element: the SD card
+   counter of WP-14a is behind the same interface and in the same format),
+   so that missing newest boots show to a checker who reads the unit's
+   current counter;
 3. outside time-stamping as a matter of course, not on request;
 4. reproducible firmware builds, plus secure boot, so the firmware hash in
    each record can be matched to published source and only that firmware
@@ -122,6 +128,14 @@ the log (see "Who signed").
   The access log is not signed, so whoever runs the server can rewrite it
   whole; signing it is later work.
 - **A batch altered on the way to the server**: refused on arrival.
+- **A boot left out, or an older boot's log cut short** (WP-14a): each
+  boot's `continuity` record names its boot counter and the previous boot's
+  record count and last record. Given both boots, a log cut back to a
+  checkpoint after the next boot started fails, and a boot missing between
+  two supplied ones fails (a gap with `--allow-gaps`); the earliest boot
+  supplied says which boot came before it. A previous boot's last records
+  after its own last checkpoint are covered by the next boot's signature.
+  The counter is on the SD card: see "What is NOT protected yet".
 - **An earlier card file shortened or extended** after the hub moved on:
   each new card file names the previous file's exact length and last
   record, so this shows, provided the newer file is there. **A missing file
@@ -168,10 +182,15 @@ the log (see "Who signed").
    a different one from running.
 3. **The end of the log.** Records after the newest signature are chained
    but not yet signed; the verifier reports them as "not covered by a
-   signature". Cutting the log back to any checkpoint, or deleting the
-   newest card files, leaves no trace at all. There is no counter that
-   survives a reboot or a card change, so a whole boot that was never
-   uploaded, or a reformatted card, does not show either.
+   signature" (the next boot's signed continuity record covers them once it
+   exists). Cutting the **newest** boot's log back to a checkpoint, or
+   deleting the newest card files, leaves no trace. The boot counter
+   (WP-14a) lives in two state files on the SD card: whoever holds the card
+   can rewrite them, delete them (the next boot then says the card held no
+   counter and starts at 1) or wipe the card. So boots after the newest one
+   supplied do not show unless you know the unit's current counter (the hub
+   prints `evidence boot counter N` on its console at each card mount; a
+   secure-element counter would make that number trustworthy).
 4. **Time-stamps are not automatic.** Someone has to ask the server for one
    (button/API), and only while it is online.
 5. **The re-decode shares our decoder.** The verifier decodes the raw bytes

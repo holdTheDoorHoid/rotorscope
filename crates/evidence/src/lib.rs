@@ -22,6 +22,8 @@
 //! - [`verify`] (feature `verify`, host): check a whole log.
 //! - [`b64`]: base64 for the console stream and bundles.
 //! - [`files`]: evidence file names on the card and the next one to create.
+//! - [`continuity`]: the boot counter and the previous boot's head, behind
+//!   the [`continuity::BootCounter`] trait (SD card state file now).
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 pub mod b64;
@@ -29,6 +31,7 @@ pub mod b64;
 /// `firmware/hub-p4/build.rs`; compiled here only for its tests).
 #[cfg(test)]
 mod buildid;
+pub mod continuity;
 /// The hub build script's `ROTORSCOPE_DEV_KEY` check (included by path from
 /// `firmware/hub-p4/build.rs`; compiled here only for its tests).
 #[cfg(test)]

@@ -183,6 +183,10 @@ pub struct Evidence {
     pub drained: u32,
     /// Records in `q` (see `queued_records`).
     queued_records: u32,
+    /// This chain's records known durably on a card (flushed), and the
+    /// hash of the last of them: what the boot counter store keeps for
+    /// the next boot (`evidence::continuity`).
+    durable: Option<(u64, [u8; 32])>,
 }
 
 impl Evidence {
@@ -242,6 +246,7 @@ impl Evidence {
             last_sign_us: 0,
             drained: 0,
             queued_records: 0,
+            durable: None,
         }
     }
 
@@ -261,6 +266,16 @@ impl Evidence {
 
     pub fn seq(&self) -> u64 {
         self.chain.seq()
+    }
+
+    pub fn boot_id(&self) -> [u8; 8] {
+        self.chain.boot_id()
+    }
+
+    /// Records of this boot's chain durably on a card, and the hash of the
+    /// last of them (see `flushed`).
+    pub fn durable(&self) -> Option<(u64, [u8; 32])> {
+        self.durable
     }
 
     pub fn queued(&self) -> usize {
@@ -561,14 +576,22 @@ impl Evidence {
         let w = self.written;
         // Whole records only are flushed (sd.rs flushes at a record boundary).
         let mut at = 0;
+        let mut last = None;
         while at < w {
             match format::peek_len(&self.q[at..w]) {
-                Ok(l) if l > 0 => {
+                Ok(l) if l > 0 && at + l <= w => {
+                    last = Some((at, l));
                     at += l;
                     self.queued_records = self.queued_records.saturating_sub(1);
                 }
                 _ => break,
             }
+        }
+        // The last record now on the card: the next boot names it.
+        if let Some((a, l)) = last {
+            let r = &self.q[a..a + l];
+            let seq = u64::from_le_bytes(r[format::off::SEQ..format::off::SEQ + 8].try_into().unwrap_or([0; 8]));
+            self.durable = Some((seq + 1, evidence::sha256(r)));
         }
         self.q.copy_within(w..self.len, 0);
         self.len -= w;
@@ -596,6 +619,29 @@ impl Evidence {
         data[12..44].copy_from_slice(&ph);
         data[44] = ps;
         self.event(EventCode::CardMounted, name.as_bytes(), &data);
+    }
+
+    /// Where this boot stands among the unit's boots (`evidence::continuity`):
+    /// once a boot when the counter store answers, again for a card with
+    /// another counter.
+    pub fn continuity(&mut self, k: &evidence::continuity::Continuity) {
+        let mut t: heapless::String<160> = heapless::String::new();
+        let _ = write!(
+            t,
+            "boot counter {} ({}); previous boot ",
+            k.counter,
+            evidence::continuity::Continuity::status_name(k.status)
+        );
+        if k.prev_boot == [0; 8] {
+            let _ = t.push_str("none");
+        } else {
+            for b in k.prev_boot {
+                let _ = write!(t, "{b:02x}");
+            }
+            let _ = write!(t, " with {} records stored", k.prev_records);
+        }
+        println!("hub-p4: evidence {t}");
+        self.event(EventCode::Continuity, t.as_bytes(), &k.encode());
     }
 
     /// Where the hub is and what time it is, for every record.
