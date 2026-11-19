@@ -657,3 +657,35 @@ fn the_tracker_with_path_history_stays_under_a_mebibyte() {
     assert!(size_of::<PathRing>() <= 4_500);
     assert_eq!(size_of::<PathPoint>(), 12);
 }
+
+#[test]
+fn level_and_reasons_reach_json_cot_and_the_strip() {
+    let from = offset(SITE.0, SITE.1, 0.0, -1200.0);
+    let path = move |t: f64| Flight::Toward { from, to: SITE, speed_mps: 12.0, alt_from: 60.0, alt_to: 40.0 }.at(t);
+    let mut sim = Sim::new(&[HOUSE]);
+    sim.run(&[Drone::new("OUT-1", &path)], 65, |_| {});
+    let now = sim.now() - 1000;
+    let t = sim.track("OUT-1").unwrap();
+    assert_eq!(t.threat.level, Some(Level::Critical));
+    let ctx = sim.tr.context(now, Some(1_700_000_000_000));
+    let mut buf = [0u8; crate::json::MAX_LINE];
+    let n = crate::json::track_line(t, &ctx, &mut buf).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+    let th = &v["threat"];
+    assert_eq!(th["level"], "critical");
+    assert_eq!(th["held"], false);
+    assert_eq!(th["snoozed_s"], serde_json::Value::Null);
+    assert_eq!(th["reasons"][0]["rule"], "fast_inbound");
+    assert_eq!(th["reasons"][0]["place"], "house");
+    assert!(th["reasons"][0]["eta_s"].as_f64().unwrap() < 30.0);
+    assert!(th["reasons"][0].get("h_m").is_none(), "only the numbers the rule has");
+    assert_eq!(th["reasons"][1]["rule"], "beeline");
+    let mut cot = [0u8; crate::cot::MAX_EVENT];
+    let n = crate::cot::drone_event(t, &ctx, &mut cot).unwrap();
+    let x = core::str::from_utf8(&cot[..n]).unwrap();
+    assert!(x.contains("; Threat: Critical: FAST, heading for house, "), "{x}");
+    assert!(x.contains("<color argb=\"-65536\"/>"), "{x}");
+    let strip = strip_text(t).unwrap();
+    assert!(strip.starts_with("CRITICAL #1 FAST to house "), "{strip}");
+    assert_eq!(sim.tr.top_threat(now).map(|t| t.id), Some(t.id));
+}

@@ -611,7 +611,7 @@ fn json_golden() {
         // a weak flag, so the score stays below the report level.
         r#""spoof":{"score":20,"flags":[{"check":"serial_format","conf":20,"detail":4}],"auth":0},"cont":null,"confirmed":false,"#,
         // Nothing disputed, nothing held: no `claims` object.
-        r#""claims":null}"#,
+        r#""claims":null,"threat":null}"#,
         "\n"
     );
     assert_eq!(got, want);
@@ -840,6 +840,8 @@ fn json_worst_case_fits() {
     t.continuity.identity_changed = false;
     // A dispute over everything, with a far rival claim.
     t.claims = claims::Claims::worst_for_tests(u64::MAX / 2);
+    // A threat level with four reasons, every number at its widest.
+    t.threat = behaviour::TrackThreat::worst_for_tests(u64::MAX / 2 - 1000);
     tr.set_own_position(
         89.999_999_9,
         179.999_999_9,

@@ -70,6 +70,82 @@ struct Line<'a> {
     /// null when there is nothing to say (the usual case). Added with
     /// WP-10.
     claims: Option<ClaimsJ>,
+    /// Threat level and reasons (see `crate::behaviour`); null when the
+    /// drone is not judged (no position, not confirmed, or a hub that does
+    /// not run the threat levels). Added with slice 16a.
+    threat: Option<ThreatJ<'a>>,
+}
+
+#[derive(Serialize)]
+struct ThreatJ<'a> {
+    level: &'static str,
+    /// Seconds left of the operator's snooze; null when not snoozed.
+    snoozed_s: Option<u32>,
+    /// Held after the drone was lost while heading in.
+    held: bool,
+    /// Matched a `friend` line (place rules lowered to notice).
+    friend: bool,
+    /// Warning reached by two caution rules at once.
+    combined: bool,
+    reasons: ReasonsJ<'a>,
+}
+
+struct ReasonsJ<'a>(&'a [crate::behaviour::Reason]);
+
+impl Serialize for ReasonsJ<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = s.serialize_seq(Some(self.0.len()))?;
+        use crate::behaviour::Rule;
+        for r in self.0 {
+            let approach = matches!(r.rule, Rule::Beeline | Rule::FastInbound | Rule::LastSeenInbound);
+            let high = matches!(r.rule, Rule::InArea | Rule::AboveCeiling);
+            seq.serialize_element(&ReasonJ {
+                rule: r.rule.name(),
+                level: r.level.name(),
+                place: r.place(),
+                m: r.range_m(),
+                eta_s: r.eta_s().filter(|_| approach),
+                mps: r.speed_mps().filter(|_| approach),
+                h_m: r.height_m().filter(|_| high),
+                ago_s: r.ago_s().filter(|_| r.rule == Rule::LastSeenInbound),
+            })?;
+        }
+        seq.end()
+    }
+}
+
+/// One reason. Only the numbers that rule has are written: `m` always
+/// (metres, see `crate::behaviour::Reason`), `h_m` (height above the unit)
+/// for in_area and above_ceiling, `eta_s` and `mps` (closing speed) for
+/// beeline, fast_inbound and last_seen_inbound, `ago_s` for the last.
+#[derive(Serialize)]
+struct ReasonJ<'a> {
+    rule: &'static str,
+    level: &'static str,
+    /// The area's name; empty for the bubble round the unit.
+    place: &'a str,
+    m: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_s: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mps: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    h_m: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ago_s: Option<u16>,
+}
+
+fn threat_json(t: &Track, now: u64) -> Option<ThreatJ<'_>> {
+    let th = &t.threat;
+    Some(ThreatJ {
+        level: th.level?.name(),
+        snoozed_s: th.snooze_left_s(now),
+        held: th.held,
+        friend: th.friend,
+        combined: th.combined,
+        reasons: ReasonsJ(&th.reasons),
+    })
 }
 
 #[derive(Serialize)]
@@ -403,8 +479,9 @@ struct Own {
 /// PSRAM. (1792 before protocol 4 added the `dji` object; 2304 before
 /// protocol 8 added `dji.o4`; 2432 before the `spoof` and `cont` objects,
 /// which add up to 373 bytes; 2816 before WP-10's `claims` object, which
-/// adds up to 195; worst case now 2897 bytes.)
-pub const MAX_LINE: usize = 3008;
+/// adds up to 195; 3008 before slice 16a's `threat` object, which adds up
+/// to 489; worst case now 3386 bytes.)
+pub const MAX_LINE: usize = 3456;
 
 /// Write `track` as one JSON object followed by `\n`. Returns bytes written.
 pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize, FormatError> {
@@ -481,6 +558,7 @@ pub fn track_line(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize,
         }),
         confirmed: track.confirmed(),
         claims: claims_json(track, now),
+        threat: threat_json(track, now),
     };
     let n = serde_json_core::to_slice(&line, buf).map_err(|_| FormatError::BufferTooSmall)?;
     let nl = buf.get_mut(n).ok_or(FormatError::BufferTooSmall)?;

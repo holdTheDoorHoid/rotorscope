@@ -26,6 +26,10 @@
 //!   track's position is the established one, and the dispute is in the
 //!   remarks. An authentication message is reported as present, not
 //!   checked: the hub verifies no signature.
+//! - A drone's threat level (`crate::behaviour`) is in its remarks
+//!   (`Threat: Warning: heading for house, 180 m away at 12 m/s, there in
+//!   about 14 s`), and colours it: orange at Warning, red at Critical,
+//!   DragonSync's yellow otherwise.
 
 use core::fmt::Write;
 
@@ -167,9 +171,20 @@ pub fn drone_event(track: &Track, ctx: &Context, buf: &mut [u8]) -> Result<usize
         }
         w.write_str("<remarks>")?;
         remarks(&mut w, track, ctx)?;
-        w.write_str("</remarks><color argb=\"-256\"/></detail></event>")
+        write!(w, "</remarks><color argb=\"{}\"/></detail></event>", threat_argb(track))
     })();
     w.finish()
+}
+
+/// The drone's colour as a signed ARGB integer (CoT's `<color argb>`):
+/// red at Critical, orange at Warning, otherwise DragonSync's yellow.
+pub fn threat_argb(track: &Track) -> i32 {
+    use crate::behaviour::Level;
+    match track.threat.level {
+        Some(Level::Critical) => 0xFFFF_0000_u32 as i32,
+        Some(Level::Warning) => 0xFFFF_8000_u32 as i32,
+        _ => -256,
+    }
 }
 
 /// `Key: value; ` pairs in DragonSync's order, skipping unknowns.
@@ -242,7 +257,36 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
     if track.spoof.auth_pages != 0 {
         w.write_str("; Auth: message present, not checked")?;
     }
-    claim(w, track, ctx.now_ms)
+    claim(w, track, ctx.now_ms)?;
+    threat(w, track)
+}
+
+/// `; Threat: Warning: heading for house, ...; over yard` (place names come
+/// from the site file, not the air; still escaped).
+fn threat(w: &mut Buf<'_>, track: &Track) -> core::fmt::Result {
+    let th = &track.threat;
+    let Some(level) = th.level else { return Ok(()) };
+    if level == crate::behaviour::Level::Notice && !th.friend {
+        return Ok(());
+    }
+    write!(w, "; Threat: {}", level.label())?;
+    if th.friend {
+        w.write_str(" (friend)")?;
+    }
+    for (i, r) in th.reasons.iter().enumerate() {
+        w.write_str(if i == 0 { ": " } else { ", " })?;
+        let text: heapless::String<96> = render(Reasoned(r));
+        write!(w, "{}", Xml(&text))?;
+    }
+    Ok(())
+}
+
+struct Reasoned<'a>(&'a crate::behaviour::Reason);
+
+impl core::fmt::Display for Reasoned<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        crate::behaviour::write_reason(f, self.0)
+    }
 }
 
 /// `; Claim: unverified broadcast`, or the dispute with the other claimed

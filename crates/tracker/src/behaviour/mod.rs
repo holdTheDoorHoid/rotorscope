@@ -360,6 +360,33 @@ impl TrackThreat {
         self.rise
     }
 
+    /// The longest JSON and CoT this can produce: every field at its widest.
+    #[cfg(test)]
+    pub(crate) fn worst_for_tests(now_ms: u64) -> Self {
+        let name = Name::try_from("abcdefghijkl").unwrap();
+        let wide = |rule| {
+            let mut r = Reason::new(rule, Level::Critical, &name, 1.0e9).with_eta(1.0e9).with_speed(1.0e9).with_height(Some(-1.0e9));
+            r.ago_s = NONE_U16 - 1;
+            r
+        };
+        let mut reasons = Vec::new();
+        // The widest set a drone can have at once (a held drone has only
+        // its one "last seen inbound" reason, which is shorter).
+        for rule in [Rule::FastInbound, Rule::Beeline, Rule::AboveCeiling, Rule::InArea] {
+            let _ = reasons.push(wide(rule));
+        }
+        Self {
+            level: Some(Level::Critical),
+            reasons,
+            combined: true,
+            friend: true,
+            held: true,
+            since_ms: now_ms,
+            snoozed_until_ms: now_ms + SNOOZE_MS,
+            ..Self::default()
+        }
+    }
+
     /// Two records of one drone merged: keep the more serious picture.
     pub(crate) fn absorb(&mut self, o: &TrackThreat) {
         if o.level > self.level {
