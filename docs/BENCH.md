@@ -142,7 +142,7 @@ relies on the one before.
 ```sh
 RUSTC_WRAPPER= cargo test --workspace --locked      # all pass
 tools/check-wifi-blobs.sh                          # radio libraries and the patched esp-radio
-tools/check-image-identity.sh                      # images do not depend on the kit or the checkout
+tools/check-image-identity.sh                      # images do not depend on the kit (identical builds)
 tools/dev-board.sh --self-test && tools/flash-node.sh --self-test
 ```
 

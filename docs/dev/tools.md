@@ -14,6 +14,8 @@ as of commit `6651ecd` (2026-11-18); each section names the source file that is 
 | [`airspace-pack`](#airspace-pack) | Rust | Builds the offline airspace map pack for the hub's SD card |
 | [`bench/`](#bench) | Python | Two-board bench tests, one command each |
 | [`cc26xx-flash`](#cc26xx-flash) | Rust | Backs up and flashes a Sonoff CC2652P dongle |
+| [`check-image-identity.sh`](#check-image-identitysh) | Shell | Shows that firmware images hold no key: two independent checkouts, one with decoy keys, must build identical images |
+| [`check-wifi-blobs.sh`](#check-wifi-blobssh) | Shell | Checks the Espressif radio libraries carry the CVE-2025-52471 fix, and the esp-radio patch |
 | [`dev-board.sh`](#dev-boardsh) | Shell | Flashes and reads boards under a per-board lock |
 | [`docs-build.sh`, `docs-check.py`](#docs-buildsh-and-docs-checkpy) | Shell, Python | Builds and checks this documentation site |
 | [`droneid-file`](#droneid-file) | Rust | Decodes DJI DroneID from an I/Q recording |
@@ -23,11 +25,12 @@ as of commit `6651ecd` (2026-11-18); each section names the source file that is 
 | [`fetch-droneid-samples.sh`](#fetch-droneid-samplessh) | Shell | Downloads the two public DroneID recordings |
 | [`flarm-keys`](#flarm-keys) | Rust | Makes the private FLARM key file from a SoftRF checkout |
 | [`flash-node.sh`](#flash-nodesh) | Shell | Builds and flashes a multi-image listener node |
-| [`link-key`](#link-key) | Rust | Makes the kit's ESP-NOW link key |
+| [`link-key`](#link-key) | Rust | Makes the kit master and writes each board's ESP-NOW key record |
 | [`modes-live`](#modes-live) | Rust | Checks our ADS-B decoder against an ADSBee |
 | [`p4-prepare.sh`](#p4-preparesh) | Shell | Prepares the patched esp-hal the P4 hub needs |
-| [`partitions-node.csv`](#partitions-nodecsv) | Data | Flash layout of a multi-image node |
+| [`partitions-node.csv`](#partitions-nodecsv) | Data | Flash layout of a multi-image node (and the hub and single-image tables) |
 | [`rawcap-pull`](#rawcap-pull) | Rust | Rebuilds node-sdr captures from a console log |
+| [`repro-env.sh`](#repro-envsh) | Shell | Makes a firmware image independent of checkout path and build time |
 | [`rfuav-check`](#rfuav-check) | Rust | Runs the C5's FPV and DroneID detectors over RFUAV recordings |
 | [`rid-ble-beacon`](#rid-ble-beacon) | Rust | Bench-only Bluetooth Remote ID test transmitter (laptop) |
 | [`rid-view`](#rid-view) | Rust | Laptop viewer: the hub's tracker on a laptop |
@@ -174,6 +177,56 @@ Status: `info`, `read` and `flash` of Sniffle were run on one real dongle (2026-
 the Zigbee backup is **simulated only** (`tests/sim_flows.rs`). Source: `tools/cc26xx-flash/src/main.rs`,
 `src/ccfg.rs`. Guide: [A Sonoff dongle as a Bluetooth 5 receiver](../SONOFF.md).
 
+## check-image-identity.sh
+
+**Purpose:** show that firmware images hold no link key and are the same for every kit: it builds
+the same commit from two independent throwaway checkouts, one of them with decoy key files and the
+retired key variable set, and compares the images.
+
+```text
+tools/check-image-identity.sh [--plain] [--paths] [node-wifi|gateway]...   default: node-wifi gateway
+```
+
+It compares the app image espflash would write (`espflash save-image`) by SHA-256 and reports the
+ELFs too (they also carry debug sections, which are never flashed); it also fails if an image
+carries a `link-key:` tag. Both builds go through `tools/repro-env.sh`, which removes the build time
+and the absolute source paths from the image; `--plain` builds without it, to show what differs
+then (the build time, 68 bytes on node-wifi). The two checkouts are built **in turn at the same
+directory path**: cargo hashes the location of every crate under `crates/` (outside each
+firmware's own workspace) into symbol names, so the same commit built in two different directories
+gives differently laid-out images. `--paths` adds that comparison too. Result on 2026-11-18: the
+node-wifi and gateway images (and ELFs) identical. It
+builds the committed tree (`git archive HEAD`), so commit first; it needs about 2.5 GB free while it
+runs, removes everything afterwards and touches no board. Exit 0 when every image matches.
+
+Source: `tools/check-image-identity.sh`. Background: docs/LINK-KEYS-DESIGN.md section 9.
+
+## check-wifi-blobs.sh
+
+**Purpose:** check, offline, that every radio firmware links Espressif radio libraries with the fix
+for CVE-2025-52471, and the patched esp-radio.
+
+```text
+tools/check-wifi-blobs.sh [lockfile...]   default: every firmware/*/Cargo.lock
+tools/check-wifi-blobs.sh --self-test     checks of this script on fake data (no registry)
+```
+
+1. For every `esp-wifi-sys-<chip>` crate a lockfile names, for the chips the firmware is built for
+   (ESP32-C3, ESP32-C5, ESP32-S3), the git blob hashes of `libespnow.a`, `libnet80211.a` and
+   `libpp.a` in the local cargo registry must equal the list in the script: the files of the
+   Espressif Wi-Fi library commit that contains the fix. A dependency bump to a version with no
+   entry fails until someone checks its provenance and records it.
+2. Every lockfile that uses esp-radio must take the patched copy (`firmware/patches/esp-radio`),
+   and that copy must differ from the crates.io release only in the two files
+   `firmware/patches/README.md` names (the release is read from the registry cache after its
+   SHA-256 is checked).
+
+**Reads:** the lockfiles, `$CARGO_HOME` (default `~/.cargo`) and the repository; nothing from the
+network. Exit 0 when all is good, 1 with what failed and why.
+
+Source: `tools/check-wifi-blobs.sh`. Background: `firmware/patches/README.md`,
+docs/LINK-KEYS-DESIGN.md section 8.
+
 ## dev-board.sh
 
 **Purpose:** flash an ELF to a bench board and capture its console, holding a per-board lock so
@@ -187,6 +240,8 @@ tools/dev-board.sh --list                                    registered boards: 
 tools/dev-board.sh --resolve <board>                         print "<port> <chip>"
 tools/dev-board.sh --hold <seconds> [board]                  take the lock and sit on it
 tools/dev-board.sh --pt <csv> --app <label>=<elf> [--app ...] [--erase LABEL] --multi [seconds] [board]
+tools/dev-board.sh --pt <csv> <elf> [seconds] [board]           single image with that partition table
+tools/dev-board.sh --self-test                               dry-run checks of this script (no board)
 ```
 
 | Option (before the positional arguments) | Meaning |
@@ -195,7 +250,7 @@ tools/dev-board.sh --pt <csv> --app <label>=<elf> [--app ...] [--erase LABEL] --
 | `--send-after SECS` | When to start typing (default 8 s after the reset) |
 | `--run CMD` | Run `CMD` (with `bash -c`) under the lock, with `BOARD_PORT` set, for at most `seconds`. No reset. Give an ELF too to flash first. |
 | `--dry-run` | Print what would happen; touch no hardware, take no lock |
-| `--pt`, `--app`, `--erase`, `--multi` | Multi-image flash: write the partition table, erase `otadata` and `rsjob` (plus any `--erase` label), write each ELF into its slot |
+| `--pt`, `--app`, `--erase`, `--multi` | Multi-image flash: write the partition table, erase `otadata` and `rsjob` (plus any `--erase` label), write each ELF into its slot. `--pt` with one ELF flashes a single image with that table (single-image ESP-NOW nodes: `tools/partitions-single.csv`) |
 
 ```bash
 tools/dev-board.sh --list
@@ -205,8 +260,8 @@ tools/dev-board.sh --list
 tools/dev-board.sh --send xw firmware/rid-beacon/target/xtensa-esp32s3-none-elf/release/rid-beacon 40 s3
 ```
 
-**Reads:** `tools/boards.local` (or `$ROTORSCOPE_BOARDS`), each ELF's `link-key:` and `bench-build:`
-tags, the kit key's ID (through `link-key id`). **Writes:** the board; lock files in
+**Reads:** `tools/boards.local` (or `$ROTORSCOPE_BOARDS`), each ELF's `bench-build:` tag. It looks
+for no key: images carry none. **Writes:** the board; lock files in
 `$ROTORSCOPE_LOCK_DIR` (default `~/.local/state/rotorscope/locks/`), plus the legacy
 `/tmp/rotorscope-board-<name>.lock`; `--register` appends to `tools/boards.local`.
 
@@ -218,9 +273,10 @@ How it behaves:
 - The lock lives outside `/tmp` because a sandboxed program can have a private `/tmp`, giving each
   program its own "shared" lock. Waiting is capped at 10 minutes. A held lock records the PID,
   time and command, which `--list` shows.
-- Before flashing it prints each ESP-NOW image's link-key ID and **warns** if an image has no key or
-  a different one from the kit key. It **refuses** a bench image unless `ROTORSCOPE_BENCH=1`
-  (and warns when it is set).
+- It **refuses** a bench image unless `ROTORSCOPE_BENCH=1` (and announces it when it is set).
+- It never erases the provisioning partitions `rskey` (a node's key record), `rskit` and `rsboot`
+  (the hub's master, roster and boot counter): `--erase` refuses them, and an app flash with the
+  same table leaves them where they were. Only `link-key` writes them, through `--run`.
 - The console is read at 115200 baud after a USB-JTAG reset. It rides out an ESP32-C5 dropping off
   USB as its firmware starts, and keeps reading while it types, because Linux holds only 4 KB of
   unread serial input.
@@ -438,11 +494,10 @@ tools/flash-node.sh [--open] <board> [seconds=20]
 
 | Setting | Meaning |
 |---|---|
-| `--open` | Build and flash an **open** kit on purpose (no link authentication) |
+| `--open` | Accept a board with an **open** key record (no link authentication) as a good flash |
 | `NODE_WIRED=1` | Build wired (UART) images, no ESP-NOW |
 | `NODE_BUS=1` | Build wired-bus images; every image must be a bus build |
 | `NODE_SDR_ELF` | The node-sdr image for slot `ota_2` (default its normal, or with `NODE_BUS=1` its bus, build path) |
-| `ROTORSCOPE_LINK_KEY_FILE` | Key file (default `tools/link.key`); `none` needs `--open` |
 | `ROTORSCOPE_BENCH=1` | Allow bench images |
 
 ```bash
@@ -452,40 +507,75 @@ tools/flash-node.sh c5a
 It builds `node-wifi` (2.4 GHz build, into `ota_0`) and `node-ble` (into `ota_1`), adds `node-sdr`
 to `ota_2` only if that ELF exists (it never builds it; otherwise the slot is erased and the node
 offers no DroneID or FPV), erases `otadata` and `rsjob` so the node starts `node-wifi`, and reads
-the console. It stops if the board is not an ESP32-C5, if there is no link key (without `--open`),
-if the images carry different link keys, if a bus node has a non-bus image, or if an image is a
-bench build without `ROTORSCOPE_BENCH=1`.
+the console. It never erases or writes `rskey`, the node's key record, which `link-key node` put
+there. It stops if the board is not an ESP32-C5, if an image does not fit the node (an ESP-NOW node
+takes only images that run the version 3 link, `"link":"v3"`; a wired or bus node takes none of
+those; a bus node needs bus images), or if an image is a bench build without `ROTORSCOPE_BENCH=1`.
+Images carry no key. After an ESP-NOW flash it reads the boot line and calls the flash good (exit
+0) only if the node says it is keyed (`{"t":"uplink","auth":"kit:<id> slot:<n> gen:<g>
+check:<c>",...}`), or, with `--open`, has an open record; otherwise it exits 1 with what the board
+reported (`missing`, `damaged`, `wrong_board`, `no_rng`, `open`, or no boot line).
 
 Source: `tools/flash-node.sh`.
 
 ## link-key
 
-**Purpose:** make the kit's ESP-NOW link key, one random 32-byte key shared by the gateway and every
-ESP-NOW node of one kit.
+**Purpose:** make the kit's master key and write each board's ESP-NOW key record: every node gets
+a key of its own, worked out from the master and its roster slot, generation and MAC address; the
+hub gets the master and the roster. The procedure is in
+[ESP-NOW in depth](../ESPNOW.md#kits-ship-open-sealing-yours).
 
 ```text
-link-key new [--force] [FILE]   # write tools/link.key (refuses to overwrite)
-link-key id [FILE]              # print the key's ID (default tools/link.key)
+link-key kit new [--force]                  new master in tools/kit.key + empty roster; prints the kit id
+link-key hub <hub-board> [--keep-boot]      master + roster to the hub's rskit; seeds rsboot
+link-key node <board> [--slot N] [--label TEXT] [--mac MAC] [--hub <hub-board>]
+                                            provision a node (next free slot, or slot N at gen+1)
+link-key hub-roster <hub-board>             roster only to the hub (never the master)
+link-key revoke --slot N                    mark a slot revoked (then hub-roster)
+link-key open <board> [--hub] [--keep-boot] write an open (unauthenticated) record
+link-key show                               kit id and roster with key checks
 ```
+
+| Option | Meaning |
+|---|---|
+| `--kit-dir DIR` | Where `kit.key` and `kit.roster` live (default `tools/`, or `$ROTORSCOPE_KIT_DIR`) |
+| `--table CSV` | The board's partition table (default `tools/partitions-node.csv`, or `tools/partitions-hub.csv` for hub commands); single-image nodes need `tools/partitions-single.csv` |
+| `--hub-table CSV` | The hub's table for `node --hub` |
+| `--dry-run` | Print the `dev-board.sh` / `espflash` commands; touch no board and leave the roster alone (`node` then needs `--mac`). Every board-writing command takes it |
+| `--keep-boot` | `hub`, `open --hub`: leave the boot counter alone |
+| `--bench-corrupt` | `node`, bench only (`ROTORSCOPE_BENCH=1`): write a record whose CRCs are both bad |
 
 ```bash
-cargo run -p link-key -- new
+cargo run -p link-key -- kit new
+cargo run -p link-key -- hub p4 --dry-run
+cargo run -p link-key -- node c5a --label "roof" --hub p4
 ```
 
-```bash
-cargo run -p link-key -- id
-```
+**Writes:** `tools/kit.key` (the master, owner-only, git-ignored) and `tools/kit.roster` (slot,
+generation, MAC, key check and label per node; no secrets, git-ignored because it is per kit); on a
+board, the `rskey`, `rskit` or `rsboot` partition through `tools/dev-board.sh --run` and `espflash
+write-bin` (`$ROTORSCOPE_DEV_BOARD` overrides the script, for tests). **Prints:** never a key; the
+kit id and each node's key check (8 hex digits each), which boards print at boot too.
 
-**Writes:** 64 hex digits from `/dev/urandom`, owner-only permissions. **Prints:** only the key's ID
-(8 hex digits, derived from the key, safe to show); boards print the same ID at boot. `new --force`
-replaces the key: then rebuild and reflash the gateway and **every** ESP-NOW node, or they stop
-talking to each other.
+How it behaves:
+
+- `hub` first reads the hub's boot counter and, when it still reads good, seeds the new one just
+  above it, so the nodes follow a re-provisioned hub at once.
+- A key image goes to a 0600 file in a private temporary directory and is overwritten and deleted
+  as soon as it is written, also on Ctrl-C (the command then says "interrupted" and exits 130).
+  Only `kill -9` or a power cut in that second leaves `link-key-<pid>-<random>` in the system
+  temporary directory.
+- `kit new --force` replaces the master: then the hub and every node must be provisioned again.
+- `link-key new` and `link-key id` (the one-key-per-kit commands) are removed. A leftover
+  `tools/link.key` is read by nothing; keep it only until every board runs current firmware.
 
 > [!IMPORTANT]
-> The repository is public. `tools/link.key` and `*.linkkey` are ignored by Git; never commit,
-> paste or print the file. Back it up somewhere private.
+> The repository is public. `tools/kit.key` and `tools/kit.roster` are ignored by Git; never commit,
+> paste or print `kit.key`. Back it up somewhere private: it is the only way to add a node to the
+> kit without provisioning everything again.
 
-Source: `tools/link-key/src/main.rs`. Background: [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
+Source: `tools/link-key/src/main.rs`, `tools/link-key/src/lib.rs`. Background:
+[ESP-NOW in depth](../ESPNOW.md#securing-the-link).
 
 ## modes-live
 
@@ -545,9 +635,17 @@ Source: `tools/p4-prepare.sh`; provenance in `firmware/patches/esp-hal-p4-pre-v3
 | `ota_1` | app | 0x210000 | 0x200000 | `node-ble` by convention |
 | `ota_2` | app | 0x410000 | 0x200000 | `node-sdr` by convention |
 | `rsjob` | data | 0x610000 | 0x1000 | the job a node switched images for |
+| `rskey` | data (0x40) | 0x611000 | 0x1000 | the node's key record, written only by `link-key`; every image on the board reads it |
 
 The running image recognises the others by the project name in their app descriptor
 (`crates/nodeimage`), so the slot order is a convention, not a rule.
+
+Two more tables live beside it. `tools/partitions-single.csv` is for single-image ESP-NOW nodes
+(ESP32-S3 node-wifi, ESP32-C3 node-lr): espflash's default 4 MB layout with the app one 64 KB block
+shorter and `rskey` at 0x3f0000; flash those boards with it (`dev-board.sh --pt`), or the node
+reports its key record `missing`. `tools/partitions-hub.csv` is the P4 hub's: Elecrow's own four
+rows unchanged, then `rskit` (master and roster, 0xC10000) and `rsboot` (boot counter, 0xC12000).
+Every provisioning offset is fixed for good, so a reflash with the same table keeps the keys.
 
 ## rawcap-pull
 
@@ -570,6 +668,26 @@ cargo run --release -p rawcap-pull -- c5.log --out caps --spectrum
 
 It never opens a serial port itself; capture with `tools/dev-board.sh --log 60 c5a | tee c5.log`.
 Source: `tools/rawcap-pull/src/main.rs`.
+
+## repro-env.sh
+
+**Purpose:** make a firmware image independent of where and when it is built, so two builds of one
+commit give the same image. Source it (bash) in the firmware folder before building:
+
+```bash
+cd firmware/gateway && . ../../tools/repro-env.sh riscv32imac-unknown-none-elf
+cargo build --release "${REPRO_CARGO_ARGS[@]}"
+```
+
+It sets `SOURCE_DATE_EPOCH` to the commit's time unless already set (the app descriptor's build
+time and date then come from the commit), and `REPRO_CARGO_ARGS` to a `--config` that adds
+`--remap-path-prefix` for this checkout (to `/rotorscope`), the cargo home (`/cargo`) and the rustup
+home (`/rustup`), so panic messages name no local paths. The argument is the target triple (default
+`riscv32imac-unknown-none-elf`). `flash-node.sh` and `check-image-identity.sh` use it. It does not
+make images independent of the checkout's directory: build in the same directory path to get the
+same image (see `check-image-identity.sh`).
+
+Source: `tools/repro-env.sh`.
 
 ## rfuav-check
 
@@ -656,6 +774,7 @@ DragonSync inputs are in
 ## Where this lives in the code
 
 - `tools/*/src/main.rs`: each Rust tool's argument parser and usage text
-- `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`, `tools/fetch-droneid-samples.sh`, `tools/docs-build.sh`: the scripts, documented in their header comments
+- `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`, `tools/fetch-droneid-samples.sh`, `tools/docs-build.sh`, `tools/check-wifi-blobs.sh`, `tools/check-image-identity.sh`, `tools/repro-env.sh`: the scripts, documented in their header comments
+- `tools/partitions-node.csv`, `tools/partitions-single.csv`, `tools/partitions-hub.csv`: flash layouts
 - `tools/bench/run.py`, `tools/bench/judge.py`: the bench runner
 - `Cargo.toml`: which tools are workspace members

@@ -16,6 +16,11 @@
 #     `target.<triple>.rustflags` when the firmware's config sets rustflags there (which
 #     replaces `build.rustflags`), else under `build.rustflags`.
 #
+# What it cannot remove: cargo hashes the absolute location of every path dependency outside
+# the firmware's own workspace (crates/*) into symbol names (-C metadata), so the same commit
+# built in two different directories still gives differently laid-out images. Build in the
+# same directory path to get the same image (tools/check-image-identity.sh does).
+#
 # Argument: the target triple being built (default riscv32imac-unknown-none-elf).
 
 _repro_triple=${1:-riscv32imac-unknown-none-elf}
