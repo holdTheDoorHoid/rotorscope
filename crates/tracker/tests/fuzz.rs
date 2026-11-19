@@ -9,8 +9,8 @@ use tracker::site::{self, Lines, SiteLine, SiteState};
 use tracker::{Config, Observation, Tracker, json, spoof};
 
 const SITE: &str = "# site file\n\
-NODE 10:BD:a3:ce:bd:18  39.9521 -75.1638  roof # north\n\
-node 10-bd-a3-ce-bd-18 clear\n\
+NODE 02:00:00:00:00:1A  39.9521 -75.1638  roof # north\n\
+node 02-00-00-00-00-1a clear\n\
 node all here\n\
 mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi Guest \n\
 mute deauth source=02:00:00:00:00:01 target=0a:00:00:00:00:02\n\
