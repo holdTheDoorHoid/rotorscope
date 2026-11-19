@@ -465,6 +465,12 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             Frame::HubFix(_) | Frame::Csbee(_) | Frame::Flags(_) => {}
             // Protocol 9: attacks and jamming, a table of their own.
             Frame::Threat(s) => drop(self.ingest_threat(node, s, now_ms)),
+            // Protocol 14: a node's delivery claims are only worth checking
+            // against what the hub itself verified from that node, so the
+            // hub feeds them with its own count (`Tracker::link_received`,
+            // `Tracker::ingest_node_health`). A web head, which sees the
+            // frames but not the link, never does.
+            Frame::NodeHealth(_) => {}
         }
     }
 

@@ -9,6 +9,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod forward;
+pub mod gw;
 pub mod origin;
 pub mod printable;
 
@@ -94,7 +95,19 @@ use serde::{Deserialize, Serialize};
 ///   carrying the entry as a bad channel and keeps its previous plan.
 ///   A `MavlinkAttack` from a Wi-Fi node has `channel` set (the Wi-Fi
 ///   channel); from an LR2021 node it is 0.
-pub const PROTOCOL_VERSION: u8 = 13;
+/// - 14: per-node link keys (docs/LINK-KEYS-DESIGN.md, WP-13). The gateway's
+///   UART to the hub no longer carries `Frame`s: it speaks [`gw::GwUp`] /
+///   [`gw::GwDown`] (their own framing limit, [`gw::MAX_GW_FRAME`]), and the
+///   hub takes node frames only from inside a packet it verified.
+///   [`Frame::NodeHealth`] appended (node to hub, every 5 s: shed and
+///   delivery counts, link rejects, robustness counters).
+///   [`ThreatKind::LinkLoss`] appended (raised by the hub). `ForgedLink`
+///   gains `detail` codes 8-16 ([`origin::forged_reason`]). **Not append
+///   only:** [`HubFix`] gains `held` and `utc_held` at its end, so a v14
+///   web head cannot read a v13 hub's `HubFix` (it counts it as corrupt);
+///   the hub and its web head are reflashed together. A v13 web head
+///   reading a v14 `HubFix` ignores the two new bytes.
+pub const PROTOCOL_VERSION: u8 = 14;
 
 /// Longest CSBee line [`Frame::Csbee`] carries (`adsb::MAX_LINE`; the link
 /// crate does not depend on `adsb`, so the number is repeated here and
@@ -550,6 +563,29 @@ pub enum ThreatKind {
     /// Codes 5 and 6 need no protocol change: the frame is the same and
     /// `detail` was always a number; a hub that does not know them shows
     /// the threat with an unknown reason.
+    ///
+    /// Protocol 14 (per-node keys, docs/LINK-KEYS-DESIGN.md): the hub
+    /// verifies node packets itself and raises these from its own checks or
+    /// from the gateway's [`gw::GwUp::Refused`] reports (code 7, **late**, is
+    /// a node's own count, in [`NodeHealth::rejects`]):
+    /// - 8 **old firmware**: a version 2 (kit key) packet, from a board that
+    ///   was not reflashed;
+    /// - 9 **not in roster**: the sender's address is not one of the kit's
+    ///   nodes;
+    /// - 10 **over budget**: a roster address sending more than its share
+    ///   (the gateway's per-address limit): a flood, or a forger crowding a
+    ///   node out;
+    /// - 11 **late uplink**: a genuine node batch more than 2 s old: held
+    ///   back and released late;
+    /// - 12 **future uplink**: a genuine node batch claiming a hub clock more
+    ///   than 0.5 s ahead;
+    /// - 13 **not for this slot**: a beacon with no tag for the node's slot;
+    /// - 14 **unproven**: genuine, but from an epoch the node has not been
+    ///   moved to yet;
+    /// - 15 **malformed**: ours, but the wrong size, kind or direction;
+    /// - 16 **foreign**: not ours at all (other ESP-NOW users); not an attack.
+    ///
+    /// [`origin::forged_reason`] has each code's words.
     ForgedLink,
     /// Protocol 13 (docs/DRONE-ATTACKS.md). Deauthentication or
     /// disassociation aimed at a network that `crates/wifidrone` recognises
@@ -604,6 +640,16 @@ pub enum ThreatKind {
     /// 0-15 new identities a second over the window; `count` = new
     /// identities in the window, `window_ms` = the window.
     IdFlood,
+    /// Protocol 14, raised by the hub (docs/LINK-KEYS-DESIGN.md 7.3,
+    /// `tracker::delivery`): a node says it delivered far more frames than
+    /// the hub verified from it. Something acknowledged its packets on the
+    /// air and then lost them (forged acknowledgements, or a gateway that
+    /// drops them), so the hub is missing what that node hears. Never sent
+    /// on the node link (a node or gateway claiming it is refused as a
+    /// forged origin). The reporting node is the threat's node; `count` =
+    /// frames missing over the window, `detail` = percent of the frames the
+    /// node sent that are missing, `window_ms` = the window.
+    LinkLoss,
 }
 
 impl ThreatKind {
@@ -633,6 +679,7 @@ impl ThreatKind {
             MavlinkAttack => "mavlink_attack",
             AreaGnss => "area_gnss",
             IdFlood => "id_flood",
+            LinkLoss => "link_loss",
         }
     }
 
@@ -879,7 +926,15 @@ pub struct HubFix {
     /// The frame reaches the web head a few milliseconds later (queue + wire).
     pub utc_ms: Option<u64>,
     /// The hub's UTC is anchored to a GPS PPS edge (sub-millisecond there).
+    /// Protocol 14: false while the time is held (`utc_held`).
     pub utc_pps: bool,
+    /// Protocol 14. `position` is a held value, not live: the hub's GPS
+    /// checks stopped trusting the receiver (possible jamming or spoofing)
+    /// and the last trusted position is being kept. Show it as held.
+    pub held: bool,
+    /// Protocol 14. `utc_ms` is held: GPS time is not trusted just now, and
+    /// the hub's clock runs on from the last trusted time.
+    pub utc_held: bool,
 }
 
 /// Protocol 6. One flag on [`FlagReport`]: the rule and level, and the one
@@ -1040,6 +1095,81 @@ pub enum Frame {
     /// [`Frame::Threat`] so the evidence log keeps the bytes. Only sent
     /// with control content decoding on (the frame is content).
     MavlinkEvidence(MavlinkEvidence),
+    /// Protocol 14: a node's own health counters, every 5 s
+    /// (docs/LINK-KEYS-DESIGN.md 6.4, 7.3). Running totals since boot.
+    NodeHealth(NodeHealth),
+}
+
+/// [`NodeHealth::shed`] entries: frames the node turned away before its
+/// uplink queue, per kind, in `wifiwatch::shed::Kind` order.
+pub const SHED_KINDS: usize = 8;
+/// The kinds [`NodeHealth::shed`] counts, in order (names as on the node's
+/// own JSON stats line).
+pub const SHED_KIND_NAMES: [&str; SHED_KINDS] = ["rid_known", "rid_new", "health", "threat", "wdrone", "dji", "open", "other"];
+
+/// [`NodeHealth::rejects`] entries: hub packets the node's link refused, one
+/// per reason a node can see.
+pub const NODE_REJECTS: usize = 10;
+/// The `ForgedLink` detail code (`airlink::v3::Reject::code`) of each
+/// [`NodeHealth::rejects`] entry, in order: bad tag, replay,
+/// unauthenticated, stale, late, old firmware, not for this slot,
+/// unproven, malformed, foreign. The hub-only reasons (9 not in roster,
+/// 10 over budget, 11 late uplink, 12 future uplink) never happen on a node.
+pub const NODE_REJECT_CODES: [u32; NODE_REJECTS] = [1, 2, 3, 4, 7, 8, 13, 14, 15, 16];
+
+/// Protocol 14. What [`Frame::NodeHealth`] carries. Every count is a running
+/// total since the node booted (a lost report costs nothing: the next one
+/// carries everything), wrapping at `u32::MAX`; the hub takes differences.
+/// A node without one of these sends 0 for it.
+///
+/// Worst case 168 bytes encoded (every counter at its widest varint), so it
+/// fits one wired-bus unit (`wirebus::MAX_UNIT`, 336) with room to spare; a
+/// typical one is under 60.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeHealth {
+    /// Node uptime, seconds: tells the hub a reboot from a counter wrap.
+    pub uptime_s: u32,
+    /// Frames turned away by the node's queue budget, per kind
+    /// ([`SHED_KIND_NAMES`]).
+    pub shed: [u32; SHED_KINDS],
+    /// Sightings reported as alternating (two transmitters taking turns on
+    /// one identity): DJI Wi-Fi DroneID, then Wi-Fi drone networks.
+    pub alternations: [u32; 2],
+    /// Uplink accounting (section 7.3): frames in batches the radio
+    /// acknowledged, batches acknowledged, batches given up after every
+    /// retry, and send attempts (acknowledged or not).
+    pub frames_sent: u32,
+    pub batches_sent: u32,
+    pub batches_given_up: u32,
+    pub send_attempts: u32,
+    /// Hub packets refused by the node's link, per reason
+    /// ([`NODE_REJECT_CODES`]).
+    pub rejects: [u32; NODE_REJECTS],
+    /// Hub packets that repeated the last one taken (radio retries).
+    pub duplicates: u32,
+    /// `node_common::health()`: plans refused (they would leave the node
+    /// deaf to the gateway, or failed another check)...
+    pub plans_refused: u32,
+    /// ...fall-backs to the built-in plan after 60 s without the gateway,
+    /// and what each turned out to be: the plan was blamed, or the gateway
+    /// was away (an outage)...
+    pub deaf_fallbacks: u32,
+    pub deaf_blamed: u32,
+    pub deaf_outages: u32,
+    /// ...`Assign`s turned away while a blamed plan is refused...
+    pub deaf_refused: u32,
+    /// ...image switches refused by the rate limit, and seconds until the
+    /// next one is allowed (0: now).
+    pub switches_refused: u32,
+    pub switch_wait_s: u32,
+}
+
+impl NodeHealth {
+    /// Index into [`NodeHealth::rejects`] of `ForgedLink` detail `code`;
+    /// `None` for a reason a node never counts.
+    pub fn reject_index(code: u32) -> Option<usize> {
+        NODE_REJECT_CODES.iter().position(|&c| c == code)
+    }
 }
 
 /// Longest MAVLink frame a [`MavlinkEvidence`] carries. A full MAVLink 2
@@ -1162,6 +1292,8 @@ mod tests {
             position: Some(HubPosition { lat_e7: 399_526_000, lon_e7: -751_652_000, alt_hae_mm: None, age_ms: 0 }),
             utc_ms: Some(1_700_000_000_000),
             utc_pps: false,
+            held: false,
+            utc_held: false,
         })
     }
 
@@ -1362,6 +1494,8 @@ mod tests {
                 }),
                 utc_ms: Some(u64::MAX),
                 utc_pps: true,
+                held: false,
+                utc_held: false,
             }),
             Frame::HubFix(HubFix {
                 state: GnssState::Absent,
@@ -1369,6 +1503,8 @@ mod tests {
                 position: None,
                 utc_ms: None,
                 utc_pps: false,
+                held: false,
+                utc_held: false,
             }),
             Frame::Csbee([0xFF; MAX_CSBEE_LINE].into_iter().collect()),
             Frame::Csbee(b"#S:2,0,0,0,0,0,0,0,0,0,0,ABCD\r\n".iter().copied().collect()),
@@ -1436,6 +1572,24 @@ mod tests {
         assert!(postcard::from_bytes::<Command>(&[5]).is_err());
     }
 
+    /// A frame as protocol 13 encoded it: every frame but `HubFix` is
+    /// unchanged in protocol 14, and a `HubFix` with neither new flag set
+    /// encodes as the v13 one did (tag 10 and the five v13 fields).
+    fn encode_as_v13<'a>(f: &Frame, buf: &'a mut [u8]) -> &'a mut [u8] {
+        let Frame::HubFix(h) = f else { return encode(f, buf).unwrap() };
+        assert!(!h.held && !h.utc_held);
+        #[derive(Serialize)]
+        struct HubFixV13 {
+            state: GnssState,
+            sats: Option<u8>,
+            position: Option<HubPosition>,
+            utc_ms: Option<u64>,
+            utc_pps: bool,
+        }
+        let v13 = HubFixV13 { state: h.state, sats: h.sats, position: h.position, utc_ms: h.utc_ms, utc_pps: h.utc_pps };
+        postcard::to_slice_cobs(&(10u8, v13), buf).unwrap()
+    }
+
     fn air(proto: AirProto, n: usize, fill: u8) -> AirFrame {
         AirFrame {
             proto,
@@ -1466,7 +1620,7 @@ mod tests {
             if let Frame::Hello { protocol, .. } = &mut f {
                 *protocol = 10;
             }
-            fnv(encode(&f, &mut buf).unwrap());
+            fnv(encode_as_v13(&f, &mut buf));
         }
         for c in commands() {
             fnv(encode_command(&c, &mut buf).unwrap());
@@ -1662,7 +1816,7 @@ mod tests {
     fn protocol_9_threat_appended() {
         let mut buf = [0u8; MAX_FRAME];
         let mut dec = Decoder::new();
-        for k in 0..=22u8 {
+        for k in 0..=23u8 {
             let kind: ThreatKind = postcard::from_bytes(&[k]).unwrap();
             let f = Frame::Threat(ThreatSighting {
                 kind,
@@ -1685,7 +1839,7 @@ mod tests {
             dec.feed(wire, |r| got = Some(r));
             assert_eq!(got, Some(Ok(f)));
         }
-        assert!(postcard::from_bytes::<ThreatKind>(&[23]).is_err());
+        assert!(postcard::from_bytes::<ThreatKind>(&[24]).is_err());
         assert!(ThreatKind::Blinded.is_jamming() && !ThreatKind::Deauth.is_jamming());
     }
 
@@ -1833,7 +1987,7 @@ mod tests {
             if let Frame::Hello { protocol, .. } = &mut f {
                 *protocol = 11;
             }
-            fnv(encode(&f, &mut buf).unwrap());
+            fnv(encode_as_v13(&f, &mut buf));
         }
         for c in commands() {
             fnv(encode_command(&c, &mut buf).unwrap());
@@ -2047,5 +2201,96 @@ mod tests {
         }
         let both = AeroMode::ControlFlags { read_ids: true, decode_content: true }.entry(0);
         assert_eq!(plan_control_flags(&[(149, 150), both]), Some((true, true)));
+    }
+
+    fn node_health_max() -> NodeHealth {
+        NodeHealth {
+            uptime_s: u32::MAX,
+            shed: [u32::MAX; SHED_KINDS],
+            alternations: [u32::MAX; 2],
+            frames_sent: u32::MAX,
+            batches_sent: u32::MAX,
+            batches_given_up: u32::MAX,
+            send_attempts: u32::MAX,
+            rejects: [u32::MAX; NODE_REJECTS],
+            duplicates: u32::MAX,
+            plans_refused: u32::MAX,
+            deaf_fallbacks: u32::MAX,
+            deaf_blamed: u32::MAX,
+            deaf_outages: u32::MAX,
+            deaf_refused: u32::MAX,
+            switches_refused: u32::MAX,
+            switch_wait_s: u32::MAX,
+        }
+    }
+
+    /// Protocol 14: `NodeHealth` is tag 21, round-trips, and at its worst
+    /// (every counter at its widest varint) fits one wired-bus unit
+    /// (`wirebus::MAX_UNIT` = `MAX_FRAME` + 16 = 336) with room to spare.
+    #[test]
+    fn protocol_14_node_health_fits_a_bus_unit() {
+        let mut buf = [0u8; 1024];
+        let worst = Frame::NodeHealth(node_health_max());
+        let n = encode(&worst, &mut buf).unwrap().len();
+        std::println!("NodeHealth worst case {n} bytes encoded");
+        assert_eq!(n, 168, "the size the docs give");
+        assert!(n <= (MAX_FRAME + 16) / 2, "{n}: half a bus unit at most");
+        // A typical report: small counters.
+        let typical = Frame::NodeHealth(NodeHealth {
+            uptime_s: 86_400,
+            shed: [3, 120, 0, 1, 0, 0, 7, 0],
+            alternations: [2, 0],
+            frames_sent: 1_000_000,
+            batches_sent: 200_000,
+            batches_given_up: 12,
+            send_attempts: 200_100,
+            rejects: [0, 0, 0, 0, 1, 0, 0, 0, 2, 40_000],
+            duplicates: 30,
+            switch_wait_s: 3_600,
+            ..NodeHealth::default()
+        });
+        let t = encode(&typical, &mut buf).unwrap().len();
+        assert!(t <= 60, "{t}");
+        assert_eq!(postcard::to_slice(&worst, &mut buf).unwrap()[0], 21);
+        let mut dec = Decoder::new();
+        for f in [worst, typical, Frame::NodeHealth(NodeHealth::default())] {
+            let mut got = None;
+            dec.feed(encode(&f, &mut buf).unwrap(), |r| got = Some(r));
+            assert_eq!(got, Some(Ok(f)));
+        }
+        assert!(core::mem::size_of::<Frame>() <= 288, "Frame grew: {}", core::mem::size_of::<Frame>());
+    }
+
+    /// Protocol 14: `HubFix` carries `held` and `utc_held` (two bytes at its
+    /// end); `LinkLoss` is threat kind 23; every older frame is unchanged.
+    #[test]
+    fn protocol_14_hub_fix_and_link_loss() {
+        let mut buf = [0u8; MAX_FRAME];
+        let held = Frame::HubFix(HubFix {
+            state: GnssState::Fix3d,
+            sats: Some(4),
+            position: Some(HubPosition { lat_e7: 1, lon_e7: 2, alt_hae_mm: None, age_ms: 9_000 }),
+            utc_ms: Some(1_800_000_000_000),
+            utc_pps: false,
+            held: true,
+            utc_held: true,
+        });
+        let raw = postcard::to_slice(&held, &mut buf).unwrap().to_vec();
+        assert_eq!(raw[0], 10);
+        assert_eq!(&raw[raw.len() - 2..], [1, 1], "held, utc_held last");
+        let mut dec = Decoder::new();
+        let mut got = None;
+        dec.feed(encode(&held, &mut buf).unwrap(), |r| got = Some(r));
+        assert_eq!(got, Some(Ok(held.clone())));
+        // A v13 web head reads the v14 frame, ignoring the two new bytes;
+        // a v14 web head refuses a v13 one (reflash them together).
+        let v13 = encode_as_v13(&hub_fix(), &mut buf).to_vec();
+        let mut got = None;
+        dec.feed(&v13, |r| got = Some(r));
+        assert_eq!(got, Some(Err(LinkError::Corrupt)));
+        assert_eq!(postcard::to_slice(&ThreatKind::LinkLoss, &mut buf).unwrap(), [23]);
+        assert_eq!(ThreatKind::LinkLoss.name(), "link_loss");
+        assert!(!ThreatKind::LinkLoss.is_jamming());
+        assert_eq!(PROTOCOL_VERSION, 14);
     }
 }

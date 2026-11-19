@@ -755,7 +755,7 @@ fn a_registered_gateway_still_can() {
 fn bus_nodes_cannot_send_hub_or_gateway_frames() {
     let mut b = [0u8; 400];
     let me = [1; 6];
-    let fix = Frame::HubFix(link::HubFix { state: link::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true });
+    let fix = Frame::HubFix(link::HubFix { state: link::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true, held: false, utc_held: false });
     let csbee = Frame::Csbee(b"#A:x".iter().copied().collect());
     let flags = Frame::Flags(link::FlagReport { who: "x".try_into().unwrap(), level: 3, items: heapless::Vec::new(), pack_date: 0 });
     let join = Frame::BusJoin { mac: [5; 6], want: 0, check: 0 };

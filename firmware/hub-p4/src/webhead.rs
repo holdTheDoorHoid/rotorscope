@@ -122,7 +122,10 @@ impl Feed {
 
 /// The P4's GPS as a protocol 5 frame. Only a real fix is sent: a manual
 /// position typed on the P4's console stays on the P4 (the web head has the
-/// phone page's own form for that).
+/// phone page's own form for that). Protocol 14: a held position or time
+/// (`gps::Fix::held`, `Gps::time_held`: the integrity checks stopped trusting
+/// the receiver) is sent marked held, and held time never claims PPS, so the
+/// web head never shows either as live.
 pub fn hub_fix(gps: &Gps, fix_max_age_ms: u64, now: u64) -> HubFix {
     let state = match gps.status.state {
         GpsState::Absent => GnssState::Absent,
@@ -130,18 +133,23 @@ pub fn hub_fix(gps: &Gps, fix_max_age_ms: u64, now: u64) -> HubFix {
         GpsState::Fix2d => GnssState::Fix2d,
         GpsState::Fix3d => GnssState::Fix3d,
     };
-    let position = gps.fresh_fix(now, fix_max_age_ms).map(|f| HubPosition {
+    let fix = gps.fresh_fix(now, fix_max_age_ms);
+    let position = fix.map(|f| HubPosition {
         lat_e7: round(f.lat * 1e7),
         lon_e7: round(f.lon * 1e7),
         alt_hae_mm: f.alt_hae_m.map(|a| round(a * 1000.0)),
         age_ms: now.saturating_sub(f.at_ms).min(u64::from(u32::MAX)) as u32,
     });
+    let utc_ms = gps.utc_ms(now);
+    let utc_held = utc_ms.is_some() && gps.time_held;
     HubFix {
         state,
         sats: gps.status.sats,
         position,
-        utc_ms: gps.utc_ms(now),
-        utc_pps: gps.time.is_some_and(|t| t.pps),
+        utc_ms,
+        utc_pps: !utc_held && gps.time.is_some_and(|t| t.pps),
+        held: fix.is_some_and(|f| f.held),
+        utc_held,
     }
 }
 

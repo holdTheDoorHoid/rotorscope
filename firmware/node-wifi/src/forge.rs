@@ -33,6 +33,8 @@ fn frame(what: &str) -> Option<link::Frame> {
             position: Some(link::HubPosition { lat_e7: 0, lon_e7: 0, alt_hae_mm: Some(0), age_ms: 0 }),
             utc_ms: Some(978_307_200_000),
             utc_pps: true,
+            held: false,
+            utc_held: false,
         }),
         "csbee" => Frame::Csbee(heapless::Vec::from_slice(b"#A:FA4E00,,,,,,,,,,,,,,,,0000\r\n").ok()?),
         "flags" => Frame::Flags(link::FlagReport {

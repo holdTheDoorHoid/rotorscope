@@ -127,6 +127,7 @@ pub const fn threat_label(kind: ThreatKind) -> &'static str {
         ThreatKind::MavlinkAttack => "Hostile drone telemetry",
         ThreatKind::AreaGnss => "GPS interference nearby",
         ThreatKind::IdFlood => "Flood of fake IDs",
+        ThreatKind::LinkLoss => "Node reports going missing",
     }
 }
 

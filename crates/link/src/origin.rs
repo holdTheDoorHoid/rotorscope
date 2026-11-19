@@ -73,6 +73,81 @@ pub const FORGED_ORIGIN: u32 = 5;
 /// gateway could not relay because its node table was full.
 pub const FORGED_TABLE_FULL: u32 = 6;
 
+// Protocol 14 `ForgedLink` details (docs/LINK-KEYS-DESIGN.md 6.4; the same
+// numbers as `airlink::v3::Reject::code`, plus 10 for the gateway's budget).
+/// A version 2 (kit key) packet: a board that was not reflashed.
+pub const FORGED_OLD_FIRMWARE: u32 = 8;
+/// The sender's address is not in the kit roster.
+pub const FORGED_NOT_IN_ROSTER: u32 = 9;
+/// A roster address over the gateway's per-address budget.
+pub const FORGED_OVER_BUDGET: u32 = 10;
+/// A genuine node batch more than 2 s behind the hub's clock.
+pub const FORGED_LATE_UPLINK: u32 = 11;
+/// A genuine node batch more than 0.5 s ahead of the hub's clock.
+pub const FORGED_FUTURE_UPLINK: u32 = 12;
+/// A beacon with no tag for this node's slot.
+pub const FORGED_NOT_FOR_THIS_SLOT: u32 = 13;
+/// Genuine, but from an epoch the node has not been moved to.
+pub const FORGED_UNPROVEN: u32 = 14;
+/// Ours, but the wrong size, kind or direction.
+pub const FORGED_MALFORMED: u32 = 15;
+/// Not ours at all: other ESP-NOW users share the air.
+pub const FORGED_FOREIGN: u32 = 16;
+
+/// A `ForgedLink` `detail` code in plain words, for the console, the
+/// evidence text and the screen; `None` for a code this build does not know.
+pub const fn forged_reason(detail: u32) -> Option<&'static str> {
+    Some(match detail {
+        1 => "bad tag: forged, or made with another key",
+        2 => "replay: a genuine packet played back",
+        3 => "unauthenticated: no tag (a node built without a key)",
+        4 => "stale: from before the last restart",
+        FORGED_ORIGIN => "frame type the sender may not send",
+        FORGED_TABLE_FULL => "gateway node table full",
+        7 => "late: a genuine packet held back",
+        FORGED_OLD_FIRMWARE => "old firmware: a board that was not reflashed",
+        FORGED_NOT_IN_ROSTER => "not one of this kit's nodes",
+        FORGED_OVER_BUDGET => "over its traffic budget: a flood",
+        FORGED_LATE_UPLINK => "late: a node report held back over 2 s",
+        FORGED_FUTURE_UPLINK => "from the future: a node report stamped ahead of the hub's clock",
+        FORGED_NOT_FOR_THIS_SLOT => "beacon not for this node",
+        FORGED_UNPROVEN => "not yet proven: a genuine packet from an unconfirmed hub restart",
+        FORGED_MALFORMED => "malformed: wrong size, kind or direction",
+        FORGED_FOREIGN => "foreign: another ESP-NOW user, not an attack",
+        _ => return None,
+    })
+}
+
+/// Protocol 14: who originates each gateway-to-hub message ([`crate::gw`]).
+/// Exhaustive on purpose, like [`Head::origin`]. A `Packet` carries a node's
+/// sealed bytes: nothing in it counts until the hub has verified it, and its
+/// frames then go through [`node_may_send`] like any node's. Every other
+/// message is the gateway's own (it holds no key, so they are reports, never
+/// node frames).
+pub const fn gw_up_origin(m: &crate::gw::GwUp<'_>) -> Origin {
+    use crate::gw::GwUp;
+    match m {
+        GwUp::Hello { .. } => Origin::Gateway,
+        GwUp::Packet { .. } => Origin::Node,
+        GwUp::TxDone { .. } => Origin::Gateway,
+        GwUp::Refused { .. } => Origin::Gateway,
+        GwUp::Stats(_) => Origin::Gateway,
+    }
+}
+
+/// Protocol 14: who originates each hub-to-gateway message. All the hub's:
+/// beacons and transmissions are sealed by the hub (the gateway sends them
+/// as they are), the roster and cancels are the hub's control.
+pub const fn gw_down_origin(m: &crate::gw::GwDown<'_>) -> Origin {
+    use crate::gw::GwDown;
+    match m {
+        GwDown::Roster(_) => Origin::Hub,
+        GwDown::Beacon(_) => Origin::Hub,
+        GwDown::Transmit { .. } => Origin::Hub,
+        GwDown::Cancel { .. } => Origin::Hub,
+    }
+}
+
 /// Who may claim a role in a `Hello` or `Status`: the gateway role only the
 /// link's own end (the gateway, or the hub introducing itself to its web
 /// head); every other role is a node's.
@@ -98,8 +173,9 @@ pub const fn threat_origin(kind: ThreatKind) -> Origin {
         // The gateway's report of packets it refused (and, on its own
         // stream to the web head, the hub's).
         ForgedLink => Origin::Gateway,
-        // Raised by the hub from aircraft and drone tracks.
-        AreaGnss | IdFlood => Origin::Hub,
+        // Raised by the hub from aircraft and drone tracks, and (protocol
+        // 14) from its own delivery accounting.
+        AreaGnss | IdFlood | LinkLoss => Origin::Hub,
     }
 }
 
@@ -131,6 +207,7 @@ pub enum Head {
     Control,
     ControlEnergy,
     MavlinkEvidence,
+    NodeHealth,
 }
 
 /// The [`Head`] of a frame. Exhaustive: a new `Frame` variant needs a
@@ -158,6 +235,7 @@ pub fn head(f: &Frame) -> Head {
         Frame::Control(_) => Head::Control,
         Frame::ControlEnergy(_) => Head::ControlEnergy,
         Frame::MavlinkEvidence(_) => Head::MavlinkEvidence,
+        Frame::NodeHealth(_) => Head::NodeHealth,
     }
 }
 
@@ -195,6 +273,9 @@ impl Head {
             Head::Control => Origin::Node,
             Head::ControlEnergy => Origin::Node,
             Head::MavlinkEvidence => Origin::Node,
+            // Protocol 14: a node's own counters (the hub compares its
+            // delivery claims with what it verified).
+            Head::NodeHealth => Origin::Node,
         }
     }
 }
@@ -530,6 +611,8 @@ mod tests {
             position: Some(HubPosition { lat_e7: 399_526_000, lon_e7: -751_652_000, alt_hae_mm: Some(1), age_ms: 0 }),
             utc_ms: Some(1_800_000_000_000),
             utc_pps: true,
+            held: false,
+            utc_held: false,
         })
     }
 
@@ -624,6 +707,7 @@ mod tests {
                 uptime_us: 1,
             }), Node),
             (Frame::MavlinkEvidence(MavlinkEvidence { detail: 1, sysid: 1, compid: 1, msgid: 0, truncated: false, uptime_us: 1, frame: heapless::Vec::new() }), Node),
+            (Frame::NodeHealth(NodeHealth { uptime_s: 5, frames_sent: 40, ..NodeHealth::default() }), Node),
         ];
         for role in [NodeRole::Wifi24, NodeRole::Wifi5, NodeRole::Ble, NodeRole::Fpv, NodeRole::DroneId, NodeRole::Aero] {
             t.push((hello(role), Node));
@@ -642,6 +726,7 @@ mod tests {
         t.push((threat(ForgedLink), Gateway));
         t.push((threat(AreaGnss), Hub));
         t.push((threat(IdFlood), Hub));
+        t.push((threat(LinkLoss), Hub));
         t
     }
 
@@ -663,7 +748,7 @@ mod tests {
         }
         assert_eq!(head_of_encoded(&[]), None);
         assert_eq!(head_of_encoded(&[0]), None);
-        assert_eq!(head_of_encoded(&[2, 21, 0]), None, "no such variant");
+        assert_eq!(head_of_encoded(&[2, 22, 0]), None, "no such variant");
     }
 
     /// Every postcard variant index of `Frame` appears in the table.
@@ -673,9 +758,9 @@ mod tests {
         let mut tags: std::vec::Vec<u8> = table().iter().map(|(f, _)| postcard::to_slice(f, &mut buf).unwrap()[0]).collect();
         tags.sort();
         tags.dedup();
-        assert_eq!(tags, (0..=20).collect::<std::vec::Vec<u8>>());
+        assert_eq!(tags, (0..=21).collect::<std::vec::Vec<u8>>());
         // One past the last variant does not decode: nothing is missing.
-        assert!(postcard::from_bytes::<Frame>(&[21]).is_err());
+        assert!(postcard::from_bytes::<Frame>(&[22]).is_err());
     }
 
     #[test]
@@ -727,9 +812,16 @@ mod tests {
 
     #[test]
     fn node_batch_refuses_hub_only_frames() {
-        let (relay, refused, _) = run(&batch(&[hub_fix(), csbee(), flags(), threat(ThreatKind::AreaGnss), threat(ThreatKind::IdFlood)]));
+        let (relay, refused, _) = run(&batch(&[
+            hub_fix(),
+            csbee(),
+            flags(),
+            threat(ThreatKind::AreaGnss),
+            threat(ThreatKind::IdFlood),
+            threat(ThreatKind::LinkLoss),
+        ]));
         assert!(relay.is_empty());
-        assert_eq!(refused.iter().map(|r| r.1).collect::<std::vec::Vec<_>>(), [Origin::Hub; 5]);
+        assert_eq!(refused.iter().map(|r| r.1).collect::<std::vec::Vec<_>>(), [Origin::Hub; 6]);
     }
 
     #[test]
@@ -876,5 +968,74 @@ mod tests {
         assert_eq!(log.drain(2500, 1000, |_| panic!("nothing new")), 0);
         let t = forged_link(&got[0], [9; 6], 6, 24370, 7);
         assert_eq!((t.kind, t.detail, t.source, t.target, t.count), (ThreatKind::ForgedLink, FORGED_ORIGIN, a, [9; 6], 2));
+    }
+
+    /// Protocol 14: the new refusal codes are the numbers the design gives
+    /// them, every code 1-16 has words, and nothing past them does.
+    #[test]
+    fn protocol_14_forged_link_details() {
+        assert_eq!(
+            [
+                FORGED_OLD_FIRMWARE,
+                FORGED_NOT_IN_ROSTER,
+                FORGED_OVER_BUDGET,
+                FORGED_LATE_UPLINK,
+                FORGED_FUTURE_UPLINK,
+                FORGED_NOT_FOR_THIS_SLOT,
+                FORGED_UNPROVEN,
+                FORGED_MALFORMED,
+                FORGED_FOREIGN,
+            ],
+            [8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        for d in 1..=16 {
+            let words = forged_reason(d).unwrap_or_else(|| panic!("code {d} has no words"));
+            assert!(!words.is_empty() && words.is_ascii(), "{d}");
+        }
+        assert_eq!(forged_reason(0), None);
+        assert_eq!(forged_reason(17), None);
+        // Every code a node counts has words and a NodeHealth slot.
+        for (i, &c) in NODE_REJECT_CODES.iter().enumerate() {
+            assert!(forged_reason(c).is_some());
+            assert_eq!(NodeHealth::reject_index(c), Some(i));
+        }
+        for hub_only in [FORGED_NOT_IN_ROSTER, FORGED_OVER_BUDGET, FORGED_LATE_UPLINK, FORGED_FUTURE_UPLINK, FORGED_ORIGIN] {
+            assert_eq!(NodeHealth::reject_index(hub_only), None);
+        }
+    }
+
+    /// Protocol 14: every gateway message has an origin, and only a
+    /// `Packet` (still sealed) is a node's.
+    #[test]
+    fn gateway_messages_have_an_origin() {
+        use crate::gw::*;
+        let up = [
+            (GwUp::Hello { protocol: PROTOCOL_VERSION, firmware: "gw".try_into().unwrap(), mac: [1; 6], channel: 6 }, Origin::Gateway),
+            (GwUp::Packet { src: [2; 6], rssi: -50, held_us: 10, data: &[1, 2, 3] }, Origin::Node),
+            (GwUp::TxDone { id: 1, to: [2; 6], radio_acked: true, attempts: 1, held_ms: 3 }, Origin::Gateway),
+            (GwUp::Refused { src: [3; 6], reason: RefuseReason::NotInRoster, count: 1, rssi: -70, window_ms: 1000 }, Origin::Gateway),
+            (GwUp::Stats(GwStats::default()), Origin::Gateway),
+        ];
+        let mut buf = [0u8; MAX_GW_FRAME];
+        let mut tags = std::vec::Vec::new();
+        for (m, want) in &up {
+            assert_eq!(gw_up_origin(m), *want, "{m:?}");
+            tags.push(postcard::to_slice(m, &mut buf).unwrap()[0]);
+        }
+        assert_eq!(tags, [0, 1, 2, 3, 4], "one of each GwUp variant");
+        assert!(postcard::from_bytes::<GwUp>(&[5]).is_err(), "and there are no others");
+        let down = [
+            GwDown::Roster(heapless::Vec::new()),
+            GwDown::Beacon(&[1; 24]),
+            GwDown::Transmit { id: 1, to: [2; 6], urgent: false, give_up_ms: 2000, data: &[1; 40] },
+            GwDown::Cancel { to: [2; 6] },
+        ];
+        let mut tags = std::vec::Vec::new();
+        for m in &down {
+            assert_eq!(gw_down_origin(m), Origin::Hub, "{m:?}");
+            tags.push(postcard::to_slice(m, &mut buf).unwrap()[0]);
+        }
+        assert_eq!(tags, [0, 1, 2, 3], "one of each GwDown variant");
+        assert!(postcard::from_bytes::<GwDown>(&[4]).is_err(), "and there are no others");
     }
 }
