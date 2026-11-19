@@ -552,3 +552,60 @@ Additions the packages must cover:
    this package may depend on hub randomness for security; where the hub needs uniqueness it
    uses the boot counter.
 5. **Spike S0 runs before 13c, 13e, 13f and 13g start.** 13a and 13d do not depend on it.
+
+## 13. Notes from the finished packages (13a, 13b, 13d), for the ones that follow
+
+What was built differs from the text above in these places; the code and its module docs win.
+
+**Kit keys (13a)**
+* The hub's master and roster are two separate records in `rskit` (master copies at `0x0000`
+  and `0x0800`, roster copies at `0x1000` and `0x1800`), so `hub-roster` can push the roster
+  without the master. The roster record carries the kit id; a roster from another kit is refused.
+* Boot counter log (`rsboot`): 8-byte entries (value plus a CRC) over two 4 KB sectors; the
+  current value is the largest good entry.
+* Generations start at 1. A revoked slot stays taken; re-keying it goes to the next generation.
+* `link-key hub` re-seeds `rsboot` unless `--keep-boot` is given. **Still to do (cut-over
+  package):** when the hub's counter still reads good, seed above the old value, so nodes do
+  not need the 60 s relink after a re-provision.
+* Still to do: a Ctrl-C during a board write leaves the 0600 temporary key file behind.
+
+**Packets (13b, `airlink::v3`)**
+* Beacon size is 24 + 8n bytes (152 for 16 slots), not 32 + 8n.
+* Lateness is exactly 3 s (commands, sync, beacon) and 0.5 s (`TimeSync`) while the node keeps
+  hearing beacons, and about 3.3 s and 0.55 s when it hears nothing more.
+* **Epoch rule.** A node that has just booted, or has accepted nothing for 60 s ("relink": new
+  session, no epoch), takes a genuine beacon of any epoch as a provisional epoch only. A Sync
+  proves an epoch and is the only packet that moves a proven node to a higher one. Lower epochs
+  are refused, except that a Sync may move a provisional node down. A Command never moves a
+  node, and a `TimeSync` needs a proven epoch. A hub that comes back with a lower counter is
+  refused for about 60 s, then the nodes relink and carry on: no reflash or power cycle.
+* The hub checks the tag even on stale or late batches, so it can tell a genuine node that
+  needs a Sync from a forgery.
+* **Hub (13e) must:** answer a genuine refused batch (`wants_sync`) with a rate-limited Sync;
+  send a Sync before the first `TimeSync` to a node not yet synced; send each `TimeSync` alone
+  in its own Command, sealed as it is written to the UART.
+* **Nodes (13g) must:** pass `timesync = true` for a Command holding a `TimeSync`; take
+  randomness from the hardware generator after the radio starts; re-seal every retry; feed one
+  monotonic uptime; not reset the link on the deaf fall-back (`airlink` relinks by itself).
+* **Wire types (13c) must:** reserve `ForgedLink` detail codes 13 to 16 for
+  `not_for_this_slot`, `unproven`, `malformed` and `foreign`, and size `NodeHealth` for the
+  node's nine reject reasons, not six.
+* Known residual: a node kept deaf by jamming all through a hub reboot can be handed a held
+  `TimeSync` once its epoch moves; the 60 s relink caps how old it can be, and the aero nodes'
+  three-agreeing-syncs rule still applies.
+
+**Node robustness (13d)**
+* The streak that lengthens the image-switch wait resets only after the image has sat ten
+  minutes past its own wait without being asked to switch (the rule as first written could
+  never reach the one-hour cap).
+* Deaf fall-back: after 60 s without an accepted gateway packet on a hub-given or stored plan
+  the node returns to its built-in plan. If the gateway is still silent 30 s later it was an
+  outage and the plan is not blamed; otherwise the plan id is refused for 10 minutes, doubling
+  on each repeat to a 1 hour cap. Nothing is refused until reboot.
+* `coverage` keeps `airlink` as a test-only dependency (a test and a compile-time check hold
+  its channel equal to `airlink::GATEWAY_CHANNEL`) until the cut-over deletes the compiled key.
+* **Gateway (13f) and nodes (13g) must** replace their own channel constants with
+  `airlink::GATEWAY_CHANNEL` (`firmware/gateway/src/main.rs`, `firmware/node-ble/src/uplink.rs`,
+  `firmware/node-lr/src/uplink.rs`, `firmware/node-sdr/src/uplink.rs`), wire the deaf fall-back
+  into node-sdr and node-lr (only node-wifi has it), grow the JSON buffers in node-wifi's
+  `report.rs` for 49-hop plans, and carry `node_common::health()` in `NodeHealth`.
