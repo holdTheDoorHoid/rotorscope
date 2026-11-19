@@ -4,6 +4,8 @@ target/
 **/target-espnow/
 **/target-bus/
 *.bin
+# Generated glyph atlas, embedded by include_bytes!; must be committed.
+!crates/screen/src/wide/glyphs.bin
 *.elf
 # Hub station-mode credentials: created by the owner, never committed.
 firmware/hub/wifi.local.toml
