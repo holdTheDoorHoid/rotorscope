@@ -10,6 +10,9 @@
 //! The store is not inside [`crate::Track`]: tracks are moved and merged by
 //! value, and a 4 KB track would make every such move a 4 KB copy on the
 //! stack. Each ring is tagged with the [`TrackId`] that owns it instead.
+//!
+//! The unit's own trail ([`OwnTrail`], one point every five seconds) is
+//! kept here too, for the "following" rule.
 
 use heapless::Deque;
 
@@ -213,6 +216,110 @@ impl<const N: usize> PathStore<N> {
     }
 }
 
+/// Points of the unit's own trail kept for each drone path ring (so a hub
+/// that keeps no drone histories keeps no trail either).
+pub const OWN_POINTS_PER_RING: usize = 4;
+/// Spacing of the unit's own trail (as the coarse ring).
+pub const OWN_STEP_MS: u64 = COARSE_STEP_MS;
+/// A gap in the unit's fixes longer than this starts the trail again.
+pub const OWN_GAP_MS: u64 = 60_000;
+
+/// One remembered position of the unit itself, 12 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OwnPoint {
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    /// Hub time in tenths of a second (wraps after 13 years).
+    t_ds: u32,
+}
+
+impl OwnPoint {
+    const EMPTY: OwnPoint = OwnPoint { lat_e7: 0, lon_e7: 0, t_ds: 0 };
+
+    pub fn lat(&self) -> f64 {
+        f64::from(self.lat_e7) * 1e-7
+    }
+
+    pub fn lon(&self) -> f64 {
+        f64::from(self.lon_e7) * 1e-7
+    }
+
+    /// Hub time, milliseconds (to the tenth of a second).
+    pub fn ms(&self) -> u64 {
+        u64::from(self.t_ds) * 100
+    }
+}
+
+/// Where the unit itself has been: one point every five seconds, for the
+/// "following" rule (slice 16b). It holds [`OWN_POINTS_PER_RING`] points
+/// for each drone path ring, so the P4 hub (64 rings) keeps 256 points,
+/// about 21 minutes, in 3 KB; a hub with no path rings keeps none.
+#[derive(Debug, Clone)]
+pub struct OwnTrail<const P: usize> {
+    /// Where the next point goes, and how many are held.
+    head: u16,
+    len: u16,
+    pts: [[OwnPoint; OWN_POINTS_PER_RING]; P],
+}
+
+impl<const P: usize> Default for OwnTrail<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const P: usize> OwnTrail<P> {
+    const CAP: usize = P * OWN_POINTS_PER_RING;
+
+    pub const fn new() -> Self {
+        Self { head: 0, len: 0, pts: [[OwnPoint::EMPTY; OWN_POINTS_PER_RING]; P] }
+    }
+
+    pub fn len(&self) -> usize {
+        usize::from(self.len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The `i`th newest point (0 the newest).
+    pub fn get(&self, i: usize) -> Option<&OwnPoint> {
+        if i >= self.len() {
+            return None;
+        }
+        let k = (usize::from(self.head) + Self::CAP - 1 - i) % Self::CAP;
+        Some(&self.pts[k / OWN_POINTS_PER_RING][k % OWN_POINTS_PER_RING])
+    }
+
+    /// Add a fix taken at `at_ms`. Kept only [`OWN_STEP_MS`] after the
+    /// newest point; a gap over [`OWN_GAP_MS`], or time going backwards,
+    /// starts the trail again.
+    pub fn record(&mut self, lat: f64, lon: f64, at_ms: u64) {
+        if Self::CAP == 0 {
+            return;
+        }
+        if let Some(last) = self.get(0).map(OwnPoint::ms) {
+            if at_ms < last || at_ms > last + OWN_GAP_MS {
+                self.clear();
+            } else if at_ms < last + OWN_STEP_MS {
+                return;
+            }
+        }
+        let e7 = |d: f64| libm::round(d * 1e7) as i32;
+        let k = usize::from(self.head);
+        self.pts[k / OWN_POINTS_PER_RING][k % OWN_POINTS_PER_RING] =
+            OwnPoint { lat_e7: e7(lat), lon_e7: e7(lon), t_ds: (at_ms / 100) as u32 };
+        self.head = ((k + 1) % Self::CAP) as u16;
+        self.len = (self.len() + 1).min(Self::CAP) as u16;
+    }
+
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +368,29 @@ mod tests {
         s.retain(|id| id == TrackId(3));
         assert_eq!(s.in_use(), 1);
         assert!(s.get(TrackId(2)).is_none());
+    }
+
+    #[test]
+    fn own_trail_keeps_a_point_every_five_seconds() {
+        let mut o: OwnTrail<2> = OwnTrail::new();
+        assert!(o.is_empty());
+        for k in 0..60u64 {
+            o.record(1.0 + k as f64 * 1e-5, 2.0, 10_000 + k * 1000);
+        }
+        // Eight points (two rings' worth), the newest at second 59 - 59 % 5.
+        assert_eq!(o.len(), 8);
+        let newest = o.get(0).unwrap();
+        assert_eq!(newest.ms(), 10_000 + 55_000);
+        assert!((newest.lat() - (1.0 + 55.0 * 1e-5)).abs() < 1e-7);
+        assert_eq!(o.get(7).unwrap().ms(), 10_000 + 20_000);
+        assert!(o.get(8).is_none());
+        // A long gap starts again.
+        o.record(1.0, 2.0, 10_000 + 55_000 + OWN_GAP_MS + 1);
+        assert_eq!(o.len(), 1);
+        // No rings, no trail.
+        let mut z: OwnTrail<0> = OwnTrail::new();
+        z.record(1.0, 2.0, 1000);
+        assert!(z.is_empty() && core::mem::size_of::<OwnTrail<0>>() <= 4);
     }
 
     extern crate std;
