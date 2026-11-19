@@ -11,10 +11,11 @@ the kit comes up, and how to prove the whole chain works with the test transmitt
 ## About the screen pictures
 
 The pictures on this page are drawn by the project's screen tests (`crates/screen`) at
-**320x240**, the size of the earlier S3 hub's panel. The P4 hub draws exactly the same pages,
-doubled to 640x480, on the left of its 800x480 panel. The right-hand 160 pixels hold three
-large touch keys, **UP**, **SELECT** and **DOWN**, standing in for the S3 hub's buttons. So
-what you see on the P4 is the picture here at twice the size, with a column of keys beside it.
+**320x240**, the size of the earlier S3 hub's panel. As of 2026-11-19 the P4 hub draws the same
+pages in a newer layout made for its 800x480 panel, with three touch keys along the bottom that
+say what each does. So what you see on the P4 holds the same information as the pictures here,
+arranged with more room; this page has not yet been updated with pictures of it. The newer
+layout is **simulated only**: not yet looked at on the panel.
 
 Two differences: some test pictures show a battery level, but the P4 always shows USB power
 (it cannot read its battery); and the test pictures use made-up drones and nodes, not your kit.
@@ -75,13 +76,13 @@ position** (no GPS fitted, or no fix yet) the hub shows a list in its place, new
 first, under a yellow warning, and the top bar says **NO GPS** (no receiver found) or
 **NO FIX**:
 
-![The first page without a position: "NO GPS" in the top bar, the warning "NO POSITION - distances unavailable", and "No drones heard yet, Listening on every radio"](../images/screen/status_gps_absent.png)
+![The first page without a position: "NO GPS" in the top bar, the warning "NO POSITION - distances unavailable", and "No drones heard yet, No IDs heard (see Signals)"](../images/screen/status_gps_absent.png)
 
 A normal hub build has no way to type in its own position, so on a hub without a working GPS
 this is the page you will see: drones are still listed, with signal strength, but there are no
 distances or bearings. **With a position**, the same page is the radar:
 
-![The radar page with no drones: rings at 100 m, 300 m, 1 km and 3 km, "Listening for drones" on the right](../images/screen/radar_0_drones.png)
+![The radar page with no drones: rings at 100 m, 300 m, 1 km and 3 km, and on the right "No drone IDs heard. Drones without Remote ID may only show on Signals"](../images/screen/radar_0_drones.png)
 
 The bar along the top shows, from the left, the GPS state, a mark for each kind of listener
 (crossed out when that listener has stopped responding), the SD card state and the time.
@@ -179,7 +180,7 @@ That is the whole chain proven on the air: test transmitter → node → ESP-NOW
 
 ## Where this lives in the code
 
-- `firmware/hub-p4/src/display.rs`: the 2x drawing and the touch-key column
+- `firmware/hub-p4/src/display.rs`: the panel and the touch keys
 - `firmware/hub-p4/src/app.rs`: what the hub puts on the screen
 - `firmware/hub-p4/src/sd.rs`: the SD card folder and files
 - `crates/screen/`: every page, and `crates/screen/tests/snapshots.rs` for the pictures

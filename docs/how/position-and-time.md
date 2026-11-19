@@ -151,7 +151,7 @@ When the GPS is present but has no usable fix, the status bar says **NO FIX** an
 with its signal strength, height, age and the radios that heard it. A note warns that a strong
 signal does not mean a near drone.
 
-![Drone list with a NO GPS status, no SD card, USB power, and the message No drones heard yet, Listening on every radio](../images/screen/status_gps_absent.png)
+![Drone list with a NO GPS status, no SD card, USB power, and the message No drones heard yet, No IDs heard (see Signals)](../images/screen/status_gps_absent.png)
 
 With no GPS connected the status bar says **NO GPS**. Everything else works the same way. In the
 JSON output the hub's `own` position is `null`, every track's `own` (distance and direction) is

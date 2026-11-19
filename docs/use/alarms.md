@@ -113,7 +113,7 @@ backs it up.
 
 It needs an ADS-B receiver on the hub. It is a prompt to look up, not a finding of fault.
 
-![The health page with AIRCRAFT boxed in the status bar and the line NEAR drone 240m from N911PH +98ft](../images/screen/health_conflict.png)
+![The health page with PLANE NEAR boxed in the status bar and the line NEAR drone 240 m from N911PH +98ft](../images/screen/health_conflict.png)
 
 ### Fake traffic on Rotorscope's own link
 
@@ -169,9 +169,9 @@ the screen when you press it.
 | `Unmute 3` | Nothing is sounding but you have muted or snoozed something: drops all of yours | |
 | `None sounding` | Nothing to do | |
 
-![Settings with the Alarms row selected, reading Mute 2 (2h), and ATTACK in the status bar](../images/screen/settings_actions.png)
+![Settings with ATTACK in the status bar and the Alarms row reading Mute 2, 2 h](../images/screen/settings_actions.png)
 
-![Settings with JAMMED in the status bar and the Alarms row reading Snooze 1 (5m)](../images/screen/settings_snooze.png)
+![Settings with JAMMED in the status bar and the Alarms row reading Snooze 1, 5 min](../images/screen/settings_snooze.png)
 
 Things to know:
 
@@ -185,7 +185,7 @@ Things to know:
 - **While anything is silenced**, the strip along the bottom says so, for example
   `MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES 1`.
 
-![The radar with JAMMED in the status bar and two strip lines: MUTED 2 1h59 SNOOZED 1 4m05 SITE MUTES 1, and ON: control IDs, control content](../images/screen/caveats_alarms.png)
+![The radar with JAMMED in the status bar and two strip lines: muted 2: 1 h 59 min, snoozed 1: 4:05, site 1; and ON: control IDs, control content](../images/screen/caveats_alarms.png)
 
 **For good, in the site file.** A false alarm a venue always has (that café's guest network) can
 be muted permanently with one line in `SITE.TXT` on the hub's card that names exactly that

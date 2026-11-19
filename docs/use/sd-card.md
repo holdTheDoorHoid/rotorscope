@@ -204,7 +204,7 @@ key**, whose secret is in the repository. Anyone can sign with it, so the verifi
 log `FAILED`, and the hub's screen says `TEST KEY: log not evidence` for as long as it runs. A
 hub with a development key says `DEV KEY: not evidence-grade`:
 
-![The radar page with a yellow bar along the bottom reading "DEV KEY: not evidence-grade"](../images/screen/caveats_dev_key.png)
+![The radar page with an amber bar along the bottom reading "Dev key: not evidence-grade"](../images/screen/caveats_dev_key.png)
 
 Every run ends with the same line, because no verdict can prove it: "NOT PROVEN: that the log is
 complete". Records after the last one, newer files, a reformatted card or a start-up never
