@@ -1,0 +1,11 @@
+[package]
+name = "kitkeys"
+description = "Per-node ESP-NOW link keys: derivation from the kit master, the node and hub provisioning records, the kit roster, the hub boot counter"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# HMAC-SHA256 (airlink's src/hmac.rs, compiled in by path). No default
+# features: no_std, no alloc.
+sha2 = { version = "0.11", default-features = false }

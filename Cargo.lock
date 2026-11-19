@@ -1404,6 +1404,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitkeys"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
