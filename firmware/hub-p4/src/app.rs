@@ -273,7 +273,8 @@ impl App {
 
     /// Attacks and jamming (protocol 9, and the hub's own deaf-node check):
     /// one evidence event and one console line each time a threat is raised
-    /// (again after it ended, WP-14a), and one more when that episode ends,
+    /// (again after it ended, WP-14a; a silenced one too, saying so), and
+    /// one more when that episode ends,
     /// with what it totalled. A flapping threat is bounded (tracker
     /// `threats::FLAP_RAISES`) and the records say so. Out of line: the
     /// main loop's frame is the P4's tightest stack budget.
@@ -332,7 +333,7 @@ impl App {
             }
             // Raised again, and the flapping bound when it starts.
             let _ = tracker::threats::raise_note(t, &mut text);
-            let mut data = [0u8; threat::WITH_EPISODE];
+            let mut data = [0u8; threat::WITH_SILENCE];
             data[0] = t.kind as u8;
             data[1..7].copy_from_slice(&mac);
             data[7..11].copy_from_slice(&t.episode().to_le_bytes());
@@ -342,6 +343,13 @@ impl App {
                 tracker::threats::RaiseKind::AfterSilence => threat::RAISE_AFTER_SILENCE,
             };
             data[12] = t.raises_in_window().min(255) as u8;
+            // Muting stops the alert, never the record.
+            data[13] = match t.silence() {
+                None => threat::ALERTED,
+                Some(tracker::threats::Silence::Snoozed) => threat::SNOOZED,
+                Some(tracker::threats::Silence::Muted) => threat::MUTED,
+                Some(tracker::threats::Silence::ForGood) => threat::MUTED_FOR_GOOD,
+            };
             ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
             crate::println!("hub-p4: THREAT {}", text);
         }

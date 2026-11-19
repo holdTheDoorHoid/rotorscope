@@ -102,7 +102,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 14 | shutdown | (none); a shutdown checkpoint follows |
 | 15 | gps_receiver | 1 answering, 0 silent |
 | 16 | o4_decrypted | session key ID (4), record selector (1); text is what it decrypted to, never the key |
-| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); from WP-14a also episode (u32, 1 = the alarm entry's first), how it was raised (1: 0 first, 1 again after an earlier episode ended, 2 still sounding when its mute or snooze ended), raises within the last minute (1). Text describes it. One record per raise (see "Threat episodes" below). For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
+| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); from WP-14a also episode (u32, 1 = the alarm entry's first), how it was raised (1: 0 first, 1 again after an earlier episode ended, 2 still sounding when its mute or snooze ended), raises within the last minute (1); then whether a mute rule covered it so no alert was given (1: 0 alerted, 1 snoozed, 2 muted by the operator, 3 muted for good by the site file; absent before 2026-11-18, when only alerted raises were recorded). Text describes it, and for a silenced one says so. One record per raise (see "Threat episodes" below). For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
 | 18 | gnss_jamming | kind (1), level (i16); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
@@ -129,8 +129,13 @@ has been raised 3 times within 60 s, its episode ends only after 60 s with
 no report, and the raises in between are counted into that episode
 (`raises`, flag "held") instead of each getting a record. The third raise's
 text says the hold begins. Records per alarm entry are thus at most about
-four a minute. A silenced (muted or snoozed) alarm is not raised and so
-has no end record; its raw frames are logged as before.
+four a minute. A silenced (muted or snoozed) alarm is recorded the same
+way, raise and end, with its raise marked silenced (no alert was given);
+when the rule ends while it is still sounding it gets one more raise record
+(how 2, "still sounding after its mute or snooze ended"). Muting stops the
+alert, never the record. Logs written before 2026-11-18 have no raise or
+end record for an alarm that started while a mute covered it (only the
+node's raw frames, and nothing for a hub-raised kind).
 
 ### Continuity across boots
 

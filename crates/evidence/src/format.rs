@@ -399,6 +399,17 @@ pub mod threat {
     pub const RAISE_FIRST: u8 = 0;
     pub const RAISE_AGAIN: u8 = 1;
     pub const RAISE_AFTER_SILENCE: u8 = 2;
+    /// Then: whether a mute rule covered it, so no alert was given (1:
+    /// [`ALERTED`], [`SNOOZED`], [`MUTED`], [`MUTED_FOR_GOOD`]). Absent from
+    /// records written before it was added: those were all alerted.
+    pub const WITH_SILENCE: usize = WITH_EPISODE + 1;
+    pub const ALERTED: u8 = 0;
+    /// Snoozed (a safety-critical kind, minutes).
+    pub const SNOOZED: u8 = 1;
+    /// An operator's timed mute.
+    pub const MUTED: u8 = 2;
+    /// A site-file mute, for good.
+    pub const MUTED_FOR_GOOD: u8 = 3;
 }
 
 /// Data of a `threat_ended` event (26).

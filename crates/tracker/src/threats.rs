@@ -4,8 +4,8 @@
 //! These are not drones. A deauth flood, beacon spam, an evil twin or a
 //! jammer is something attacking the radios around the detector (or the
 //! detector), or drowning out the bands drones use. They are kept in their
-//! own table with their own ids and handed out once each by
-//! [`Tracker::take_new_threat`] for an alert.
+//! own table with their own ids and handed out once per episode by
+//! [`Tracker::take_new_threat`] for the record (a silenced one too, said so).
 //!
 //! **Same threat.** One kind from one node against one target is one threat
 //! while it lasts; a jamming kind is also keyed by band (a jammer seen at
@@ -181,8 +181,9 @@ pub struct Threat {
     pub last_seen_ms: u64,
     pub reports: u32,
     /// Silenced: matches a mute rule (an operator's timed mute, a snooze,
-    /// or a site-file mute). Kept and logged, but no alert and no badge. It
-    /// still counts as jamming: [`Tracker::partly_blind`] ignores mutes.
+    /// or a site-file mute). Kept and logged (its raise record says it was
+    /// silenced, [`Threat::silence`]), but no alert and no badge. It still
+    /// counts as jamming: [`Tracker::partly_blind`] ignores mutes.
     pub muted: bool,
     /// Silenced by a snooze (a safety-critical kind, [`SNOOZE_MS`]).
     pub snoozed: bool,
@@ -206,6 +207,17 @@ pub enum RaiseKind {
     /// Announced again in the same episode: its mute or snooze ended while
     /// it was still sounding.
     AfterSilence,
+}
+
+/// Why a threat is silenced ([`Threat::silence`]), for its raise record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Silence {
+    /// Snoozed: a safety-critical kind, for [`SNOOZE_MS`].
+    Snoozed,
+    /// An operator's timed mute ([`OPERATOR_MUTE_MS`] at most).
+    Muted,
+    /// A site-file mute, for good.
+    ForGood,
 }
 
 /// One episode of a threat: from a raise (first report, or the first report
@@ -363,6 +375,19 @@ impl Threat {
     /// How the latest announcement came about.
     pub fn raise_kind(&self) -> RaiseKind {
         self.ep.how
+    }
+
+    /// The rule silencing it now, by type (`None`: it alerts).
+    pub fn silence(&self) -> Option<Silence> {
+        if !self.muted {
+            None
+        } else if self.snoozed {
+            Some(Silence::Snoozed)
+        } else if self.silenced_until_s == 0 {
+            Some(Silence::ForGood)
+        } else {
+            Some(Silence::Muted)
+        }
     }
 
     /// Raises within [`FLAP_WINDOW_MS`] up to the latest (at most
@@ -1402,9 +1427,16 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         self.threats.all().iter().any(|t| t.active(now_ms) && t.kind.is_jamming())
     }
 
-    /// The next threat to alert on, exactly once each (and once more when
-    /// a mute or snooze on it ends while it is still sounding). Silenced
-    /// threats are not handed out.
+    /// The next threat raise to record, exactly once per episode (and once
+    /// more when a mute or snooze on it ends while it is still sounding).
+    ///
+    /// A silenced threat is handed out too: muting stops the alert, not the
+    /// record. [`Threat::silence`] says which rule covered it, so the
+    /// console line and the evidence record can say no alert was given,
+    /// and its episode gets an end record like any other. (It used not to
+    /// be: an alarm already covered by a mute when it started left no
+    /// `threat` record at all, and a hub-raised kind has no raw frame
+    /// either.)
     ///
     /// Every episode is announced (WP-14a, TR-16): a threat that ended and
     /// is reported again is handed out again ([`Threat::raise_kind`] says
@@ -1412,28 +1444,25 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// ([`FLAP_RAISES`]), whose raises are counted into the episode and
     /// reported with its end ([`Tracker::take_ended_threat`]).
     pub fn take_new_threat(&mut self, _now_ms: u64) -> Option<ThreatId> {
-        loop {
-            // A MAVLink suspicion waits until it is backed.
-            let t = self.threats.v.iter_mut().find(|t| !t.announced && !t.suspect())?;
-            t.announced = true;
-            if !t.muted {
-                t.ep.how = if t.ep.logged {
-                    RaiseKind::AfterSilence
-                } else if t.ep.number > 1 {
-                    RaiseKind::Again
-                } else {
-                    RaiseKind::First
-                };
-                t.ep.logged = true;
-                return Some(t.id);
-            }
-        }
+        // A MAVLink suspicion waits until it is backed.
+        let t = self.threats.v.iter_mut().find(|t| !t.announced && !t.suspect())?;
+        t.announced = true;
+        t.ep.how = if t.ep.logged {
+            RaiseKind::AfterSilence
+        } else if t.ep.number > 1 {
+            RaiseKind::Again
+        } else {
+            RaiseKind::First
+        };
+        t.ep.logged = true;
+        Some(t.id)
     }
 
     /// The next announced episode that ended, exactly once each: quiet for
     /// [`THREAT_ACTIVE_MS`] (for a flapping one [`FLAP_QUIET_MS`]), or its
     /// entry removed from the table. Episodes that were never announced
-    /// (silenced, or a MAVLink suspicion) have no end either.
+    /// (a MAVLink suspicion never backed) have no end either; silenced
+    /// ones were announced and do.
     pub fn take_ended_threat(&mut self, now_ms: u64) -> Option<EpisodeEnd> {
         self.threats.take_ended(now_ms)
     }
@@ -1457,8 +1486,19 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
 /// about the episode: nothing for an entry's first raise; for a raise after
 /// an earlier episode ended, its number and how many raises fell within a
 /// minute, and when that reaches [`FLAP_RAISES`], that further raises will
-/// be held (so the bound on the log is itself on record).
+/// be held (so the bound on the log is itself on record). Then, for a
+/// silenced one, that no alert was given and which rule covered it.
 pub fn raise_note(t: &Threat, w: &mut impl core::fmt::Write) -> core::fmt::Result {
+    raise_kind_note(t, w)?;
+    match t.silence() {
+        None => Ok(()),
+        Some(Silence::Snoozed) => write!(w, " - silenced: snoozed, no alert"),
+        Some(Silence::Muted) => write!(w, " - silenced: muted by the operator until hub uptime {} s, no alert", t.silenced_until_s),
+        Some(Silence::ForGood) => write!(w, " - silenced: muted by the site file, no alert"),
+    }
+}
+
+fn raise_kind_note(t: &Threat, w: &mut impl core::fmt::Write) -> core::fmt::Result {
     match t.raise_kind() {
         RaiseKind::First => Ok(()),
         RaiseKind::AfterSilence => write!(w, " - still sounding after its mute or snooze ended"),
@@ -2024,9 +2064,13 @@ mod tests {
         assert_eq!(tr.active_threats(1_000).count(), 0);
         assert!(tr.partly_blind(1_000), "a snoozed jammer still blinds");
         assert_eq!(tr.threats().len(), 2, "kept for the record");
-        // The same twin again: still muted, no new alert. A different name
-        // or jamming on the other band is not.
-        tr.ingest_threat(3, &twin, 2_000);
+        // The same twin again: still muted, no new alert, but recorded as
+        // silenced (muting stops the alert, never the record). A different
+        // name or jamming on the other band is not muted.
+        let t3 = tr.ingest_threat(3, &twin, 2_000).unwrap();
+        assert_eq!(tr.take_new_threat(2_000), Some(t3));
+        assert_eq!(tr.get_threat(t3).unwrap().silence(), Some(Silence::Muted));
+        assert_eq!(tr.active_threats(2_000).count(), 0, "no alert");
         assert!(tr.take_new_threat(2_000).is_none());
         let mut other = twin.clone();
         other.ssid = heapless::String::try_from("Other").unwrap();

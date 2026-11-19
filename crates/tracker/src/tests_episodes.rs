@@ -215,20 +215,59 @@ fn an_active_flood_pushed_out_of_a_full_table_ends_as_removed() {
     assert_eq!((e[0].id, e[0].why), (first, EndWhy::Removed));
 }
 
-/// A muted threat is not announced, so its end is not either (there is no
-/// raise record for it to close).
+/// An episode that starts while a mute already covers it is still raised
+/// for the record (console line and evidence), marked silenced, and its end
+/// is recorded too. Muting stops the alert, never the record. It used not
+/// to be: the alarm left no `threat` record at all.
 #[test]
-fn a_muted_episode_has_no_end_record() {
+fn a_muted_episode_is_recorded_as_silenced_and_ends() {
     let mut tr: Tracker = Tracker::default();
     let a = tr.ingest_threat(1, &deauth(50, -40), 1_000).unwrap();
     raised(&mut tr, 1_000);
     tr.silence(a, 1_500).unwrap();
     // The end of the episode that was announced (before the mute) is due.
     assert_eq!(ended(&mut tr, 1_000 + THREAT_ACTIVE_MS).len(), 1);
-    // A new episode while muted: neither raised nor ended.
+    // A new episode while muted: raised as silenced, not alerted.
     tr.ingest_threat(1, &deauth(50, -40), 60_000);
-    assert!(raised(&mut tr, 60_000).is_empty());
-    assert!(ended(&mut tr, 60_000 + THREAT_ACTIVE_MS).is_empty());
+    assert_eq!(raised(&mut tr, 60_000), [a]);
+    let t = tr.get_threat(a).unwrap();
+    assert_eq!((t.raise_kind(), t.silence()), (threats::RaiseKind::Again, Some(threats::Silence::Muted)));
+    let mut text = std::string::String::new();
+    threats::raise_note(t, &mut text).unwrap();
+    assert!(text.contains("raised again") && text.contains("silenced: muted by the operator"), "{text}");
+    assert_eq!(tr.active_threats(60_000).count(), 0, "no alert");
+    assert_eq!(tr.alarm_counts(60_000, 60_000), (0, 0), "nothing to mute or snooze");
+    // Its end closes that record.
+    let e = ended(&mut tr, 60_000 + THREAT_ACTIVE_MS);
+    assert_eq!(e.len(), 1);
+    assert_eq!((e[0].id, e[0].episode), (a, 2));
+}
+
+/// A brand-new alarm entry covered by an existing rule from its first
+/// report (here a site-file mute) is recorded as silenced, and when the
+/// rule goes while it is still sounding it is announced again as
+/// "still sounding after its mute ended" (the alert the mute held back).
+#[test]
+fn a_new_alarm_under_a_mute_is_recorded_then_alerts_when_unmuted() {
+    let mut tr: Tracker = Tracker::default();
+    let site::SiteLine::Mute(rule) = site::parse_line("mute deauth source=02:00:00:00:00:01 target=0a:00:00:00:00:02").unwrap() else {
+        panic!()
+    };
+    assert_eq!(tr.set_site_mutes(&[rule], 0), 0);
+    let a = tr.ingest_threat(1, &deauth(50, -40), 1_000).unwrap();
+    assert!(tr.get_threat(a).unwrap().muted);
+    assert_eq!(raised(&mut tr, 1_000), [a]);
+    let t = tr.get_threat(a).unwrap();
+    assert_eq!((t.raise_kind(), t.silence()), (threats::RaiseKind::First, Some(threats::Silence::ForGood)));
+    assert_eq!(tr.active_threats(1_000).count(), 0, "no alert");
+    assert!(raised(&mut tr, 1_000).is_empty(), "once per episode");
+    // The site file no longer mutes it while it is still sounding.
+    tr.ingest_threat(1, &deauth(50, -40), 2_000);
+    tr.set_site_mutes(&[], 2_000);
+    assert_eq!(raised(&mut tr, 2_000), [a]);
+    let t = tr.get_threat(a).unwrap();
+    assert_eq!((t.raise_kind(), t.silence()), (threats::RaiseKind::AfterSilence, None));
+    assert_eq!(tr.active_threats(2_000).count(), 1);
 }
 
 #[test]
