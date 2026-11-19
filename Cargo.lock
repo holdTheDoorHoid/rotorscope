@@ -386,6 +386,7 @@ dependencies = [
 name = "cc26xx-flash"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "serialport",
 ]
 
