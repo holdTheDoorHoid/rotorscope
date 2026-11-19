@@ -1,0 +1,3 @@
+actions/checkout
+actions/deploy-pages
+actions/upload-pages-artifact
