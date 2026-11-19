@@ -698,10 +698,10 @@ impl<'d> GatewayLink<'d> {
         use airlink::v3::Reject as R;
         let (gm, gch) = a.gateway().map_or(([0; 6], 0), |g| (g.mac, g.channel));
         println!(
-            "hub-p4: gwlink kit={} epoch={:?} gw={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ch={} pkts={} ok={} dup={} open={} bad_tag={} replay={} unauth={} stale={} old_fw={} not_in_roster={} late_uplink={} future_uplink={} malformed={} foreign={} unprov={} beacons={} rosters={} syncs={} answers={} cmds={} cmd_refused={} cancels={} time_syncs={} ts_held_max={}ms acked={} given_up={} sink_full={} gw_refused={:?} corrupt={} overflow={} out_full={}",
+            "hub-p4: gwlink kit={} epoch={:?} gw={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ch={} pkts={} ok={} dup={} open={} bad_tag={} replay={} unauth={} stale={} catching_up={} old_fw={} not_in_roster={} late_uplink={} future_uplink={} malformed={} foreign={} unprov={} beacons={} rosters={} syncs={} answers={} cmds={} cmd_refused={} cancels={} time_syncs={} ts_held_max={}ms acked={} given_up={} sink_full={} gw_refused={:?} corrupt={} overflow={} out_full={}",
             self.kit.name(), a.epoch(), gm[0], gm[1], gm[2], gm[3], gm[4], gm[5], gch,
             s.packets, s.accepted, s.duplicates, s.open_batches,
-            r[R::BadTag.index()], r[R::Replay.index()], r[R::Unauthenticated.index()], r[R::Stale.index()], r[R::OldFirmware.index()],
+            r[R::BadTag.index()], r[R::Replay.index()], r[R::Unauthenticated.index()], r[R::Stale.index()], s.catching_up, r[R::OldFirmware.index()],
             r[R::NotInRoster.index()], r[R::LateUplink.index()], r[R::FutureUplink.index()], r[R::Malformed.index()], r[R::Foreign.index()],
             s.unprovisioned, s.beacons, s.rosters, s.syncs, s.sync_answers, s.commands, s.command_refused, s.cancels,
             s.time_syncs, s.time_sync_held_max_ms, s.tx_acked, s.tx_given_up, s.sink_full, s.gw_refused,

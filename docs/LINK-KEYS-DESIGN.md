@@ -278,6 +278,15 @@ and carry on (no reflash); `link-key hub` avoids even that by seeding above the 
 The hub checks the tag even on stale or late batches, so it can tell a genuine node that needs
 a Sync (it answers with one, rate-limited) from a forgery.
 
+**A hub restart is not an attack.** For a moment after the hub restarts, every node still seals
+under the previous boot's epoch. Those batches are refused (`stale`) and answered with a Sync,
+but they are not reported as forged traffic: a *genuine* old-epoch batch from a slot the hub
+has not yet accepted in this boot, in the first 90 s of the boot (`STALE_GRACE_MS`), counts as
+`catching_up` on the hub's `gwlink` line and raises nothing. Old-epoch traffic is still reported
+(`ForgedLink` detail 4) when its tag is bad, once that node has been accepted in this boot (it
+is then a replay of recorded traffic), or after the 90 s. Found on the bench, 2026-11-19: before
+this rule every hub restart raised one "Forged node traffic" alert per node.
+
 For the uplink check, a node's stamp `clock` field changes meaning. It is no longer "the
 highest gateway clock heard" but the node's **estimate of the hub clock** when sealing:
 `max(previous estimate, last accepted clock + elapsed_ms / 10)`. It is still non-decreasing

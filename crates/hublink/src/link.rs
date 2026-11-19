@@ -52,6 +52,11 @@ pub const BEACON_MS: u64 = 500;
 pub const ROSTER_MS: u64 = 5_000;
 /// At most one answering `Sync` per slot this often.
 pub const SYNC_ANSWER_MS: u64 = 1_000;
+/// For this long after the hub's link starts, a node may still seal under
+/// the hub's previous boot: it relinks within 60 s at worst. A genuine
+/// old-boot batch from a slot not yet accepted in this boot is, in that
+/// time, a node catching up and not forged traffic ([`Counters::catching_up`]).
+pub const STALE_GRACE_MS: u64 = 90_000;
 /// A first `Sync` not radio-acknowledged is sent again after this long.
 pub const SYNC_RETRY_MS: u64 = 2_000;
 /// Commands and syncs: the gateway retries this long (inside the node's 3 s).
@@ -117,6 +122,10 @@ pub struct Counters {
     pub rosters: u32,
     pub syncs: u32,
     pub sync_answers: u32,
+    /// Of `rejects[Stale]`: genuine batches from a node still following the
+    /// hub's previous boot, soon after this boot started. Answered with a
+    /// Sync and not reported as forged traffic.
+    pub catching_up: u32,
     pub commands: u32,
     /// Commands not sent: no such node, not heard yet this hub boot, too
     /// big, not whole frames, closed kit.
@@ -234,6 +243,9 @@ pub struct HubLink {
     beacon_seq: u16,
     last_beacon: Option<u64>,
     roster_at: Option<u64>,
+    /// When this link first ran (hub uptime, ms): the start of
+    /// [`STALE_GRACE_MS`].
+    born: Option<u64>,
     next_id: u16,
     inflight: Vec<Inflight, 32>,
     refusals: RefusalLog<16>,
@@ -265,6 +277,7 @@ impl HubLink {
             beacon_seq: 0,
             last_beacon: None,
             roster_at: None,
+            born: None,
             next_id: 0,
             inflight: Vec::new(),
             refusals: RefusalLog::new(),
@@ -354,6 +367,7 @@ impl HubLink {
 
     /// One message from the gateway, at hub uptime `now` ms.
     pub fn on_up<'a>(&mut self, m: GwUp<'a>, now: u64, sink: &mut impl Sink, out: &mut impl FnMut(Up<'a>)) {
+        self.born.get_or_insert(now);
         match m {
             GwUp::Hello { protocol, firmware, mac, channel } => {
                 self.stats.hellos += 1;
@@ -422,6 +436,16 @@ impl HubLink {
         }
     }
 
+    /// Whether a genuine old-boot batch for `slot` at `now` is a node
+    /// catching up after a hub restart: nothing from that slot has been
+    /// accepted in this boot yet, and the boot is younger than
+    /// [`STALE_GRACE_MS`]. After either, old-boot traffic is a replay.
+    fn catching_up(&self, slot: Option<u8>, now: u64) -> bool {
+        let fresh_boot = self.born.is_some_and(|b| now.saturating_sub(b) < STALE_GRACE_MS);
+        let unheard = slot.and_then(|s| self.slots.get(usize::from(s))).and_then(Option::as_ref).is_some_and(|s| s.session.is_none());
+        fresh_boot && unheard
+    }
+
     fn packet<'a>(&mut self, src: Mac, rssi: i8, data: &'a [u8], now: u64, sink: &mut impl Sink, out: &mut impl FnMut(Up<'a>)) {
         self.stats.packets += 1;
         let shape = v3::inspect(data);
@@ -471,11 +495,19 @@ impl HubLink {
                 self.first_sync(u.slot, now, sink);
             }
             HubVerdict::Duplicate { .. } => self.stats.duplicates += 1,
-            HubVerdict::Reject { reason, .. } => {
+            HubVerdict::Reject { reason, slot, genuine } => {
                 if let Some((slot, echo)) = v.wants_sync() {
                     self.answer_sync(slot, echo, now, sink);
                 }
-                self.refuse(src, reason, rssi);
+                if reason == Reject::Stale && genuine.is_some() && self.catching_up(slot, now) {
+                    // A node still following the hub's previous boot: the
+                    // Sync above moves it. Counted, not reported.
+                    let c = &mut self.stats.rejects[reason.index()];
+                    *c = c.saturating_add(1);
+                    self.stats.catching_up += 1;
+                } else {
+                    self.refuse(src, reason, rssi);
+                }
             }
         }
     }
@@ -566,6 +598,7 @@ impl HubLink {
     /// Timers: beacon, roster, first syncs still owed, refusal reports.
     /// Call from the main loop and between screen bands.
     pub fn tick(&mut self, now: u64, sink: &mut impl Sink, mut on_refusal: impl FnMut(Refusal)) {
+        self.born.get_or_insert(now);
         self.tick_beacon(now, sink);
         self.tick_roster(now, sink);
         for slot in 0..SLOTS as u8 {

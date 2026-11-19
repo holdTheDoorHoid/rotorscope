@@ -400,6 +400,66 @@ fn genuine_stale_batch_is_answered_with_a_rate_limited_sync() {
     assert_eq!(k.link.stats.sync_answers, 2);
 }
 
+/// A hub restart must not cry "forged". Each node's batches sealed under the
+/// hub's previous boot are genuine and expected: answered with a Sync,
+/// counted, and not reported (bench, 2026-11-19: one "Forged node traffic"
+/// alert per node at every hub restart). Old-boot traffic is still reported
+/// when its tag is bad, once the node has been accepted in this boot (then
+/// it is a replay), or once the catching-up time has passed.
+#[test]
+fn nodes_catching_up_after_a_hub_restart_are_not_reported_as_forged() {
+    let mut old = Kit::new(keyed(99));
+    old.start();
+    let mut k = Kit::new(keyed(100));
+    k.nodes = core::mem::take(&mut old.nodes);
+    k.nt = old.nt;
+    k.up(hello(14));
+    k.tick();
+    k.wire.take();
+    // Node A still follows boot 99: refused, answered, counted, not reported.
+    let stale = k.batch(0);
+    assert!(k.packet(MAC_A, &stale).is_empty());
+    assert_eq!(k.link.stats.rejects[Reject::Stale.index()], 1);
+    assert_eq!(k.link.stats.catching_up, 1);
+    let t = transmits(&k.wire.take());
+    assert_eq!(t.len(), 1, "the Sync");
+    assert_eq!(k.hears(0, &t[0].4, false), Verdict::Accept, "the Sync moves node A to this boot");
+    k.wait(1_100);
+    assert!(k.tick().is_empty(), "a node catching up is not forged traffic");
+    // A forged old-boot batch in node B's name (bad tag) is reported, even
+    // now: only a genuine one is a node catching up.
+    let mut forged = k.batch(1);
+    forged[airlink::HEADER] ^= 2;
+    k.packet(MAC_B, &forged);
+    k.wait(1_100);
+    let r = k.tick();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].source, MAC_B);
+    assert_eq!(k.link.stats.catching_up, 1);
+    // Node A's next batch is accepted.
+    let fresh = k.batch(0);
+    assert_eq!(k.packet(MAC_A, &fresh).len(), 1);
+    k.wire.take();
+    // The old batch again, now that A is linked in this boot: a replay of
+    // old traffic, reported with the stale code.
+    assert!(k.packet(MAC_A, &stale).is_empty());
+    k.wait(1_100);
+    let r = k.tick();
+    let got: StdVec<(Mac, u32)> = r.iter().map(|x| (x.source, x.detail)).collect();
+    assert_eq!(got, [(MAC_A, Reject::Stale.code())]);
+    assert_eq!(k.link.stats.catching_up, 1);
+    // Node B never came back. Genuine old-boot traffic in its name long
+    // after the restart is not a node catching up either: reported.
+    let late = k.batch(1);
+    k.wait(STALE_GRACE_MS);
+    k.packet(MAC_B, &late);
+    k.wait(1_100);
+    let r = k.tick();
+    let got: StdVec<(Mac, u32)> = r.iter().map(|x| (x.source, x.detail)).collect();
+    assert_eq!(got, [(MAC_B, Reject::Stale.code())]);
+    assert_eq!(k.link.stats.catching_up, 1);
+}
+
 #[test]
 fn withheld_batch_late_at_hub_and_answered() {
     let mut k = Kit::new(keyed(100));
