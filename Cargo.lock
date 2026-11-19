@@ -2964,6 +2964,7 @@ dependencies = [
 name = "wirebus"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "postcard",

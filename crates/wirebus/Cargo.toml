@@ -12,3 +12,4 @@ postcard.workspace = true
 
 [dev-dependencies]
 rid.workspace = true
+fuzzkit = { path = "../fuzzkit" }
