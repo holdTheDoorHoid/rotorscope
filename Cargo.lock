@@ -1522,6 +1522,7 @@ dependencies = [
 name = "link-key"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "kitkeys",
 ]
 
