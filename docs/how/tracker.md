@@ -104,7 +104,7 @@ any output may say about it is "auth message present, not checked".
 
 ## Rival claims and DISPUTED
 
-![Drone detail page showing a serial number, distance 320 metres north-east, and the CLAIM line DISPUTED, other at 1.9 km E](../images/screen/detail_disputed.png)
+![Drone detail page for serial 1581F5FKD229400D with an amber box reading ! 2 TRANSMITTERS USE THIS ID; the CLAIM row says One at 320 m NE, one at 1.9 km E: either may be fake; the big distance 320 m is dimmed](../images/screen/wide/detail_disputed.png)
 
 Anyone in range can broadcast a real drone's ID with a false position. The tracker's answer:
 
@@ -119,8 +119,9 @@ Anyone in range can broadcast a real drone's ID with a false position. The track
 4. If the original goes silent for 10 s while the rival continues, the track **follows** the
    rival. A real drone that stops broadcasting or glitches is then not left frozen on the map.
 
-A dispute is not an accusation. It does not say which transmitter is real; the screen shows the
-established position and names the other claim. Changed text (Self-ID, operator ID) or a new
+A dispute is not an accusation. It does not say which transmitter is real; the screen keeps showing the
+established position, dims its distance, and says where both claims are ("One at 320 m NE, one
+at 1.9 km E: either may be fake"). Changed text (Self-ID, operator ID) or a new
 session ID is adopted only after 3 frames over 5 s without the old value coming back.
 
 ## Identity continuity

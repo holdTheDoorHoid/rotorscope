@@ -1,6 +1,6 @@
 # FAA rule flags
 
-**Level: 🟢 Beginner** · What the FLAGS page means, why it says "possible" and never "illegal",
+**Level: 🟢 Beginner** · What the Flags page means, why it says "possible" and never "illegal",
 and what it needs on the SD card to work.
 
 Rotorscope can mark a flight that **possibly** breaks a rule of the US Federal Aviation
@@ -29,8 +29,9 @@ A flight that looks wrong from the ground is often perfectly legal. The hub cann
   changes which rules apply.
 
 So every flag says "possible violation", names the rule it is about, gives the numbers it saw,
-and says where its map data came from and how old it is. On the screen the page heading says it
-plainly: "possible violations - hub can't see waivers/LAANC".
+and says where its map data came from and how old it is. On the screen, the Flags page says it
+plainly under its title: "Possible rule issues, based on what drones broadcast (IDs and positions
+can be faked). The hub can't see waivers or LAANC."
 
 ## What it checks
 
@@ -76,12 +77,15 @@ Flying over people is not checked: the hub has no data about people.
 
 ## The four levels
 
-| Level | Screen | Meaning | Example |
-|---|---|---|---|
-| 0 | `NOTE` | Context, not a problem | Night; inside Class D airspace (often authorised) |
-| 1 | `WATCH` | One rule possibly exceeded, briefly or within the error margin | 420 ft above ground for a few seconds; 600 m from the pilot |
-| 2 | `WARN` | Clearly exceeded, and held | Over 450 ft above ground for 30 s; above the drone-map ceiling |
-| 3 | `ALERT` | Strong, combined evidence | Inside a TFR or prohibited area for 5 s; over 600 ft and far from the pilot at night |
+| Level | Name in the log | On the screen | Meaning | Example |
+|---|---|---|---|---|
+| 0 | Note | **CHECK** | Context, not a problem | Night; inside Class D airspace (often authorised) |
+| 1 | Watch | **WATCH** | One rule possibly exceeded, briefly or within the error margin | 420 ft above ground for a few seconds; 600 m from the pilot |
+| 2 | Warning | **LIKELY** | Clearly exceeded, and held | Over 450 ft above ground for 30 s; above the drone-map ceiling |
+| 3 | Alert | **SERIOUS** | Strong, combined evidence | Inside a TFR or prohibited area for 5 s; over 600 ft and far from the pilot at night |
+
+The screen uses its own words for the levels (Check, Watch, Likely, Serious) because the hub
+sees only what drones broadcast; the console and the log keep the rule engine's names.
 
 A flag starts low and climbs as the evidence builds, so one noisy reading never shouts.
 It climbs faster when:
@@ -143,8 +147,8 @@ later removed. See [SD card and logs](sd-card.md).
 
 **Without a pack** the hub still checks night, the Remote ID problems, distance from the pilot,
 and height when the drone itself reports its height above ground or above take-off. Everything that needs the map
-(airspace, the drone map, ground height, hills, low aircraft) is off, and the FLAGS page says
-"no airspace pack".
+(airspace, the drone map, ground height, hills, low aircraft) is off, and the Flags page says
+"no airspace pack" at its top right.
 
 ## What it cannot know
 
@@ -163,16 +167,48 @@ and height when the drone itself reports its height above ground or above take-o
   transmitter that lies about its position will produce wrong flags; see
   [Spoofed drones](../SPOOFING.md).
 
-The date of the pack is on the FLAGS page and in the source of every flag, so stale data is
-obvious.
+The date of the pack is at the top right of the Flags page ("pack 2026-11-15") and in the
+source of every flag, so stale data is obvious.
 
 ## On the screen
 
-![The FLAGS page: an ALERT for a test drone inside a national-security drone area, a WARN for the same drone at 853 ft above ground, a WATCH for a drone 640 m from its pilot, and a WARN for a crewed aircraft at 520 ft, under its 1000 ft minimum](../images/screen/flags.png)
+The P4 hub's screen has a **Flags** page, third in the cycle of pages after Radar and Drone list
+(its title reads "FLAGS 3/6"). A hub without the rule engine leaves the page out. How to move
+between pages is on [The screen](screen.md#the-three-keys).
 
-The FLAGS page (see [The screen](screen.md)) lists flagged drones and aircraft, worst first. Each
-row shows the level, who it is (the drone's ID, or an aircraft's callsign), the rule code, how
-long it has held, and a short line of evidence. The pack date is at the top right.
+![The Flags page: the FLAG chip and the band "POSSIBLE SERIOUS RULE ISSUE · see Flags" at the top, "pack 2026-11-15" at the top right, and five rows: SERIOUS for a test drone in a national security UAS area, LIKELY for the same drone at 260 m (853 ft) above ground, LIKELY for the aircraft N12345 (marked "plane") at 158 m (520 ft) above ground against a 1000 ft limit, WATCH for a drone 640 m from its pilot, and CHECK for a drone flying in twilight](../images/screen/wide/flags.png)
+
+The page lists flagged drones and aircraft, worst first, then the longest held. Each row has:
+
+| Column | What it shows |
+|---|---|
+| **Level** | A pill: **SERIOUS** filled in the warning colour, **LIKELY** outlined in it, **WATCH** faintly outlined, **CHECK** plain and dim |
+| **Who** | The drone's ID, or an aircraft's callsign with a small **plane** mark after it |
+| **Rule** | The rule code from the table above, such as `HEIGHT` or `AREA` |
+| **Evidence** | What the hub saw, in metres first, such as "260 m (853 ft) above ground, limit 400 ft" |
+| **For** | How long it has held |
+
+The airspace pack's date is at the top right ("pack 2026-11-15"), or what is wrong with the
+pack ("no airspace pack", "pack damaged"). With nothing flagged the page says "none". If there
+are more flags than fit, the bottom right says "+N more".
+
+**When a flag reaches Serious**, the status bar shows a **FLAG** chip (a small boxed word) on
+every page, and the warning band under it says "POSSIBLE SERIOUS RULE ISSUE · see Flags",
+unless a more urgent warning has the band. See [The status bar](screen.md#the-status-bar) and
+[The warning band](screen.md#the-warning-band). This is a pointer, not an alarm: it never
+appears in the Alarms count and cannot be muted.
+
+**Opening a flagged drone.** Touch a drone's row to open its detail page. Or press the middle
+key, labelled **CHOOSE FLAG**: a row is highlighted, the left key (**PREVIOUS**) and the right
+key (**NEXT**) move between rows, and the middle key, labelled **OPEN DRONE**, opens that drone.
+Hold the middle key for 1 second to stop choosing. An aircraft's row has no detail page (the key
+says "A plane: no detail"), nor has a drone the hub no longer holds ("Drone gone").
+
+![The Flags page while choosing: CHOOSING beside the title, the LIKELY HEIGHT row for drone 1581F5FKD22940 highlighted, and the keys PREVIOUS, OPEN DRONE (hold: back to flags) and NEXT](../images/screen/wide/flags_choose.png)
+
+**How far the screen is proven:** the Flags page as drawn here is **Simulated only** as of
+2026-11-19: drawn and tested on a computer with made-up flags and built into the hub's firmware,
+not yet looked at on the real panel.
 
 Flags also appear:
 

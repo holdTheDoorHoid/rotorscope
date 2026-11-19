@@ -21,6 +21,30 @@ screen. The older S3 hub writes the same CSV log but none of the other files.
 If the card is missing, the hub keeps working and checks for one every 3 seconds. A card that
 answers but cannot be used is retried every 15 seconds.
 
+## What the screen shows
+
+The right-hand end of the P4 hub's status bar says what the card is doing (see
+[The status bar](screen.md#the-status-bar)):
+
+| Status bar | Meaning |
+|---|---|
+| **REC** with a red dot | Recording: the detection log and the evidence log are both being written |
+| **NO EVIDENCE** chip (a small boxed word) | The detection log is recording, but evidence is not reaching the card |
+| **no SD**, in dim letters | No card answering |
+| **SD ERROR** chip | The card answered but failed: full, a write error, or not FAT |
+
+While evidence is not being written, a filled **fault bar** just above the keys says why and how
+many records wait in the hub's memory, for example "NO EVIDENCE (no SD): 12 waiting" or "NO
+EVIDENCE (file error): 1234 waiting, 56 dropped". The reasons are "no SD", "SD error" and "file
+error". The Health page's **SD log** row says the same in words: "recording", "no card", "CSV
+only · NO EVIDENCE" or "ERROR · not recording". See
+[The notes above the keys](screen.md#the-notes-above-the-keys) and [Health](screen.md#health).
+
+![The radar with the NO EVIDENCE chip at the right of the status bar (no REC), the fault bar "NO EVIDENCE (file error): 1234 waiting, 56 dropped" above the notes lines, and the notes "Log not tamper-proof (test key)", "Nodes unsecured: reports can be faked", "Bench build", "2 muted, 1 h 59 min left" and "1 snoozed, 4:05 left". The JAMMED chip and band are part of the same test drawing](../images/screen/wide/caveats_all.png)
+
+This screen layout is **Simulated only** as of 2026-11-19: drawn and tested on a computer and
+built into the hub's firmware, not yet looked at on the real panel.
+
 ## What is in the `ROTORSCP` folder
 
 | File | Who writes it | What it is |
@@ -97,7 +121,8 @@ never rewritten. Each new file names the last record of the previous one, so the
 What it proves, and the important things it does **not** yet prove (who made it, that it is
 complete, that the times are true), are explained in [The evidence log](../EVIDENCE.md). As of
 2026-11-18 it works on the bench hub, signed with the published test key unless a development
-key was built in (the screen says which), and is **not evidence-grade** either way.
+key was built in (a note above the screen's keys says which), and is **not evidence-grade**
+either way.
 
 ### Files you add
 
@@ -135,8 +160,8 @@ The CSV file is saved every 5 seconds, so pulling the card loses at most the las
 rows. Evidence records wait in the hub's memory until they are safely on the card; if the card
 goes before that, they are written to the next file when a card goes back in, as long as the hub
 stays powered. The hub holds about 256 KB of them, roughly 9 minutes at one detection a second;
-once that is full, new detections are counted but not logged, and the strip along the bottom of
-the screen shows how many were dropped.
+once that is full, new detections are counted but not logged, and while evidence is not being
+written the fault bar above the screen's keys shows how many were dropped.
 
 For a clean stop, use the hub's USB console (115,200 baud): press `e`. The hub writes a shutdown
 event and a signed checkpoint, and prints a line saying the card is safe to remove once its
@@ -201,10 +226,9 @@ court would accept the log; see [The evidence log](../EVIDENCE.md).
 
 **The test key.** A hub built without its own development key signs with a **published test
 key**, whose secret is in the repository. Anyone can sign with it, so the verifier marks such a
-log `FAILED`, and the hub's screen says `TEST KEY: log not evidence` for as long as it runs. A
-hub with a development key says `DEV KEY: not evidence-grade`:
-
-![The radar page with an amber bar along the bottom reading "Dev key: not evidence-grade"](../images/screen/caveats_dev_key.png)
+log `FAILED`, and the hub's screen keeps the note "Log not tamper-proof (test key)" above
+its keys for as long as it runs (pictured in [What the screen shows](#what-the-screen-shows)).
+A hub with a development key shows "Log not evidence-grade (dev key)" instead.
 
 Every run ends with the same line, because no verdict can prove it: "NOT PROVEN: that the log is
 complete". Records after the last one, newer files, a reformatted card or a start-up never

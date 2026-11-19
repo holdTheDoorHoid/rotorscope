@@ -73,7 +73,8 @@ read from the code (`crates/gnss/src/integrity.rs`, `trust.rs`, `timeguard.rs`):
 - Any other epoch publishes the **last trusted** position and time, marked as held. While
   spoofing is suspected, the held position is *home* (below) if there is one.
 - If nothing has been trusted since power-up (a spoofer present from the start), **nothing** is
-  published. The screen's Health page says `no trusted position/time`, and evidence records say
+  published. The GPS tile on the screen's Health page says `no trusted position` (or `time`, or
+  `position or time`), and evidence records say
   their time source is `untrusted`.
 
 **The time guard.** The hub has its own clock, from its crystal. GPS time may steer that clock
@@ -108,8 +109,9 @@ The hub keeps a **home** position, from three sources, strongest first:
 
 Once home exists, a fix more than 75 m from it (or four times the stated accuracy, whichever is
 larger) is a spoofing suspicion, and more than 300 m a strong one. A new place is never adopted on
-its own: the screen's Settings row changes to **New home / Accept here**, and only you can accept
-it. If you move the hub on purpose, choose **Hub moved** to forget home and learn again.
+its own: the screen's Settings row changes to **New spot found / Use this spot**, and only you can
+accept it. If you move the hub on purpose, choose **Hub location / I moved the hub** to forget home
+and learn again.
 
 `GPSMEM.TXT` also keeps the latest time the hub trusted, written at most once an hour.
 
@@ -137,23 +139,27 @@ the hub re-applies it every second so it never times out.
 
 A manual position is not kept across reboots.
 
-![Radar page with POS MAN in the top left, one drone 320 metres to the north-east at 85 metres up, and its pilot marked P](../images/screen/status_manual_pos.png)
+![The radar page with POS TYPED at the left of the status bar and "no SD" on the right; one drone 320 metres to the north-east, 87 m above you, with its pilot marked P 140 m to the north-west](../images/screen/wide/status_manual_pos.png)
 
-The status bar shows `POS MAN` while a manual position is in use, instead of `GPS` and the number
-of satellites.
+The status bar shows `POS TYPED` while a manual position is in use, instead of `GPS` and the
+number of satellites, and the Health page's GPS tile says `no fix; typed position in use`.
 
 ## With no fix, or no GPS at all
 
-![Drone list with a NO FIX status and the banner NO POSITION, distances unavailable, listing five drones by signal strength, height and age](../images/screen/no_fix.png)
+![The home page without a position, titled "HOME · NO POSITION 1/5": a NO FIX chip and a "5 DOWN" chip in the status bar, the amber band "5 GHz RECEIVER DOWN · drones on 5 GHz won't be heard" with "+1 more", the count 5, and a list of drones with signal bars in dBm, height above takeoff, when heard and the radios that heard them, under the notes "newest first" and "signal strength is not distance"](../images/screen/wide/no_fix.png)
 
-When the GPS is present but has no usable fix, the status bar says **NO FIX** and a banner says
-**NO POSITION - distances unavailable**. The list still shows every drone, sorted newest first,
-with its signal strength, height, age and the radios that heard it. A note warns that a strong
-signal does not mean a near drone.
+When the GPS is present but has no usable fix, the status bar shows a **NO FIX** chip (a small
+boxed word) and the first page is no longer the radar: it is titled **HOME · NO POSITION** and
+lists every drone, newest first, with its signal strength, height, when it was last heard and the
+radios that heard it. The amber warning band says
+**NO POSITION · distances and directions unavailable** when nothing more serious is showing (in
+the picture above, a dead 5 GHz node is, and the band ends in `+1 more`). A note at the top right
+warns that signal strength is not distance: Wi-Fi and Bluetooth send at different powers.
 
-![Drone list with a NO GPS status, no SD card, USB power, and the message No drones heard yet, No IDs heard (see Signals)](../images/screen/status_gps_absent.png)
+![The home page without a position: a NO GPS chip in the status bar, "no SD" and USB on the right, the amber band "NO POSITION · distances and directions unavailable", the title "HOME · NO POSITION 1/5", a count of 0 and the words "No drone IDs heard yet" and "Drones without Remote ID may only show on Signals"](../images/screen/wide/status_gps_absent.png)
 
-With no GPS connected the status bar says **NO GPS**. Everything else works the same way. In the
+With no GPS connected the status bar shows a **NO GPS** chip and the Health page's GPS tile
+says `no receiver found`. Everything else works the same way. In the
 JSON output the hub's `own` position is `null`, every track's `own` (distance and direction) is
 `null`, and the CSV log is numbered (`LOG00023.CSV`) instead of named by date. Without GPS time the
 TAK feed cannot be time-stamped, and the aero node cannot follow FLARM hops: it parks on one

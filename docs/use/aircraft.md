@@ -49,19 +49,29 @@ and [The aero node](../AERO-NODE.md).
 This is a deliberate rule. Aircraft are for awareness, not detection:
 
 - they never enter the drone list;
-- they never sound the new-drone alert or the buzzer;
+- they never bring up the new-drone banner (and never sound a buzzer on a hub that has one; the
+  P4 hub has none);
 - they are listed in their own section everywhere: the screen's Health page, the phone page's
   "Aircraft (ADS-B)" section, the SD card log, the USB output, TAK and the laptop table.
 
-The only mark an aircraft gets on its own is a quiet **LOW** label: airborne, within 5 km of
-you and at most 2,000 ft above you (above sea level, if the hub does not know its own height). It is a word on the screen, not an alarm.
+The only mark an aircraft gets on its own is a quiet **LOW**: airborne, within 5 km of you and
+at most 2,000 ft above you (above sea level, if the hub does not know its own height). It is a
+word on the screen, not an alarm.
 
-![The Health page, with the ADS-B receiver listed as a node and an AIRCRAFT line reading "12 1 LOW N911PH 1.2 km 1200ft"](../images/screen/health_aircraft.png)
+![The Health page with an ADSBee: an ADS-B row in the node table, PLANES among the receivers in the status bar, and a Planes row reading "12 active · 1 LOW nearby · nearest N911PH 1.2 km at 1200 ft"](../images/screen/wide/health_aircraft.png)
 
-On the hub's screen, the Health page lists the ADSBee as a node (here `ADS-B`), with its message
-rate. The **AIRCRAFT** line gives the number of aircraft heard recently, how many are low, and the
-nearest one with its distance and its pressure height in feet. A crewed aircraft flying below its legal minimum height can
-also get a `LOW` flag on the [FAA flags](faa-flags.md) page.
+On the P4 hub's screen (see [Health](screen.md#health)):
+
+- the ADSBee is listed as a node on the Health page (**ADS-B**), with its message rate, and it
+  appears among the receivers in the status bar as **PLANES**;
+- the **Planes** row gives the number of aircraft heard recently, how many are LOW nearby, and
+  the nearest one with its distance and its pressure height in feet, such as "12 active · 1 LOW
+  nearby · nearest N911PH 1.2 km at 1200 ft" ("none heard" when there are none);
+- while an aircraft is LOW nearby, the Planes row moves to the top of the rows and is marked in
+  the warning colour. There is still no chip, no warning band and no alarm.
+
+A crewed aircraft flying below its legal minimum height can also get a `LOW` flag on the
+[FAA flags](faa-flags.md) page.
 
 Aircraft go stale after 15 seconds without being heard and are removed after 60 seconds, much
 sooner than drones, because they move fast.
@@ -80,10 +90,22 @@ where a drone is flying is the case this is for.
 
 "About the same height" means within 150 m (about 500 ft).
 
-At Caution or Warning the status bar shows **AIRCRAFT** in a box, ahead of JAMMED and ATTACK, and
-the Health page gets a **NEAR** line:
+At Caution or Warning the status bar shows a **PLANE NEAR** chip (a small boxed word), and the
+warning band under it names the aircraft and the distance, such as "DRONE 240 m FROM N911PH · a
+crewed aircraft is close to a drone". Only "not listening" outranks it for the band. See
+[The warning band](screen.md#the-warning-band).
 
-![The Health page with PLANE NEAR boxed in the status bar and a NEAR line reading "drone 240 m from N911PH +98ft"](../images/screen/health_conflict.png)
+![The radar with the PLANE NEAR chip in the status bar and the band "DRONE 240 m FROM N911PH · a crewed aircraft is close to a drone"](../images/screen/wide/band_near_plane.png)
+
+The Health page gets a **Near a plane** row with the drone's distance from the aircraft and the
+height difference in metres and feet. At Advisory level the row is there too, but plain: no
+chip and no band.
+
+![The Health page with PLANE NEAR and JAMMED chips, the band "DRONE 240 m FROM N911PH" with "+1 more", a Near a plane row beginning "drone 240 m from N911PH", and the Planes row at the top](../images/screen/wide/health_conflict.png)
+
+**How far the screen is proven:** the screen pictured here is **Simulated only** as of
+2026-11-19: drawn and tested on a computer with made-up aircraft and built into the hub's
+firmware, not yet looked at on the real panel.
 
 Each pair is also written to the [evidence log](../EVIDENCE.md), once per level (and again
 after 5 minutes if it is still close).

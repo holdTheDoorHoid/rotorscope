@@ -106,19 +106,21 @@ send.
 
 ## Seeing the assignments: the Health page
 
-![The Health page listing four nodes, Wi-Fi 2.4, Wi-Fi 5, DroneID and Gateway, with frames per second, Remote ID found, drops and time up for each](../images/screen/health_roles.png)
+![The Health page, titled "HEALTH 4/5", listing four nodes with green dots: Wi-Fi 2.4, Wi-Fi 5, DroneID and Gateway, with frames per second, ID messages, frames lost and time up for each, and tiles for GPS, drones seen, SD log and power below](../images/screen/wide/health_roles.png)
 
 The hub's **Health** page lists every node with the job it reports (Wi-Fi 2.4, Wi-Fi 5,
-Bluetooth, DroneID, FPV 5.8, ADS-B, Gateway, LR radio), its frames per second, Remote ID found,
-drops and how long it has been up. A node that stops reporting shows **NOT RESPONDING**.
+Bluetooth, DroneID, FPV 5.8, ADS-B, Gateway, LR radio), its frames per second, ID messages
+found, frames lost and how long it has been up. A node that stops reporting shows
+**NOT RESPONDING**; one that answers but hears nothing shows **HEARS NOTHING**. How to reach the
+page and read the rest of it is in [The screen](../use/screen.md#health).
 
-On a hub that assigns jobs (the P4), each node also gets a small line under it with what it was
-asked to do, for example `-> Wi-Fi 2.4 plan 5a3c running` (`crates/screen/src/render.rs`):
+On a hub that assigns jobs (the P4), the page gains an **ASSIGNED ROLE** column with what each
+node was asked to do, for example `Wi-Fi 2.4 plan 5a3c running`:
 
-![The Health page with three nodes; under Wi-Fi 2.4 a line reads "Wi-Fi 2.4 plan 5a3c running", and under DroneID a highlighted line reads "DroneID plan 0b17 sent"](../images/screen/health_assigned.png)
+![The Health page with an ASSIGNED ROLE column: Wi-Fi 2.4 reads "Wi-Fi 2.4 plan 5a3c running" in grey, Wi-Fi 5 has no assignment, and DroneID reads "DroneID plan 0b17 sent" in amber](../images/screen/wide/health_assigned.png)
 
-"running" means the node has echoed that plan back; "sent", in the highlight colour, means the
-hub sent it and is still waiting.
+"running" means the node has echoed that plan back; "sent", in amber, means the hub sent it and
+is still waiting.
 
 The USB console says the same once every 5 s, in a line such as
 `hub-p4: coverage nodes=2 assigned=2 applied=2 missing=0x18`. `missing` is a list of the jobs
@@ -149,6 +151,6 @@ used the hub's own plans ([bench tests](../BENCH.md)). Assignments over the wire
   channel-6 rule, aero plans.
 - `crates/coverage/README.md`: the rules in plain language.
 - `firmware/hub-p4/src/downlink.rs`: running it every 2 s and sending the commands.
-- `crates/screen/src/render.rs`: the Health page.
+- `crates/screen/src/wide/pages.rs`: the Health page as the P4 draws it.
 
 **Next:** [Position and time](position-and-time.md)

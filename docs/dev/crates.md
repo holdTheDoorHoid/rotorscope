@@ -885,23 +885,83 @@ hardware key, secure boot and automatic upload are still to do ([The evidence lo
 ### screen
 
 **What it does.** The on-device screen: `UiState` (a plain view-model the hub fills each frame),
-`Ui` (pages, cursor, alert banner, settings; fed `Button` events from `ButtonDecoder`), `render`
-(one 320x240 frame to any embedded-graphics `DrawTarget<Color = Rgb565>`) and `band`
-(`render_banded`: the same frame 24 rows at a time into a 15 KB buffer, for hubs without PSRAM).
+`Ui` (the state machine: page, mode, cursor, alert banner, settings and their actions; fed
+`Button` events, from `ButtonDecoder` or the P4's touch keys, and `Tap` events) and two
+renderers that draw the same pages from the same `Ui` and `UiState`: `render` (one 320x240 frame
+to any embedded-graphics `DrawTarget<Color = Rgb565>`, with `band`'s `render_banded` drawing it 24
+rows at a time into a 15 KB buffer for hubs without PSRAM) and, behind feature `wide`, the native
+800x480 layout of the P4 hub. `crates/screen/README.md` has the design decisions and every
+snapshot case.
 
-**Constants.** `WIDTH = 320`, `HEIGHT = 240`, `BAR_H = 18`, `BAND_ROWS = 24`; model limits
-`MAX_DRONES = 32`, `MAX_NODES = 5`, `MAX_SIGNALS = 8`, `MAX_CONTROL_ROWS = 3`, `MAX_FLAG_ROWS = 12`;
-`ALERT_MS = 5_000`, `BUZZ_GAP_MS = 3_000`, `IDLE_MS = 30_000`; long press 700 ms. Palettes `DAY`
-and `NIGHT`.
+**The wide layout** (`screen::wide`). `wide::render(&Ui, &UiState, lit, &mut Canvas)` draws the
+part of a frame that falls in one `wide::Canvas` (whole 800-pixel rows starting at a given top
+row; every primitive clips to the band first). `lit` is the key drawn pressed. `wide::render_banded`
+runs the bands through a caller's buffer and `flush(top, pixels)`; the P4 runs the same loop
+itself, 48 rows at a time into a PSRAM band, copying each finished band into the framebuffer.
+`wide::key_labels(&Ui, &UiState)` returns the three `KeyLabel`s (word, optional second line,
+active, arrow, primary, check) that say what each key does in the current state;
+`wide::key_at(x, y)` maps a touch in the bottom strip to `Button::Up`, `Select` or `Down` (left,
+middle, right thirds, no dead gaps); `wide::tap_target(&Ui, &UiState, x, y)` runs the same layout
+with no pixels to find what a touch on the page landed on, as a `Tap`. Themes at this size are
+`wide::Look` values (`Theme::look()`).
 
-**Features.** `tracker`: `from_tracker::fill_from_tracker` fills a `UiState` straight from a
-`tracker::Tracker` (pulls in `tracker`, `rid`, `link`, `ctrlwatch`); both hubs enable it.
+**Touch and the state machine.** `Ui::tap(Tap, &UiState, pressed_ms)` takes `Tap::Drone(key)`,
+`Flag(row)`, `SettingsRow(i)`, `Banner` or `Nothing`. A tap on the banner opens its drone, anywhere
+else only dismisses it; a settings row is chosen by the first tap and changed by a second; a touch
+that hits nothing shows "Tap a drone, or use the keys below". A tap that began before the screen
+last changed (page, mode or banner) is ignored, and so is a key press that began before the
+banner appeared (`pressed_ms`, `Ui::button_at`). `Ui::set_held` tells the screen how long
+the middle key has been held, so the key fills towards `wide::HOLD_MS`.
 
-**Tests.** 53, including `tests/snapshots.rs`, which writes a PNG of every screen to
-`crates/screen/snapshots/` (45 files at `6651ecd`; copies are in `docs/images/screen/`) and checks
-that banded rendering equals full-frame rendering pixel for pixel. **Proof level.** **Proven on the
-air**: renders on the P4 hub on the bench (the S3 hub drew it too, but its build does not link as of 2026-11-18, see
-[webui](#webui)); the content it shows is as proven as the detections behind it.
+**Themes and backlight.** `Theme` is `GlassCockpit` (the default), `FieldDay` or `RedNight`;
+`ThemeMode` is `Fixed(Theme)` or `Auto`, which picks `Settings::day_theme` or `night_theme` by the
+sun (`sun`: NOAA's solar-position algorithm, `elevation_deg`, `is_day`, `next_change`; `SwitchAt`
+chooses sunrise and sunset or civil twilight). `Ui::effective_theme` is the look to draw, and
+`Ui::observe` holds a due Auto switch back while the operator is busy. 320x240 colours are
+`Palette` values in `theme` (`GLASS_COCKPIT`, `FIELD_DAY`, `RED_NIGHT`, via `Theme::palette()`).
+Brightness 1 to 5 maps to backlight percentages with `backlight_pct` (`BRIGHTNESS_PCT`);
+`Ui::backlight_level` caps it at `RED_NIGHT_MAX_BRIGHTNESS` while Red Night shows.
+`Ui::take_settings_change` hands the hub `(before, after)` once when an edit ends with something
+changed; the P4 appends `theme` and `brightness` lines to `ROTORSCP/SITE.TXT`, and
+`Ui::set_settings` applies them when it reads that file. `Ui::set_has_buzzer(false)` (the P4) removes the
+Buzzer row and every beep request.
+
+**Lettering.** The wide layout's text is 4-bit anti-aliased glyphs rasterised from B612 and
+B612 Mono (Glass Cockpit, Red Night) and IBM Plex Sans Condensed (Field Day) by `tools/fontgen`
+(`cargo run -p fontgen --release`, run by hand). The TTFs and their SIL OFL licences are in
+`crates/screen/fonts/`; the generated `src/wide/glyphs.rs` and `glyphs.bin` are committed, so a
+build needs neither the fonts nor the tool. The 320x240 renderer uses embedded-graphics' bundled
+fonts and drawn block digits.
+
+**Constants.** 320x240: `WIDTH = 320`, `HEIGHT = 240`, `BAR_H = 18`, `BAND_ROWS = 24`. Wide
+(`wide::`): `W = 800`, `H = 480`, `BAR_H = 38` (status bar), `BAND_H = 34` (warning band),
+`KEYS_TOP = TOUCH_TOP = 410`, `KEY_Y = 414`, `KEY_H = 62`, `CAVEAT_H = 22` (fault bar),
+`NOTE_H = 20` (notes line), `BAND_ROWS = 48`, `HOLD_MS = 1_000`. Model limits `MAX_DRONES = 32`,
+`MAX_NODES = 5`, `MAX_SIGNALS = 8`, `MAX_CONTROL_ROWS = 3`, `MAX_FLAG_ROWS = 12`,
+`MAX_WARNINGS = 11`. `Ui`: `ALERT_MS = 5_000`, `STICKY_M = 300.0`, `SWARM_MS = 15_000`,
+`NEW_MS = 60_000`, `BUZZ_GAP_MS = 3_000`, `IDLE_MS = 30_000`, `DETAIL_IDLE_MS = 120_000`,
+`CONFIRM_MS = 4_000`, `ACTION_WAIT_MS = 10_000`, `BRIGHTNESS_PCT = [10, 25, 45, 70, 100]`,
+`RED_NIGHT_MAX_BRIGHTNESS = 2`. `ButtonDecoder::LONG_MS = 700` (push buttons).
+
+**Features.**
+
+| Feature | Gates | Enabled by |
+|---|---|---|
+| `tracker` | `from_tracker::fill_from_tracker`, filling a `UiState` straight from a `tracker::Tracker` (pulls in `tracker`, `rid`, `link`, `ctrlwatch`) | hub-p4, hub (S3) |
+| `wide` | `screen::wide`, the 800x480 layout, and its glyph tables in the flash image (no further crates) | hub-p4 |
+
+**Tests.** 78 (`src/tests.rs`, `src/sun.rs`, `tests/adapter.rs`, `tests/snapshots.rs`): the state
+machine, key labels and touch targets, the sun against US Naval Observatory times, the tracker
+adapter, and banded rendering equal to full-frame rendering pixel for pixel in both layouts.
+`tests/snapshots.rs` writes a PNG of every screen: 50 at 320x240 in `crates/screen/snapshots/`,
+and 77 per theme at 800x480 in `crates/screen/snapshots/wide/<theme>/` (`glass-cockpit`,
+`field-day`, `red-night`). `tools/docs-build.sh` copies them into `docs/images/screen/` and
+`docs/images/screen/wide/` ([tools](tools.md#docs-buildsh-and-docs-checkpy)).
+**Proof level.** The 320x240 layout is **proven on the air**: the P4 hub drew it on the bench,
+and its panel and touch were confirmed by eye on 2026-11-14 (the S3 hub drew it too, but its build
+does not link as of 2026-11-18, see [webui](#webui)). The 800x480 layout is **simulated only** as of
+2026-11-19: drawn and tested on a computer and built into the P4 firmware, not yet looked at on
+the panel. The content either shows is as proven as the detections behind it.
 
 ### webui
 

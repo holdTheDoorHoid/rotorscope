@@ -68,6 +68,12 @@
 @media (min-width: 720px) {
     .content main img[src*="images/screen/"] { width: 400px; }
 }
+/* The P4 hub's 800x480 pictures have smooth lettering: full size, never
+   enlarged, scaled down smoothly on a narrow window */
+.content main img[src*="images/screen/wide/"] {
+    width: 800px;
+    image-rendering: auto;
+}
 .content main img { max-width: 100%; height: auto; }
 
 /* Diagrams */

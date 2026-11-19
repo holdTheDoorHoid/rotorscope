@@ -344,8 +344,12 @@ tools/docs-build.sh [build|serve|check]
 `mdbook serve`); `check` builds and then runs `tools/docs-check.py`, which reports broken relative
 links and anchors, relative links that leave `docs/`, GitHub links to files not in the repository,
 and pages missing from `docs/SUMMARY.md` (exit 1 if any). The first run downloads Mermaid 11.4.1
-into `docs/assets/` and checks its SHA-256; every run copies `crates/screen/snapshots/*.png` into
-`docs/images/screen/`. Needs mdBook 0.5.4. See [Writing these docs](docs-style.md).
+into `docs/assets/` and checks its SHA-256. Every run copies the screen's test snapshots into the
+site: `crates/screen/snapshots/*.png` (the 320x240 layout) into `docs/images/screen/`, every
+`crates/screen/snapshots/wide/glass-cockpit/*.png` (the P4's 800x480 layout in the default theme)
+into `docs/images/screen/wide/`, and five named pictures (`radar_5_drones`, `list_5_drones`,
+`detail`, `band_many_warnings`, `settings_brightness_capped`) from each of the other two themes
+into `docs/images/screen/wide/field-day/` and `docs/images/screen/wide/red-night/`. Needs mdBook 0.5.4. See [Writing these docs](docs-style.md).
 
 ## droneid-file
 

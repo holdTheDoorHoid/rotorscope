@@ -73,12 +73,16 @@ flowchart LR
 - **Laptop viewer.** `rid-view`, a program for a laptop, shows the same drones from a node
   plugged in by USB, from a saved file, or from a built-in demo.
 
-![The radar page: you are at the centre, five drones around you, the nearest 75 metres to the north-west at 32 metres up](../images/screen/radar_5_drones.png)
+![The radar page: a north-up plot with you as a ring and dot at the centre and numbered diamonds around you; the card on the right says the nearest drone is 75 m to the north-west, 34 m above you; a second card says 5 drones sending ID; three keys along the bottom read SETTINGS, CHOOSE DRONE and DRONE LIST](../images/screen/wide/radar_5_drones.png)
 
-The picture shows the radar page, drawn by the screen software from made-up test drones. You are the small cross in the centre; each diamond is a
-drone. The panel on the right gives the nearest one: 75 metres away, north-west, 32 metres
-up. The bar along the top shows the GPS, which radios are listening, that the log is
-recording, the battery and the time. [The screen](../use/screen.md) explains every page.
+The picture shows the radar page of the hub's 800 x 480 screen, drawn by the screen software
+from made-up test drones. You are the ring and dot in the centre; each diamond is a drone,
+numbered nearest first, and the hollow one has gone quiet. The card on the right gives the
+nearest one: 75 metres away, north-west, 34 metres above you. The bar along the top shows the
+GPS, which receivers are listening, that the log is recording, the battery and the time. Along
+the bottom are three touch keys. As of 2026-11-19 this layout is **simulated only**: tested on
+a computer and built into the hub's firmware, but not yet looked at on the real panel.
+[The screen](../use/screen.md) explains every page.
 
 ## Receive-only, and why it matters
 

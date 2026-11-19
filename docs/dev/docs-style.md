@@ -15,7 +15,7 @@ pages instruct, deep-dive pages specify. This page keeps the layers consistent.
 | The sidebar (order and titles) | `docs/SUMMARY.md` |
 | Guides written for the site | `docs/start/`, `get-going/`, `use/`, `how/`, `detect/`, `hardware/`, `dev/`, `project/` |
 | Deep dives written alongside the code | `docs/*.md` in capitals, such as `docs/SPOOFING.md` |
-| Pictures | `docs/images/` (`screen/` holds copies of `crates/screen/snapshots/`) |
+| Pictures | `docs/images/` (`screen/` holds copies of `crates/screen/snapshots/`, the S3's 320x240 layout; `screen/wide/` holds the P4 hub's 800x480 layout, and pages about the hub's screen use those) |
 | Look and diagrams | `docs/assets/` |
 | Site settings | `book.toml` at the top of the repository |
 
@@ -146,7 +146,7 @@ emphasis in general.
 **Pictures** go in `docs/images/` and always carry alt text that says what the picture shows:
 
 ```markdown
-![The radar page showing five drones, the nearest 75 metres to the north-west](../images/screen/radar_5_drones.png)
+![The radar page showing five drones and one gone quiet, the nearest 75 metres to the north-west at 310°](../images/screen/wide/radar_5_drones.png)
 ```
 
 ## Links

@@ -138,7 +138,7 @@ single forged message cannot move it into the wrong slot. Details:
 Once a second the hub compares every drone with every aircraft and warns at three levels, from
 "Advisory" (within 3 km and about 1,000 ft) to "Warning" (within 300 m and about the same height, or
 predicted to pass that close in the next 20 s). At Caution or Warning the status bar shows
-**AIRCRAFT**, which takes priority over JAMMED and ATTACK, and each pair is logged as evidence. It
+**PLANE NEAR**, which takes priority over JAMMED and ATTACK, and each pair is logged as evidence. It
 compares GPS and pressure heights carefully, predicts the closest approach over the next minute,
 and only uses confirmed drones. It is a prompt to look up, not a finding of fault. **Simulated
 only**. Details: [Drone near a crewed aircraft](../AIRCRAFT-CONFLICT.md).

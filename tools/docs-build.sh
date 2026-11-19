@@ -42,6 +42,17 @@ fi
 mkdir -p docs/images/screen
 cp crates/screen/snapshots/*.png docs/images/screen/
 
+# The P4 hub's 800x480 layout: every picture in the default theme (Glass
+# Cockpit), and a few in the other two themes for the pages that compare them.
+mkdir -p docs/images/screen/wide
+cp crates/screen/snapshots/wide/glass-cockpit/*.png docs/images/screen/wide/
+for theme in field-day red-night; do
+    mkdir -p "docs/images/screen/wide/$theme"
+    for shot in radar_5_drones list_5_drones detail band_many_warnings settings_brightness_capped; do
+        cp "crates/screen/snapshots/wide/$theme/$shot.png" "docs/images/screen/wide/$theme/"
+    done
+done
+
 case "${1:-build}" in
     build)
         mdbook build

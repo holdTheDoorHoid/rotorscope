@@ -17,9 +17,9 @@ not know are in the [glossary](../project/glossary.md).
 > and anyone with a transmitter can try to cause one. Every alarm is written to the
 > [evidence log](../EVIDENCE.md) so it can be checked later.
 
-On the hub, protocol attacks raise the **ATTACK** badge, jamming raises **JAMMED**, a flood of
-fake identities raises **ID FLOOD**, and GPS interference in the area raises **AREA JAM** or
-**AREA FAKE**. What each badge means on the screen, and how to mute a nuisance alarm, is on
+On the hub's screen, protocol attacks raise the boxed word **ATTACK** in the status bar, jamming
+raises **JAMMED**, a flood of fake identities raises **FAKE IDS**, and GPS interference in the area
+raises **AREA GPS JAM** or **AREA GPS FAKE**. What each one means on the screen, and how to mute a nuisance alarm, is on
 [Alarms and warnings](../use/alarms.md). Jamming, a blinded node, area GPS, ID floods and forged
 link traffic can only be snoozed for five minutes, never muted for good
 ([Site settings](../SITE.md)).
@@ -56,7 +56,7 @@ the real ones and fill the hub's tables.
 **How Rotorscope notices.** A new identity has to earn its place: a drone is only announced once it
 has been heard twice at least a second apart, and a busy table never throws out a confirmed drone
 that is still transmitting. When new identities arrive far faster than a real sky produces, the
-hub raises **ID FLOOD** (`id_flood`), for drones, aircraft or control links. It also notices one
+hub raises the flood alarm (`id_flood`; **FAKE IDS** on the screen), for drones, aircraft or control links. It also notices one
 node discarding a flood.
 
 **Needs:** nothing. **Proof: simulated only** (host tests, and 2026-11-18 bench runs in which a
