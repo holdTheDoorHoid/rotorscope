@@ -10,8 +10,9 @@
 //! [`BUS_OUT`] for the bus task (`node_common::bus`) and applies the
 //! assignments it puts in [`BUS_COMMANDS`].
 //!
-//! - `Hello` + `Status` at boot, every [`KEEPALIVE_US`] and whenever the role
-//!   or plan changes (the hub forgets a node after 15 s of silence).
+//! - `Hello` + `Status` (and, protocol 14, `NodeHealth`) at boot, every
+//!   [`KEEPALIVE_US`] and whenever the role or plan changes (the hub forgets
+//!   a node after 15 s of silence).
 //! - `DroneId`: one per decoded or detected burst, as it comes.
 //! - `Rf`: FPV scanner verdicts, at most one per channel per [`RF_REPEAT_US`]
 //!   unless the kind changes.
@@ -142,7 +143,18 @@ impl Hub {
         let _ = fw.push_str(env!("CARGO_PKG_VERSION"));
         self.push(&Frame::Hello { role: self.role, protocol: PROTOCOL_VERSION, firmware: fw });
         self.push(&Frame::Status { role: self.role, can: CAN, plan: self.plan_id });
+        self.push_node_health();
         true
+    }
+
+    /// Protocol 14: `NodeHealth` with the Hello, every 5 s. No per-kind
+    /// budget here: frames dropped from a full queue count as `other`.
+    /// Out of line, so its frame is never part of the capture loop's.
+    #[inline(never)]
+    fn push_node_health(&mut self) {
+        let mut shed = [0u32; link::SHED_KINDS];
+        shed[link::SHED_KINDS - 1] = self.dropped;
+        self.push(&Frame::NodeHealth(node_common::node_health(shed, [0, 0])));
     }
 
     pub fn droneid(&mut self, s: link::DroneIdSighting, hil: bool) {

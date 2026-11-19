@@ -144,12 +144,16 @@ async fn main(spawner: Spawner) -> ! {
     }
     #[cfg(feature = "espnow")]
     let _wifi = {
+        // The link key: from the board's rskey partition
+        // (tools/partitions-single.csv), never from this image.
+        let keystore = node_common::keystore::read(p.FLASH);
         let wifi = esp_radio::wifi::WifiController::new(p.WIFI, Default::default()).unwrap();
         let now = wifi.esp_now();
-        if let Err(e) = now.set_channel(uplink::CHANNEL) {
+        if let Err(e) = now.set_channel(airlink::GATEWAY_CHANNEL) {
             out::line(format_args!(r#"{{"t":"warn","what":"espnow","note":"set_channel {e:?}"}}"#));
         }
-        spawner.spawn(uplink::run(now).unwrap());
+        // After `WifiController::new`: the uplink takes the TRNG then.
+        spawner.spawn(uplink::run(now, keystore).unwrap());
         wifi
     };
 
@@ -210,6 +214,11 @@ async fn main(spawner: Spawner) -> ! {
         if hello {
             out::hub_frame(&hello_frame());
             out::hub_frame(&state::status_frame());
+            // Protocol 14. No per-kind budget here: sightings over the rate
+            // limit and frames lost to a full hub pipe count as `other`.
+            let mut shed = [0u32; link::SHED_KINDS];
+            shed[link::SHED_KINDS - 1] = dropped;
+            out::hub_frame(&link::Frame::NodeHealth(node_common::node_health(shed, [0, 0])));
         }
         if hello || state::STATUS_CHANGED.swap(false, Relaxed) {
             out::hub_frame(&state::aero_status_frame());

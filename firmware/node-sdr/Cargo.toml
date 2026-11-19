@@ -33,7 +33,7 @@ decode = []
 # re-locks the receiver. This is the ONLY way this firmware transmits; the
 # capture path stays receive-only (see README.md "Hub link"). Off by default.
 # Build with `cargo fw-now` from c5/.
-espnow = ["esp-radio/esp-now", "dep:airlink"]
+espnow = ["esp-radio/esp-now", "dep:airlink", "node-common/espnow"]
 # Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
 # hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). Nothing is transmitted on the air and the capture never pauses

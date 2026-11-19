@@ -1413,11 +1413,13 @@ checksum = "8d5439c4ad607c3c23abf66de8c8bf57ba8adcd1f129e699851a6e43935d339d"
 name = "node-common"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "critical-section",
  "embassy-time",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "heapless 0.8.0",
+ "kitkeys",
  "link",
  "nodeimage",
  "portable-atomic",
@@ -1458,7 +1460,9 @@ dependencies = [
 name = "nodeimage"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "heapless 0.8.0",
+ "kitkeys",
  "link",
  "postcard",
 ]

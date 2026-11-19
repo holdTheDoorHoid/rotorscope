@@ -51,7 +51,7 @@ band24 = []
 # UART. Makes the node transmit; see docs/ESPNOW.md. 2.4 GHz builds only (the
 # gateway is on 2.4 GHz channel 6). A 5 GHz plan gets 40 ms visits to channel 6
 # at least once a second so the node can still send (`role::with_espnow_visits`).
-espnow = ["esp-radio/esp-now", "dep:airlink"]
+espnow = ["esp-radio/esp-now", "dep:airlink", "node-common/espnow"]
 # Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
 # hub UART, polled by the hub, TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). Receive-only on the air, like the plain wired build. C5 only; not
@@ -61,9 +61,11 @@ wirebus = ["node-common/wirebus"]
 # on USB to prove the reboot after a panic and the hang watchdog. Never in a
 # normal build.
 faulttest = ["node-common/faulttest"]
-# Bench only (docs/BENCH.md "Origin checks"): type `forge hubfix` (or csbee,
-# flags, via, hello, threat, join) on USB to send a frame a node must never
-# originate, and see the gateway and the hub refuse it. Not with faulttest
+# Bench only (docs/BENCH.md "Origin checks", docs/LINK-KEYS-DESIGN.md
+# section 9): type `forge hubfix` (or csbee, flags, via, hello, threat, join)
+# on USB to send a frame a node must never originate, and see the hub refuse
+# it; with espnow also the captured-node attacks (`forge claim <mac>`, `cmd
+# <mac>`, `beacon`, `hold <s>`, `spam <n>`, src/forge.rs). Not with faulttest
 # (both read the USB console). Never in a normal build.
 forgetest = []
 # Bench only (docs/BENCH.md "Frame flood"): type `flood <kind> <rate>` on

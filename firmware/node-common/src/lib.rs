@@ -28,6 +28,10 @@
 #[cfg(feature = "wirebus")]
 pub mod bus;
 pub mod fault;
+#[cfg(feature = "espnow")]
+pub mod keystore;
+#[cfg(feature = "espnow")]
+pub mod linkauth;
 
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
@@ -103,6 +107,33 @@ pub fn health() -> Health {
         switches_refused: SWITCHES_REFUSED.load(Relaxed),
         switch_wait_s: switchlimit::wait_s(STREAK.load(Relaxed), uptime_s()),
     }
+}
+
+/// `Frame::NodeHealth` (protocol 14, docs/LINK-KEYS-DESIGN.md 6.4 and 7.3),
+/// sent every 5 s by every node image, wired ones included: uptime, the
+/// robustness counters ([`health`]), and with `espnow` the link's delivery
+/// accounting and refusals (as `linkauth::publish` last left them). `shed`
+/// (per `wifiwatch::shed::Kind`) and `alternations` (DJI, Wi-Fi drone) come
+/// from the image; one without them passes zeros.
+pub fn node_health(shed: [u32; link::SHED_KINDS], alternations: [u32; 2]) -> link::NodeHealth {
+    let h = health();
+    #[allow(unused_mut)]
+    let mut n = link::NodeHealth {
+        uptime_s: uptime_s(),
+        shed,
+        alternations,
+        plans_refused: h.plans_refused,
+        deaf_fallbacks: h.deaf_fallbacks,
+        deaf_blamed: h.deaf_blamed,
+        deaf_outages: h.deaf_outages,
+        deaf_refused: h.deaf_refused,
+        switches_refused: h.switches_refused,
+        switch_wait_s: h.switch_wait_s,
+        ..link::NodeHealth::default()
+    };
+    #[cfg(feature = "espnow")]
+    nodeimage::uplink::fill_health(&linkauth::counts(), &mut n);
+    n
 }
 
 /// One app slot.
@@ -210,6 +241,13 @@ impl<'d> Images<'d> {
         let stored = nodeimage::decode_job(&raw)?;
         STREAK.store(stored.streak, Relaxed);
         Some(stored.job)
+    }
+
+    /// The provisioning record (`rskey`), read with this flash handle. Call
+    /// once at boot.
+    #[cfg(feature = "espnow")]
+    pub fn keystore(&mut self) -> keystore::Keystore {
+        keystore::read_from(&mut self.flash)
     }
 
     /// The slot to start for `role`, if this board holds an image for it.

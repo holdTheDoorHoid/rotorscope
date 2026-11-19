@@ -1,11 +1,23 @@
 [package]
 name = "nodeimage"
-description = "Which firmware images a node holds, which roles they give it, and the job a node carries across an image switch"
+description = "Which firmware images a node holds, which roles they give it, the job a node carries across an image switch, and the node side of the ESP-NOW link (rskey lookup, link glue)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+
+[features]
+# The node's ESP-NOW link glue (`uplink`, over airlink::v3 and kitkeys). Off
+# for wired-only images, which then never build airlink. Its host tests run
+# without it (the same crates are dev-dependencies).
+uplink = ["dep:airlink", "dep:kitkeys"]
 
 [dependencies]
 link.workspace = true
 heapless.workspace = true
 postcard.workspace = true
+airlink = { path = "../airlink", optional = true }
+kitkeys = { path = "../kitkeys", optional = true }
+
+[dev-dependencies]
+airlink = { path = "../airlink" }
+kitkeys = { path = "../kitkeys" }

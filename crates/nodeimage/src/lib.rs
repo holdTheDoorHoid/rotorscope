@@ -11,12 +11,19 @@
 //! ([`encode_job`]), marks the other slot bootable and resets; the new image
 //! reads the job back ([`decode_job`]) and starts with it.
 //!
+//! Also the node's half of the per-node link keys (docs/LINK-KEYS-DESIGN.md):
+//! finding the `rskey` provisioning partition ([`keystore`]) and the link
+//! logic every ESP-NOW image shares ([`uplink`], feature `uplink`).
+//!
 //! Pure logic only (no flash access), so it is tested on the host; the flash
 //! glue is `firmware/node-common`.
 #![cfg_attr(not(test), no_std)]
 
 pub mod deaf;
+pub mod keystore;
 pub mod switchlimit;
+#[cfg(any(test, feature = "uplink"))]
+pub mod uplink;
 
 use link::{Assignment, NodeRole};
 
