@@ -426,7 +426,6 @@ done
   echo "environment           only PATH, HOME, CARGO_HOME, RUSTUP_HOME, SOURCE_DATE_EPOCH, RUSTC_WRAPPER= (empty), LC_ALL=C, TZ=UTC"
   echo "cargo flags           build --release --locked --offline, plus each image's arguments below"
   echo "image                 espflash save-image --chip <chip> <elf> <name>.bin (espflash defaults for flash mode, size, frequency)"
-  echo "toolchain             $toolchain"
   rustc "+$toolchain" -vV | sed 's/^/rustc                 /'
   echo "cargo                 $(cargo "+$toolchain" -V)"
   echo "espflash              $(espflash --version)"

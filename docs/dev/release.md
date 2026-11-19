@@ -161,6 +161,7 @@ Measured 2026-11-19 with Rust 1.99.1 and espflash 4.7.0, building commit `bfc135
 | Gateway, both built through the fixed path, the real folder not yet remapped | 65 bytes differ, all of them the ELF's SHA-256 (see below): the debug info named the real folder. The code is identical |
 | Gateway and node-wifi, both through the fixed path with every host path remapped (the release method) | app images and ELFs identical |
 | Node-wifi, the same, one of the two builds with an extra remapping rule in its rustflags (as a different home folder gives) | app images and ELFs identical: rustflags do not change symbol names |
+| `tools/release-build.sh`, run twice on commit `ba09473` with a different home folder and a different temporary folder: gateway, node-wifi, node-ble, node-sdr, rid-beacon | all 21 files, `SHA256SUMS` included, identical |
 
 What `espflash` writes from an ELF that carries debug information, measured on the gateway: only
 the loadable segments. Stripping the debug information (`llvm-objcopy --strip-debug`), or all
