@@ -16,13 +16,17 @@ diff -r ~/.cargo/registry/src/index.crates.io-*/esp-radio-1.0.0-beta.1 firmware/
 ```
 
 (only those two files, plus the registry's `.cargo-ok`, `.cargo_vcs_info.json` and `Cargo.lock`,
-differ). Every changed spot is marked `ROTORSCOPE PATCH`.
+and the three files Rotorscope adds, differ). Every changed spot is marked `ROTORSCOPE PATCH`.
+
+The release ships no licence files although it declares `MIT OR Apache-2.0`, so the copy adds
+`LICENSE-MIT` and `LICENSE-APACHE` (esp-hal's own, the repository the crate names) and a
+`PROVENANCE.md` with the version, checksum, upstream commit and the two changes.
 
 How the copy was made, so anyone can make it again: copy
 `~/.cargo/registry/src/index.crates.io-*/esp-radio-1.0.0-beta.1` (the crate whose checksum is
 `50247f4e91000fc87661e77254126c74acc4535f822ee247f7778807202dc938` in the lockfiles before the
 patch) to `firmware/patches/esp-radio`, delete `.cargo-ok`, `.cargo_vcs_info.json` and
-`Cargo.lock`, and apply the two changes below. `tools/check-wifi-blobs.sh` fails if anything
+`Cargo.lock`, add the three files above, and apply the two changes below. `tools/check-wifi-blobs.sh` fails if anything
 else differs from the registry copy, or if the registry copy is missing.
 
 ### 1. ESP-NOW receive length (CVE-2025-52471, defence in depth)

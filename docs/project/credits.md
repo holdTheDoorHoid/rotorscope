@@ -21,8 +21,47 @@ kits, but whoever ships a changed version must publish their changes under the s
 | What | Where | Licence | Used for |
 |---|---|---|---|
 | **opendroneid-core-c**, the official Open Drone ID library, including its GB 46750 (China) variant | [`third_party/opendroneid-core-c`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/third_party/opendroneid-core-c) | Apache-2.0 (kept with its own licence file) | Host-side tests only: `crates/odid-ref` compares Rotorscope's Remote ID decoder with it. It is never built into firmware. |
-| **esp-radio 1.0.0-beta.1**, Espressif's Rust radio driver, with one file changed | [`firmware/patches/esp-radio`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/firmware/patches/esp-radio) | MIT OR Apache-2.0 | `rid-beacon` only. The change fixes the C5's shared radio front-end clocks so Bluetooth transmits while Wi-Fi runs. To be removed when upstream carries a fix ([README](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/patches/README.md)). |
+| **esp-radio 1.0.0-beta.1**, the esp-rs Rust radio driver for Espressif chips, with two files changed | [`firmware/patches/esp-radio`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/firmware/patches/esp-radio) | MIT OR Apache-2.0 (licence files added by Rotorscope; the release ships none) | Every radio firmware. The changes add a length check on received ESP-NOW packets and fix the C5's shared radio front-end clocks so Bluetooth transmits while Wi-Fi runs ([README](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/patches/README.md), [PROVENANCE.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/patches/esp-radio/PROVENANCE.md)). |
 | **ESP32-P4 pre-v3 patch** for esp-hal: the community kit naoNao89/esp32p4-pre-v3-kit 0.1.3 | [`firmware/patches/esp-hal-p4-pre-v3`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/firmware/patches/esp-hal-p4-pre-v3) | MIT/Apache-2.0; the ROM linker tables inside it come from ESP-IDF under Apache-2.0 | Lets the hub run on the P4 board's early chip revision (v1.3), which upstream esp-hal does not support. Exact origins and checksums are in [PROVENANCE.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/patches/esp-hal-p4-pre-v3/PROVENANCE.md). `tools/p4-prepare.sh` checks the patch's SHA-256, then applies it and Rotorscope's own memory-map fix to a pinned esp-hal checkout, which is not committed. |
+| **B612 and B612 Mono** fonts (Regular, Bold) | [`crates/screen/fonts/b612`, `b612mono`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/crates/screen/fonts) | SIL Open Font License 1.1 (`OFL.txt` beside each) | Lettering on the 800x480 screen. `tools/fontgen` turns them into the glyph tables `crates/screen/src/wide/glyphs.rs` and `glyphs.bin`, which carry the same licence. |
+| **IBM Plex Sans Condensed** font (Regular, SemiBold, Bold) | [`crates/screen/fonts/ibmplexsanscondensed`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/crates/screen/fonts/ibmplexsanscondensed) | SIL Open Font License 1.1, Reserved Font Name "Plex" (`OFL.txt`) | Lettering in the Field Day theme, through the same glyph tables. |
+| **Leaflet 1.9.4**, the map library | [`tools/evidence-server/src/static`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/tools/evidence-server/src/static) | BSD-2-Clause (`LEAFLET-LICENSE`) | The map on the evidence server's page. Served from the server itself, not from a CDN. |
+
+### Versions, origins and checksums
+
+What each copy is, as far as the repository can tell (as of 2026-11-19). "Still unknown" is what
+the files do not say and nobody wrote down when they were added.
+
+| Item | Version | Origin | Checksum | Still unknown |
+|---|---|---|---|---|
+| opendroneid-core-c | `VERSION 0.2` in its CMake file; includes the 2026 GB 46750 library | github.com/opendroneid/opendroneid-core-c | Git blob hash of every file in [its PROVENANCE.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/third_party/opendroneid-core-c/PROVENANCE.md) | The upstream commit (steps to pin it are in that file) |
+| esp-radio | 1.0.0-beta.1 | crates.io; esp-hal commit `f769fcd` | `.crate` SHA-256 `50247f4e...2dc938`, checked by `tools/check-wifi-blobs.sh` | Whether esp-hal's licence files were byte-identical at `f769fcd` (taken from `e02f361`) |
+| ESP32-P4 pre-v3 patch | kit 0.1.3, against esp-hal `e02f3613` | naoNao89/esp32p4-pre-v3-kit | Patch SHA-256 in `manifest.json`, checked by `tools/p4-prepare.sh` | Nothing beyond what [PROVENANCE.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/patches/esp-hal-p4-pre-v3/PROVENANCE.md) says |
+| B612, B612 Mono | `Version 1.008` (font name table) | The B612 project (github.com/polarsys/b612, per `OFL.txt`) | SHA-256 below | Where the files were downloaded from |
+| IBM Plex Sans Condensed | `Version 1.3` (font name table) | IBM Plex (IBM Corp., per `OFL.txt`) | SHA-256 below | Where the files were downloaded from |
+| Leaflet | 1.9.4 (file header) | leafletjs.com release | Matched the release's published integrity hashes when added (commit `278fde0`); SHA-256 below | Nothing |
+
+<details>
+<summary>SHA-256 of the fonts and the Leaflet files</summary>
+
+| File | SHA-256 |
+|---|---|
+| `crates/screen/fonts/b612/B612-Regular.ttf` | `139dce659100a83bf95b48474696e448bee95631ef84fd3d0437ced2bf33cf73` |
+| `crates/screen/fonts/b612/B612-Bold.ttf` | `91749541ac7b2c328b58832b7e2c4df809d7e2ba38d62a3a5aa3f8e38b271814` |
+| `crates/screen/fonts/b612mono/B612Mono-Regular.ttf` | `b98cb96cc8a6206dae08c063d60902df7e6d40f86139ebdb97256704253c9c69` |
+| `crates/screen/fonts/b612mono/B612Mono-Bold.ttf` | `b467b1d19fdabed42be51d87e38c86645ceeff2f828f294775188d00d1fd68ca` |
+| `crates/screen/fonts/ibmplexsanscondensed/IBMPlexSansCondensed-Regular.ttf` | `e7437c072eef2ef592ae6f2beb0000446287385907abb57ac1cf07bcbaa2aa33` |
+| `crates/screen/fonts/ibmplexsanscondensed/IBMPlexSansCondensed-SemiBold.ttf` | `a081ca60548aea14100757a2d6fe71ca60fd90ebce779c9a8ae5a0c8fb4526d4` |
+| `crates/screen/fonts/ibmplexsanscondensed/IBMPlexSansCondensed-Bold.ttf` | `b65492d86cdd5cd9d43d2671b55d5d36fec36859fc8b08bc6aba78e441d6c849` |
+| `tools/evidence-server/src/static/leaflet.js` | `db49d009c841f5ca34a888c96511ae936fd9f5533e90d8b2c4d57596f4e5641a` |
+| `tools/evidence-server/src/static/leaflet.css` | `a7837102824184820dfa198d1ebcd109ff6d0ff9a2672a074b9a1b4d147d04c6` |
+
+</details>
+
+Files that look third-party but are Rotorscope's own: the timestamp test fixtures under
+`crates/evidence/tests/fixtures/` (made by the scripts beside them, with test keys), the screen
+snapshots, and the radio library blobs, which are not in the repository at all (they arrive inside
+Espressif's `esp-wifi-sys` crates and are checked by `tools/check-wifi-blobs.sh`).
 
 ### Code ported into Rotorscope's own crates
 

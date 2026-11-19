@@ -49,8 +49,12 @@ FILES=(libespnow.a libnet80211.a libpp.a)
 ESP_RADIO_VERSION=1.0.0-beta.1
 ESP_RADIO_SHA256=50247f4e91000fc87661e77254126c74acc4535f822ee247f7778807202dc938
 # What may differ between the release and the patched copy (diff -rq lines, normalised).
+# The release ships no licence files; the copy adds them and its PROVENANCE.md.
 ESP_RADIO_DIFFS='only-release .cargo_vcs_info.json
 only-release Cargo.lock
+only-patched LICENSE-APACHE
+only-patched LICENSE-MIT
+only-patched PROVENANCE.md
 differ src/esp_now/mod.rs
 differ src/radio_clocks/clocks_ll/esp32c5.rs'
 
