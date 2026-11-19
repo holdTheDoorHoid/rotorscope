@@ -691,6 +691,7 @@ impl Radio {
         );
         let mut found = HVec::<DroneIdSighting, 4>::new();
         let (full, valid) = self.decode_into(&mut line, CAPTURE_LEN, Some((&mut found, lvl, snr)));
+        crate::stack_check();
         let t1 = now_us();
         println!("{}}}", line.as_str());
         for s in found {
@@ -1113,6 +1114,7 @@ impl Radio {
         let mut line = Line::new();
         let _ = write!(line, r#"{{"t":"decode","samples":{},"rate":{}"#, self.c16_len, RATE_DECODE);
         self.decode_into(&mut line, self.c16_len, None);
+        crate::stack_check();
         println!("{}}}", line.as_str());
     }
 

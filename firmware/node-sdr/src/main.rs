@@ -141,6 +141,33 @@ pub fn stack_free() -> usize {
     p - lo
 }
 
+/// Untouched stack below which the node says so on USB, once per boot.
+pub const STACK_LOW: usize = 2048;
+
+/// Call after the deepest work (a decode). The decoder's large frame steps
+/// over esp-hal's guard word, and below the stack is the capture memory, so
+/// an overflow would otherwise damage captures with nothing said.
+///
+/// - The lowest painted word written: the stack reached its end. Memory
+///   below it can no longer be trusted, so the node panics, which prints
+///   and restarts it (`custom_halt`).
+/// - Less than [`STACK_LOW`] never touched: one `fault` line on USB. The
+///   node carries on; a build that gets here needs its frames looked at.
+///
+/// It sees what was written, not what was only reserved: a frame that
+/// reaches past the end without writing there is not caught. The bench
+/// floor in the README stays the first line of defence.
+pub fn stack_check() {
+    static SAID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    let free = stack_free();
+    if free == 0 {
+        panic!("main stack used to its end: the capture memory below it may be damaged");
+    }
+    if free < STACK_LOW && !SAID.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        println!(r#"{{"t":"fault","why":"stack_low","stack_free":{free},"floor":{STACK_LOW}}}"#);
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger(LOG_LEVEL);
