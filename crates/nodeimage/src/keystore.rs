@@ -10,7 +10,9 @@
 //! stack instead of the 3 KB table buffer `esp-bootloader-esp-idf` wants,
 //! which matters on node-sdr.
 //!
-//! `rskey` is a data partition (type 1) of subtype [`SUBTYPE`] (0x40), 4 KB,
+//! `rskey` is a data partition (type 1) of subtype [`SUBTYPE`] (`undefined`,
+//! 0x06, the same as `rsjob`: espflash cannot flash a table with a data
+//! subtype it has no name for), 4 KB,
 //! labelled `rskey`. A partition with that label but another type, subtype or
 //! a smaller size is not taken ([`Found::Unusable`]): the node then behaves as
 //! unprovisioned and says why. Nothing here, or anywhere in the firmware,
@@ -37,7 +39,7 @@ pub const ENTRY_MAGIC: [u8; 2] = [0xAA, 0x50];
 /// The partition's label, type and subtype.
 pub const LABEL: &str = "rskey";
 pub const TYPE_DATA: u8 = 1;
-pub const SUBTYPE: u8 = 0x40;
+pub const SUBTYPE: u8 = 0x06;
 /// Its size (`kitkeys::record::PARTITION_LEN`; a host test holds them equal).
 pub const PARTITION_LEN: u32 = 0x1000;
 /// Where in the partition the two record copies are
@@ -87,7 +89,7 @@ pub enum Found {
     /// espflash's default one).
     NotInTable,
     /// An entry labelled `rskey` that is not a 4 KB data partition of
-    /// subtype 0x40.
+    /// subtype `undefined` (0x06).
     Unusable { ty: u8, subtype: u8, size: u32 },
     /// A flash read failed.
     ReadError,
@@ -250,11 +252,11 @@ mod tests {
         md5[..2].copy_from_slice(&[0xEB, 0xEB]);
         assert_eq!(search(&flash(&[md5])).0, Found::NotInTable);
         // Labelled rskey but the wrong shape.
-        for bad in [entry(1, 6, 0x611000, 0x1000, "rskey"), entry(0, 0x40, 0x611000, 0x1000, "rskey"), entry(1, 0x40, 0x611000, 0x800, "rskey")] {
+        for bad in [entry(1, 2, 0x611000, 0x1000, "rskey"), entry(1, 0x40, 0x611000, 0x1000, "rskey"), entry(0, 6, 0x611000, 0x1000, "rskey"), entry(1, 6, 0x611000, 0x800, "rskey")] {
             assert!(matches!(search(&flash(&[bad])).0, Found::Unusable { .. }));
         }
         // A label that only starts with "rskey" is someone else's.
-        assert_eq!(search(&flash(&[entry(1, 0x40, 0x611000, 0x1000, "rskeyx")])).0, Found::NotInTable);
+        assert_eq!(search(&flash(&[entry(1, 6, 0x611000, 0x1000, "rskeyx")])).0, Found::NotInTable);
         // A read error.
         assert_eq!(find(|_, _| false), Found::ReadError);
         // A full table without rskey: every entry read, no more.

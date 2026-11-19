@@ -131,7 +131,7 @@ A flash dump or shared image gives nothing: images carry no key.
 
 | Board | Partition | Location |
 |---|---|---|
-| Multi-image C5 node | `rskey`, data, subtype `0x40`, 4 KB | `0x611000` in `tools/partitions-node.csv`, after `rsjob` (space is free up to 8 MB) |
+| Multi-image C5 node | `rskey`, data, subtype `undefined` (0x06, as `rsjob`; espflash cannot flash a table with a custom data subtype), 4 KB | `0x611000` in `tools/partitions-node.csv`, after `rsjob` (space is free up to 8 MB) |
 | Single-image node (S3 Wi-Fi, C3 aero, C5 single-image builds) | `rskey`, same, at `0x3F0000` | `tools/partitions-single.csv` (nvs, phy_init, factory, rskey); these boards must be flashed with it, since espflash's default table has no `rskey` |
 | P4 hub | `rskit` (8 KB: two copies of the master record at `0x0000`/`0x0800`, two of the roster at `0x1000`/`0x1800`), `rsboot` (8 KB boot counter) at `0xC10000` and `0xC12000` | `tools/partitions-hub.csv` (Elecrow's four rows, then these two) |
 | Gateway | none | - |

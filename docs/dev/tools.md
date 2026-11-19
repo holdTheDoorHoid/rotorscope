@@ -635,7 +635,7 @@ Source: `tools/p4-prepare.sh`; provenance in `firmware/patches/esp-hal-p4-pre-v3
 | `ota_1` | app | 0x210000 | 0x200000 | `node-ble` by convention |
 | `ota_2` | app | 0x410000 | 0x200000 | `node-sdr` by convention |
 | `rsjob` | data | 0x610000 | 0x1000 | the job a node switched images for |
-| `rskey` | data (0x40) | 0x611000 | 0x1000 | the node's key record, written only by `link-key`; every image on the board reads it |
+| `rskey` | data | 0x611000 | 0x1000 | the node's key record, written only by `link-key`; every image on the board reads it |
 
 The running image recognises the others by the project name in their app descriptor
 (`crates/nodeimage`), so the slot order is a convention, not a rule.

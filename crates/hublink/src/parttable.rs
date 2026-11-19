@@ -131,8 +131,8 @@ pub(crate) mod tests {
             entry("otadata", 1, 0, 0xd000, 0x2000),
             entry("phy_init", 1, 1, 0xf000, 0x1000),
             entry("factory", 0, 0, 0x10000, 0xC00000),
-            entry("rskit", 1, 0x41, 0xC10000, 0x2000),
-            entry("rsboot", 1, 0x42, 0xC12000, 0x2000),
+            entry("rskit", 1, 6, 0xC10000, 0x2000),
+            entry("rsboot", 1, 6, 0xC12000, 0x2000),
         ])
     }
 
@@ -140,7 +140,7 @@ pub(crate) mod tests {
     fn finds_the_hub_partitions() {
         let t = hub_table();
         let k = data_partition(&t, RSKIT, 0x2000).unwrap();
-        assert_eq!((k.offset, k.size, k.subtype), (0xC10000, 0x2000, 0x41));
+        assert_eq!((k.offset, k.size, k.subtype), (0xC10000, 0x2000, 6));
         let b = data_partition(&t, RSBOOT, 0x2000).unwrap();
         assert_eq!(b.offset, 0xC12000);
         assert_eq!(entries(&t).count(), 6);
@@ -181,25 +181,25 @@ pub(crate) mod tests {
     fn unsafe_entries_are_refused() {
         let base = [
             entry("factory", 0, 0, 0x10000, 0xC00000),
-            entry("rskit", 1, 0x41, 0xC10000, 0x2000),
+            entry("rskit", 1, 6, 0xC10000, 0x2000),
         ];
         let cases: [[u8; 32]; 6] = [
-            entry("rsboot", 1, 0x42, 0x10000, 0x2000),  // inside the app
-            entry("rsboot", 1, 0x42, 0xC0F000, 0x2000), // straddles the app's end
-            entry("rsboot", 1, 0x42, 0x8000, 0x2000),   // the table itself
-            entry("rsboot", 1, 0x42, 0xC12000, 0x1000), // wrong size
+            entry("rsboot", 1, 6, 0x10000, 0x2000),  // inside the app
+            entry("rsboot", 1, 6, 0xC0F000, 0x2000), // straddles the app's end
+            entry("rsboot", 1, 6, 0x8000, 0x2000),   // the table itself
+            entry("rsboot", 1, 6, 0xC12000, 0x1000), // wrong size
             entry("rsboot", 0, 0x10, 0xC12000, 0x2000), // an app partition
-            entry("rsboot", 1, 0x42, 0xC12800, 0x2000), // not sector-aligned
+            entry("rsboot", 1, 6, 0xC12800, 0x2000), // not sector-aligned
         ];
         for c in cases {
             let t = table(&[base[0], base[1], c]);
             assert_eq!(data_partition(&t, RSBOOT, 0x2000), Err(PartError::Unsafe), "{c:?}");
         }
         // Two entries with the name: refused.
-        let t = table(&[base[0], base[1], entry("rsboot", 1, 0x42, 0xC12000, 0x2000), entry("rsboot", 1, 0x42, 0xC14000, 0x2000)]);
+        let t = table(&[base[0], base[1], entry("rsboot", 1, 6, 0xC12000, 0x2000), entry("rsboot", 1, 6, 0xC14000, 0x2000)]);
         assert_eq!(data_partition(&t, RSBOOT, 0x2000), Err(PartError::Unsafe));
         // Overlapping rskit: refused.
-        let t = table(&[base[0], base[1], entry("rsboot", 1, 0x42, 0xC11000, 0x2000)]);
+        let t = table(&[base[0], base[1], entry("rsboot", 1, 6, 0xC11000, 0x2000)]);
         assert_eq!(data_partition(&t, RSBOOT, 0x2000), Err(PartError::Unsafe));
     }
 }

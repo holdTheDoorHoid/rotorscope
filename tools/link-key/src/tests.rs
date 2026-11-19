@@ -52,10 +52,10 @@ fn counter_master_hex() -> String {
 const NODE_CSV: &str = "# Name, Type, SubType, Offset, Size\n\
 nvs,      data, nvs,       0x9000,   0x4000\n\
 rsjob,    data, undefined, 0x610000, 0x1000\n\
-rskey,    data, 0x40,      0x611000, 0x1000\n";
+rskey,    data, undefined,      0x611000, 0x1000\n";
 const HUB_CSV: &str = "nvs, data, nvs, 0x9000, 0x6000\n\
-rskit, data, 0x41, 0x3f0000, 8K\n\
-rsboot, data, 0x42, 0x3f2000, 0x2000\n";
+rskit, data, undefined, 0x3f0000, 8K\n\
+rsboot, data, undefined, 0x3f2000, 0x2000\n";
 
 struct Kit {
     dir: TempDir,
@@ -241,7 +241,7 @@ fn partition_lookup() {
     // Wrong size is refused.
     let d = TempDir::new();
     let t = d.0.join("t.csv");
-    std::fs::write(&t, "rskey, data, 0x40, 0x611000, 0x2000\n").unwrap();
+    std::fs::write(&t, "rskey, data, undefined, 0x611000, 0x2000\n").unwrap();
     assert!(partition_offset(&t, "rskey", 0x1000).unwrap_err().contains("expected 0x1000"));
 }
 

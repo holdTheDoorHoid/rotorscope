@@ -1,4 +1,4 @@
-//! The node's provisioning partition `rskey` (4 KB, data, subtype 0x40):
+//! The node's provisioning partition `rskey` (4 KB, data, subtype `undefined`):
 //! two copies of a 64-byte record, at 0x000 and 0x800. Nothing the firmware
 //! does writes to it; `link-key node` and `link-key open` write the whole
 //! partition with `espflash write-bin`.

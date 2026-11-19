@@ -107,7 +107,7 @@ self_test() {
   t=$(mktemp -d); trap 'rm -rf "$t"' RETURN
   printf 'c5x  /dev/serial/by-id/usb-Espressif_selftest_02:00:00:00:00:01-if00  esp32c5\n' >"$t/boards"
   : >"$t/a.elf"; : >"$t/b.elf"; printf 'xx bench-build:faulttest xx' >"$t/bench.elf"
-  printf 'rskey, data, 0x40, 0x611000, 0x1000\n' >"$t/pt.csv"
+  printf 'rskey, data, undefined, 0x611000, 0x1000\n' >"$t/pt.csv"
   run() { ROTORSCOPE_BOARDS=$t/boards ROTORSCOPE_LOCK_DIR=$t/locks ROTORSCOPE_BENCH= "$here/dev-board.sh" "$@" 2>&1; }
   check() {  # check <name> <condition result>
     if [[ $2 == 0 ]]; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails + 1)); fi
@@ -138,6 +138,17 @@ self_test() {
   printf 'xx link-key:0a1b2c3d xx' >"$t/oldkey.elf"
   out=$(ROTORSCOPE_LINK_KEY_FILE=$t/nonexistent run --dry-run "$t/oldkey.elf" 5 c5x)
   ! grep -qi 'link key\|link\.key' <<<"$out" && grep -q 'espflash flash ' <<<"$out"; check "no compiled-key check, no key file read" $?
+  # 7. The real espflash can read every table we ship. It panics on a data
+  #    subtype it has no name for (found on the bench, 2026-11-19: `0x40`),
+  #    which a dry run never shows. Skipped, and said so, without espflash.
+  if command -v espflash >/dev/null; then
+    for f in "$here"/partitions-*.csv; do
+      out=$(espflash partition-table "$f" 2>&1); rc=$?
+      (( rc == 0 )) && ! grep -qi 'panicked' <<<"$out"; check "espflash reads ${f##*/}" $?
+    done
+  else
+    echo "skip espflash not installed: shipped partition tables not parsed"
+  fi
   (( fails == 0 )) && echo "dev-board self-test: all passed" || echo "dev-board self-test: $fails FAILED"
   return $(( fails > 0 ))
 }

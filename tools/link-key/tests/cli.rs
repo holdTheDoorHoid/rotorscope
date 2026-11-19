@@ -72,9 +72,9 @@ fn setup() -> Setup {
     let o = run(&tmp.0, &["kit", "new", "--kit-dir", d]);
     assert!(o.status.success(), "{}", text(&o));
     let node_csv = kit.0.join("node.csv");
-    std::fs::write(&node_csv, "rskey, data, 0x40, 0x611000, 0x1000\n").unwrap();
+    std::fs::write(&node_csv, "rskey, data, undefined, 0x611000, 0x1000\n").unwrap();
     let hub_csv = kit.0.join("hub.csv");
-    std::fs::write(&hub_csv, "rskit, data, 0x41, 0x3f0000, 0x2000\nrsboot, data, 0x42, 0x3f2000, 0x2000\n").unwrap();
+    std::fs::write(&hub_csv, "rskit, data, undefined, 0x3f0000, 0x2000\nrsboot, data, undefined, 0x3f2000, 0x2000\n").unwrap();
     let master = master_hex(&kit.0);
     assert_no_secret(&text(&o), &master);
     Setup { master, kit, tmp, node_csv: node_csv.to_str().unwrap().into(), hub_csv: hub_csv.to_str().unwrap().into() }

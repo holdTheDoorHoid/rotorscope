@@ -15,4 +15,7 @@ rsjob,    data, undefined, 0x610000, 0x1000
 # written only by tools/link-key, never by firmware, never erased by
 # tools/dev-board.sh. Every image on the board reads the same one. The offset
 # is fixed for good: an app reflash with this table leaves the key in place.
-rskey,    data, 0x40,      0x611000, 0x1000
+# Subtype `undefined` (0x06), as rsjob: espflash (4.7.0, esp-idf-part 0.6.0)
+# panics on a data partition whose subtype it has no name for, so a custom
+# number here would make the table unflashable. The label is what marks it.
+rskey,    data, undefined, 0x611000, 0x1000
