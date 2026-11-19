@@ -752,6 +752,14 @@ no link protocol change. Design: docs/THREAT-PROFILES.md; research: docs/THREAT-
 Slices 16a (areas, bubble, approach, levels) -> 16b (lingering, circling, drops, following) ->
 16c (signal and sound trends, radio-silent drones) -> 16d (across drones and days) -> 16e (profiles,
 tuning, map drawing).
+**Status 2026-11-19:** 16a-16e built on the branch (host tests; the P4 firmware compiles; nothing on
+the bench yet). 16e: `profile` site line (default, home, facility, event, patrol) with safety floors
+no profile loosens, a host false-alarm matrix (17 scripted flights x 5 profiles), the places in
+`/api/state`, and the phone page showing levels, reasons, places, signals without a position, a
+"draw an area" mode and a profile picker that only make site-file lines to copy. Still blocked:
+bench and field tuning (no recordings, boards busy), writing areas or profiles from the phone (a
+write endpoint is an owner decision), and the S3 web head running the behaviour layer (it does not
+link yet and keeps no path history). See THREAT-PROFILES.md, "Slice 16e as built".
 
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.

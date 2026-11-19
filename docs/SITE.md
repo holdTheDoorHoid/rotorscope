@@ -198,6 +198,56 @@ Two switches for the rules that look across drones and days (slice 16d):
   console (within 5 seconds). It is logged in the evidence log. There is no
   button for it on the screen (the Settings page is full).
 
+## Profiles: presets of the threat numbers
+
+      profile home     # default, home, facility, event or patrol
+      crowd auto       # no crowd line in force: the profile decides the count
+
+A profile sets how the hub weighs what drones do, so nobody tunes the numbers
+one by one. Later lines win, as everywhere in the file; without a `profile`
+line the hub uses `default` (the numbers it always had).
+
+| Profile | For | What it changes |
+|---|---|---|
+| `default` | | nothing |
+| `home` | a house: stalking, casing | a drone back on a **2nd** day in two weeks is a repeat visitor (3 by default); hovering low means under **20 m** for **6 s** (15 m, 10 s); lingering low is a Warning after **3 min** (5) |
+| `facility` | infrastructure, a prison | a pilot within **100 m** of the fence counts as "at the fence" (30 m); **circling** is a Warning on its own (Caution) |
+| `event` | many friendly drones | "several at once" is **not counted by number** (drones during jamming or GPS interference still are); a pilot nearby and a drone coming back (probing) count **one level lower** |
+| `patrol` | a handheld unit on the move | **fast inbound** from **18 m/s** (25), or arriving within **45 s** (30); **following** after **120 m** (200) |
+
+**No profile ever lowers** a drone heading straight for you (beeline), fast
+inbound, a striker after a spotter, a new identity mid-flight, or drones at a
+place during jamming or GPS interference. A profile can only make those more
+sensitive (patrol does, for fast inbound).
+
+**A `crowd` line wins over the profile**, whichever comes first in the file:
+the profile is a preset of many numbers, and a line naming one setting is a
+deliberate choice about it. So `profile event` with `crowd 4` still counts
+four drones at once. `crowd auto` hands the count back to the profile.
+Nothing else in the file overlaps a profile.
+
+A profile change (from the card or the console) is an evidence "setting"
+event with data byte 6 that says what the profile does, e.g. `site file
+changed: threat profile event: several at once by count off (jamming still
+counts), pilot nearby and probing one level lower`. The phone page shows the
+profile in use (Settings, "Threat profile") and makes the `profile` line to
+copy; it cannot change it.
+
+## Drawing an area on the phone
+
+On the phone page's radar, **Draw an area** places a circle (tap the middle,
+then the edge, or type the radius) or a polygon (tap each corner, 3 to 16) on
+the radar, relative to the hub's own position (so it needs a GPS fix or a
+typed position). Give it a name and, if you like, a ceiling, and the page
+shows the exact lines, e.g.
+
+      area garden circle 39.9521363 -75.1638244 150
+      area garden ceiling 45
+
+to copy into this file (or type on the console with `L`). The page sends
+nothing to the hub. A polygon of more than about four corners is longer than
+the console's 120 characters: put it in the file.
+
 ## What a load of the file leaves in the evidence log
 
 The hub reads the file at every card mount. A swapped or edited card must not
@@ -208,22 +258,22 @@ trace, so every load writes evidence "setting" events:
    bytes), its size and line count, lines used and ignored, how many mutes for
    good, how many mute lines not honoured, how many node positions, the
    control switches, and how many areas, the bubble's radius and how many
-   friends, then the `crowd` and `visits` switches. For example `site file
+   friends, then the `crowd` and `visits` switches and the profile. For example `site file
    loaded: sha256 9f2c...e1, 412 bytes, 14 lines (12 used, 2 ignored); 1
    mutes for good, 1 mute lines not honoured; 3 node positions; control ids
    off, control content off; 2 areas, bubble off, 1 friends, several at once
-   from 3 drones, visit history kept`.
+   from 3 drones, visit history kept, profile default`.
 2. **One per change** from what the hub was using: a mute added or removed, a
    node placed, moved (with the old position) or cleared, e.g. `site file
    changed: node 10:bd:a3:ce:bd:18 at 39.9600000 -75.1638000 (was 39.9521000
    -75.1638000); spoof checks use it`; an area set or removed, the bubble,
    a friend added or removed (`site file changed: friend SN1 "our own Mini"
    added (its area alarms are lowered to Notice; fast inbound never is)`),
-   the `crowd` or `visits` switch changed.
+   the `crowd` or `visits` switch changed, the profile changed (data byte 6).
    The same file loaded again changes nothing and logs only the summary.
 3. **Bounded.** However long the file (it is read a piece at a time; later
    lines win), the hub holds at most 24 mutes, 16 node positions, 8 areas, a bubble and 8 friends, so one
-   load can change at most 107 things. At most 48 are logged one by one; the
+   load can change at most 108 things. At most 48 are logged one by one; the
    rest are counted in one more event (`site file changed: N more changes not
    logged one by one`). The hash always covers the whole file.
 

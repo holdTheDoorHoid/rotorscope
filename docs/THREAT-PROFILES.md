@@ -1,9 +1,9 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
-Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a, 16b, 16c and 16d built
+Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a to 16e built
 (host tests and P4 firmware compile; not yet on the bench; 16c's sound half waits for the acoustic
-branch). See "Slice 16a as built", "Slice 16b as built", "Slice 16d as built" and "Slice 16c as
-built" at the end.**
+branch). See "Slice 16a as built", "Slice 16b as built", "Slice 16d as built", "Slice 16c as
+built" and "Slice 16e as built" at the end.**
 
 Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
 repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
@@ -553,3 +553,170 @@ Choices made here, and why (open to change):
   screen's Snooze covers signals (`site.rs`). Emitters, Wi-Fi drones and open links reach the
   tracker as before; control links through the control table, which now hands each packet's level
   to the tracker. No link protocol change; `crates/link` untouched.
+
+## Slice 16e as built (2026-11-19)
+
+Profiles, a host false-alarm matrix, the places in `/api/state`, and the phone page showing the
+levels and drawing areas. Code: `crates/tracker/src/behaviour/profile.rs` (the table and the
+floors), `places.rs` (`Places::profile`, `crowd_set`, `crowd()`), `site.rs` (the `profile` and
+`crowd auto` lines, the change text), `json.rs` (`places_json`, `Signals::places`), the matrix in
+`behaviour/tests_profiles.rs`; `web/index.html`; `firmware/hub-p4/src/site.rs` (the evidence tag);
+`tools/rid-view` (`--mock-state`, fixtures in `web/mock/`). Site lines: [SITE.md](SITE.md),
+"Profiles".
+
+**How a profile is applied.** A `profile NAME` line picks one row of `profile::TUNINGS`. The rules
+read their numbers from that row (`Places::tuning()`), and the level weights are applied in one
+place, `behaviour::judge`, to every hit before the "two signs" pair is counted. The rules across
+drones (16d) run on the unweighted levels, so a weight never hides a spotter from rule 14; a repeat
+visitor's raise is worked out again on the weighted levels. There are no `if profile == ..` checks
+in the rules.
+
+| | default | home | facility | event | patrol |
+|---|---|---|---|---|---|
+| fast inbound (6): closing faster than | 25 m/s | 25 | 25 | 25 | **18** |
+| fast inbound (6): arriving sooner than | 30 s | 30 | 30 | 30 | **45** |
+| pilot "at the fence" (2): within | 30 m | 30 | **100** | 30 | 30 |
+| loitering (7): a Warning when low after | 5 min | **3 min** | 5 | 5 | 5 |
+| low hover (9): under | 15 m | **20 m** | 15 | 15 | 15 |
+| low hover (9): for | 10 s | **6 s** | 10 | 10 | 10 |
+| following (11): the unit travelled | 200 m | 200 | 200 | 200 | **120 m** |
+| repeat visitor (17): days in two weeks | 3 | **2** | 3 | 3 | 3 |
+| several at once (15): the count of drones | on | on | on | **off** | on |
+| level weights (one level, never above Warning, never below Notice) | | | circling **+1** | pilot near, probing **-1** | |
+
+How the design's intent maps to it: home weights repeat visitor and low hover up (and long low
+loitering, the "casing" case); facility weights the pilot outside (a pilot standing near the
+fence counts out to 100 m, so drone in plus pilot near is two signs) and circling up; event turns
+several-at-once by count off and lowers the "pilot nearby" and "coming back" signs that every show
+drone gives, approach rules untouched; patrol makes fast inbound and following sooner.
+
+**Safety floors no profile can loosen**, held in code, not by convention: `Tuning::fast_mps()`
+never returns more than 25 m/s and `soon_s()` never less than 30 s; `Tuning::weigh` never lowers
+beeline (5), fast inbound (6), the striker and the spotter's mark (14, 21), identity change (19),
+the lost-track hold (20), or several-at-once during jamming or GPS interference (the alarm half of
+15); a Notice (a friend's lowered place rule) is never raised. A test checks every row
+(`no_profile_loosens_a_safety_floor`), including a deliberately bad row the accessors must hold.
+Friends are never lowered on 5, 6, 14 or 19 under any profile (that is not a profile matter).
+
+**Precedence (decided here).** A `crowd` line is an explicit setting and **wins over the profile
+whatever the order of the lines**: the profile is a preset of many numbers, a line naming one
+setting is a deliberate choice about it, and switching profiles must not silently undo it.
+`crowd auto` hands the count back to the profile. `crowd` is the only overlap: areas, the bubble,
+friends and `visits` are never set by a profile. Profile lines among themselves: later wins.
+
+**The false-alarm matrix** (`tests_profiles::false_alarm_matrix`; every flight under every profile,
+one report a second through the whole tracker; the worst level seen, and for the hostile flights
+the second it was first reached; run with `--nocapture` to print it). Ordinary flights must stay at
+or below the level here, hostile ones must reach it; the test asserts each cell.
+
+| | flight | place | default | home | facility | event | patrol |
+|---|---|---|---|---|---|---|---|
+| ordinary | estate photographer next door (a 60 m circle 20 m from our fence, pilot 80 m out) | house | Notice | Notice | Caution | Notice | Notice |
+| ordinary | roof or solar inspector, 8 m up for a minute | house | Warning | Warning | Warning | Warning | Warning |
+| ordinary | delivery drone passing straight, 400 m off | house | Notice | Notice | Notice | Notice | Notice |
+| ordinary | park hobbyist 120 m from a handheld user, 7 min | bubble | Caution | Caution | Caution | Caution | Caution |
+| ordinary | lawnmower survey over the house, surveyor 50 m out | house | Warning | Warning | Warning | Warning | Warning |
+| ordinary | landed drone in the area | house | Warning | Warning | Warning | Warning | Warning |
+| ordinary | two hobbyists in a park | bubble | Caution | Caution | Caution | Caution | Caution |
+| ordinary | neighbour's drone over its own garden, 4 days | house | Notice | Notice | Warning | Notice | Notice |
+| ordinary | club meet: 4 drones over the area, pilots inside | house | Warning | Warning | Warning | Caution | Warning |
+| hostile | beeline at 12 m/s | house | Critical @59 s | Critical @59 s | Critical @59 s | Critical @59 s | Critical @44 s |
+| hostile | FPV dive at 40 m/s | house | Critical @6 s | Critical @6 s | Critical @6 s | Critical @6 s | Critical @6 s |
+| hostile | spotter then striker | house | Critical @350 s | Critical @350 s | Critical @350 s | Critical @350 s | Critical @350 s |
+| hostile | recon circling over the house | house | Warning @95 s | Warning @95 s | Warning @95 s | Warning @95 s | Warning @95 s |
+| hostile | payload drop | house | Warning @60 s | Warning @60 s | Warning @60 s | Warning @60 s | Warning @60 s |
+| hostile | following a walker | bubble | Warning @144 s | Warning @144 s | Warning @144 s | Warning @144 s | Warning @87 s |
+| hostile | camera drone at 20 m/s at a walker | bubble | Critical @32 s | Critical @32 s | Critical @32 s | Critical @32 s | Critical @6 s |
+| hostile | window peek, 18 m for 10 s | house | Warning @66 s | Warning @57 s | Warning @66 s | Warning @66 s | Warning @66 s |
+
+What it says, and what was tuned:
+
+- **Tuned: the event profile no longer weights circling down.** The first table had circling -1
+  under event (camera drones orbit a stage); recon circling over the area then fell to Caution.
+  A hostile pattern dropping below Warning is worse than an orbiting camera drone at a Warning, so
+  circling is untouched under event (a `friend` line covers your own camera drone).
+- **Accepted, and the same under every profile** (no profile can soften them without also
+  hiding the hostile case they look like): the roof inspector and the landed drone are low hover
+  (the window-peeping case); the survey is drone-in-pilot-out plus passes heading for the middle
+  (a contractor: a `friend` line). These are the 16b and 16d expected false alarms.
+- **Facility is louder by design**: a pilot standing 80 m from the fence (the photographer, the
+  neighbour) is "at the fence"; with the neighbour back on a third day it is a Warning.
+- **Event** takes the club meet from Warning to Caution (no crowd count, pilots inside no longer a
+  second sign) and leaves every hostile flight where it was.
+- **Patrol** reaches Critical sooner (the walker rushed at 20 m/s: 6 s instead of 32 s; the beeline
+  44 s instead of 59 s) and warns of following sooner (87 s instead of 144 s).
+- **Home** sees the window peek 9 s sooner, as low hover while it is still at the window; every
+  profile sees it later as a drop (down 22 m, a pause, up) when it climbs away.
+- The two hobbyists stayed at Caution here: the second one's short passes never made a beeline
+  long and straight enough. Another geometry can make the 16d "two friends in a park" Warning.
+
+**`/api/state`** (`json::state_full`) gains `"places":{...}` when the hub gives its places
+(`Signals::places`): `profile`, `crowd` (null: not counted by number), `visits`, `friends` (a
+count; the serials are never written: they would tell anyone on the hotspot which drone the owner
+flies and has lowered), `bubble_m`, and each area with an outline: `name`, `ceiling_m`, and
+`circle {lat, lon, r_m}` or `poly [[lat, lon], ...]`. Widest object 3,978 bytes
+(`json::MAX_PLACES_JSON` 4,608). Hubs that judge no levels (the S3 hub, rid-view) leave it out.
+Schema in `crates/tracker/README.md`.
+
+**The phone page** (`web/index.html`):
+
+- Every drone with a level shows it as a symbol, the word and a colour (NOTICE dotted, CAUTION
+  outlined, WARNING filled, CRITICAL filled with a double edge), with its first reason in the list
+  and every reason in the drone sheet (worded as the hub's own text), and "friend", "held", "two
+  signs at once" and "snoozed on the hub" when they apply. The list sorts by level after
+  standing. A banner shows the most serious drone or signal at Warning or above whose alert the
+  hub has not snoozed.
+- Signals with a level (rules 12-13) are their own rows, "Getting louder (no position)", "judged
+  from how loud a signal or rotor sound is, not from a position", and are never drawn on the radar
+  (the radar note counts them).
+- The radar draws each area's outline (circle or polygon) with its name and ceiling, and the bubble
+  as a dashed ring; drones at Caution or above get a ring whose dash and weight differ by level,
+  and the level in their label. Legend entries appear when the hub sends places.
+- **Draw an area**: circle (tap the middle, then the edge, or type the radius; "Centre on the hub"
+  and a typed radius need no pointer) or polygon (3 to 16 corners); a name and an optional ceiling;
+  the exact `area ... circle|poly ...` and `area ... ceiling ...` lines to copy (7 decimals, as the
+  hub writes them; a test parses lines copied from the page), with a note on SITE.TXT and the
+  console's 120 characters. Points are kept as latitude and longitude from the radar's own
+  reference (the hub's position, `own`), so zooming does not move them; the zoom is held while
+  drawing. Without a hub position the page says so and does not offer drawing.
+- **Profile picker** (Settings, "Threat profile"): the profile in use (from `places`), what each
+  does, and the `profile NAME` line to copy.
+- **Nothing is sent to the hub**: no new endpoint, no POST (a write surface on the hotspot that
+  can switch protection off is the owner's decision). The page's only requests are still
+  `/api/state`, `/api/flags` and `POST /api/own-pos`.
+- A hub that judges no levels sends no `threat`, `signal_threats` or `places`: the page shows
+  nothing new except "Draw an area" (it needs only the position) and "This hub does not report a
+  profile". Checked with `web/mock/no-levels-state.json`.
+- Light and dark checked, and a 375 px phone width with no sideways scrolling. Size: 64,376 ->
+  90,983 bytes, **21,458 -> 29,847 gzipped** (the budget test allows 40 KB).
+- Preview without hardware: `rid-view --http 127.0.0.1:8080 --mock-state
+  web/mock/threat-state.json` (tools/rid-view/README.md). The fixture was written by the tracker
+  from a scripted run (test coordinates only).
+
+**Evidence.** A profile change, from a card load or the console, is a `Setting` event (code 4)
+with data byte **6** ([EVIDENCE-FORMAT.md](EVIDENCE-FORMAT.md)) whose text names the profile and
+what it does (and that a `crowd` line still wins, when one is in force). The load summary ends with
+`, profile NAME`. No new evidence code.
+
+**Not done, or blocked:**
+
+- **Bench and field tuning.** Every number in the profile table is from scripted flights. There are
+  no recorded flight paths in the repo and the boards were held by another session. First bench
+  job: fly the matrix's flights with `rid-beacon` under each profile and compare.
+- **The P4 screen strip does not show the profile.** Its caveat lines are full at 52 columns
+  ("ON: control IDs, control content, audio clips" is 45); a profile there needs a layout change,
+  not a few characters. The console, the evidence log and the phone page show it.
+- **Writing areas or the profile from the phone** (a POST): not built, owner decision.
+- **The S3 web head running the behaviour layer**: the S3 tracker keeps no path history (`P` = 0)
+  and the S3 web-head build does not link yet, so a phone on a P4 kit's hotspot sees no levels,
+  places or signals yet; the page degrades cleanly. The P4 itself does not serve the page.
+- The S3 hub's default build (`firmware/hub/s3`, `cargo fw`) compiles but **does not link, before
+  or after this slice**: its RAM is over by 48,240 bytes at 6574429 and 48,248 after (`stack.x:
+  cannot move location counter backwards`, from 0x3fce7370, now 0x3fce7378, to 0x3fcdb700): the 8
+  bytes are the two new fields in its tracker's `Places`. The page adds 8.4 KB gzipped to its flash.
+
+**Measured** (P4 firmware compiles, no warnings): `HubTracker` on the target 412,904 bytes
+(6574429: 412,896; earlier slices quoted the host figure, which is unchanged at 416,464); main
+stack frame 68,128 bytes and once-a-second housekeeping frame 3,632 bytes, both unchanged. S3
+`Tracker<64, 32>` on the host 87,760 bytes, unchanged. Host tests: 1,582 passed, 5 ignored
+(16c: 1,569); tracker 335 (16c: 324).
