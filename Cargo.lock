@@ -13,6 +13,7 @@ name = "adsb"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -902,6 +903,7 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "flarm",
+ "fuzzkit",
  "libm",
 ]
 
@@ -1102,6 +1104,9 @@ dependencies = [
 [[package]]
 name = "gnss"
 version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+]
 
 [[package]]
 name = "group"
@@ -1637,6 +1642,7 @@ name = "modes"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "libm",
 ]
 
@@ -2669,6 +2675,7 @@ name = "uat"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "libm",
 ]
 

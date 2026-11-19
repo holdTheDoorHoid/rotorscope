@@ -45,9 +45,11 @@ pub mod legacy;
 pub use keys::{KeyError, Keys};
 
 #[cfg(all(test, feature = "legacy"))]
-mod tests_legacy;
+pub(crate) mod tests_legacy;
 #[cfg(test)]
-mod tests_ogn;
+pub(crate) mod tests_ogn;
+#[cfg(test)]
+mod fuzz_tests;
 
 const FT_PER_M: f64 = 1.0 / 0.3048;
 const KT_PER_MPS: f64 = 3600.0 / 1852.0;

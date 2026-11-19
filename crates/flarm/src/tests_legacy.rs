@@ -32,7 +32,7 @@ key4 = 0x55aa55aa
 key5 = 11111111, 22222222, 33333333, 44444444
 ";
 
-fn fake() -> Keys {
+pub(crate) fn fake() -> Keys {
     Keys::parse(FAKE_KEYS).unwrap()
 }
 
@@ -74,7 +74,7 @@ fn bytes(w: &[u32; 6]) -> [u8; 24] {
 }
 
 #[derive(Clone, Copy)]
-struct Tx {
+pub(crate) struct Tx {
     addr: u32,
     acft: u8,
     lat: f64,
@@ -91,7 +91,7 @@ struct Tx {
     time: u32,
 }
 
-fn tug() -> Tx {
+pub(crate) fn tug() -> Tx {
     Tx {
         addr: 0xDDA5BA,
         acft: 2,
@@ -114,7 +114,7 @@ fn ground_threshold(acft: u8) -> f64 {
 }
 
 /// Port of SoftRF's `legacy_v6_encode`.
-fn encode_v6(t: &Tx, keys: &Keys) -> [u8; 24] {
+pub(crate) fn encode_v6(t: &Tx, keys: &Keys) -> [u8; 24] {
     let mut p = [0u8; 24];
     let lat = (t.lat * 1e7) as i32;
     let lon = (t.lon * 1e7) as i32;
@@ -205,7 +205,7 @@ fn enscale_signed(value: i32, mbits: u32, ebits: u32) -> u32 {
 }
 
 /// Port of SoftRF's `legacy_encode` (v7).
-fn encode_v7(t: &Tx, keys: &Keys) -> [u8; 24] {
+pub(crate) fn encode_v7(t: &Tx, keys: &Keys) -> [u8; 24] {
     let mut p = [0u8; 24];
     let lat = (t.lat * 1e7) as i32;
     let lon = (t.lon * 1e7) as i32;
@@ -258,7 +258,7 @@ fn encode_v7(t: &Tx, keys: &Keys) -> [u8; 24] {
     bytes(&w)
 }
 
-fn with_crc(p: &[u8; 24]) -> [u8; 26] {
+pub(crate) fn with_crc(p: &[u8; 24]) -> [u8; 26] {
     let mut out = [0u8; 26];
     out[..24].copy_from_slice(p);
     out[24..].copy_from_slice(&crc16(p).to_be_bytes());
@@ -266,7 +266,7 @@ fn with_crc(p: &[u8; 24]) -> [u8; 26] {
 }
 
 /// A receiver about 15 km from the transmitter.
-fn rx_near(t: &Tx) -> Receiver {
+pub(crate) fn rx_near(t: &Tx) -> Receiver {
     Receiver {
         unix_time: t.time,
         lat_deg: t.lat - 0.1,

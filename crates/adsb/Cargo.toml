@@ -12,5 +12,6 @@ encode = []
 [dependencies]
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 # Tests always see the optional feature.
 adsb = { path = ".", features = ["encode"] }
