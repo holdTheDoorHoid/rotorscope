@@ -154,7 +154,7 @@ It is a convenience: the raw bytes are the record.
 | size | field |
 |---:|---|
 | 1 | reason: 0 periodic (every 60 s), 1 shutdown, 2 requested |
-| 1 | key class: 0 public test key, 1 development software key, 2 hardware key (eFuse) |
+| 1 | key class: 0 public test key, 1 development software key, 2 hardware key (eFuse), 3 hardware key (secure element chip) |
 | 65 | public key, SEC1 uncompressed (`04` x y), NIST P-256 |
 | 8 | record count: equals this record's own sequence number (u64) |
 | lv | note (ASCII), e.g. `DEVELOPMENT KEY, NOT EVIDENCE-GRADE (software key in flash)` |
@@ -169,6 +169,15 @@ copy of a checkpoint. (Firmware built before 2026-11-18 did not normalise
 `s`; about half its checkpoints are high-S and fail.) Those bytes
 include the previous-record hash (the chain head), the count and the time,
 so one valid checkpoint vouches for every record before it in its chain.
+
+**Algorithm.** A checkpoint of format version 1 is ECDSA P-256 with
+SHA-256, by definition: the record's version byte is its algorithm tag,
+and the public key it carries says which key. The hub refuses to write a
+version 1 checkpoint with any other signer. A later algorithm or key type
+gets a new checkpoint version with its own layout; version 1 logs keep
+verifying unchanged, and a checker that meets a version it does not know
+reports it instead of guessing. Whatever form of `s` a signer returns (a
+secure element may return either), the hub writes the low-S form.
 
 The published test key (class 0) has secret scalar
 SHA-256("rotorscope evidence public test key - not secret - do not trust").

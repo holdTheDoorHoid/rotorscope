@@ -30,6 +30,12 @@
 //! hardware key design. Nothing here touches eFuses. Key bytes are never
 //! printed or logged; only the public key and its fingerprint are.
 //!
+//! **Signer.** Checkpoints are signed only through the `evidence::Signer`
+//! trait ([`HubSigner`], made by [`make_signer`]): the software key is the
+//! one implementation today; a secure element replaces it there, with no
+//! format change (same algorithm, its own key class; the writer puts any
+//! signature in low-S form).
+//!
 //! **Bench builds.** The boot event's text lists the bench features
 //! compiled in (`bench: none` for a normal build), so a log made by a build
 //! that can fake data says so in its first record.
@@ -76,6 +82,26 @@ pub fn built_key_class() -> KeyClass {
 /// normal build.
 pub const BENCH: &str = env!("ROTORSCOPE_BENCH_LIST");
 
+/// The signer this build uses. The only place to change for another
+/// implementation of `evidence::Signer` (a secure element).
+pub type HubSigner = SoftSigner;
+
+/// The development key if the build has a usable one, else the published
+/// test key (said loudly).
+fn make_signer() -> HubSigner {
+    match dev_key().and_then(|k| SoftSigner::new(&k, KeyClass::DevelopmentSoftware)) {
+        Some(s) => s,
+        None => {
+            if DEV_KEY_HEX.is_some() {
+                // Well-formed digits (build.rs) but not a usable P-256
+                // scalar: say so loudly; the screen shows TEST KEY.
+                println!("hub-p4: evidence dev key REFUSED (not a valid P-256 private key): signing with the PUBLISHED TEST KEY");
+            }
+            SoftSigner::public_test()
+        }
+    }
+}
+
 fn dev_key() -> Option<[u8; 32]> {
     let h = DEV_KEY_HEX?.as_bytes();
     if h.len() != 64 {
@@ -107,7 +133,7 @@ struct NodeSeen {
 
 pub struct Evidence {
     chain: Chain,
-    signer: SoftSigner,
+    signer: HubSigner,
     q: &'static mut [u8],
     len: usize,
     /// Bytes at the front of the queue written to the current card file
@@ -152,21 +178,12 @@ impl Evidence {
             // SAFETY: taken once, here.
             _ => unsafe { &mut *(&raw mut RAM_Q) },
         };
-        let signer = match dev_key().and_then(|k| SoftSigner::new(&k, KeyClass::DevelopmentSoftware)) {
-            Some(s) => s,
-            None => {
-                if DEV_KEY_HEX.is_some() {
-                    // Well-formed digits (build.rs) but not a usable P-256
-                    // scalar: say so loudly; the screen shows TEST KEY.
-                    println!("hub-p4: evidence dev key REFUSED (not a valid P-256 private key): signing with the PUBLISHED TEST KEY");
-                }
-                SoftSigner::public_test()
-            }
-        };
+        let signer = make_signer();
         let pk = signer.public_key();
         let fp = evidence::fingerprint(&pk);
         println!(
-            "hub-p4: evidence key {} fingerprint {} ({}); queue {} KB in {}",
+            "hub-p4: evidence key {} {} fingerprint {} ({}); queue {} KB in {}",
+            signer.algorithm().name(),
             signer.key_class().name(),
             core::str::from_utf8(&fp).unwrap_or("?"),
             signer.key_class().note(),

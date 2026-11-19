@@ -632,7 +632,7 @@ fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -
         key: match ev.key_class() {
             evidence::KeyClass::PublicTest => screen::EvidenceKey::Test,
             evidence::KeyClass::DevelopmentSoftware => screen::EvidenceKey::Development,
-            evidence::KeyClass::HardwareEfuse => screen::EvidenceKey::NotShown,
+            evidence::KeyClass::HardwareEfuse | evidence::KeyClass::SecureElement => screen::EvidenceKey::NotShown,
         },
         bench: !evlog::BENCH.is_empty(),
         link_open: gw.stats.gw_open(),

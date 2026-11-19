@@ -57,6 +57,9 @@ pub enum BuildError {
     /// The record would not fit the buffer or `MAX_RECORD`.
     TooLong,
     Sign(SignError),
+    /// The signer's algorithm cannot be written as a format version 1
+    /// checkpoint (see `sign`).
+    Algorithm(crate::sign::Algorithm),
 }
 
 pub struct Chain {
@@ -194,6 +197,9 @@ impl Chain {
     /// record's sequence number) and the time (header).
     pub fn checkpoint<S: Signer>(&mut self, ctx: &Context, reason: format::CheckpointReason, signer: &mut S, buf: &mut [u8]) -> Result<usize, BuildError> {
         self.staged = None;
+        if signer.algorithm() != crate::sign::Algorithm::EcdsaP256Sha256 {
+            return Err(BuildError::Algorithm(signer.algorithm()));
+        }
         self.header(Kind::Checkpoint, ctx, buf)?;
         let class = signer.key_class();
         let mut o = Out { b: buf, at: HEADER };
@@ -208,7 +214,9 @@ impl Chain {
         // The length field is inside the signed part: set it now.
         buf[off::LEN..off::LEN + 2].copy_from_slice(&((end + TRAILER) as u16).to_le_bytes());
         let digest = crate::sha256(&buf[..signed_end]);
-        let sig = signer.sign_digest(&digest).map_err(BuildError::Sign)?;
+        let mut sig = signer.sign_digest(&digest).map_err(BuildError::Sign)?;
+        // Whatever the signer returned, only the low-S form is written.
+        crate::sign::normalize_low_s(&mut sig);
         buf[signed_end..end].copy_from_slice(&sig);
         Ok(self.finish(buf, end))
     }
