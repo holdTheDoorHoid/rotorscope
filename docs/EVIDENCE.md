@@ -322,12 +322,19 @@ environment, no redirects followed. When a certificate chain or revocation
 list URL is configured, the server also fetches those files (plain GETs with
 the same headers), at most once an hour per service. The service sees this
 server's IP address and the times of the requests. A test checks the exact
-bytes sent.
+bytes sent, and passes both in a build of the server alone and in a
+workspace-wide build (where another crate turns on the HTTP client's gzip
+support, which used to add `Accept-Encoding: gzip`; the headers are now set
+explicitly, and a compressed reply is refused in either build). One case
+remains build-dependent: a reply both compressed and chunked is unpacked
+by a workspace-wide build instead of refused; it must still be a stamp of
+exactly the imprint and nonce sent.
 
 **What is kept.** A reply is kept only if it is a granted stamp whose
 imprint and nonce are exactly the ones sent; anything else (refused,
-unreachable, timed out after 30 s, larger than 256 KiB, a redirect, another
-imprint, another or no nonce, not a time-stamp reply at all) is recorded as
+unreachable, timed out after 30 s, larger than 256 KiB, compressed, of
+unstated length, a redirect, another imprint, another or no nonce, not a
+time-stamp reply at all) is recorded as
 a failure with its reason and never stored as a stamp. A stamp is a line in
 `timestamps.log` with the service's reply as received, the nonce, when it
 was queued and sent, and the chain and revocation list fetched then; plus

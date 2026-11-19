@@ -79,7 +79,34 @@ pub fn post_query(agent: &ureq::Agent, url: &str, req: &[u8]) -> Result<Vec<u8>,
     if resp.status() != 200 {
         return Err(format!("HTTP {} (redirects are not followed)", resp.status()));
     }
+    plain_body(&resp)?;
     read_capped(resp.into_reader(), MAX_REPLY)
+}
+
+/// Refuse a reply that is compressed, or whose length is not stated.
+///
+/// The request asks for `identity`, so a compressed reply is already a
+/// misbehaving service. Whether ureq would decompress it depends on its
+/// `gzip` feature, which a workspace-wide build turns on (another crate uses
+/// ureq's defaults) and a build of this package alone does not. When ureq
+/// decompresses, it removes both `Content-Encoding` and `Content-Length`; so
+/// a reply must state its length (or be chunked), and then a compressed one
+/// is refused in either build: by its header here, or by its missing length
+/// there. (A reply both compressed and chunked would still be decompressed
+/// by a gzip-enabled build; it is then checked like any other: it must be a
+/// stamp of exactly the imprint and nonce sent, within the size cap.)
+fn plain_body(resp: &ureq::Response) -> Result<(), String> {
+    if let Some(ce) = resp.header("content-encoding")
+        && !ce.trim().eq_ignore_ascii_case("identity")
+    {
+        let ce: String = ce.chars().filter(|c| !c.is_control()).take(40).collect();
+        return Err(format!("reply is compressed (Content-Encoding: {ce}): refused"));
+    }
+    let chunked = resp.header("transfer-encoding").is_some_and(|t| t.to_ascii_lowercase().contains("chunked"));
+    if resp.header("content-length").is_none() && !chunked {
+        return Err("reply has no length (no Content-Length and not chunked; or it was compressed and this build's HTTP client unpacked it): refused".into());
+    }
+    Ok(())
 }
 
 /// GET a published file (certificate chain, revocation list), capped.
@@ -88,6 +115,7 @@ pub fn get_capped(agent: &ureq::Agent, url: &str, max: usize) -> Result<Vec<u8>,
     if resp.status() != 200 {
         return Err(format!("HTTP {} (redirects are not followed)", resp.status()));
     }
+    plain_body(&resp)?;
     read_capped(resp.into_reader(), max)
 }
 

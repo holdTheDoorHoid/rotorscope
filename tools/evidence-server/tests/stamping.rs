@@ -37,6 +37,10 @@ enum Behave {
     WrongNonce,
     NoNonce,
     Oversize,
+    /// The right reply, gzip-compressed (Content-Encoding: gzip).
+    Gzipped,
+    /// The right reply with no length: the body runs until the connection closes.
+    Unframed,
     Http500,
     /// 302 to another listener (whose requests are counted).
     Redirect(u16),
@@ -128,8 +132,17 @@ fn serve(mut c: TcpStream, b: Behave, seen: &Mutex<Vec<Vec<u8>>>) {
         Behave::WrongImprint => respond(&mut c, "200 OK", "application/timestamp-reply", &ok(&[0x5A; 32], Some(&nonce))),
         Behave::WrongNonce => respond(&mut c, "200 OK", "application/timestamp-reply", &ok(&imprint, Some(&[0x7E; 8]))),
         Behave::NoNonce => respond(&mut c, "200 OK", "application/timestamp-reply", &ok(&imprint, None)),
-        Behave::Oversize => {
+        Behave::Gzipped => {
+            let body = gzip_stored(&ok(&imprint, Some(&nonce)));
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = c.write_all(&body);
+        }
+        Behave::Unframed => {
             let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nConnection: close\r\n\r\n");
+            let _ = c.write_all(&ok(&imprint, Some(&nonce)));
+        }
+        Behave::Oversize => {
+            let _ = write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/timestamp-reply\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", 1 << 20);
             let junk = vec![0x30u8; 64 << 10];
             for _ in 0..16 {
                 if c.write_all(&junk).is_err() {
@@ -146,6 +159,29 @@ fn serve(mut c: TcpStream, b: Behave, seen: &Mutex<Vec<Vec<u8>>>) {
             respond(&mut c, "200 OK", "application/timestamp-reply", &ok(&imprint, Some(&nonce)));
         }
     }
+}
+
+/// `data` as a gzip member with one stored (uncompressed) deflate block:
+/// valid gzip that any decoder accepts, built without a gzip library.
+fn gzip_stored(data: &[u8]) -> Vec<u8> {
+    let crc = {
+        let mut c = !0u32;
+        for &b in data {
+            c ^= u32::from(b);
+            for _ in 0..8 {
+                c = if c & 1 != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+            }
+        }
+        !c
+    };
+    let n = data.len() as u16;
+    let mut v = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 0x01];
+    v.extend_from_slice(&n.to_le_bytes());
+    v.extend_from_slice(&(!n).to_le_bytes());
+    v.extend_from_slice(data);
+    v.extend_from_slice(&crc.to_le_bytes());
+    v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    v
 }
 
 fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
@@ -381,6 +417,10 @@ fn a_reply_that_is_not_the_stamp_asked_for_is_a_failure_never_a_stamp() {
         (Behave::WrongNonce, "nonce"),
         (Behave::NoNonce, "nonce"),
         (Behave::Oversize, "longer than"),
+        // Whether this build's HTTP client can decompress (a workspace-wide
+        // build turns ureq's gzip on) must not matter: refused either way.
+        (Behave::Gzipped, "compressed"),
+        (Behave::Unframed, "no length"),
         (Behave::Http500, "HTTP 500"),
         (Behave::Redirect(elsewhere.port), "HTTP 302"),
         (Behave::Slow(4_000), "timed out"),
