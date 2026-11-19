@@ -168,7 +168,7 @@ version = "0.1.0"
 dependencies = [
  "airlink",
  "ctrlwatch",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
 ]
 
@@ -240,7 +240,7 @@ dependencies = [
 name = "ctrlwatch"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "mavwatch",
  "serde",
 ]
@@ -491,7 +491,7 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "futures-core",
  "futures-sink",
- "heapless 0.9.3",
+ "heapless 0.9.4",
 ]
 
 [[package]]
@@ -642,7 +642,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-io 0.7.1",
  "embedded-sdmmc-types",
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "hex-literal",
  "thiserror",
 ]
@@ -710,7 +710,7 @@ dependencies = [
  "esp-config",
  "esp-metadata-generated",
  "esp-println",
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "riscv",
  "xtensa-lx",
 ]
@@ -942,7 +942,7 @@ dependencies = [
 name = "evidence"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
  "p256",
  "postcard",
@@ -956,7 +956,7 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "airspace",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "libm",
  "rid",
  "tracker",
@@ -1110,17 +1110,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
 dependencies = [
  "hash32 0.3.1",
- "serde",
  "stable_deref_trait",
 ]
 
 [[package]]
 name = "heapless"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
 dependencies = [
  "hash32 0.3.1",
+ "serde_core",
  "stable_deref_trait",
 ]
 
@@ -1167,7 +1167,7 @@ dependencies = [
  "faarules",
  "flarm",
  "gnss",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "hublink",
  "kitkeys",
  "link",
@@ -1187,7 +1187,7 @@ version = "0.1.0"
 dependencies = [
  "airlink",
  "evidence",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "kitkeys",
  "link",
  "postcard",
@@ -1314,7 +1314,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "openlink",
  "postcard",
  "rid",
@@ -1346,7 +1346,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 name = "mavwatch"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
 ]
 
 [[package]]
@@ -1622,7 +1622,7 @@ version = "0.1.0"
 dependencies = [
  "ctrlwatch",
  "embedded-graphics",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "libm",
  "link",
  "rid",
@@ -1916,7 +1916,7 @@ dependencies = [
  "adsb",
  "ctrlwatch",
  "droneid",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "libm",
  "link",
  "openlink",
@@ -2017,7 +2017,7 @@ dependencies = [
 name = "wirebus"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
  "postcard",
 ]

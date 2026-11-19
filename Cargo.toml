@@ -41,7 +41,7 @@ modes = { path = "crates/modes" }
 wifidrone = { path = "crates/wifidrone" }
 droneid = { path = "crates/droneid", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
-heapless = { version = "0.8", features = ["serde"] }
+heapless = { version = "0.9.4", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["heapless"] }
 
 # The jamming tests push millions of synthetic samples through the DSP

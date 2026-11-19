@@ -120,7 +120,7 @@ log              = "0.4.27"
 
 serde           = { version = "1", default-features = false, features = ["derive"] }
 serde-json-core = { version = "0.6", default-features = false }
-heapless        = { version = "0.8", features = ["serde"] }
+heapless        = { version = "0.9.4", features = ["serde"] }
 
 [profile.dev]
 # The default debug profile is too slow and too big for these chips.

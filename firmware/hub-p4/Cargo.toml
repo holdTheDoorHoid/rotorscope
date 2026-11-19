@@ -113,7 +113,7 @@ kitkeys = { path = "../../crates/kitkeys" }
 wirebus = { path = "../../crates/wirebus" }
 coverage = { path = "../../crates/coverage" }
 rid = { path = "../../crates/rid" }
-heapless = "0.8"
+heapless = "0.9.4"
 critical-section = "1.2"
 # `wide`: the native 800x480 layout with anti-aliased lettering.
 screen = { path = "../../crates/screen", features = ["tracker", "wide"] }
