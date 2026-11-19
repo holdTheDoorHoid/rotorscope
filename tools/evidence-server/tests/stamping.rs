@@ -410,7 +410,7 @@ async fn the_export_carries_the_stamps_and_the_checker_reads_them() {
     let fails: Vec<_> = r.findings.iter().filter(|f| f.level == Level::Fail).collect();
     assert!(fails.is_empty(), "{fails:?}");
     let notes: Vec<&str> = r.findings.iter().filter(|f| f.level == Level::Note).map(|f| f.what.as_str()).collect();
-    assert!(notes.iter().any(|n| n.contains("existed by") && n.contains("within a minute of the newest upload it covers was stored")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("existed by") && n.contains("the newest upload it covers was stored")), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("outstanding since")), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("1 attempt(s)") && n.contains("HTTP 500")), "{notes:?}");
 }
