@@ -31,6 +31,32 @@ each one:
 | Drone audible (close) | a drone, FPV link, DJI link or Wi-Fi drone was on the radio in the last 15 s | yes |
 | Aircraft heard | no drone on the radio, but a tracked aircraft is airborne within 3 km | no |
 | Possible drone heard, no radio | neither | yes, after 5 s |
+| Low hum heard (fan, engine or aircraft) | not explained by radio or a tracked aircraft, and heard mostly below 140 Hz | no |
+
+### Low hums (2026-11-18)
+
+A contact heard mostly below **140 Hz** (`tracker::sound::LOW_HUM_BELOW_HZ`) is kept, shown and
+logged like any other, but does not alert and gets no clip. Why:
+
+- The first day indoors (hub on a bench, a fan running, about four hours of console logs) gave
+  eight false "possible drone" alerts. All eight sat at 102-120 Hz, quiet (-57 to -72 dBFS, at
+  the room's own level), drifting slowly, for up to a minute. Ten more stretches were heard for
+  under five seconds and never alerted.
+- Every drone recording we have is higher: Mavic Pro 158-199 Hz, Mini 4 Pro 190-232 Hz, Bebop
+  300-500 Hz, Mambo about 600 Hz, 5-inch FPV 650-750 Hz.
+- Replayed through the same contact rules: the eight alerts become none; on the Al-Emadi
+  "unknown" set (three hours of everyday noise) 37 alerts become 25; drone alerts are unchanged
+  (Bebop 16, Mambo 14, Bat Ear field files 13).
+
+"Mostly" is counted over the contact's once-a-second reports, so one second at the wrong octave
+does not make a hum alert, and a hum whose pitch rises into the drone range and stays there
+does. A drone on the radio still makes the contact "Drone audible (close)".
+
+The price: a heavy-lift drone with propellers of about 20 inches or more (crop sprayers, large
+cinema and cargo hexacopters) can sit below 140 Hz and would be logged as a low hum, not
+alerted, unless it is also on the radio. What the eight false alerts actually were is not
+settled: the laptop's own fan was ruled out (it tops out at 85 Hz and the hub does not hear
+it), and no sound was kept at the time, clips being off.
 
 Contacts appear as `"t":"sound"` JSON lines and as `S<n>` rows in the SD log. The aircraft
 check needs the hub's own position and uses distance only; matching the pitch curve to the

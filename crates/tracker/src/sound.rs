@@ -17,12 +17,22 @@
 //!   on the ground. Alerts as "possible drone heard, no radio": a weaker
 //!   claim than any radio detection, and worded so.
 //!
+//! - **Low hum.** Whatever the radio says or does not say, a contact whose
+//!   pitch stays below [`LOW_HUM_BELOW_HZ`] is logged and shown but does not
+//!   alert on its own: fans, engines, compressors and crewed aircraft live
+//!   there, and the camera and FPV drones this hub is for do not (every
+//!   drone recording we have sits at 158 Hz or higher; every false alert in
+//!   the first day's indoor run sat at 102-120 Hz). A drone on the radio
+//!   still makes it "with radio".
+//!
 //! One microphone gives no direction, so with several radio tracks live the
 //! contact cannot say which of them is the audible one.
 //!
 //! A contact's kind only ever strengthens while it lasts (no radio ->
 //! aircraft -> with radio), so one fly-past is not relabelled back and
-//! forth.
+//! forth. Low hum against no radio is the exception: it follows what most
+//! of the contact's reports said, so a hum whose pitch rises into the drone
+//! range does alert, and one second at the wrong octave does not.
 
 use heapless::Vec;
 use serde::Serialize;
@@ -45,6 +55,11 @@ pub const RADIO_RECENT_MS: u64 = 15_000;
 /// Slant range inside which a crewed aircraft is taken as audible, metres.
 /// A heuristic (after `audio-flyover-geolocation`'s 2.5-3 km).
 pub const AIRCRAFT_AUDIBLE_M: f64 = 3_000.0;
+/// A contact heard mostly below this pitch is a "low hum" and does not
+/// alert by itself. Lowest drone pitch in our recordings: 158 Hz (Mavic
+/// Pro); heavy-lift drones with 20 inch and larger propellers do sit below
+/// it and are the price (docs/ACOUSTIC.md "Low hums").
+pub const LOW_HUM_BELOW_HZ: u16 = 140;
 
 /// Stable handle for a sound contact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -69,6 +84,7 @@ pub struct SoundReport {
 /// What a contact most likely is. Ordered weakest to strongest explanation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SoundKind {
+    LowHum,
     NoRadio,
     Aircraft,
     WithRadio,
@@ -78,15 +94,17 @@ impl SoundKind {
     /// Short plain-English name for the screen and alerts.
     pub const fn label(self) -> &'static str {
         match self {
+            SoundKind::LowHum => "Low hum heard (fan, engine or aircraft)",
             SoundKind::NoRadio => "Possible drone heard, no radio",
             SoundKind::Aircraft => "Aircraft heard",
             SoundKind::WithRadio => "Drone audible (close)",
         }
     }
 
-    /// Whether this kind raises an alert. A tracked aircraft does not.
+    /// Whether this kind raises an alert. A tracked aircraft does not, and
+    /// neither does a low hum.
     pub const fn alerts(self) -> bool {
-        !matches!(self, SoundKind::Aircraft)
+        !matches!(self, SoundKind::Aircraft | SoundKind::LowHum)
     }
 }
 
@@ -108,6 +126,8 @@ pub struct SoundContact {
     pub small_props: bool,
     /// Detector reports merged into this contact.
     pub reports: u32,
+    /// How many of them were below [`LOW_HUM_BELOW_HZ`].
+    pub low_reports: u32,
     /// The nearest audible aircraft when the contact was (last) explained
     /// by one, and its slant range, metres.
     pub aircraft: Option<AircraftKey>,
@@ -210,17 +230,28 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             return None;
         }
         let aircraft = self.audible_aircraft(now_ms);
-        let kind = if self.radio_drone_recent(now_ms) {
-            SoundKind::WithRadio
+        let explained = if self.radio_drone_recent(now_ms) {
+            Some(SoundKind::WithRadio)
         } else if aircraft.is_some() {
-            SoundKind::Aircraft
+            Some(SoundKind::Aircraft)
         } else {
-            SoundKind::NoRadio
+            None
+        };
+        let low = u32::from(r.pitch_hz < LOW_HUM_BELOW_HZ);
+        // Unexplained: a low hum if most of the contact was heard low.
+        let unexplained = |low_reports: u32, reports: u32| {
+            if low_reports * 2 > reports { SoundKind::LowHum } else { SoundKind::NoRadio }
         };
         let table = &mut self.sounds;
         if let Some(c) = table.contacts.iter_mut().find(|c| c.active(now_ms)) {
             c.last_seen_ms = now_ms;
-            c.kind = c.kind.max(kind);
+            c.reports = c.reports.saturating_add(1);
+            c.low_reports = c.low_reports.saturating_add(low);
+            let mut kind = explained.unwrap_or_else(|| unexplained(c.low_reports, c.reports));
+            if c.kind >= SoundKind::Aircraft {
+                kind = kind.max(c.kind);
+            }
+            c.kind = kind;
             c.pitch_hz = r.pitch_hz;
             c.pitch_min_hz = c.pitch_min_hz.min(r.pitch_hz);
             c.pitch_max_hz = c.pitch_max_hz.max(r.pitch_hz);
@@ -229,7 +260,6 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             c.level_dbfs = r.level_dbfs;
             c.peak_level_dbfs = c.peak_level_dbfs.max(r.level_dbfs);
             c.small_props = r.small_props;
-            c.reports = c.reports.saturating_add(1);
             if let Some((key, range)) = aircraft {
                 c.aircraft = Some(key);
                 c.aircraft_range_m = range;
@@ -245,7 +275,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         table.next_id = table.next_id.wrapping_add(1).max(1);
         let _ = table.contacts.push(SoundContact {
             id,
-            kind,
+            kind: explained.unwrap_or_else(|| unexplained(low, 1)),
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
             pitch_hz: r.pitch_hz,
@@ -257,6 +287,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             peak_level_dbfs: r.level_dbfs,
             small_props: r.small_props,
             reports: 1,
+            low_reports: low,
             aircraft: aircraft.map(|a| a.0),
             aircraft_range_m: aircraft.map_or(0, |a| a.1),
             clip: 0,
@@ -299,7 +330,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
 struct SoundLine {
     t: &'static str,
     id: SoundId,
-    /// `"NoRadio"`, `"Aircraft"` or `"WithRadio"`.
+    /// `"LowHum"`, `"NoRadio"`, `"Aircraft"` or `"WithRadio"`.
     kind: SoundKind,
     label: &'static str,
     alerts: bool,

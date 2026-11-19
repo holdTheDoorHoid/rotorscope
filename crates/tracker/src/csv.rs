@@ -33,7 +33,7 @@
 //! `WifiDrone` (`WifiDrone5G` on 5 GHz). The address is not logged.
 //!
 //! Sound contacts ([`sound_row`]): `track` is `S<n>`, `uas_id` the pitch in
-//! Hz with `id_type` `PitchHz`, `ua_type` the kind (`NoRadio`, `Aircraft`,
+//! Hz with `id_type` `PitchHz`, `ua_type` the kind (`LowHum`, `NoRadio`, `Aircraft`,
 //! `WithRadio`), `transports` `Sound`, and `rssi_dbm` holds the loudness in
 //! dB relative to full scale, not a radio level.
 

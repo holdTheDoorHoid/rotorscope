@@ -306,6 +306,7 @@ impl Ear {
                 SoundKind::NoRadio => 0,
                 SoundKind::Aircraft => 1,
                 SoundKind::WithRadio => 2,
+                SoundKind::LowHum => 3,
             };
             data[5..7].copy_from_slice(&c.pitch_hz.to_le_bytes());
             data[7] = c.peak_confidence;

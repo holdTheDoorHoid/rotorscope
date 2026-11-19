@@ -109,7 +109,7 @@ fn a_distant_or_landed_aircraft_explains_nothing() {
     tr.set_own_position(CITY_HALL.0, CITY_HALL.1, Some(10.0), 0);
     tr.ingest_aircraft(&heli(0x000001, 9_000.0, 1_000, 1_000, 7, 180.0, 80), 0);
     tr.vouch_for_tests(0);
-    let id = listen(&mut tr, 1, 8, 110).unwrap();
+    let id = listen(&mut tr, 1, 8, 180).unwrap();
     assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::NoRadio);
     assert_eq!(tr.take_new_sound(8_000), Some(id));
 }
@@ -165,4 +165,66 @@ fn the_table_keeps_the_latest_sixteen_and_the_line_fits() {
     let mut buf = [0u8; MAX_SOUND_LINE];
     let ctx = tr.context(u64::MAX, None);
     assert!(sound_line(&worst, &ctx, &mut buf).is_ok());
+}
+
+#[test]
+fn a_low_hum_is_logged_but_does_not_alert() {
+    // The first day's indoor false alerts: 102-120 Hz for up to a minute.
+    let mut tr: Tracker = Tracker::default();
+    let id = listen(&mut tr, 1, 60, 107).unwrap();
+    assert_eq!(tr.take_new_sound(60_000), None);
+    let c = tr.get_sound(id).unwrap();
+    assert_eq!(c.kind, SoundKind::LowHum);
+    assert!(!c.kind.alerts());
+    assert!(!c.alert_due(60_000));
+    assert!(!clip::may_start(true, c, 60_000), "and no clip");
+    // Still a contact, with its line.
+    let mut buf = [0u8; MAX_SOUND_LINE];
+    let n = sound_line(c, &tr.context(60_000, None), &mut buf).unwrap();
+    let line = core::str::from_utf8(&buf[..n]).unwrap();
+    assert!(line.contains(r#""kind":"LowHum""#) && line.contains(r#""alerts":false"#), "{line}");
+}
+
+#[test]
+fn the_low_hum_line_is_just_under_the_lowest_drone_we_have() {
+    let mut tr: Tracker = Tracker::default();
+    let id = listen(&mut tr, 1, 6, LOW_HUM_BELOW_HZ).unwrap();
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::NoRadio);
+    assert_eq!(tr.take_new_sound(6_000), Some(id));
+    let mut tr: Tracker = Tracker::default();
+    let id = listen(&mut tr, 1, 6, LOW_HUM_BELOW_HZ - 1).unwrap();
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::LowHum);
+    assert_eq!(tr.take_new_sound(6_000), None);
+}
+
+#[test]
+fn one_second_at_the_wrong_octave_does_not_make_a_hum_alert() {
+    let mut tr: Tracker = Tracker::default();
+    listen(&mut tr, 1, 20, 107);
+    let id = tr.ingest_sound(&heard(214), 21_000).unwrap();
+    listen(&mut tr, 22, 30, 107);
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::LowHum);
+    assert_eq!(tr.take_new_sound(30_000), None);
+}
+
+#[test]
+fn a_hum_that_rises_into_the_drone_range_and_stays_alerts() {
+    // A drone spooling up, or one first followed at half its pitch.
+    let mut tr: Tracker = Tracker::default();
+    let id = listen(&mut tr, 1, 4, 110).unwrap();
+    listen(&mut tr, 5, 7, 190);
+    assert_eq!(tr.take_new_sound(7_000), None, "still mostly low");
+    listen(&mut tr, 8, 8, 190);
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::NoRadio);
+    assert_eq!(tr.take_new_sound(8_000), Some(id));
+}
+
+#[test]
+fn a_low_hum_with_a_drone_on_the_radio_is_still_with_radio() {
+    let mut tr: Tracker = Tracker::default();
+    let d = det(Transport::WifiBeacon, WIFI_MAC, -60, &[serial("SN-1"), location(CITY_HALL.0, CITY_HALL.1, 60.0)]);
+    tr.ingest(0, &d, 1_000);
+    tr.ingest(0, &d, 2_000);
+    let id = listen(&mut tr, 2, 8, 110).unwrap();
+    assert_eq!(tr.get_sound(id).unwrap().kind, SoundKind::WithRadio);
 }
