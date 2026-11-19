@@ -4,9 +4,10 @@
 //! `{"t":"aircraft"}` per ADS-B aircraft (the tracker's own formatters, so
 //! byte-for-byte the S3 format), `{"t":"control"}` per drone control link
 //! and `{"t":"control_energy"}` per control band (LR2021 nodes, protocol
-//! 12), then one `{"t":"hub"}` status line, which is P4-specific (this
-//! hub's links, GPS module, SD and console figures), and its companions
-//! (`bus`, `aero`, `control_stats`).
+//! 12), `{"t":"signal_threat"}` per signal without a position at a threat
+//! level (slice 16c), then one `{"t":"hub"}` status line, which is
+//! P4-specific (this hub's links, GPS module, SD and console figures), and
+//! its companions (`bus`, `aero`, `control_stats`).
 //!
 //! The console runs at 115200 baud (~11.5 KB/s, shared with the log), so the
 //! hub line goes first and the per-track lines after it; whatever does not
@@ -81,6 +82,16 @@ pub fn tick(app: &mut App, gw: &GatewayLink<'_>, gps: &Gps, adsbee: &Adsbee, sd:
             {
                 return;
             }
+        }
+    }
+    // Slice 16c: one {"t":"signal_threat"} line per signal without a
+    // position that has a threat level (rules 12-14, a trend, not a
+    // position).
+    for st in app.tracker.signal_threats().iter().filter(|s| s.threat.level.is_some()) {
+        if let Ok(n) = json::signal_threat_line(st, &ctx, &mut line)
+            && !console::json(&line[..n])
+        {
+            return;
         }
     }
     // Protocol 9: one {"t":"threat"} line per attack or jamming entry.

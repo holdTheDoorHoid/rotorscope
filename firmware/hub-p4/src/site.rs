@@ -303,6 +303,18 @@ impl Site {
                 ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
                 crate::println!("hub-p4: {t}");
             }
+            // Signals without a position at Warning or above (slice 16c).
+            for id in app.tracker.snooze_signal_levels(now) {
+                let mut t: heapless::String<160> = heapless::String::new();
+                let _ = write!(t, "screen: snooze 5 min: threat level alerts of signal S{}", id.0);
+                if let Some(s) = app.tracker.get_signal_threat(id) {
+                    // From the firmware's own tables, not the air.
+                    let _ = write!(t, " ({})", s.src);
+                }
+                let _ = write!(t, "; level still shown and logged; ends at hub uptime {} s", (now + tracker::behaviour::SNOOZE_MS) / 1000);
+                ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+                crate::println!("hub-p4: {t}");
+            }
         }
         let added = if snooze { app.tracker.snooze_seen(seen_ms, now) } else { app.tracker.mute_seen(seen_ms, now) };
         for m in &added {

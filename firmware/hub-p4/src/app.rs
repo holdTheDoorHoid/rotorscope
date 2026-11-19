@@ -179,6 +179,24 @@ impl App {
             ev.event(evidence::format::EventCode::ThreatLevel, text.as_bytes(), &data);
             crate::println!("hub-p4: LEVEL {}", text);
         }
+        self.announce_signal_levels(ev, now);
+    }
+
+    /// Signals without a position whose level rose (slice 16c: an FPV video
+    /// or control-link downlink, drone Wi-Fi or an open FPV link getting
+    /// louder fast; rotor sound once a microphone feeds the tracker): the
+    /// same `threat_level` event, with flag bit 4 ("no position") and the
+    /// signal's entry id, and a `hub-p4: LEVEL` line worded as a trend.
+    #[inline(never)]
+    fn announce_signal_levels(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
+        while let Some(r) = self.tracker.take_signal_rise(now) {
+            let Some(s) = self.tracker.get_signal_threat(r.id) else { continue };
+            // A spotter's ID (rule 14) arrived over the air.
+            let text: heapless::String<256> = clean(&self.tracker.describe_signal_level(r.id, now).unwrap_or_default());
+            let data = tracker::behaviour::trend::signal_rise_data(s, &r);
+            ev.event(evidence::format::EventCode::ThreatLevel, text.as_bytes(), &data);
+            crate::println!("hub-p4: LEVEL {}", text);
+        }
     }
 
     /// Nodes' Status and Stats: role and plan, then the deaf-node and
