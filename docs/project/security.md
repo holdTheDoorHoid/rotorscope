@@ -66,13 +66,14 @@ proven, in the words of [Status](status.md).
 - **A signed link between boards.** On a sealed kit every ESP-NOW packet between a node and the
   hub carries a tag made with that node's own key, and forged, replayed or late packets are
   dropped and reported; the gateway in between holds no key. Kits ship open and are sealed with
-  `link-key`. Before the 2026-11-18 cut-over, with one key for the whole kit, this was **proven on
-  the air** (the bench kit ran keyed builds); the per-node design is **simulated only**
-  (tested on a computer and built for the boards). See [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
+  `link-key`. **Proven on the air** on 2026-11-19: on the bench kit, test boards playing a
+  captured node and a captured gateway had their forged, replayed and late packets refused
+  ([Bench tests](../BENCH.md)). See [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
 - **Forged frames refused.** Each kind of report may only come from the kind of board allowed to
   send it; the hub refuses the rest, counts them and raises an alarm, and the web head checks
-  again. **Proven on the air** before the cut-over: on 2026-11-18 seven kinds of forbidden frame
-  sent by a test node were all refused at the gateway, which did this check then. See
+  again. **Proven on the air**: on 2026-11-19 seven kinds of forbidden frame sent by a test node
+  were all refused by the hub (on 2026-11-18, before the cut-over, by the gateway, which did this
+  check then). The web head's check is **built, not yet tried**. See
   [ESP-NOW in depth](../ESPNOW.md) and [Wire protocol reference](../dev/protocol.md).
 - **The kit's keys never in the repository or in a firmware image.** The kit master lives in
   `tools/kit.key` on the owner's computer and never goes into git; each node's key is written to
@@ -99,4 +100,5 @@ proven, in the words of [Status](status.md).
   DISPUTED. **Simulated only**, with floods of made-up drones injected on the bench. See
   [Spoofed drones](../SPOOFING.md).
 
-For how far each of these has been tested on hardware, see [Status](status.md).
+For how far each of these has been tested on hardware, see [Status](status.md). For who might
+attack a kit and how far each attacker gets today, see the [threat model](../THREAT-MODEL.md).

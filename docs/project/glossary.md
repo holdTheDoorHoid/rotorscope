@@ -484,6 +484,9 @@ signed with it proves nothing, and the verifier rejects it unless told it is a t
 **TFR** (temporary flight restriction). An area the FAA closes to flights for a while, such as
 around an event. TFRs change daily, so they must be refreshed. See [FAA rule flags](../use/faa-flags.md).
 
+**Threat model.** A plain list of who might attack a thing, what they want and how far they can
+get. See [Threat model](../THREAT-MODEL.md).
+
 **Toolchain.** The compiler and tools needed to build firmware for a given chip. See
 [Set up your machine](../dev/setup.md).
 

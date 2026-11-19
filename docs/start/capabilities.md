@@ -52,10 +52,10 @@ The detailed, piece-by-piece table is on the [status page](../project/status.md)
 
 - **Hub touch screen and memory-card log** work on the bench: the hub wrote and read back
   every row of its log in the 2026-11-15 run.
-- **Signed link between boards** ran on the bench with one key for the whole kit (**Proven on
-  the air**): on 2026-11-18 the gateway refused every kind of frame a test board was not allowed
-  to send. The current link, with a key per node checked by the hub, has been tested only on a
-  computer and built for the boards. Kits ship open until the owner seals them.
+- **Signed link between boards**, with a key per node checked by the hub, ran on the bench on
+  2026-11-19 (**Proven on the air**): test boards playing a captured node and a captured gateway
+  had their forged, replayed and late packets refused ([bench tests](../BENCH.md)). Kits ship
+  open until the owner seals them.
 - **Evidence log** works on the bench. The hub signs it with a published test key unless a
   development key is built in, and the screen says which. Either way it is not yet
   evidence-grade; [the evidence log page](../EVIDENCE.md) says exactly what it does and does
@@ -103,6 +103,9 @@ The detailed, piece-by-piece table is on the [status page](../project/status.md)
 > [!WARNING]
 > Do not rely on Rotorscope for safety decisions yet. It has not been tested against real
 > drones, and nobody knows its real-world range.
+
+Who might try to fool, blind or break into a kit, and how far each of them gets today, is on
+its own page: the [threat model](../THREAT-MODEL.md).
 
 ## What is coming
 

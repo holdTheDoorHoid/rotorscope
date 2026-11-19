@@ -129,7 +129,8 @@ A detection shows that a broadcast was received. It does not prove who was flyin
 and DroneID can be faked; Rotorscope's [spoofing checks](../SPOOFING.md) help but have not been
 tested against real attackers, and Rotorscope itself has not yet heard a real drone. Before
 anyone confronts a pilot, calls the authorities or makes a safety decision, confirm with your
-own eyes and other information. Never approach or interfere with an aircraft.
+own eyes and other information. Never approach or interfere with an aircraft. What an attacker
+can make a kit show, hide or record is set out in the [threat model](../THREAT-MODEL.md).
 
 ## Rules differ by country
 

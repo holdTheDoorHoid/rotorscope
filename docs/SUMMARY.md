@@ -98,4 +98,5 @@
 - [FAQ](project/faq.md)
 - [Glossary](project/glossary.md)
 - [Credits and licences](project/credits.md)
+- [Threat model](THREAT-MODEL.md)
 - [Security policy](project/security.md)
