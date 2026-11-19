@@ -2,6 +2,8 @@
 //! banner and the user's settings. Driven by [`Button`] events and
 //! [`Ui::tick`]; read by [`crate::render`].
 
+use core::cell::Cell;
+
 use crate::model::UiState;
 
 /// A button event, after debouncing and long-press detection
@@ -88,20 +90,126 @@ pub enum Mode {
     Edit,
 }
 
-/// Colour scheme.
+/// A colour scheme (the look actually drawn). Every distinction is also
+/// carried by shape or text, so any of them can be used for anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Theme {
-    /// Dark background, default. Kind to night vision.
+    /// Dark, after airliner displays: cyan labels, white data, magenta for
+    /// drones and the selection, amber cautions, green OK. The default.
     #[default]
-    Night,
-    /// Light background, for direct sunlight.
-    Day,
+    GlassCockpit,
+    /// Dark ink on a light background, for direct sunlight.
+    FieldDay,
+    /// Red only, dim: keeps night vision. One hue, so alerts rely on boxes,
+    /// inverse text and shapes.
+    RedNight,
 }
 
-/// User settings the hub should apply (and may persist to flash).
+impl Theme {
+    pub const ALL: [Theme; 3] = [Theme::GlassCockpit, Theme::FieldDay, Theme::RedNight];
+
+    /// The name on screen.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Theme::GlassCockpit => "Glass Cockpit",
+            Theme::FieldDay => "Field Day",
+            Theme::RedNight => "Red Night",
+        }
+    }
+
+    /// The word in the site file (`theme red-night`).
+    pub const fn word(self) -> &'static str {
+        match self {
+            Theme::GlassCockpit => "glass-cockpit",
+            Theme::FieldDay => "field-day",
+            Theme::RedNight => "red-night",
+        }
+    }
+
+    pub fn from_word(w: &str) -> Option<Theme> {
+        Self::ALL.into_iter().find(|t| t.word().eq_ignore_ascii_case(w))
+    }
+
+    /// The next one, wrapping round.
+    pub const fn next(self) -> Theme {
+        match self {
+            Theme::GlassCockpit => Theme::FieldDay,
+            Theme::FieldDay => Theme::RedNight,
+            Theme::RedNight => Theme::GlassCockpit,
+        }
+    }
+}
+
+/// The Theme setting: one look always, or switch by the sun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    /// The day theme while the sun is up, the night theme otherwise, from
+    /// the hub's position and GPS time ([`crate::sun`]).
+    Auto,
+    Fixed(Theme),
+}
+
+impl Default for ThemeMode {
+    fn default() -> Self {
+        ThemeMode::Fixed(Theme::GlassCockpit)
+    }
+}
+
+impl ThemeMode {
+    /// The word in the site file (`theme auto`, `theme field-day`).
+    pub const fn word(self) -> &'static str {
+        match self {
+            ThemeMode::Auto => "auto",
+            ThemeMode::Fixed(t) => t.word(),
+        }
+    }
+
+    /// Auto -> Glass Cockpit -> Field Day -> Red Night -> Auto.
+    const fn next(self) -> ThemeMode {
+        match self {
+            ThemeMode::Auto => ThemeMode::Fixed(Theme::GlassCockpit),
+            ThemeMode::Fixed(Theme::RedNight) => ThemeMode::Auto,
+            ThemeMode::Fixed(t) => ThemeMode::Fixed(t.next()),
+        }
+    }
+}
+
+/// When Auto switches between the day and the night theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SwitchAt {
+    /// Sunrise and sunset (the sun's centre 0.833° below the horizon).
+    Sunrise,
+    /// Civil dawn and dusk (6° below): the day theme stays on through
+    /// twilight, while there is still light to wash the screen out.
+    #[default]
+    Twilight,
+}
+
+impl SwitchAt {
+    pub const fn name(self) -> &'static str {
+        match self {
+            SwitchAt::Sunrise => "Sunrise & sunset",
+            SwitchAt::Twilight => "Dawn & dusk",
+        }
+    }
+    /// The word in the site file (`theme-switch twilight`).
+    pub const fn word(self) -> &'static str {
+        match self {
+            SwitchAt::Sunrise => "sunrise",
+            SwitchAt::Twilight => "twilight",
+        }
+    }
+}
+
+/// User settings the hub should apply (and may persist).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
-    pub theme: Theme,
+    pub theme: ThemeMode,
+    /// Used by Auto while the sun is up.
+    pub day_theme: Theme,
+    /// Used by Auto at night, and while Auto does not know yet.
+    pub night_theme: Theme,
+    pub switch_at: SwitchAt,
     /// Backlight level 1..=5. The hub maps it to PWM.
     pub brightness: u8,
     /// Beep on a new drone.
@@ -111,15 +219,90 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: Theme::Night,
+            theme: ThemeMode::default(),
+            day_theme: Theme::FieldDay,
+            night_theme: Theme::RedNight,
+            switch_at: SwitchAt::default(),
             brightness: 3,
             buzzer: true,
         }
     }
 }
 
-/// Rows on the settings page, in order.
-pub const SETTINGS_ROWS: usize = 6;
+/// One row of the settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsRow {
+    Theme,
+    /// Only while Theme is Auto.
+    DayTheme,
+    /// Only while Theme is Auto.
+    NightTheme,
+    /// Only while Theme is Auto.
+    SwitchAt,
+    Brightness,
+    Buzzer,
+    /// "Hub moved", or "New home" while the hub waits for one.
+    HubMoved,
+    Alarms,
+    NodesAtHub,
+}
+
+const ROWS_FIXED: [SettingsRow; 6] = [
+    SettingsRow::Theme,
+    SettingsRow::Brightness,
+    SettingsRow::Buzzer,
+    SettingsRow::HubMoved,
+    SettingsRow::Alarms,
+    SettingsRow::NodesAtHub,
+];
+const ROWS_AUTO: [SettingsRow; 9] = [
+    SettingsRow::Theme,
+    SettingsRow::DayTheme,
+    SettingsRow::NightTheme,
+    SettingsRow::SwitchAt,
+    SettingsRow::Brightness,
+    SettingsRow::Buzzer,
+    SettingsRow::HubMoved,
+    SettingsRow::Alarms,
+    SettingsRow::NodesAtHub,
+];
+
+impl Settings {
+    /// The settings page's rows, in order. The three Auto rows show only
+    /// while Theme is Auto, so a fixed theme has fewer rows to get lost in.
+    pub fn rows(&self) -> &'static [SettingsRow] {
+        match self.theme {
+            ThemeMode::Auto => &ROWS_AUTO,
+            ThemeMode::Fixed(_) => &ROWS_FIXED,
+        }
+    }
+}
+
+/// What Auto is doing right now ([`Ui::auto_status`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoStatus {
+    /// Theme is not Auto.
+    Off,
+    /// No position or no time has been known yet: the night theme (dark is
+    /// the safer guess), or the last one in effect.
+    Waiting { day: Option<bool> },
+    /// Day (`true`) or night by the sun; the next switch in UTC ms, if the
+    /// sun crosses the line within a day (not in polar day or night).
+    Sun { day: bool, next_utc_ms: Option<u64>, stale_position: bool },
+}
+
+/// Auto's memory: the last position seen (positions come and go with the
+/// fix) and the last verdict, recomputed at most once a UTC minute.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct AutoMemo {
+    position: Option<(f32, f32)>,
+    /// (UTC minute, rule, position) the verdict is for.
+    key: Option<(u64, SwitchAt, (f32, f32))>,
+    day: Option<bool>,
+    /// The next change, computed only when asked for (settings page), for
+    /// the same key.
+    next: Option<(u64, SwitchAt, (f32, f32), Option<u64>)>,
+}
 
 /// An action chosen on the settings page, for the hub to carry out
 /// ([`Ui::take_request`]).
@@ -179,13 +362,19 @@ pub struct Ui {
     mode: Mode,
     /// Drone key under the cursor (Pick/Detail).
     cursor: Option<u32>,
+    /// Index into `settings.rows()`.
     settings_row: usize,
     /// An action row was chosen: the request for the hub (taken once), and
     /// which row says "done" until the settings are left.
     request: Option<Request>,
-    done_row: Option<usize>,
+    done_row: Option<SettingsRow>,
     alert: Option<Alert>,
     settings: Settings,
+    /// The settings when editing began, to report what changed once it ends.
+    edit_start: Option<Settings>,
+    /// An edit ended with changes: (before, after), taken once by the hub.
+    changed: Option<(Settings, Settings)>,
+    auto: Cell<AutoMemo>,
     buzz: Option<Buzz>,
     last_buzz_ms: Option<u64>,
     last_input_ms: u64,
@@ -210,6 +399,9 @@ impl Ui {
             done_row: None,
             alert: None,
             settings,
+            edit_start: None,
+            changed: None,
+            auto: Cell::new(AutoMemo::default()),
             buzz: None,
             last_buzz_ms: None,
             last_input_ms: 0,
@@ -237,15 +429,103 @@ impl Ui {
     }
 
     /// The action row chosen during this visit to the settings, if any.
-    pub fn done_row(&self) -> Option<usize> {
+    pub fn done_row(&self) -> Option<SettingsRow> {
         self.done_row
     }
 
+    /// The cursor's row on the settings page, as an index into
+    /// [`Settings::rows`].
     pub fn settings_row(&self) -> usize {
         self.settings_row
     }
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Replace the settings (from the hub's saved ones, e.g. the P4's site
+    /// file). Not reported by [`Ui::take_settings_change`].
+    pub fn set_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+        let n = self.settings.rows().len();
+        self.settings_row = self.settings_row.min(n - 1);
+        if let Some(start) = self.edit_start.as_mut() {
+            *start = settings;
+        }
+    }
+
+    /// The operator finished editing the settings (Back, or the idle
+    /// timeout) and something changed: `(before, after)`, handed out once,
+    /// so the hub saves one line per changed setting rather than one per
+    /// press.
+    pub fn take_settings_change(&mut self) -> Option<(Settings, Settings)> {
+        self.changed.take()
+    }
+
+    /// The page Up (`delta` -1) or Down (+1) goes to while browsing, for
+    /// the key labels.
+    pub fn page_after(&self, delta: isize, state: &UiState) -> Page {
+        self.page.step(delta, state.flags.is_some())
+    }
+
+    /// The look to draw now. Fixed themes are just that; Auto picks the day
+    /// or night theme by the sun at the hub's position (the last one seen,
+    /// if the fix is gone) and GPS time. Before both are known it is the
+    /// night theme: dark is the safer guess at an unknown hour. Without
+    /// time it keeps the last verdict.
+    pub fn effective_theme(&self, state: &UiState) -> Theme {
+        let s = &self.settings;
+        match s.theme {
+            ThemeMode::Fixed(t) => t,
+            ThemeMode::Auto => {
+                if self.auto_day(state).unwrap_or(false) {
+                    s.day_theme
+                } else {
+                    s.night_theme
+                }
+            }
+        }
+    }
+
+    /// What Auto is doing, for the settings page (computes the next switch
+    /// time, once a minute).
+    pub fn auto_status(&self, state: &UiState) -> AutoStatus {
+        if self.settings.theme != ThemeMode::Auto {
+            return AutoStatus::Off;
+        }
+        let day = self.auto_day(state);
+        let m = self.auto.get();
+        let (Some(utc), Some(pos), Some(day)) = (state.utc_ms, m.position, day) else {
+            return AutoStatus::Waiting { day };
+        };
+        let at = self.settings.switch_at;
+        let minute = utc / 60_000;
+        let next = match m.next {
+            Some((k, a, p, n)) if k == minute && a == at && p == pos => n,
+            _ => {
+                let n = crate::sun::next_change(utc as i64, f64::from(pos.0), f64::from(pos.1), at).map(|t| t as u64);
+                self.auto.set(AutoMemo { next: Some((minute, at, pos, n)), ..self.auto.get() });
+                n
+            }
+        };
+        AutoStatus::Sun { day, next_utc_ms: next, stale_position: state.position.is_none() }
+    }
+
+    /// Day or night by the sun, `None` until it has been known once.
+    fn auto_day(&self, state: &UiState) -> Option<bool> {
+        let mut m = self.auto.get();
+        if let Some(p) = state.position {
+            m.position = Some(p);
+        }
+        if let (Some(utc), Some(pos)) = (state.utc_ms, m.position) {
+            let at = self.settings.switch_at;
+            let key = (utc / 60_000, at, pos);
+            if m.key != Some(key) {
+                m.key = Some(key);
+                m.day = Some(crate::sun::is_day(utc as i64, f64::from(pos.0), f64::from(pos.1), at));
+            }
+        }
+        self.auto.set(m);
+        m.day
     }
     /// The banner, if one is showing.
     pub fn alert(&self) -> Option<&Alert> {
@@ -291,6 +571,9 @@ impl Ui {
         }
         let idle = now_ms.saturating_sub(self.last_input_ms) >= IDLE_MS;
         if idle && matches!(self.mode, Mode::Pick | Mode::Edit) {
+            if self.mode == Mode::Edit {
+                self.end_edit();
+            }
             self.mode = Mode::Browse;
             self.cursor = None;
         }
@@ -331,6 +614,7 @@ impl Ui {
                     Page::Settings => {
                         self.settings_row = 0;
                         self.mode = Mode::Edit;
+                        self.edit_start = Some(self.settings);
                     }
                     Page::Health | Page::Signals | Page::Flags => {}
                 },
@@ -365,17 +649,18 @@ impl Ui {
                     };
                 }
             },
-            Mode::Edit => match b {
-                Button::Up => {
-                    self.settings_row = (self.settings_row + SETTINGS_ROWS - 1) % SETTINGS_ROWS
+            Mode::Edit => {
+                let n = self.settings.rows().len();
+                match b {
+                    Button::Up => self.settings_row = (self.settings_row + n - 1) % n,
+                    Button::Down => self.settings_row = (self.settings_row + 1) % n,
+                    Button::Select => self.change_setting(state),
+                    Button::Back => {
+                        self.mode = Mode::Browse;
+                        self.end_edit();
+                    }
                 }
-                Button::Down => self.settings_row = (self.settings_row + 1) % SETTINGS_ROWS,
-                Button::Select => self.change_setting(state),
-                Button::Back => {
-                    self.mode = Mode::Browse;
-                    self.done_row = None;
-                }
-            },
+            }
         }
     }
 
@@ -411,36 +696,74 @@ impl Ui {
         self.cursor = Some(state.drones[usize::from(order[next as usize])].key);
     }
 
-    fn change_setting(&mut self, state: &UiState) {
-        let s = &mut self.settings;
-        match self.settings_row {
-            0 => {
-                s.theme = match s.theme {
-                    Theme::Night => Theme::Day,
-                    Theme::Day => Theme::Night,
-                }
-            }
-            1 => s.brightness = s.brightness % 5 + 1,
-            2 => s.buzzer = !s.buzzer,
-            row => {
-                let r = match row {
-                    // One row, two meanings: while the hub has found a new
-                    // place and waits, SEL accepts it; otherwise SEL forgets
-                    // home (both say "the hub really is here").
-                    3 if state.gps.home_pending => Some(Request::AcceptHome),
-                    3 => Some(Request::HubMoved),
-                    4 if state.threats.mutable > 0 => Some(Request::MuteAlarms { seen_ms: state.now_ms }),
-                    4 if state.threats.snoozable > 0 => Some(Request::SnoozeAlarms { seen_ms: state.now_ms }),
-                    4 if state.caveats.silenced.operator() > 0 => Some(Request::UnmuteAlarms),
-                    4 => None,
-                    _ => Some(Request::NodesAtHub),
-                };
-                if r.is_some() {
-                    self.request = r;
-                    self.done_row = Some(row);
-                }
-            }
+    /// Leaving the settings: forget "done" marks, report changes.
+    fn end_edit(&mut self) {
+        self.done_row = None;
+        if let Some(start) = self.edit_start.take()
+            && start != self.settings
+        {
+            // Two edits before the hub took the first: keep the oldest
+            // "before" so every changed setting is still reported.
+            let before = self.changed.map_or(start, |c| c.0);
+            self.changed = Some((before, self.settings));
         }
+    }
+
+    /// The row under the cursor.
+    pub fn settings_row_kind(&self) -> SettingsRow {
+        let rows = self.settings.rows();
+        rows[self.settings_row.min(rows.len() - 1)]
+    }
+
+    fn change_setting(&mut self, state: &UiState) {
+        let row = self.settings_row_kind();
+        let s = &mut self.settings;
+        let r = match row {
+            SettingsRow::Theme => {
+                s.theme = s.theme.next();
+                None
+            }
+            SettingsRow::DayTheme => {
+                s.day_theme = s.day_theme.next();
+                None
+            }
+            SettingsRow::NightTheme => {
+                s.night_theme = s.night_theme.next();
+                None
+            }
+            SettingsRow::SwitchAt => {
+                s.switch_at = match s.switch_at {
+                    SwitchAt::Sunrise => SwitchAt::Twilight,
+                    SwitchAt::Twilight => SwitchAt::Sunrise,
+                };
+                None
+            }
+            SettingsRow::Brightness => {
+                s.brightness = s.brightness % 5 + 1;
+                None
+            }
+            SettingsRow::Buzzer => {
+                s.buzzer = !s.buzzer;
+                None
+            }
+            // One row, two meanings: while the hub has found a new place
+            // and waits, SEL accepts it; otherwise SEL forgets home (both
+            // say "the hub really is here").
+            SettingsRow::HubMoved if state.gps.home_pending => Some(Request::AcceptHome),
+            SettingsRow::HubMoved => Some(Request::HubMoved),
+            SettingsRow::Alarms if state.threats.mutable > 0 => Some(Request::MuteAlarms { seen_ms: state.now_ms }),
+            SettingsRow::Alarms if state.threats.snoozable > 0 => Some(Request::SnoozeAlarms { seen_ms: state.now_ms }),
+            SettingsRow::Alarms if state.caveats.silenced.operator() > 0 => Some(Request::UnmuteAlarms),
+            SettingsRow::Alarms => None,
+            SettingsRow::NodesAtHub => Some(Request::NodesAtHub),
+        };
+        if r.is_some() {
+            self.request = r;
+            self.done_row = Some(row);
+        }
+        // The Theme row stays where it is (row 0) as the Auto rows come
+        // and go; keep the cursor in range anyway.
+        self.settings_row = self.settings_row.min(self.settings.rows().len() - 1);
     }
 }
 

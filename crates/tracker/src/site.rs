@@ -24,6 +24,12 @@
 //! control ids on          # read link identifiers (ELRS UID bytes, SiK NET ID...)
 //! control content on      # decode sticks, telemetry, positions; keep raw packets
 //! control content off
+//!
+//! # The screen's colour theme (P4 hub; also set on the Settings page):
+//! theme auto              # auto | glass-cockpit | field-day | red-night
+//! theme-day field-day     # Auto's theme while the sun is up
+//! theme-night red-night   # Auto's theme at night (and before it knows)
+//! theme-switch twilight   # twilight (civil dawn and dusk) | sunrise (sunrise and sunset)
 //! ```
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
@@ -100,6 +106,95 @@ pub enum SiteLine {
     Home { lat: f64, lon: f64, alt: Option<f64> },
     /// `home clear`: no placed home (the hub learns one again).
     HomeClear,
+    /// `theme ...`, `theme-day ...`, `theme-night ...`, `theme-switch ...`:
+    /// the screen's colours. Not a security setting; kept here so the
+    /// operator's choice survives a reboot.
+    Theme(ThemeSetting),
+}
+
+/// The screen themes a site file can name (the screen crate's
+/// `screen::Theme`; the tracker does not depend on it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeName {
+    GlassCockpit,
+    FieldDay,
+    RedNight,
+}
+
+impl ThemeName {
+    pub const ALL: [ThemeName; 3] = [ThemeName::GlassCockpit, ThemeName::FieldDay, ThemeName::RedNight];
+    pub const fn word(self) -> &'static str {
+        match self {
+            ThemeName::GlassCockpit => "glass-cockpit",
+            ThemeName::FieldDay => "field-day",
+            ThemeName::RedNight => "red-night",
+        }
+    }
+    pub fn from_word(w: &str) -> Option<ThemeName> {
+        Self::ALL.into_iter().find(|t| t.word().eq_ignore_ascii_case(w))
+    }
+}
+
+/// One theme line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeSetting {
+    /// `theme auto` (`None`) or one theme always.
+    Theme(Option<ThemeName>),
+    Day(ThemeName),
+    Night(ThemeName),
+    /// `theme-switch twilight` (`true`: civil dawn and dusk) or `sunrise`.
+    SwitchTwilight(bool),
+}
+
+/// The theme lines' state: each `None` until a line sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ThemeSite {
+    /// `Some(None)`: auto.
+    pub theme: Option<Option<ThemeName>>,
+    pub day: Option<ThemeName>,
+    pub night: Option<ThemeName>,
+    pub switch_twilight: Option<bool>,
+}
+
+impl ThemeSite {
+    pub fn apply(&mut self, t: ThemeSetting) {
+        match t {
+            ThemeSetting::Theme(x) => self.theme = Some(x),
+            ThemeSetting::Day(x) => self.day = Some(x),
+            ThemeSetting::Night(x) => self.night = Some(x),
+            ThemeSetting::SwitchTwilight(x) => self.switch_twilight = Some(x),
+        }
+    }
+
+    /// Nothing said.
+    pub fn is_empty(&self) -> bool {
+        *self == ThemeSite::default()
+    }
+}
+
+impl core::fmt::Display for ThemeSite {
+    /// `theme auto (day field-day, night red-night, switch twilight)`; the
+    /// parts the file never set say `default`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = |t: Option<ThemeName>| t.map_or("default", |t| t.word());
+        f.write_str("theme ")?;
+        match self.theme {
+            None => f.write_str("default")?,
+            Some(None) => f.write_str("auto")?,
+            Some(Some(t)) => f.write_str(t.word())?,
+        }
+        write!(
+            f,
+            " (day {}, night {}, switch {})",
+            name(self.day),
+            name(self.night),
+            match self.switch_twilight {
+                None => "default",
+                Some(true) => "twilight",
+                Some(false) => "sunrise",
+            }
+        )
+    }
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -209,6 +304,26 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         }
         return Ok(SiteLine::Home { lat, lon, alt });
     }
+    if let Some(kind) = word.get(..5).filter(|h| h.eq_ignore_ascii_case("theme")).and_then(|_| word.get(5..)) {
+        let v = it.next().ok_or("say: theme auto|glass-cockpit|field-day|red-night")?;
+        if it.next().is_some() {
+            return Err("one word after theme, theme-day, theme-night or theme-switch");
+        }
+        let name = || ThemeName::from_word(v).ok_or("theme names: glass-cockpit, field-day, red-night");
+        let t = match kind {
+            "" if v.eq_ignore_ascii_case("auto") => ThemeSetting::Theme(None),
+            "" => ThemeSetting::Theme(Some(name()?)),
+            w if w.eq_ignore_ascii_case("-day") => ThemeSetting::Day(name()?),
+            w if w.eq_ignore_ascii_case("-night") => ThemeSetting::Night(name()?),
+            w if w.eq_ignore_ascii_case("-switch") => match v {
+                v if v.eq_ignore_ascii_case("twilight") => ThemeSetting::SwitchTwilight(true),
+                v if v.eq_ignore_ascii_case("sunrise") => ThemeSetting::SwitchTwilight(false),
+                _ => return Err("say: theme-switch twilight|sunrise"),
+            },
+            _ => return Err("say: theme, theme-day, theme-night or theme-switch"),
+        };
+        return Ok(SiteLine::Theme(t));
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -245,7 +360,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, home, mute, unmute, control)")
+    Err("unknown line (node, home, mute, unmute, control, theme)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -264,6 +379,8 @@ pub struct SiteState {
     pub control_content: Option<bool>,
     /// The hub's own placed position (`home` lines), `(lat, lon, height)`.
     pub home: Option<(f64, f64, Option<f64>)>,
+    /// The screen theme lines.
+    pub theme: ThemeSite,
     pub used: u32,
     pub ignored: u32,
     /// `mute` lines not honoured: too broad, or for a kind that can only be
@@ -306,6 +423,7 @@ impl SiteState {
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
             SiteLine::Home { lat, lon, alt } => self.home = Some((lat, lon, alt)),
             SiteLine::HomeClear => self.home = None,
+            SiteLine::Theme(t) => self.theme.apply(t),
             SiteLine::AllNodesHere => {
                 self.ignored += 1;
                 return;
@@ -416,6 +534,17 @@ pub fn write_mute<W: Write>(w: &mut W, m: &Mute) -> core::fmt::Result {
 /// The line that sets a control-link opt-in (ends in `\n`).
 pub fn write_control<W: Write>(w: &mut W, what: ControlSetting, on: bool) -> core::fmt::Result {
     writeln!(w, "control {} {}", what.word(), if on { "on" } else { "off" })
+}
+
+/// The line that recreates one theme setting (ends in `\n`).
+pub fn write_theme<W: Write>(w: &mut W, t: ThemeSetting) -> core::fmt::Result {
+    match t {
+        ThemeSetting::Theme(None) => writeln!(w, "theme auto"),
+        ThemeSetting::Theme(Some(n)) => writeln!(w, "theme {}", n.word()),
+        ThemeSetting::Day(n) => writeln!(w, "theme-day {}", n.word()),
+        ThemeSetting::Night(n) => writeln!(w, "theme-night {}", n.word()),
+        ThemeSetting::SwitchTwilight(tw) => writeln!(w, "theme-switch {}", if tw { "twilight" } else { "sunrise" }),
+    }
 }
 
 /// The line that places a node (ends in `\n`).
@@ -584,7 +713,8 @@ impl core::fmt::Display for LoadSummary<'_> {
             st.nodes.len(),
             onoff(st.control_ids),
             onoff(st.control_content),
-        )
+        )?;
+        write!(f, "; {}", st.theme)
     }
 }
 
@@ -666,6 +796,42 @@ mod tests {
                 assert_eq!(parse_line(&s), Ok(SiteLine::Control { what, on }));
             }
         }
+    }
+
+    #[test]
+    fn theme_lines_read_back_and_last_one_wins() {
+        use ThemeName::*;
+        assert_eq!(parse_line("theme auto"), Ok(SiteLine::Theme(ThemeSetting::Theme(None))));
+        assert_eq!(parse_line("THEME Red-Night # dark site"), Ok(SiteLine::Theme(ThemeSetting::Theme(Some(RedNight)))));
+        assert_eq!(parse_line("theme-day glass-cockpit"), Ok(SiteLine::Theme(ThemeSetting::Day(GlassCockpit))));
+        assert_eq!(parse_line("Theme-Night field-day"), Ok(SiteLine::Theme(ThemeSetting::Night(FieldDay))));
+        assert_eq!(parse_line("theme-switch sunrise"), Ok(SiteLine::Theme(ThemeSetting::SwitchTwilight(false))));
+        assert_eq!(parse_line("theme-switch twilight"), Ok(SiteLine::Theme(ThemeSetting::SwitchTwilight(true))));
+        for bad in ["theme", "theme night", "theme auto please", "theme-day auto", "theme-switch dusk", "theme-colour red-night", "themé x"] {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
+        // Every line the hub writes reads back as itself.
+        let mut all = std::vec![ThemeSetting::Theme(None), ThemeSetting::SwitchTwilight(true), ThemeSetting::SwitchTwilight(false)];
+        for n in ThemeName::ALL {
+            all.extend([ThemeSetting::Theme(Some(n)), ThemeSetting::Day(n), ThemeSetting::Night(n)]);
+        }
+        for t in all {
+            let mut s: heapless::String<40> = heapless::String::new();
+            write_theme(&mut s, t).unwrap();
+            assert!(s.ends_with('\n'));
+            assert_eq!(parse_line(&s), Ok(SiteLine::Theme(t)), "{s}");
+        }
+        // A file: later lines win, and the summary says what it set.
+        let st = load("theme red-night\ntheme-night glass-cockpit\ntheme auto\ntheme-switch sunrise\n");
+        assert_eq!(
+            st.theme,
+            ThemeSite { theme: Some(None), day: None, night: Some(GlassCockpit), switch_twilight: Some(false) }
+        );
+        assert_eq!(st.used, 4);
+        let sum = LoadSummary { st: &st, sha256: &[0; 32], bytes: 1, lines: 4 };
+        let text = std::format!("{sum}");
+        assert!(text.ends_with("; theme auto (day default, night glass-cockpit, switch sunrise)"), "{text}");
+        assert!(std::format!("{}", ThemeSite::default()).starts_with("theme default"));
     }
 
     #[test]

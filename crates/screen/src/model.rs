@@ -751,6 +751,10 @@ pub struct UiState {
     pub now_ms: u64,
     /// UTC as Unix milliseconds, from GPS time. `None` until GPS time is known.
     pub utc_ms: Option<u64>,
+    /// The hub's own position in use (GPS fix or a manual one), latitude
+    /// and longitude in degrees. Only the automatic theme reads it (sunrise
+    /// and sunset); `None` without one.
+    pub position: Option<(f32, f32)>,
     pub gps: Gps,
     pub nodes: Vec<NodeStatus, MAX_NODES>,
     /// Parallel to `nodes`, for hubs that assign roles: what each node was

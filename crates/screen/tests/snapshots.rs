@@ -321,7 +321,7 @@ fn radar_five() {
 #[test]
 fn radar_five_day() {
     let ui = Ui::new(Settings {
-        theme: Theme::Day,
+        theme: ThemeMode::Fixed(Theme::FieldDay),
         ..Settings::default()
     });
     shot("radar_5_drones_day", &ui, &five_drones(true));

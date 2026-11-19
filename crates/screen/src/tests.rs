@@ -192,7 +192,7 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     ui.button(Button::Select, &s);
     assert_eq!(ui.mode(), Mode::Edit);
     ui.button(Button::Select, &s); // theme
-    assert_eq!(ui.settings().theme, Theme::Day);
+    assert_eq!(ui.settings().theme, ThemeMode::Fixed(Theme::FieldDay));
     ui.button(Button::Down, &s);
     for _ in 0..3 {
         ui.button(Button::Select, &s); // brightness 3 -> 4 -> 5 -> 1
@@ -204,7 +204,7 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     ui.button(Button::Down, &s);
     assert_eq!(ui.done_row(), None);
     ui.button(Button::Select, &s); // hub moved
-    assert_eq!(ui.done_row(), Some(3));
+    assert_eq!(ui.done_row(), Some(SettingsRow::HubMoved));
     assert_eq!(ui.take_request(), Some(Request::HubMoved));
     assert_eq!(ui.take_request(), None, "taken once");
     // WP-12: while the hub waits on a new place, the same row accepts it.
@@ -249,6 +249,120 @@ fn signals_and_health_select_is_inert_and_settings_edit() {
     assert_eq!(ui.mode(), Mode::Browse);
     assert_eq!(ui.page(), Page::Settings);
     assert_eq!(ui.done_row(), None, "cleared on leaving");
+}
+
+/// The Theme row cycles Auto -> Glass Cockpit -> Field Day -> Red Night ->
+/// Auto, the three Auto rows show only while it is Auto, and the change is
+/// reported once, when editing ends, as (before, after).
+#[test]
+fn theme_rows_come_and_go_and_changes_are_reported_once() {
+    let s = three();
+    let mut ui = Ui::default();
+    assert_eq!(ui.settings().theme, ThemeMode::Fixed(Theme::GlassCockpit), "the default");
+    assert_eq!(ui.effective_theme(&s), Theme::GlassCockpit);
+    ui.button(Button::Up, &s);
+    assert_eq!(ui.page(), Page::Settings);
+    ui.button(Button::Select, &s);
+    assert_eq!(ui.settings().rows().len(), 6);
+    for want in [Theme::FieldDay, Theme::RedNight] {
+        ui.button(Button::Select, &s);
+        assert_eq!(ui.settings().theme, ThemeMode::Fixed(want));
+        assert_eq!(ui.effective_theme(&s), want, "applies at once");
+    }
+    ui.button(Button::Select, &s);
+    assert_eq!(ui.settings().theme, ThemeMode::Auto);
+    assert_eq!(
+        ui.settings().rows(),
+        &[
+            SettingsRow::Theme,
+            SettingsRow::DayTheme,
+            SettingsRow::NightTheme,
+            SettingsRow::SwitchAt,
+            SettingsRow::Brightness,
+            SettingsRow::Buzzer,
+            SettingsRow::HubMoved,
+            SettingsRow::Alarms,
+            SettingsRow::NodesAtHub
+        ]
+    );
+    assert_eq!(ui.take_settings_change(), None, "nothing until editing ends");
+    ui.button(Button::Down, &s);
+    assert_eq!(ui.settings_row_kind(), SettingsRow::DayTheme);
+    ui.button(Button::Select, &s);
+    assert_eq!(ui.settings().day_theme, Theme::RedNight);
+    ui.button(Button::Down, &s);
+    ui.button(Button::Down, &s);
+    assert_eq!(ui.settings_row_kind(), SettingsRow::SwitchAt);
+    ui.button(Button::Select, &s);
+    assert_eq!(ui.settings().switch_at, SwitchAt::Sunrise);
+    // Wrapping goes through all nine rows.
+    for _ in 0..6 {
+        ui.button(Button::Down, &s);
+    }
+    assert_eq!(ui.settings_row(), 0);
+    ui.button(Button::Back, &s);
+    let (before, after) = ui.take_settings_change().expect("a change");
+    assert_eq!(before, Settings::default());
+    assert_eq!(after.theme, ThemeMode::Auto);
+    assert_eq!(after.day_theme, Theme::RedNight);
+    assert_eq!(ui.take_settings_change(), None, "taken once");
+    // An edit that ends where it began reports nothing; the idle timeout
+    // ends an edit like Back.
+    ui.button(Button::Select, &s);
+    ui.button(Button::Select, &s);
+    ui.button(Button::Select, &s);
+    ui.button(Button::Select, &s);
+    ui.button(Button::Select, &s);
+    assert_eq!(ui.settings().theme, ThemeMode::Auto);
+    ui.tick(s.now_ms + IDLE_MS);
+    assert_eq!(ui.mode(), Mode::Browse);
+    assert_eq!(ui.take_settings_change(), None);
+    ui.button(Button::Select, &s);
+    ui.button(Button::Select, &s); // Auto -> Glass Cockpit: rows shrink
+    assert_eq!(ui.settings().rows().len(), 6);
+    ui.tick(s.now_ms + IDLE_MS);
+    assert_eq!(ui.take_settings_change().map(|c| c.1.theme), Some(ThemeMode::Fixed(Theme::GlassCockpit)));
+    // Settings loaded by the hub are not reported back to it.
+    ui.set_settings(Settings { theme: ThemeMode::Fixed(Theme::RedNight), ..Settings::default() });
+    assert_eq!(ui.take_settings_change(), None);
+    assert_eq!(ui.effective_theme(&s), Theme::RedNight);
+}
+
+/// Auto by the sun at the hub's position, the night theme before anything
+/// is known, the last position kept when the fix goes, the last verdict
+/// kept when time goes.
+#[test]
+fn auto_theme_follows_the_sun() {
+    let mut s = three();
+    let ui = Ui::new(Settings { theme: ThemeMode::Auto, ..Settings::default() });
+    assert_eq!(ui.effective_theme(&s), Theme::RedNight, "nothing known: night");
+    assert_eq!(ui.auto_status(&s), AutoStatus::Waiting { day: None });
+    // Philadelphia, 2026-11-18 16:00 UTC (11:00 local): day.
+    s.position = Some((39.95, -75.16));
+    s.utc_ms = Some(1_795_017_600_000);
+    assert_eq!(ui.effective_theme(&s), Theme::FieldDay);
+    let AutoStatus::Sun { day: true, next_utc_ms: Some(next), stale_position: false } = ui.auto_status(&s) else {
+        panic!("{:?}", ui.auto_status(&s))
+    };
+    // Civil dusk 22:11 UTC (US Naval Observatory).
+    let dusk = 1_795_017_600_000 + (6 * 60 + 11) * 60_000;
+    assert!(next.abs_diff(dusk) < 120_000, "{next} vs {dusk}");
+    // 23:00 UTC: night. The fix is gone but its position is remembered.
+    s.position = None;
+    s.utc_ms = Some(1_795_017_600_000 + 7 * 3_600_000);
+    assert_eq!(ui.effective_theme(&s), Theme::RedNight);
+    assert!(matches!(ui.auto_status(&s), AutoStatus::Sun { day: false, stale_position: true, .. }));
+    // No time either: keep the last verdict.
+    s.utc_ms = None;
+    assert_eq!(ui.effective_theme(&s), Theme::RedNight);
+    assert_eq!(ui.auto_status(&s), AutoStatus::Waiting { day: Some(false) });
+    // Sunrise & sunset instead of dawn & dusk: 21:55 UTC is after sunset
+    // (21:42) but before dusk (22:11).
+    s.utc_ms = Some(1_795_017_600_000 + (5 * 60 + 55) * 60_000);
+    s.position = Some((39.95, -75.16));
+    assert_eq!(ui.effective_theme(&s), Theme::FieldDay);
+    let ui = Ui::new(Settings { theme: ThemeMode::Auto, switch_at: SwitchAt::Sunrise, ..Settings::default() });
+    assert_eq!(ui.effective_theme(&s), Theme::RedNight);
 }
 
 #[test]

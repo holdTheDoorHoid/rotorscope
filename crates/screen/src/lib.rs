@@ -37,8 +37,11 @@ pub mod band;
 mod draw;
 pub mod model;
 mod render;
+pub mod sun;
 pub mod theme;
 pub mod ui;
+#[cfg(feature = "wide")]
+pub mod wide;
 
 #[cfg(feature = "tracker")]
 pub mod from_tracker;
@@ -47,7 +50,9 @@ pub use band::{BAND_ROWS, Band, render_banded};
 pub use model::*;
 pub use render::{BAR_H, HEIGHT, WIDTH, render};
 pub use theme::Palette;
-pub use ui::{Alert, Button, ButtonDecoder, Buzz, Mode, Page, Request, Settings, Theme, Ui};
+pub use ui::{
+    Alert, AutoStatus, Button, ButtonDecoder, Buzz, Mode, Page, Request, Settings, SettingsRow, SwitchAt, Theme, ThemeMode, Ui,
+};
 
 #[cfg(test)]
 mod tests;

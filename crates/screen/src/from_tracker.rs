@@ -16,7 +16,7 @@ use crate::model::*;
 /// [`MAX_DRONES`] most relevant when there are more (active before stale,
 /// confirmed before unconfirmed, then nearest, then newest: a forged drone
 /// can claim to be at the hub, so standing comes before claimed distance).
-/// Also sets `now_ms`, `utc_ms`, `threats.flood_per_s` and
+/// Also sets `now_ms`, `utc_ms`, `position`, `threats.flood_per_s` and
 /// `total_drones`, and downgrades a 2D/3D/manual `gps.fix` to `None` when
 /// the tracker considers the own position too old, so the layout and the
 /// numbers agree. (`Fix::Absent` is left alone: it says more.)
@@ -27,6 +27,7 @@ pub fn fill_from_tracker<const N: usize, const A: usize>(
 ) {
     state.now_ms = ctx.now_ms;
     state.utc_ms = ctx.utc_ms;
+    state.position = ctx.own.map(|o| (o.lat as f32, o.lon as f32));
     if ctx.own.is_none() && state.gps.has_position() {
         state.gps.fix = Fix::None;
     }
