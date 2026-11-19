@@ -2,7 +2,7 @@
 # A firmware image's parts list (software bill of materials), from cargo's own view of the
 # build plus the code cargo does not see. Standard library only; no network. Run with -I:
 #
-#   cargo metadata --locked --offline --format-version 1 --filter-platform <triple> \
+#   cargo metadata --locked --offline --format-version 1 \
 #       [--features ...] [--no-default-features] --manifest-path <firmware>/Cargo.toml >meta.json
 #   cargo tree --locked --offline --target <triple> [features] --manifest-path ... \
 #       --prefix none -f '{p}' -e normal,no-proc-macro >image.tree     (what is linked)

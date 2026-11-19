@@ -387,7 +387,7 @@ for l in "${selected[@]}"; do
       case $a in --target) skip=1 ;; *) feats+=("$a") ;; esac
     done
     "${clean_env[@]}" cargo "+$toolchain" metadata "${meta_args[@]}" --format-version 1 \
-      --filter-platform "$triple" "${feats[@]}" >"$work/$name.meta.json"
+      "${feats[@]}" >"$work/$name.meta.json"
     tree=("${clean_env[@]}" cargo "+$toolchain" tree "${meta_args[@]}" --target "$triple" "${feats[@]}" --prefix none -f '{p}')
     "${tree[@]}" -e normal,no-proc-macro >"$work/$name.image.tree"
     "${tree[@]}" -e normal,build >"$work/$name.all.tree"
