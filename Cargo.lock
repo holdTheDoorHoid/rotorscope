@@ -1664,6 +1664,7 @@ name = "nodeimage"
 version = "0.1.0"
 dependencies = [
  "airlink",
+ "fuzzkit",
  "heapless 0.8.0",
  "kitkeys",
  "link",

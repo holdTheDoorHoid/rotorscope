@@ -21,3 +21,4 @@ kitkeys = { path = "../kitkeys", optional = true }
 [dev-dependencies]
 airlink = { path = "../airlink" }
 kitkeys = { path = "../kitkeys" }
+fuzzkit = { path = "../fuzzkit" }
