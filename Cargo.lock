@@ -1475,6 +1475,7 @@ dependencies = [
 name = "kitkeys"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "sha2 0.11.1",
 ]
 

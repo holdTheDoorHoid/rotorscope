@@ -9,3 +9,6 @@ license.workspace = true
 # HMAC-SHA256 (src/hmac.rs). No default
 # features: no_std, no alloc.
 sha2 = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
