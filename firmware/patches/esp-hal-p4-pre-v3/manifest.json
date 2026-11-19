@@ -12,5 +12,11 @@
     "esp-backtrace",
     "esp-bootloader-esp-idf",
     "esp-println"
+  ],
+  "local_patches": [
+    {
+      "path": "rotorscope-pre-v3-memory.patch",
+      "sha256": "538754f02a703deef9783f52563c48fc23ae8f7b107d32d1fbfd8907bfd9fa57"
+    }
   ]
 }
