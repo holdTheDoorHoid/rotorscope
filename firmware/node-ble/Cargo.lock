@@ -1660,11 +1660,13 @@ dependencies = [
 name = "node-common"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "critical-section",
  "embassy-time",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "heapless 0.8.0",
+ "kitkeys",
  "link",
  "nodeimage",
  "portable-atomic",
@@ -1675,7 +1677,9 @@ dependencies = [
 name = "nodeimage"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "heapless 0.8.0",
+ "kitkeys",
  "link",
  "postcard",
 ]

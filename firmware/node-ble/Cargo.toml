@@ -46,7 +46,7 @@ esp32c5 = [
 # second to let it send and hear the gateway (src/uplink.rs). `coex` is
 # esp-radio's coexistence support, needed to run both stacks at all. Makes
 # the node transmit; see docs/ESPNOW.md and README.md "ESP-NOW".
-espnow = ["esp-radio/wifi", "esp-radio/esp-now", "esp-radio/coex", "dep:airlink"]
+espnow = ["esp-radio/wifi", "esp-radio/esp-now", "esp-radio/coex", "dep:airlink", "node-common/espnow"]
 # Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
 # hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). The scan never pauses (no Wi-Fi at all). C5 only; not with `espnow`.
