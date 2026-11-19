@@ -240,6 +240,7 @@ futures-macro 0.3 registry
 futures-sink 0.3 registry
 futures-task 0.3 registry
 futures-util 0.3 registry
+fuzzkit * path
 gateway * path
 gcd 2 registry
 generator 0.8 registry
