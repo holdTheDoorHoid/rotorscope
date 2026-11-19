@@ -19,8 +19,10 @@
 //!    forwarded, at most one per [`UNPROVISIONED_EVERY_MS`] in total, from any
 //!    address, in the shared lane.
 //! 5. Version 3 `Frames`: the sender must be in the roster the hub pushed
-//!    ([`Uplink::set_roster`]); before the first roster arrives nobody is
-//!    ([`Refuse::NotInRoster`]).
+//!    ([`Uplink::set_roster`]), else [`Refuse::NotInRoster`]. Before the
+//!    first roster arrives nobody is known: the packet goes nowhere and is
+//!    counted ([`Drop::NoRoster`], `unlisted`), but nothing is reported, so
+//!    a gateway restart does not make the hub cry "forged" for each node.
 //! 6. Version 1 (open kit, unsealed) `Frames`: forwarded from a roster
 //!    address in its own lane, from anyone else in the shared lane (an open
 //!    kit's hub has no roster to push; a keyed hub counts them as
@@ -151,6 +153,10 @@ pub enum Drop {
     UnprovisionedRate,
     /// No buffer for it (the UART to the hub is behind).
     QueueFull,
+    /// A node's packet before the hub's first roster since this gateway
+    /// started: nobody is known yet, so it is not forwarded, and not
+    /// refused either (counted as `unlisted`, nothing reported).
+    NoRoster,
 }
 
 // ------------------------------------------------------------ budgets --
@@ -501,6 +507,7 @@ impl<const SLOTS: usize> Uplink<SLOTS> {
                     Drop::Foreign => self.counts.foreign = self.counts.foreign.wrapping_add(1),
                     Drop::Refused(r) => self.refusals.record(src, r, rssi, now_ms),
                     Drop::UnprovisionedRate => self.counts.unprovisioned_limited = self.counts.unprovisioned_limited.wrapping_add(1),
+                    Drop::NoRoster => self.counts.unlisted = self.counts.unlisted.wrapping_add(1),
                     _ => {}
                 }
                 return Outcome::Dropped(d);
@@ -547,6 +554,7 @@ impl<const SLOTS: usize> Uplink<SLOTS> {
         }
         match v3::inspect(data) {
             Ok(shape) => match shape.kind {
+                Kind::Frames if self.roster.is_none() => Err(Drop::NoRoster),
                 Kind::Frames => self.roster_lane(&src).ok_or(Drop::Refused(Refuse::NotInRoster)),
                 Kind::Unprovisioned => {
                     if self.unprovisioned_at.is_some_and(|t| now_ms.saturating_sub(t) < UNPROVISIONED_EVERY_MS) {
@@ -1287,15 +1295,22 @@ mod tests {
         let mut u = std::boxed::Box::new(Up::new());
         assert!(!u.has_roster());
         assert!(u.roster().is_empty());
-        // Before any roster, no node packet passes.
-        assert_eq!(u.offer(A, 0, &small(1), 0, 0), Outcome::Dropped(Drop::Refused(Refuse::NotInRoster)));
+        // Before any roster, no node packet passes. It is not refused as
+        // "not in the roster" either: the gateway does not know the roster
+        // yet, and the hub would report each node as forged traffic at every
+        // gateway restart (bench, 2026-11-19). Counted, not reported.
+        assert_eq!(u.offer(A, 0, &small(1), 0, 0), Outcome::Dropped(Drop::NoRoster));
+        assert_eq!(u.counts.unlisted, 1);
+        let mut reported = 0;
+        u.refusals.drain(10_000, |_| reported += 1);
+        assert_eq!(reported, 0, "nothing for the hub to raise");
         u.set_roster(&[A]);
         assert_eq!(u.offer(A, 0, &small(1), 0, 0), Outcome::Queued);
         assert_eq!(u.offer(STRANGER, 0, &small(2), 0, 0), Outcome::Dropped(Drop::Refused(Refuse::NotInRoster)));
         // An empty roster lets nobody in.
         u.set_roster(&[]);
         assert_eq!(u.offer(A, 0, &small(3), 0, 0), Outcome::Dropped(Drop::Refused(Refuse::NotInRoster)));
-        assert_eq!(u.counts.unlisted, 1, "A's queued packet went with it");
+        assert_eq!(u.counts.unlisted, 2, "A's queued packet went with it (and the one before the first roster)");
         assert_eq!(u.queued(), 0);
     }
 
