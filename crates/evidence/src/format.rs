@@ -254,9 +254,11 @@ pub enum EventCode {
     /// A drone's threat level rose (tracker `behaviour`, docs/THREAT-PROFILES.md),
     /// once per rise to caution or above. Data: level (1: 1 notice, 2 caution,
     /// 3 warning, 4 critical), drone track id (u32 LE), the rule numbers of up
-    /// to four reasons (4, most serious first, 0 none), flags (1: bit 0
-    /// snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3 held after
-    /// the drone was lost). Text: the drone and the reasons with their numbers.
+    /// to four reasons (4, most serious first, 0 none; 1-19 as the design
+    /// numbers them, 20 last seen inbound, 21 spotter for a striker), flags
+    /// (1: bit 0 snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3
+    /// held after the drone was lost). Text: the drone and the reasons with
+    /// their numbers.
     /// (Codes 26 and 27 are taken on other branches: `threat_ended`,
     /// `continuity`.)
     ThreatLevel = 28,

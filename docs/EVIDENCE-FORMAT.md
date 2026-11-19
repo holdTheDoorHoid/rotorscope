@@ -78,7 +78,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 1 | boot | key class (1), public key (65), chip revision major (1), minor (1). Always and only record #0. |
 | 2 | card_mounted | this file number (u32), previous file number (u32, 0 none), previous file length at mount (u32), SHA-256 of the previous file's last whole record (32), previous file status (1): 0 none, 1 ends on a whole record, 2 ends inside an incomplete record, 3 unreadable |
 | 3 | card_lost | queued bytes that go to the next file (u32) |
-| 4 | setting | new value (1); text says which setting |
+| 4 | setting | new value (1); text says which setting. The P4 hub uses the byte as a tag for some: 3 site file, 4 GPS memory, 5 repeat-visitor history (`ROTORSCP/VISITS.DAT` read, discarded, wiped with console `W`, or switched by `visits on/off`; slice 16d) |
 | 5 | clock | old UTC (u64, 0 none), new UTC (u64), step ms (i64), PPS-locked (1) |
 | 6 | gps_fix | (none) |
 | 7 | gps_lost | (none) |
@@ -100,7 +100,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 23, 24 | (reserved) | taken by the acoustic work: 23 `sound`, 24 `sound_clip` (on the acoustic branch) |
 | 25 | id_disputed | drone track id (u32 LE), what (1: bit 0 position, 1 Self-ID, 2 operator ID, 3 a second ID), other claim's source (1: 0 Remote ID, 1 DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none); text: two transmitters claim this ID, how far apart, neither verified (tracker `claims`, docs/SPOOFING.md) |
 | 26, 27 | (reserved) | taken on other branches: 26 `threat_ended`, 27 `continuity` |
-| 28 | threat_level | a drone's threat level rose (docs/THREAT-PROFILES.md, tracker `behaviour`), once per rise to caution or above: level (1: 1 notice, 2 caution, 3 warning, 4 critical), drone track id (u32 LE), rule numbers of up to four reasons, most serious first (4: 1 in area, 2 pilot near, 3 pilot outside, 4 above ceiling, 5 beeline, 6 fast inbound, 7 loitering, 8 circling, 9 low hover, 10 drop pattern, 11 following (7-11 since slice 16b), 20 last seen inbound; 0 none), flags (1: bit 0 snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3 held after the drone was lost); text: the level, the drone, and each reason with its numbers, e.g. `Warning: drone SN-1 heading for house, 640 m away at 12 m/s, there in about 41 s` |
+| 28 | threat_level | a drone's threat level rose (docs/THREAT-PROFILES.md, tracker `behaviour`), once per rise to caution or above: level (1: 1 notice, 2 caution, 3 warning, 4 critical), drone track id (u32 LE), rule numbers of up to four reasons, most serious first (4: 1 in area, 2 pilot near, 3 pilot outside, 4 above ceiling, 5 beeline, 6 fast inbound, 7 loitering, 8 circling, 9 low hover, 10 drop pattern, 11 following (7-11 since slice 16b), 14 spotter then striker (on the striker), 15 several at once (or during jamming or GPS interference), 16 probing, 17 repeat visitor, 18 pilot on the move, 19 identity changed mid-flight (14-19 since slice 16d), 20 last seen inbound, 21 spotter for a striker (part of 14, on the spotter, since 16d); 0 none), flags (1: bit 0 snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3 held after the drone was lost); text: the level, the drone, and each reason with its numbers, e.g. `Warning: drone SN-1 heading for house, 640 m away at 12 m/s, there in about 41 s` |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
 
