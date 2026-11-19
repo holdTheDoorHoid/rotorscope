@@ -765,6 +765,21 @@ impl HubLink {
     }
 }
 
+/// Split what the coverage coordinator writes for one node (`To { node }`
+/// then whole command frames, as for the bus or an old gateway) into the
+/// node and the frames to seal for it. `None` if it does not start with a
+/// whole `To`.
+pub fn split_to(bytes: &[u8]) -> Option<(Mac, &[u8])> {
+    let end = bytes.iter().position(|&b| b == 0)?;
+    let mut to = [0u8; 16];
+    let t = to.get_mut(..=end)?;
+    t.copy_from_slice(&bytes[..=end]);
+    match postcard::from_bytes_cobs::<link::Command>(t) {
+        Ok(link::Command::To { node }) => Some((node, &bytes[end + 1..])),
+        _ => None,
+    }
+}
+
 /// Why a command was not sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandError {

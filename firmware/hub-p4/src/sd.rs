@@ -238,8 +238,11 @@ pub struct Logger {
     /// Its next contents, written by `record` when the card is free (WP-12).
     gps_mem_pending: Option<heapless::String<128>>,
     pub gps_mem_writes: u32,
-    /// The boot counter in the evidence folder (`evidence::continuity`).
-    counter: evidence::continuity::FileCounter,
+    /// The boot counter (`hublink::continuity`): the hub's flash counter
+    /// (`rsboot`, also the link epoch) when this boot recorded one, with the
+    /// previous boot's head in the evidence folder's state files; else the
+    /// state files alone, as before.
+    counter: hublink::continuity::HubCounter,
     /// Records the counter state last said were on the card, and when.
     state_records: u64,
     state_at: u64,
@@ -359,10 +362,21 @@ impl Logger {
             gps_mem: None,
             gps_mem_pending: None,
             gps_mem_writes: 0,
-            counter: evidence::continuity::FileCounter::new(),
+            counter: hublink::continuity::HubCounter::new(),
             state_records: 0,
             state_at: 0,
         }
+    }
+
+    /// At boot: this boot's `rsboot` value, when it was recorded (it is
+    /// then the evidence boot counter too, `linkauth.rs`).
+    pub fn set_boot_counter(&mut self, value: Option<u32>) {
+        self.counter.set_flash(value);
+    }
+
+    /// The boot counter's source for the boot record.
+    pub fn counter_source(&self) -> u8 {
+        self.counter.source()
     }
 
     /// The O4 key read from the card, once (the decryptor keeps it).
@@ -956,15 +970,17 @@ impl Logger {
                 self.ev_file = Some(EvFile { dir, file, name, pos: 0, dirty: false, flushed_at: now });
                 // The boot counter (WP-14a): advanced and saved before this
                 // boot writes anything else to this card's state.
-                use evidence::continuity::{BootCounter, Continuity, SlotCounter};
+                use evidence::continuity::{BootCounter, Continuity};
+                use hublink::continuity::CardCounter;
                 let mut slots = SdSlots { vm, dir };
-                match (SlotCounter { slots: &mut slots, state: &mut self.counter }).begin(ev.boot_id()) {
+                let source = self.counter.source();
+                match (CardCounter { slots: &mut slots, state: &mut self.counter }).begin(ev.boot_id()) {
                     Ok(Some(k)) => ev.continuity(&k),
                     Ok(None) => println!("hub-p4: evidence boot counter {:?}: this boot already counted on this card", self.counter.counter()),
                     Err(e) => {
                         println!("hub-p4: evidence boot counter unreadable: {e:?}");
                         ev.continuity(&Continuity {
-                            source: evidence::format::boot::COUNTER_SD_FILE,
+                            source,
                             status: evidence::continuity::STORE_ERROR,
                             counter: 0,
                             prev_boot: [0; 8],
@@ -1106,11 +1122,11 @@ impl Logger {
             && self.counter.counter().is_some()
             && (self.state_at == 0 || now.saturating_sub(self.state_at) >= evidence::continuity::PROGRESS_EVERY_MS)
         {
-            use evidence::continuity::{BootCounter, SlotCounter};
+            use evidence::continuity::BootCounter;
             self.state_at = now.max(1);
             self.state_records = records;
             let mut slots = SdSlots { vm, dir: f.dir };
-            if let Err(e) = (SlotCounter { slots: &mut slots, state: &mut self.counter }).progress(records, head) {
+            if let Err(e) = (hublink::continuity::CardCounter { slots: &mut slots, state: &mut self.counter }).progress(records, head) {
                 self.ev_errors += 1;
                 println!("hub-p4: evidence boot counter state not saved: {e:?}");
             }

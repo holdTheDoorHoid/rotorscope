@@ -594,3 +594,13 @@ fn a_cancelled_sync_is_sent_again() {
     k.tick();
     assert_eq!(transmits(&k.wire.take()).len(), 1);
 }
+
+#[test]
+fn split_to_takes_the_coordinators_bytes() {
+    let mut b = [0u8; 64];
+    let n = link::encode_command(&link::Command::To { node: MAC_A }, &mut b).unwrap().len();
+    b[n..n + 3].copy_from_slice(&[4, 1, 0]);
+    assert_eq!(split_to(&b[..n + 3]), Some((MAC_A, &[4u8, 1, 0][..])));
+    assert_eq!(split_to(&[4, 1, 0]), None);
+    assert_eq!(split_to(&[]), None);
+}
