@@ -148,7 +148,8 @@ fn cycles() -> u32 {
 /// jitter, the time since power-on, the reset cause and the chip's unique
 /// identifiers. Returns the id and the RNG's first 8 bytes, which the hub
 /// prints so a bench can see whether the RNG alone repeats across power
-/// cycles.
+/// cycles. Out of line: its buffers stay off the main frame.
+#[inline(never)]
 pub fn make_boot_id(reset_code: u32) -> ([u8; 8], [u8; 8]) {
     let rng = esp_hal::rng::Rng::new();
     let mut m = evidence::bootid::Mixer::new();
@@ -343,6 +344,7 @@ impl Evidence {
     /// The data also names the build (date, source commit and whether the
     /// tree was modified), the boot counter source and how the boot id was
     /// made (`evidence::format::boot`).
+    #[inline(never)]
     pub fn boot(&mut self, chip: (u8, u8), reset: &str, counter_source: u8, boot_id_method: u8) {
         use evidence::format::boot;
         let (git, git_state) = boot::parse_git(GIT);
@@ -449,7 +451,9 @@ impl Evidence {
     }
 
     /// Once a second: GPS, clock, nodes and pack changes become events.
-    /// `pack`: the airspace pack in use and its SHA-256.
+    /// `pack`: the airspace pack in use and its SHA-256. Out of line: its
+    /// text buffers stay off the main loop's frame.
+    #[inline(never)]
     pub fn watch(&mut self, gps: &crate::gps::Gps, nodes: &[crate::links::NodeStats], pack: Option<(&airspace::Pack<'_>, [u8; 32])>, now: u64) {
         use tracker::json::GpsState;
         self.watch_integrity(gps);

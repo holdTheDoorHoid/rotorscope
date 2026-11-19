@@ -1039,7 +1039,10 @@ impl Logger {
 
     /// Length, hash of the last whole record, and status (1 whole, 2 ends
     /// in an incomplete record, 3 no whole record) of the evidence file
-    /// `name`. Closes it again whatever happens.
+    /// `name`. Closes it again whatever happens. Out of line: its 2 KB
+    /// buffer is on the stack only for this call (not under the boot
+    /// counter's card reads in `mount_evidence`).
+    #[inline(never)]
     fn previous_tail(vm: &Vm, dir: RawDirectory, name: &str) -> Result<(u32, [u8; 32], u8), FsError> {
         let f = vm.open_file_in_dir(dir, name, Mode::ReadOnly)?;
         let r = (|| {
