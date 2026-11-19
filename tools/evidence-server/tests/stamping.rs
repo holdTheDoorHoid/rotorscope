@@ -291,6 +291,9 @@ fn only_the_fingerprint_leaves_and_the_stamp_is_kept() {
             "accept" => assert_eq!(v, "*/*"),
             "content-type" => assert_eq!(v, "application/timestamp-query"),
             "content-length" => assert_eq!(v, "69"),
+            // Fixed, so a workspace-wide build (where another crate turns on
+            // ureq's gzip) sends the same bytes.
+            "accept-encoding" => assert_eq!(v, "identity"),
             other => panic!("unexpected header {other}: {v}"),
         }
         names.push(n);

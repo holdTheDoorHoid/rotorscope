@@ -60,12 +60,22 @@ pub fn agent(timeout: std::time::Duration) -> ureq::Agent {
 }
 
 /// Says only what the client speaks, nothing about this server or unit.
+///
+/// Requests also set `Accept-Encoding: identity`: ureq adds `gzip` when
+/// another crate in a workspace-wide build turns its `gzip` feature on
+/// (tools/airspace-pack does), and the bytes sent should not depend on how
+/// the server was built.
 pub const USER_AGENT: &str = "rfc3161-client";
 
 /// POST a TimeStampReq; the reply's body, at most [`MAX_REPLY`] bytes.
 /// Only `200` is a reply.
 pub fn post_query(agent: &ureq::Agent, url: &str, req: &[u8]) -> Result<Vec<u8>, String> {
-    let resp = agent.post(url).set("Content-Type", "application/timestamp-query").send_bytes(req).map_err(short_error)?;
+    let resp = agent
+        .post(url)
+        .set("Content-Type", "application/timestamp-query")
+        .set("Accept-Encoding", "identity")
+        .send_bytes(req)
+        .map_err(short_error)?;
     if resp.status() != 200 {
         return Err(format!("HTTP {} (redirects are not followed)", resp.status()));
     }
@@ -74,7 +84,7 @@ pub fn post_query(agent: &ureq::Agent, url: &str, req: &[u8]) -> Result<Vec<u8>,
 
 /// GET a published file (certificate chain, revocation list), capped.
 pub fn get_capped(agent: &ureq::Agent, url: &str, max: usize) -> Result<Vec<u8>, String> {
-    let resp = agent.get(url).call().map_err(short_error)?;
+    let resp = agent.get(url).set("Accept-Encoding", "identity").call().map_err(short_error)?;
     if resp.status() != 200 {
         return Err(format!("HTTP {} (redirects are not followed)", resp.status()));
     }

@@ -308,6 +308,7 @@ Host: <the service>
 User-Agent: rfc3161-client
 Accept: */*
 Content-Type: application/timestamp-query
+Accept-Encoding: identity
 Content-Length: 69
 
 <69 bytes: DER TimeStampReq = SHA-256 algorithm id, the 32-byte imprint,
