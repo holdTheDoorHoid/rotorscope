@@ -67,7 +67,7 @@ impl Sim {
         for l in site_lines {
             st.apply(site::parse_line(l).unwrap_or_else(|e| panic!("{l}: {e}")));
         }
-        tr.set_places(st.places);
+        tr.set_places(&st.places);
         Self { tr, s: 0, own: None, seed: 12345 }
     }
 
@@ -572,7 +572,7 @@ fn drones_without_a_position_or_unconfirmed_get_no_level() {
     let mut tr: std::boxed::Box<Tracker> = std::boxed::Box::default();
     let mut st = site::SiteState::default();
     st.apply(site::parse_line(HOUSE).unwrap());
-    tr.set_places(st.places);
+    tr.set_places(&st.places);
     tr.set_own_fix(SITE.0, SITE.1, None, T0, Some((0.0, None)));
     // Only a Basic ID: no position.
     let id = encode::message(&Message::BasicId(BasicId {
@@ -589,7 +589,8 @@ fn drones_without_a_position_or_unconfirmed_get_no_level() {
     // One report inside the area: not confirmed yet, not judged.
     let p = Flight::Hover { lat: SITE.0, lon: SITE.1, alt_m: 30.0 }.at(0.0);
     let mut tr2: std::boxed::Box<Tracker> = std::boxed::Box::default();
-    tr2.set_places(tr.places().clone());
+    let places = tr.places().clone();
+    tr2.set_places(&places);
     tr2.ingest(0, &det(Transport::WifiBeacon, [0x60, 0, 0, 0, 0, 9], -60, &frame("ONCE", &p, None)), T0);
     tr2.tick_behaviour(T0);
     assert_eq!(tr2.tracks()[0].threat.level, None);

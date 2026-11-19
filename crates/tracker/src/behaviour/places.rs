@@ -107,6 +107,20 @@ impl Places {
         Self { areas: Vec::new(), bubble_m: None, friends: Vec::new() }
     }
 
+    /// Become a copy of `o`, one entry at a time (no whole `Places` on the
+    /// stack).
+    pub fn copy_from(&mut self, o: &Places) {
+        self.areas.clear();
+        for a in &o.areas {
+            let _ = self.areas.push(a.clone());
+        }
+        self.friends.clear();
+        for f in &o.friends {
+            let _ = self.friends.push(f.clone());
+        }
+        self.bubble_m = o.bubble_m;
+    }
+
     /// Areas with a shape, and whether the bubble is on: anything to protect.
     pub fn any(&self) -> bool {
         self.bubble_m.is_some() || self.areas.iter().any(|a| a.shape.is_some())

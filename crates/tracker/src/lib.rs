@@ -1758,9 +1758,10 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         &mut self.places
     }
 
-    /// Replace them (the site file read at mount).
-    pub fn set_places(&mut self, p: behaviour::Places) {
-        self.places = p;
+    /// Replace them (the site file read at mount), copied in place (no
+    /// second ~2 KB copy on the stack).
+    pub fn set_places(&mut self, p: &behaviour::Places) {
+        self.places.copy_from(p);
     }
 
     /// The path history of a track ([`behaviour::path`]).
