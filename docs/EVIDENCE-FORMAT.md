@@ -160,8 +160,10 @@ a previous boot with *n* records and head *h*: if that boot's records are
 supplied, record *n-1* must be there and hash to *h*. A previous log that
 ends before *n-1* was cut short (or not supplied in full), a different
 record *n-1* was changed: both failures. (In a server's export bundle, a previous boot that ends on its last
-checkpoint is a gap instead: the server only takes batches that end on a
-checkpoint, so a boot's last unsigned records are only on the card.) A
+checkpoint is a gap instead: a server takes a boot's last unsigned records
+only once the next boot's continuity record that names them is stored
+(evidence-server since WP-14b; older bundles never have them), so until
+then they are only on the card.) A
 previous boot not supplied while earlier boots are is a missing boot (a failure, or with `--allow-gaps` a
 gap). The earliest boot supplied has its predecessor named, outside what
 was checked. A previous boot's records after its own last checkpoint, up

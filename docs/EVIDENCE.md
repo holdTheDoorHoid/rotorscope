@@ -135,6 +135,38 @@ the log (see "Who signed").
   The access log is not signed, so whoever runs the server can rewrite it
   whole; signing it is later work.
 - **A batch altered on the way to the server**: refused on arrival.
+- **A boot's last records on the server** (WP-14b): a batch must end on a
+  signed checkpoint, except a boot's tail (its records after its last
+  checkpoint), which the server takes once the next boot's records are
+  stored and only if that boot's continuity record names the tail's last
+  record by number and hash; that boot's signature then covers it. The
+  uploader sends tails by itself after the signed batches. A tail that no
+  stored continuity record names, or that runs past the record named, is
+  refused. So an export of several boots shows no gap at each boot's end,
+  except the newest boot's (nothing names it yet).
+- **The server under load and against hostile peers** (WP-14b): an upload
+  is checked (every link and signature) without holding the server's
+  store, a few at a time, so a large or slow upload does not hold up other
+  requests; two uploads of the same records at once keep one and refuse
+  the other as an overlap. Size caps: 16 MiB per upload, 64 KiB for other
+  request bodies, a unit's name 100 characters (no control characters), a
+  note 4000 characters, a time-stamp reply 256 KiB; TLS handshakes time
+  out after 15 s, request headers after 30 s. The uploader reads console
+  lines with a length cap (and keeps a line split by a pause, which it used
+  to drop), holds at most 512 MiB of records, reads server replies up to
+  1 MiB and prints server text without control characters.
+- **The page** (WP-14b): its script, style and map library (Leaflet 1.9.4,
+  BSD-2-Clause, kept in `tools/evidence-server/src/static/`, byte-identical
+  to the published release, checked by a test against the SRI hashes
+  leafletjs.com publishes) are served by the server itself, under a
+  Content-Security-Policy that allows no inline script and no script from
+  anywhere else. Map tiles still come from tile.openstreetmap.org (images
+  only: they can show a wrong map, not change the records or the list;
+  they also tell OpenStreetMap which area is being viewed). The page warns
+  when a unit signs with the published test key or when a stored file
+  failed its check at start-up; such a file's detections are not shown.
+  The page is a view; the export bundle checked with `evidence-verify` is
+  the evidence.
 - **A boot left out, or an older boot's log cut short** (WP-14a): each
   boot's `continuity` record names its boot counter and the previous boot's
   record count and last record. Given both boots, a log cut back to a
@@ -215,7 +247,9 @@ the log (see "Who signed").
    prints `evidence boot counter N` on its console at each card mount; a
    secure-element counter would make that number trustworthy).
 4. **Time-stamps are not automatic.** Someone has to ask the server for one
-   (button/API), and only while it is online.
+   (button/API), and only while it is online. The options for making them
+   automatic, and the owner's choices, are in
+   docs/EVIDENCE-TIMESTAMPING-DESIGN.md (design only).
 5. **The re-decode shares our decoder.** The verifier decodes the raw bytes
    again, but with the same `rid` code the hub uses, so it shows the summary
    matches the bytes, not that our decoding is right. The raw Remote ID
@@ -321,7 +355,20 @@ Every run also prints: "NOT PROVEN: that the log is complete."
   altered in transit, re-uploads, gaps filled later, bundles with a record
   edited / deleted / truncated, a batch dropped or reordered, audit entries
   edited / dropped / reordered, the key swapped, a stored batch altered on
-  the server's disk; the no-GPS marking.
+  the server's disk; the no-GPS marking. WP-14b (`tests/hardening.rs`,
+  `lines`, `plan`, `tsa` unit tests): a bad upload refused while the store
+  is held by something else, six simultaneous uploads of the same records
+  (one kept), the page's policy and the vendored library's hashes, body
+  and field caps, a tail taken only once covered and only up to the named
+  record (and not for another unit), a changed batch file kept off the
+  map, the newest checkpoint found past a tail, a console line with no end,
+  a line split by a timeout, batches split at checkpoints under a size cap,
+  an endless time-stamp reply. End to end with the binaries: a two-boot
+  card through `evidence-upload` -> server -> export -> `evidence-verify`:
+  VERIFIED, 0 gaps, boot 1's tail sent as its own batch; the 2026-11-18
+  bench logs (`final-replay`, `spoofboot-stream`) upload and verify, and
+  `spoofboot-stream`'s two records after its last checkpoint stay on the
+  laptop (no later boot names them).
 - Bench, 2026-11-15, P4 CrowPanel (chip v1.3) with the `fakedrone` build,
   two real nodes via the gateway, no GPS attached: detections went hub ->
   USB -> laptop uploader -> server -> export bundle -> verifier: **VERIFIED**
