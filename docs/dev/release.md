@@ -127,8 +127,10 @@ parts-list script) without building anything.
 
 It refuses to ship:
 
-- a **bench build**: every fenced image must carry exactly `bench-build:none`
-  ([Bench builds](../BENCH.md#bench-builds-2026-11-18-compile-checked-only));
+- a **bench build**: an image carrying a `bench-build:` tag other than `none`
+  ([Bench builds](../BENCH.md#bench-builds-2026-11-18-compile-checked-only)). The build runs with an
+  empty environment, so `ROTORSCOPE_BENCH` is never set and a bench feature stops the build before
+  that;
 - an image with a `link-key:` tag (images never hold a key; a kit's keys are written to each board
   separately);
 - an image or ELF that holds the builder's home folder, user name or computer name;

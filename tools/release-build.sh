@@ -19,7 +19,8 @@
 #                     used: the two patches are applied afresh from the commit being built.
 #
 # Refuses: a working tree with changes or untracked files; an image carrying a bench-build
-# tag other than "none" (docs/BENCH.md "Bench builds"), or no tag where one is expected; an
+# tag other than "none" (docs/BENCH.md "Bench builds"; the empty build environment has no
+# ROTORSCOPE_BENCH, so a bench feature already stops the build); an
 # image with a link-key tag; an image or ELF holding the builder's home directory, user name
 # or host name; cargo settings outside the repository that change what is built (rustflags,
 # profiles, [env], [patch], [unstable] in the cargo home's config, or any .cargo folder above
@@ -59,8 +60,8 @@ root=$(dirname "$here")
 . "$here/repro-env.sh" riscv32imac-unknown-none-elf
 
 # name | build folder | triple | chip | ELF name | bench kind | cargo arguments
-#   bench kind: fenced = must carry exactly bench-build:none; tool = a bench tool with no fence
-#   (must carry no bench tag at all).
+#   bench kind: fenced = its build.rs refuses bench features without ROTORSCOPE_BENCH; tool = a
+#   bench tool with no fence. Neither may carry a bench-build tag other than "none".
 IMAGES=(
   "gateway|firmware/gateway|riscv32imac-unknown-none-elf|esp32c5|gateway|fenced|"
   "node-wifi|firmware/node-wifi/c5|riscv32imac-unknown-none-elf|esp32c5|node-wifi|fenced|--features esp32c5,band24,espnow"
@@ -90,23 +91,22 @@ image_line() {  # image_line <name>: its table line, or fail
 tree_clean() { [[ -z $(git -C "$1" status --porcelain 2>/dev/null) ]]; }
 
 # bench_verdict <elf> <fenced|tool>: empty output and 0 when the image may ship; else the
-# reason and 1.
+# reason and 1. A bench image carries `bench-build:<list>`; a normal C5 image usually carries no
+# tag at all (the string is only used when the list is not empty, so the optimiser drops it), and
+# hub-p4 carries `bench-build:none`. Either is accepted. For a fenced image the build itself is the
+# first guard: the release environment has no ROTORSCOPE_BENCH, so its build.rs stops any bench
+# feature or switch. The bench tool (rid-beacon) has no fence; its name says BENCH-ONLY.
 bench_verdict() {
   local tags
-  tags=$(grep -aoE 'bench-build:[A-Za-z0-9_,:-]+' "$1" 2>/dev/null | LC_ALL=C sort -u | tr '\n' ' ' || true)
+  tags=$(grep -aoE 'bench-build:[A-Za-z0-9_,:-]+' "$1" 2>/dev/null | grep -v '^bench-build:none$' | LC_ALL=C sort -u | tr '\n' ' ' || true)
   tags=${tags% }
   if grep -aq 'link-key:' "$1"; then echo "carries a link-key tag (a key in an image)"; return 1; fi
   case $2 in
-    fenced) [[ $tags == "bench-build:none" ]] && return 0
-            if [[ -z $tags ]]; then echo "has no bench-build tag, so nothing shows it is a field build"
-            else echo "is a BENCH build ($tags)"; fi
-            return 1 ;;
-    tool)   [[ -z $tags || $tags == "bench-build:none" ]] && return 0
-            echo "is a BENCH build ($tags)"; return 1 ;;
+    fenced|tool) [[ -z $tags ]] && return 0
+                 echo "is a BENCH build ($tags)"; return 1 ;;
   esac
   echo "unknown bench kind $2"; return 1
 }
-
 
 # cargo_config_verdict <file>: 0 when a cargo config outside the repository cannot change what
 # is built (a compiler wrapper or incremental setting is fine: the build overrides both).
@@ -184,7 +184,7 @@ self_test() {
   bench_verdict "$t/none.elf" fenced >/dev/null; check "a field build (bench-build:none) ships" $?
   bench_verdict "$t/bench.elf" fenced >/dev/null && r=1 || r=0; check "a bench build is refused" $r
   bench_verdict "$t/both.elf" fenced >/dev/null && r=1 || r=0; check "a bench tag beside bench-build:none is refused" $r
-  bench_verdict "$t/notag.elf" fenced >/dev/null && r=1 || r=0; check "a fenced image with no tag at all is refused" $r
+  bench_verdict "$t/notag.elf" fenced >/dev/null; check "a fenced image with no tag (the optimiser dropped bench-build:none) ships" $?
   bench_verdict "$t/notag.elf" tool >/dev/null; check "the unfenced bench tool with no tag ships (marked BENCH-ONLY)" $?
   bench_verdict "$t/bench.elf" tool >/dev/null && r=1 || r=0; check "the bench tool with a bench tag is refused" $r
   bench_verdict "$t/key.elf" fenced >/dev/null && r=1 || r=0; check "an image with a link-key tag is refused" $r
@@ -359,6 +359,8 @@ REPRO_LEAK_PATHS=("$work" "$src")
 built=()
 clean_env=(env -i "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=$cargo_home" "RUSTUP_HOME=$rustup_home"
   "SOURCE_DATE_EPOCH=$sde" "RUSTC_WRAPPER=" "CARGO_TERM_COLOR=never" "LC_ALL=C" "TZ=UTC")
+# Nothing else from the caller's environment: no ROTORSCOPE_BENCH (bench builds stop), no
+# ROTORSCOPE_DEV_KEY or other ROTORSCOPE_* switch, no RUSTFLAGS, CARGO_PROFILE_*, ESP_* settings.
 
 for l in "${selected[@]}"; do
   name=$(field "$l" 1) dir=$(field "$l" 2) triple=$(field "$l" 3) chip=$(field "$l" 4)
