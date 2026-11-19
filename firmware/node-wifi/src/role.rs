@@ -176,15 +176,12 @@ pub fn current() -> Job {
     })
 }
 
-/// Accepted (verified) packets from the gateway so far: beacons and
-/// commands, repeats included. Any change means the gateway was heard.
+/// Gateway packets the link verified so far (beacons, syncs, commands,
+/// repeats, and genuine ones refused only for their epoch). Any change
+/// means the gateway was heard.
 #[cfg(feature = "espnow")]
 fn gateway_heard() -> u32 {
-    use crate::uplink;
-    uplink::BEACONS
-        .load(Relaxed)
-        .wrapping_add(uplink::COMMANDS.load(Relaxed))
-        .wrapping_add(uplink::COMMAND_DUPS.load(Relaxed))
+    node_common::linkauth::heard()
 }
 #[cfg(not(feature = "espnow"))]
 fn gateway_heard() -> u32 {
