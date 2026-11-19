@@ -358,10 +358,14 @@ fn main() -> ! {
         (*(&raw mut FAA)).assume_init_mut()
     };
 
-    // Phase 13: the evidence log (evlog.rs). A random boot id names this
-    // boot's chain.
-    let mut boot_id = [0u8; 8];
-    esp_hal::rng::Rng::new().read(&mut boot_id);
+    // Phase 13: the evidence log (evlog.rs). A boot id names this boot's
+    // chain: the hardware RNG mixed with timing and the chip's own ids
+    // (WP-14a: the RNG alone is not a proven entropy source on the P4).
+    let (boot_id, rng_first) = evlog::make_boot_id(fault::reset_code());
+    println!(
+        "hub-p4: boot id inputs: rng first bytes {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (compare across power cycles: they must differ)",
+        rng_first[0], rng_first[1], rng_first[2], rng_first[3], rng_first[4], rng_first[5], rng_first[6], rng_first[7]
+    );
     let mut ev = evlog::Evidence::new(psram, boot_id);
     let chip = esp_hal::efuse::chip_revision();
     {
@@ -377,7 +381,7 @@ fn main() -> ! {
         (chip.major, chip.minor),
         fault::reset_reason(),
         evidence::format::boot::COUNTER_SD_FILE,
-        evidence::format::boot::BOOT_ID_RNG,
+        evidence::format::boot::BOOT_ID_MIXED,
     );
     let mut note: Option<heapless::String<120>> = None;
     // Console `L`: one site-file line being typed (node position / mute).

@@ -168,6 +168,19 @@ deleted, a wiped card), nor protect the newest boot's last records before
 the next boot starts. A secure-element counter that cannot go back, with
 its current value read off the unit by whoever checks, closes the first.
 
+### Boot id
+
+Eight bytes naming one boot's chain; they must differ between boots. The
+ESP32-P4's hardware random number generator is only documented as truly
+random while a radio or an ADC feeds it noise, and the P4 has no radio, so
+since WP-14a (boot data byte 98 = 1) the hub takes the first 8 bytes of
+SHA-256 over, each labelled and length-prefixed: 64 bytes of the hardware
+RNG read in 16 pieces, the CPU cycle counter and system timer sampled
+between the pieces, the time since power-on, the reset cause, and the
+chip's eFuse unique ID and base MAC. The construction is in
+`crates/evidence/src/bootid.rs`. Two boots that share an id would merge
+into one chain and fail the check (two different records #0).
+
 ### Kind 2: detection
 
 | size | field |

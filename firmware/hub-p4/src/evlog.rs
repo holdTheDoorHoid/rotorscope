@@ -134,6 +134,45 @@ fn dev_key() -> Option<[u8; 32]> {
     Some(k)
 }
 
+/// The CPU cycle counter (`mcycle`; the P4 has no `pccr` CSR, and esp-hal's
+/// RNG driver reads this one between RNG reads on this chip already).
+fn cycles() -> u32 {
+    let c: u32;
+    // SAFETY: reads a counter CSR, no side effects.
+    unsafe { core::arch::asm!("csrr {0}, mcycle", out(reg) c) };
+    c
+}
+
+/// The boot id (`evidence::bootid`, WP-14a): the hardware RNG is not a
+/// proven entropy source on the P4 (no radio), so it is mixed with timing
+/// jitter, the time since power-on, the reset cause and the chip's unique
+/// identifiers. Returns the id and the RNG's first 8 bytes, which the hub
+/// prints so a bench can see whether the RNG alone repeats across power
+/// cycles.
+pub fn make_boot_id(reset_code: u32) -> ([u8; 8], [u8; 8]) {
+    let rng = esp_hal::rng::Rng::new();
+    let mut m = evidence::bootid::Mixer::new();
+    let mut first = [0u8; 8];
+    let mut jitter = [0u8; 16 * 8];
+    for i in 0..16 {
+        let mut w = [0u8; 4];
+        rng.read(&mut w);
+        if i < 2 {
+            first[i * 4..i * 4 + 4].copy_from_slice(&w);
+        }
+        m.add(b"rng", &w);
+        let t = Instant::now().duration_since_epoch().as_micros() as u32;
+        jitter[i * 8..i * 8 + 4].copy_from_slice(&cycles().to_le_bytes());
+        jitter[i * 8 + 4..i * 8 + 8].copy_from_slice(&t.to_le_bytes());
+    }
+    m.add(b"jitter", &jitter);
+    m.add_u64(b"since power-on us", Instant::now().duration_since_epoch().as_micros());
+    m.add_u64(b"reset", u64::from(reset_code));
+    m.add(b"unique id", &esp_hal::efuse::read_field_le::<[u8; 16]>(esp_hal::efuse::OPTIONAL_UNIQUE_ID));
+    m.add(b"mac", esp_hal::efuse::base_mac_address().as_bytes());
+    (m.finish(), first)
+}
+
 /// SHA-256 of the firmware ELF file, as espflash wrote it into the app
 /// descriptor when flashing. Zero if flashed some other way.
 pub fn firmware_hash() -> [u8; 32] {
