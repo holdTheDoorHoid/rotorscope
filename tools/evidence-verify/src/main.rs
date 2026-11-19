@@ -245,6 +245,18 @@ fn print_report(r: &Report, list: bool) {
         if let Some(f) = c.fw_hash {
             println!("  firmware SHA-256 {}{}", hex(&f), if f == [0; 32] { " (not filled in: flashed without espflash)" } else { "" });
         }
+        if let Some(b) = c.build {
+            let state = match b.git_state {
+                format::boot::GIT_CLEAN => "",
+                format::boot::GIT_DIRTY => " WITH CHANGES",
+                _ => " (tree state unknown)",
+            };
+            println!(
+                "  built {} from source commit {}{state}",
+                verify::fmt_utc(b.built_unix_s.saturating_mul(1000)),
+                if b.git == [0; 20] { "unknown".to_string() } else { hex(&b.git) }
+            );
+        }
         match (c.utc_first, c.utc_last) {
             (Some(a), Some(b)) => println!("  UTC {} .. {}", verify::fmt_utc(a), verify::fmt_utc(b)),
             _ => println!("  UTC: none (no GPS time in any record)"),

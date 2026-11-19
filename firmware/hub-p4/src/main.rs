@@ -66,6 +66,15 @@ use esp_hal::{
 };
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// Strings anyone holding the ELF can find (`grep -a`): the bench tag
+/// tools/dev-board.sh looks for (`bench-build:none` for a normal build) and
+/// the source commit (`-dirty` if tracked files were changed). The hello
+/// line and the evidence boot event say the same. Each ends in a NUL so
+/// whatever the linker puts next cannot run on into the tag.
+#[used]
+static BUILD_TAGS: [&str; 2] =
+    [concat!(env!("ROTORSCOPE_BENCH_TAG"), "\0"), concat!("rotorscope-git:", env!("ROTORSCOPE_GIT"), "\0")];
+
 /// Unattended hub: after a panic (backtrace already printed on the USB-C
 /// console), reboot rather than sit halted on a stale screen (`fault.rs`).
 #[unsafe(no_mangle)]
@@ -202,7 +211,8 @@ fn main() -> ! {
     // Console first: from here on log lines never block the loop.
     console::init(p.UART0, p.GPIO37, p.GPIO38);
     println!(
-        "hub-p4: hello, chip revision {:?}, last reset: {} (cause {:#04x}), evidence key: {} ({}), bench: [{}]{}",
+        "hub-p4: hello, git {}, chip revision {:?}, last reset: {} (cause {:#04x}), evidence key: {} ({}), bench: [{}]{}",
+        evlog::GIT,
         esp_hal::efuse::chip_revision(),
         fault::reset_reason(),
         fault::reset_code(),
@@ -363,7 +373,12 @@ fn main() -> ! {
         );
     }
     ev.ctx.uptime_ms = app::now_ms();
-    ev.boot((chip.major, chip.minor), fault::reset_reason());
+    ev.boot(
+        (chip.major, chip.minor),
+        fault::reset_reason(),
+        evidence::format::boot::COUNTER_NONE,
+        evidence::format::boot::BOOT_ID_RNG,
+    );
     let mut note: Option<heapless::String<120>> = None;
     // Console `L`: one site-file line being typed (node position / mute).
     let mut site_line: Option<heapless::String<120>> = None;
@@ -454,7 +469,7 @@ fn main() -> ! {
             app.aero.print(if app.aero.has_keys() { "loaded" } else { sdlog.flarm_key_state }, bus::syncs(), ms);
             site.apply(&mut app, &gw);
             control_settings(&site, &mut down, &mut app, &mut ev);
-            ev.watch(&gps, &gw.nodes, faa.pack(), ms);
+            ev.watch(&gps, &gw.nodes, faa.pack().zip(faa.pack_sha256()), ms);
             gpsmem.tick(&mut gps, &mut sdlog, &mut ev, ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);

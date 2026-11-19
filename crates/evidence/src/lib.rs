@@ -25,6 +25,10 @@
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 pub mod b64;
+/// The hub build script's `ROTORSCOPE_GIT` (included by path from
+/// `firmware/hub-p4/build.rs`; compiled here only for its tests).
+#[cfg(test)]
+mod buildid;
 /// The hub build script's `ROTORSCOPE_DEV_KEY` check (included by path from
 /// `firmware/hub-p4/build.rs`; compiled here only for its tests).
 #[cfg(test)]

@@ -175,6 +175,8 @@ pub struct ChainSummary {
     pub no_position: u64,
     pub manual_position: u64,
     pub missing: Vec<(u64, u64)>,
+    /// What the boot event says about the build (firmware from WP-14a).
+    pub build: Option<format::boot::Ext>,
 }
 
 /// "1 record has" / "N records have".
@@ -616,11 +618,14 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
             match code {
                 None => rep.add(Level::Note, w.clone(), format!("unknown event code {} (newer firmware?)", e.code)),
                 Some(EventCode::Boot) => {
-                    if e.data.len() < 1 + format::PUBKEY_LEN {
-                        rep.add(Level::Fail, w.clone(), "boot event too short to hold the key");
-                    } else {
-                        c.sum.key_class = Some(e.data[0]);
-                        c.sum.key = Some(e.data[1..1 + format::PUBKEY_LEN].try_into().unwrap());
+                    match format::boot::Boot::decode(e.data) {
+                        None => rep.add(Level::Fail, w.clone(), "boot event too short to hold the key"),
+                        Some(b) => {
+                            c.sum.key_class = Some(b.key_class);
+                            c.sum.key = Some(b.pubkey);
+                            c.sum.build = b.ext;
+                            build_notes(rep, &b, w);
+                        }
                     }
                     if let Some(list) = boot_bench_list(e.text) {
                         rep.add(
@@ -652,6 +657,30 @@ fn check_record(rep: &mut Report, c: &mut ChainState, r: &Record<'_>, hash: [u8;
         }
     }
     claim
+}
+
+/// What the boot event says about the build, as notes.
+fn build_notes(rep: &mut Report, b: &format::boot::Boot, w: &Where) {
+    use format::boot;
+    let Some(e) = b.ext else {
+        rep.add(
+            Level::Note,
+            w.clone(),
+            "the boot event predates WP-14a: it names no source commit, build date or boot counter, so continuity across boots cannot be checked for this boot",
+        );
+        return;
+    };
+    let commit = hex(&e.git);
+    match e.git_state {
+        boot::GIT_CLEAN => {}
+        boot::GIT_DIRTY => rep.add(
+            Level::Note,
+            w.clone(),
+            format!("built from source commit {commit} WITH CHANGES to tracked files: the commit alone does not say what code ran (the firmware hash names the exact image)"),
+        ),
+        _ if e.git == [0; 20] => rep.add(Level::Note, w.clone(), "the build did not record its source commit (built outside a git checkout): only the firmware hash names the image"),
+        _ => rep.add(Level::Note, w.clone(), format!("built from source commit {commit}, but whether the tree had changes is unknown")),
+    }
 }
 
 fn check_detection(rep: &mut Report, d: &format::DetectionBody<'_>, w: &Where) {

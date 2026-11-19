@@ -75,7 +75,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 
 | code | name | data |
 |---:|---|---|
-| 1 | boot | key class (1), public key (65), chip revision major (1), minor (1). Always and only record #0. |
+| 1 | boot | key class (1), public key (65), chip revision major (1), minor (1); from WP-14a also build date (u64, Unix s: when the build script ran, never later than the build), source commit (20, SHA-1, zero unknown), source tree (1: 0 clean, 1 changed tracked files, 2 unknown), boot counter source (1: 0 none, 1 SD card state file, 2 secure element), how the boot id was made (1: 0 hardware RNG alone, 1 mixed, see "Boot id"). Text: `hub-p4 <version> git <commit>[-dirty] last reset: <why>; bench: <features or none>`. Always and only record #0. |
 | 2 | card_mounted | this file number (u32), previous file number (u32, 0 none), previous file length at mount (u32), SHA-256 of the previous file's last whole record (32), previous file status (1): 0 none, 1 ends on a whole record, 2 ends inside an incomplete record, 3 unreadable |
 | 3 | card_lost | queued bytes that go to the next file (u32) |
 | 4 | setting | new value (1); text says which setting |
@@ -85,7 +85,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 8 | gps_jump | distance m (u32), seconds (u32) |
 | 9 | node_join | station address (6) |
 | 10 | node_leave | station address (6) |
-| 11 | pack | airspace pack build date, Unix s (u32), length (u32), pack format version (u16) |
+| 11 | pack | airspace pack build date, Unix s (u32), length (u32), pack format version (u16); from WP-14a also the SHA-256 of the pack file as loaded (32) |
 | 12 | note | (none); the text is the operator's note |
 | 13 | not_logged | frames received but not recorded (queue full) (u32) |
 | 14 | shutdown | (none); a shutdown checkpoint follows |

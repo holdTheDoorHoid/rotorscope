@@ -82,6 +82,25 @@ pub fn built_key_class() -> KeyClass {
 /// normal build.
 pub const BENCH: &str = env!("ROTORSCOPE_BENCH_LIST");
 
+/// The source commit, `-dirty` when tracked files were changed, or
+/// `unknown` (build.rs, `evidence` buildid).
+pub const GIT: &str = env!("ROTORSCOPE_GIT");
+
+/// When build.rs ran (or SOURCE_DATE_EPOCH): never later than the build.
+pub const BUILT_UNIX_S: u64 = const_u64(env!("ROTORSCOPE_BUILD_UNIX_S"));
+
+const fn const_u64(s: &str) -> u64 {
+    let b = s.as_bytes();
+    let mut v = 0u64;
+    let mut i = 0;
+    while i < b.len() {
+        assert!(b[i].is_ascii_digit(), "ROTORSCOPE_BUILD_UNIX_S is not a number");
+        v = v * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    v
+}
+
 /// The signer this build uses. The only place to change for another
 /// implementation of `evidence::Signer` (a secure element).
 pub type HubSigner = SoftSigner;
@@ -267,23 +286,31 @@ impl Evidence {
 
     /// The first record: who signs, which firmware.
     /// `reset` is why the chip last reset (`fault::reset_reason`).
-    pub fn boot(&mut self, chip: (u8, u8), reset: &str) {
-        let mut data = [0u8; 1 + format::PUBKEY_LEN + 2];
-        data[0] = self.signer.key_class() as u8;
-        data[1..66].copy_from_slice(&self.signer.public_key());
-        data[66] = chip.0;
-        data[67] = chip.1;
-        // Version (~6), git (~40), reset reason (~10) and the bench list
+    /// The data also names the build (date, source commit and whether the
+    /// tree was modified), the boot counter source and how the boot id was
+    /// made (`evidence::format::boot`).
+    pub fn boot(&mut self, chip: (u8, u8), reset: &str, counter_source: u8, boot_id_method: u8) {
+        use evidence::format::boot;
+        let (git, git_state) = boot::parse_git(GIT);
+        let b = boot::Boot {
+            key_class: self.signer.key_class() as u8,
+            pubkey: self.signer.public_key(),
+            chip,
+            ext: Some(boot::Ext { built_unix_s: BUILT_UNIX_S, git, git_state, counter_source, boot_id_method }),
+        };
+        let mut data = [0u8; boot::LEN];
+        let n = b.encode(&mut data);
+        // Version (~6), git (~50), reset reason (~10) and the bench list
         // (every hub-p4 bench feature at once is ~110): 256 holds them all.
         let mut text: heapless::String<256> = heapless::String::new();
         let _ = write!(
             text,
-            "hub-p4 {} {} last reset: {reset}; bench: {}",
+            "hub-p4 {} git {} last reset: {reset}; bench: {}",
             env!("CARGO_PKG_VERSION"),
-            option_env!("ROTORSCOPE_GIT").unwrap_or(""),
+            GIT,
             if BENCH.is_empty() { "none" } else { BENCH }
         );
-        self.event(EventCode::Boot, text.as_bytes(), &data);
+        self.event(EventCode::Boot, text.as_bytes(), &data[..n]);
     }
 
     /// An event record. Events are small; they still need room.
@@ -368,7 +395,8 @@ impl Evidence {
     }
 
     /// Once a second: GPS, clock, nodes and pack changes become events.
-    pub fn watch(&mut self, gps: &crate::gps::Gps, nodes: &[crate::links::NodeStats], pack: Option<&airspace::Pack<'_>>, now: u64) {
+    /// `pack`: the airspace pack in use and its SHA-256.
+    pub fn watch(&mut self, gps: &crate::gps::Gps, nodes: &[crate::links::NodeStats], pack: Option<(&airspace::Pack<'_>, [u8; 32])>, now: u64) {
         use tracker::json::GpsState;
         self.watch_integrity(gps);
         let present = gps.status.state != GpsState::Absent;
@@ -462,15 +490,19 @@ impl Evidence {
             }
         }
         if !self.pack_logged
-            && let Some(p) = pack
+            && let Some((p, sha)) = pack
         {
             self.pack_logged = true;
-            let mut t: heapless::String<64> = heapless::String::new();
-            let _ = write!(t, "airspace pack v{} built {} ({} bytes)", p.version, p.created, p.len());
-            let mut data = [0u8; 10];
+            let mut t: heapless::String<160> = heapless::String::new();
+            let _ = write!(t, "airspace pack v{} built {} ({} bytes) sha256 ", p.version, p.created, p.len());
+            for b in sha {
+                let _ = write!(t, "{b:02x}");
+            }
+            let mut data = [0u8; format::pack::LEN];
             data[..4].copy_from_slice(&p.created.to_le_bytes());
             data[4..8].copy_from_slice(&(p.len() as u32).to_le_bytes());
-            data[8..].copy_from_slice(&p.version.to_le_bytes());
+            data[8..10].copy_from_slice(&p.version.to_le_bytes());
+            data[10..].copy_from_slice(&sha);
             self.event(EventCode::Pack, t.as_bytes(), &data);
         }
     }

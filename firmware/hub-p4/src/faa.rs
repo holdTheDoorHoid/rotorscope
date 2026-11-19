@@ -94,6 +94,10 @@ pub struct Faa {
     load_started_ms: u64,
     pub load_ms: u64,
     pub crc_ms: u64,
+    /// SHA-256 of the pack as it is copied in, and once loaded (for the
+    /// evidence log's `pack` event: which airspace data the hub used).
+    sha: evidence::Sha256Stream,
+    sha256: Option<[u8; 32]>,
     pub update_us_last: u64,
     pub update_us_max: u64,
     evals_prev: u32,
@@ -137,6 +141,8 @@ impl Faa {
             load_started_ms: 0,
             load_ms: 0,
             crc_ms: 0,
+            sha: evidence::Sha256Stream::new(),
+            sha256: None,
             update_us_last: 0,
             update_us_max: 0,
             evals_prev: 0,
@@ -147,6 +153,11 @@ impl Faa {
 
     pub fn pack(&self) -> Option<&Pack<'static>> {
         self.pack.as_ref()
+    }
+
+    /// SHA-256 of the loaded pack's bytes.
+    pub fn pack_sha256(&self) -> Option<[u8; 32]> {
+        self.sha256.filter(|_| self.pack.is_some())
     }
 
     /// The SD logger found a pack of `total` bytes: start copying it.
@@ -163,6 +174,8 @@ impl Faa {
             return false;
         }
         self.state = PackState::Loading { got: 0, total };
+        self.sha = evidence::Sha256Stream::new();
+        self.sha256 = None;
         self.load_started_ms = now;
         println!("hub-p4: faa loading airspace pack ({total} bytes) from the SD card");
         true
@@ -184,6 +197,9 @@ impl Faa {
         let PackState::Loading { got, total } = self.state else {
             return false;
         };
+        // SAFETY: the `n` bytes just copied in at `got` (inside the
+        // reserved range, see `chunk`); nothing writes them meanwhile.
+        self.sha.update(unsafe { core::slice::from_raw_parts(self.base.add(got as usize), n) });
         let got = got + n as u32;
         self.state = PackState::Loading { got, total };
         if got < total {
@@ -195,6 +211,7 @@ impl Faa {
 
     fn finish(&mut self, len: usize, now: u64) {
         self.load_ms = now.saturating_sub(self.load_started_ms);
+        self.sha256 = Some(core::mem::take(&mut self.sha).finish());
         // SAFETY: the bytes just written; from here on only read.
         let data: &'static [u8] = unsafe { core::slice::from_raw_parts(self.base, len) };
         let t = Instant::now();
