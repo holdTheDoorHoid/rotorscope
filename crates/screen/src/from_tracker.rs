@@ -553,11 +553,14 @@ pub fn apply_site_theme(site: &ThemeSite, mut s: Settings) -> Settings {
     if let Some(tw) = site.switch_twilight {
         s.switch_at = if tw { SwitchAt::Twilight } else { SwitchAt::Sunrise };
     }
+    if let Some(b) = site.brightness {
+        s.brightness = b.clamp(1, 5);
+    }
     s
 }
 
-/// One site line per theme setting that differs between `before` and
-/// `after`, in file order (Theme, day, night, switch).
+/// One site line per screen setting that differs between `before` and
+/// `after`, in file order (Theme, day, night, switch, brightness).
 pub fn theme_changes(before: &Settings, after: &Settings, mut f: impl FnMut(ThemeSetting)) {
     if before.theme != after.theme {
         f(ThemeSetting::Theme(match after.theme {
@@ -573,5 +576,8 @@ pub fn theme_changes(before: &Settings, after: &Settings, mut f: impl FnMut(Them
     }
     if before.switch_at != after.switch_at {
         f(ThemeSetting::SwitchTwilight(after.switch_at == SwitchAt::Twilight));
+    }
+    if before.brightness != after.brightness {
+        f(ThemeSetting::Brightness(after.brightness.clamp(1, 5)));
     }
 }

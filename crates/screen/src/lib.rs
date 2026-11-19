@@ -51,7 +51,8 @@ pub use model::*;
 pub use render::{BAR_H, HEIGHT, WIDTH, render};
 pub use theme::Palette;
 pub use ui::{
-    Alert, AutoStatus, Button, ButtonDecoder, Buzz, Mode, Page, Request, Settings, SettingsRow, SwitchAt, Theme, ThemeMode, Ui,
+    Action, ActionState, Alert, AutoStatus, Button, ButtonDecoder, Buzz, Mode, Page, Request, Settings, SettingsRow, SwitchAt, Tap, Theme,
+    ThemeMode, TitleToast, Ui, backlight_pct,
 };
 
 #[cfg(test)]

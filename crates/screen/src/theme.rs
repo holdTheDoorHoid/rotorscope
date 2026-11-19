@@ -50,42 +50,45 @@ pub const GLASS_COCKPIT: Palette = Palette {
     accent_ink: rgb(10, 0, 16),
     warn: rgb(255, 179, 0),
     warn_ink: rgb(0, 0, 0),
-    operator: rgb(109, 255, 140),
+    // Lavender: the pilot is never green (green means healthy).
+    operator: rgb(201, 160, 255),
     rec: rgb(255, 59, 59),
     bar: rgb(10, 18, 32),
 };
 
-/// Field Day: dark ink on light grey for direct sun, safety-orange drones.
+/// Field Day: dark ink on light grey for direct sun, dark orange drones,
+/// amber cautions with black ink (kept apart from the drones' orange).
 pub const FIELD_DAY: Palette = Palette {
     bg: rgb(233, 237, 241),
     fg: rgb(11, 15, 20),
     dim: rgb(74, 85, 99),
     stale: rgb(118, 128, 142),
     grid: rgb(170, 180, 193),
-    accent: rgb(227, 84, 11),
+    accent: rgb(194, 65, 12),
     accent_ink: rgb(255, 255, 255),
-    warn: rgb(180, 83, 9),
-    warn_ink: rgb(255, 255, 255),
+    warn: rgb(242, 178, 0),
+    warn_ink: rgb(11, 15, 20),
     operator: rgb(0, 80, 179),
     rec: rgb(200, 16, 46),
     bar: rgb(213, 219, 226),
 };
 
-/// Red Night: one hue. Alerts are inverse boxes and shapes, never a
-/// different colour.
+/// Red Night: pure red only (no green or blue at all, which is what costs
+/// night vision). Alerts are inverse boxes and shapes, never a different
+/// colour; dim text stays at least 3:1 against black.
 pub const RED_NIGHT: Palette = Palette {
     bg: rgb(0, 0, 0),
-    fg: rgb(255, 52, 36),
-    dim: rgb(165, 26, 16),
-    stale: rgb(122, 20, 12),
-    grid: rgb(59, 9, 5),
-    accent: rgb(255, 52, 36),
+    fg: rgb(255, 0, 0),
+    dim: rgb(190, 0, 0),
+    stale: rgb(150, 0, 0),
+    grid: rgb(96, 0, 0),
+    accent: rgb(255, 0, 0),
     accent_ink: rgb(0, 0, 0),
-    warn: rgb(255, 52, 36),
+    warn: rgb(255, 0, 0),
     warn_ink: rgb(0, 0, 0),
-    operator: rgb(255, 52, 36),
-    rec: rgb(255, 52, 36),
-    bar: rgb(17, 0, 0),
+    operator: rgb(255, 0, 0),
+    rec: rgb(255, 0, 0),
+    bar: rgb(24, 0, 0),
 };
 
 impl Theme {

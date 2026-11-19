@@ -132,10 +132,11 @@ fn base(fix: bool) -> UiState {
             .push(NodeStatus {
                 kind,
                 alive: true,
-                frames_per_s: fps,
+                frames_per_s: Some(fps),
                 rid_found: rid,
                 drops: if kind == NodeKind::Wifi24 { 3 } else { 0 },
                 uptime_s: (NOW / 1000) as u32 - 4,
+                silent_s: None,
             })
             .unwrap();
     }
@@ -502,10 +503,11 @@ fn with_aircraft() -> UiState {
         .push(NodeStatus {
             kind: NodeKind::Adsb,
             alive: true,
-            frames_per_s: 118,
+            frames_per_s: Some(118),
             rid_found: 0,
             drops: 0,
             uptime_s: 3_600,
+            silent_s: None,
         })
         .unwrap();
     st.aircraft = Some(AircraftSummary {
@@ -533,6 +535,24 @@ fn health_aircraft() {
 /// Protocol 4: a DroneID node and a gateway, a DJI drone heard on DroneID
 /// only (model, no Remote ID), an O4 presence track, RF emitters and Wi-Fi
 /// drones on the SIGNALS page.
+/// The FLAGS page's rows, on the five drones (two of them flagged) and a
+/// plane.
+fn with_flags() -> UiState {
+    let mut st = five_drones(true);
+    let mut fl = FlagsView { pack: s("pack 2026-11-15"), total: 5, ..Default::default() };
+    for (who, level, rule, text, secs, drone, aircraft) in [
+        ("1581F5FKD22940", 3, "AREA", "National security UAS area", 12, Some(1), false),
+        ("1581F5FKD22940", 2, "HEIGHT", "260 m (853 ft) above ground, limit 400 ft", 41, Some(1), false),
+        ("1668B2A07C3300", 1, "VLOS", "640 m from its pilot", 9, Some(2), false),
+        ("N12345", 2, "LOW", "158 m (520 ft) above ground, limit 1000 ft", 33, None, true),
+        ("SKY04X118", 0, "NIGHT", "flying in twilight", 300, Some(3), false),
+    ] {
+        let _ = fl.rows.push(FlagRow { who: s(who), level, rule, text: s(text), secs, drone, aircraft });
+    }
+    st.flags = Some(fl);
+    st
+}
+
 fn with_signals() -> UiState {
     let mut st = base(true);
     st.nodes.truncate(2);
@@ -541,10 +561,11 @@ fn with_signals() -> UiState {
             .push(NodeStatus {
                 kind,
                 alive: true,
-                frames_per_s: 0,
+                frames_per_s: None,
                 rid_found: 0,
                 drops: 0,
                 uptime_s: 600,
+                silent_s: None,
             })
             .unwrap();
     }
@@ -682,6 +703,8 @@ fn flags() {
             rule,
             text: s(text),
             secs,
+            drone: None,
+            aircraft: false,
         });
     }
     st.flags = Some(f);
@@ -708,13 +731,13 @@ fn settings() {
 #[test]
 fn settings_actions() {
     let mut st = base(true);
-    st.threats = Threats { active: 2, jammed: false, muted: 1, flood_per_s: 0, mutable: 2, snoozable: 0 };
+    st.threats = Threats { active: 2, jammed: false, muted: 1, flood_per_s: 0, mutable: 2, snoozable: 0, ..Threats::default() };
     let mut ui = Ui::default();
     // Settings page, edit, up to the last row (Nodes at hub), up to Alarms.
     press(&mut ui, &st, &[Button::Up, Button::Select, Button::Up, Button::Up]);
     shot("settings_actions", &ui, &st);
     // Only a jammer sounds: the row snoozes it, it never mutes it.
-    st.threats = Threats { active: 1, jammed: true, muted: 2, flood_per_s: 0, mutable: 0, snoozable: 1 };
+    st.threats = Threats { active: 1, jammed: true, muted: 2, flood_per_s: 0, mutable: 0, snoozable: 1, ..Threats::default() };
     shot("settings_snooze", &ui, &st);
 }
 
@@ -826,7 +849,7 @@ fn caveats_strip() {
     // for good, control IDs and content read. The health page says what
     // the silence hides.
     let mut st = five_drones(true);
-    st.threats = Threats { active: 1, jammed: true, muted: 3, flood_per_s: 0, mutable: 1, snoozable: 0 };
+    st.threats = Threats { active: 1, jammed: true, muted: 3, flood_per_s: 0, mutable: 1, snoozable: 0, ..Threats::default() };
     st.caveats.silenced = Silenced { muted: 2, mute_left_s: 7_140, snoozed: 1, snooze_left_s: 245, site: 1 };
     st.caveats.switches = Switches { control_ids: true, control_content: true, audio_clips: false };
     shot("caveats_alarms", &Ui::default(), &st);
@@ -1102,20 +1125,12 @@ mod wide_shots {
         after(&mut ui, &st, &[Button::Down, Button::Down, Button::Down], true);
         v.push(("health_roles", ui, st, None));
 
-        let mut st = base(true);
-        let mut fl = FlagsView { pack: s("pack 2026-11-15"), total: 4, ..Default::default() };
-        for (who, level, rule, text, secs) in [
-            ("RSTEST-SD-0001", 3, "AREA", "Natl security UAS", 12),
-            ("RSTEST-SD-0001", 2, "HEIGHT", "853ft AGL", 41),
-            ("1581F5FJD2", 1, "VLOS", "640m from pilot", 9),
-            ("N12345", 2, "LOW", "520ft<1000 91.119", 33),
-        ] {
-            let _ = fl.rows.push(FlagRow { who: s(who), level, rule, text: s(text), secs });
-        }
-        st.flags = Some(fl);
+        let st = with_flags();
         let mut ui = Ui::default();
         after(&mut ui, &st, &[Button::Down, Button::Down], true);
-        v.push(("flags", ui, st, None));
+        v.push(("flags", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Select, Button::Down], false);
+        v.push(("flags_choose", ui, st, None));
 
         let mut st = five_drones(true);
         st.nodes[1].alive = false;
@@ -1145,7 +1160,7 @@ mod wide_shots {
         st.threats = Threats { active: 2, muted: 1, snoozable: 1, ..Threats::default() };
         st.caveats.silenced = Silenced { snoozed: 1, snooze_left_s: 245, ..Silenced::default() };
         // Five nodes: the busiest health page.
-        st.nodes.push(NodeStatus { kind: NodeKind::Lr, alive: true, frames_per_s: 3, rid_found: 0, drops: 0, uptime_s: 900 }).unwrap();
+        st.nodes.push(NodeStatus { kind: NodeKind::Lr, alive: true, frames_per_s: Some(3), rid_found: 0, drops: 0, uptime_s: 900, silent_s: Some(0) }).unwrap();
         v.push(("health_busiest", ui, st, None));
 
         let st = base(true);
@@ -1225,20 +1240,198 @@ mod wide_shots {
         after(&mut ui, &st, &[Button::Up, Button::Select], false);
         ui.set_settings(Settings { theme: ThemeMode::Auto, ..Settings::default() });
         v.push(("caveats_settings_auto", ui, st, None));
+        more_cases(&mut v);
+        p3_cases(&mut v);
         v
+    }
+
+    type Case = (&'static str, Ui, UiState, Option<Button>);
+
+    /// The P1/P2 states (warnings, banner) as separate cases.
+    fn more_cases(v: &mut Vec<Case>) {
+        // Standing notes only (no fault): one muted line.
+        let mut st = five_drones(true);
+        st.caveats = Caveats { key: EvidenceKey::Test, link_open: true, ..Caveats::default() };
+        v.push(("caveats_notes_only", Ui::default(), st, None));
+
+        // P1: never "all clear" while partly blind or under attack.
+        let mut st = base(true);
+        for n in st.nodes.iter_mut() {
+            n.alive = false;
+            n.silent_s = Some(140);
+        }
+        v.push(("band_not_listening", Ui::default(), st.clone(), None));
+        st.nodes.clear();
+        v.push(("band_no_receivers", Ui::default(), st, None));
+        let mut st = base(true);
+        st.nodes[1].alive = false;
+        st.nodes[1].silent_s = Some(75);
+        v.push(("band_some_nodes_down", Ui::default(), st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("list_some_nodes_down", ui, st, None));
+        let mut st = five_drones(true);
+        st.conflict = Some(ConflictView { level: 3, drone: 3, aircraft: s("N911PH"), range_m: 240.0, dz_m: Some(30.0), count: 1 });
+        v.push(("band_near_plane", Ui::default(), st, None));
+        // Many at once: the band shows the worst, the bar a chip for each.
+        let mut st = five_drones(true);
+        st.threats = Threats { active: 3, jammed: true, flood_per_s: 40, ..Threats::default() };
+        st.gps.integrity = GpsIntegrity::SuspectSpoofing;
+        st.area_gnss = Some(AreaGnssView { spoofing: true, drones_moved: 2, ..Default::default() });
+        st.nodes[1].alive = false;
+        st.nodes[2].frames_per_s = Some(0);
+        v.push(("band_many_warnings", Ui::default(), st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Select, Button::Select], false);
+        v.push(("detail_with_band", ui, st, None));
+        let mut st = base(true);
+        st.threats.jammed = true;
+        st.threats.active = 1;
+        v.push(("radar_jammed_empty", Ui::default(), st, None));
+        // Signals heard but no IDs: the count says so.
+        let mut st = with_signals();
+        st.drones.clear();
+        st.total_drones = 0;
+        v.push(("radar_links_without_id", Ui::default(), st, None));
+
+        // Health: a node down for a while, one alive but deaf.
+        let mut st = five_drones(true);
+        st.nodes[1].alive = false;
+        st.nodes[1].silent_s = Some(140);
+        st.nodes[2].frames_per_s = Some(0);
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Up, Button::Up], true);
+        v.push(("health_down_and_deaf", ui, st, None));
+
+        // P2: the banner.
+        let st = five_drones(true);
+        let mut ui = Ui::default();
+        ui.new_drone(3, NOW); // 75 m: stays until a key is pressed
+        ui.observe(&st);
+        v.push(("alert_close_sticky", ui, st.clone(), None));
+        // Dismissed, then a swarm: a NEW chip, and NEW marks.
+        let mut ui = Ui::default();
+        ui.new_drone(5, NOW - 2_000);
+        ui.button(Button::Up, &st);
+        ui.new_drone(1, NOW);
+        ui.new_drone(2, NOW);
+        ui.tick(NOW);
+        v.push(("radar_swarm_chip", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Down], true);
+        v.push(("list_new_marks", ui, st.clone(), None));
+
+    }
+
+    /// The P3 states (keys, touch, settings safety, scrolling, Auto).
+    fn p3_cases(v: &mut Vec<Case>) {
+        let st = five_drones(true);
+        // P3: keys, touch, settings safety.
+        let mut ui = Ui::default();
+        ui.set_held(Some(600));
+        let mut st2 = st.clone();
+        st2.now_ms = NOW;
+        after(&mut ui, &st2, &[Button::Select], false);
+        ui.set_held(Some(600));
+        v.push(("pick_key_held", ui, st.clone(), Some(Button::Select)));
+        let mut ui = Ui::default();
+        ui.page_tap(NOW);
+        v.push(("radar_tap_hint", ui, st.clone(), None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Up], true);
+        let mut st3 = st.clone();
+        st3.now_ms = NOW + 5_000;
+        ui.tap(Tap::SettingsRow(1), &st3, NOW + 5_000);
+        v.push(("settings_tapped_row", ui, st3, None));
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Up, Button::Select, Button::Down, Button::Select], false);
+        v.push(("settings_brightness_adjust", ui, st.clone(), None));
+        let mut ui = Ui::new(Settings { brightness: 4, ..Settings::default() });
+        after(&mut ui, &st, &[Button::Up], true);
+        v.push(("settings_brightness_capped", ui, st.clone(), None));
+        let mut ui = Ui::default();
+        ui.set_has_buzzer(false);
+        after(&mut ui, &st, &[Button::Up, Button::Select, Button::Down, Button::Down, Button::Down, Button::Down, Button::Select], false);
+        v.push(("settings_confirm_nodes", ui.clone(), st.clone(), None));
+        after(&mut ui, &st, &[Button::Select], false);
+        let _ = ui.take_request();
+        ui.action_result(Err("No GPS position: not placed"));
+        v.push(("settings_action_failed", ui, st.clone(), None));
+        let mut ui = Ui::default();
+        ui.set_has_buzzer(false);
+        after(&mut ui, &st, &[Button::Up, Button::Select, Button::Down, Button::Down, Button::Select, Button::Select], false);
+        let _ = ui.take_request();
+        ui.action_result(Ok(()));
+        v.push(("settings_action_done", ui, st.clone(), None));
+        let mut doubt = st.clone();
+        doubt.gps.home_pending = true;
+        doubt.gps.integrity = GpsIntegrity::SuspectSpoofing;
+        let mut ui = Ui::default();
+        ui.set_has_buzzer(false);
+        after(&mut ui, &doubt, &[Button::Up, Button::Select, Button::Down, Button::Down, Button::Select], false);
+        v.push(("settings_use_spot_doubt", ui, doubt, None));
+        let mut alarms = st.clone();
+        alarms.threats = Threats { active: 2, mutable: 2, mutable_what: "Flood of fake IDs", ..Threats::default() };
+        let mut ui = Ui::default();
+        ui.set_has_buzzer(false);
+        after(&mut ui, &alarms, &[Button::Up, Button::Select, Button::Down, Button::Down, Button::Down, Button::Select], false);
+        let _ = ui.take_request();
+        ui.action_result(Ok(()));
+        v.push(("settings_alarms_muted", ui, alarms, None));
+
+        // Scrolling the signals the page could not show.
+        let mut st = with_signals();
+        for k in 0..6u32 {
+            let _ = st.emitters.push(EmitterView { key: 50 + k, kind: EmitterKind::AnalogVideo, freq_mhz: 5_740.0 + 20.0 * k as f32, snr_db: 9, duty_pct: 100, line_hz: 15_625, stale: false, last_seen_ms: NOW - 2_000 });
+        }
+        st.total_emitters = st.emitters.len() as u16;
+        let mut ui = Ui::default();
+        after(&mut ui, &st, &[Button::Down, Button::Down], true);
+        // Draw once so the page reports what did not fit.
+        let _ = full(&ui, &st, None);
+        after(&mut ui, &st, &[Button::Select, Button::Down, Button::Down, Button::Down], false);
+        v.push(("signals_scroll", ui, st, None));
+
+        // The automatic theme just switched.
+        let mut st = five_drones(true);
+        st.position = Some((39.95, -75.16));
+        st.utc_ms = Some(1_795_017_600_000);
+        let mut ui = Ui::new(Settings { theme: ThemeMode::Auto, ..Settings::default() });
+        ui.observe(&st);
+        st.utc_ms = Some(1_795_017_600_000 + 7 * 3_600_000);
+        st.now_ms = NOW + 200_000;
+        ui.tick(st.now_ms);
+        ui.observe(&st);
+        v.push(("radar_theme_switched", ui, st, None));
+    }
+
+    /// Run `f` on a thread with room for the fixtures (debug builds keep
+    /// every one of the many `UiState`s in `cases` on the stack).
+    fn big_stack(f: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new().stack_size(64 << 20).spawn(f).unwrap().join().unwrap();
     }
 
     #[test]
     fn wide_snapshots() {
-        for (name, ui, st, lit) in cases() {
-            shot(name, &ui, &st, lit);
-        }
+        // SNAP_ONLY=radar_5_drones,detail renders just those (while working).
+        let only = std::env::var("SNAP_ONLY").ok();
+        big_stack(move || {
+            for (name, ui, st, lit) in cases() {
+                if only.as_deref().is_some_and(|o| !o.split(',').any(|n| n == name)) {
+                    continue;
+                }
+                shot(name, &ui, &st, lit);
+            }
+        });
     }
 
     /// Band by band gives exactly the full frame, at the P4's band height
     /// and at awkward ones.
     #[test]
     fn wide_banded_matches_full_frame() {
+        big_stack(banded_check);
+    }
+
+    fn banded_check() {
         for (name, ui, st, lit) in cases() {
             let (whole, _) = full(&ui, &st, lit);
             for rows in [wide::BAND_ROWS, 7, 1] {
@@ -1266,31 +1459,45 @@ mod wide_shots {
     #[test]
     fn keys_label_what_they_do_and_touches_hit_them() {
         use wide::{key_at, key_labels};
+        let sub = |k: &wide::KeyLabel| k.sub.as_ref().map(|t| t.as_str().to_owned());
         let st = five_drones(true);
         let mut ui = Ui::default();
         let k = key_labels(&ui, &st);
         assert_eq!((k[0].text.as_str(), k[1].text.as_str(), k[2].text.as_str()), ("SETTINGS", "Choose drone", "DRONE LIST"));
+        assert!(k[1].primary);
         press(&mut ui, &st, &[Button::Select]);
         let k = key_labels(&ui, &st);
-        assert_eq!((k[1].text.as_str(), k[1].hold), ("Open", Some("hold: back")));
+        assert_eq!((k[1].text.as_str(), sub(&k[1]).as_deref()), ("Open", Some("hold: stop choosing")));
         press(&mut ui, &st, &[Button::Select]);
         assert_eq!(ui.mode(), Mode::Detail);
         let k = key_labels(&ui, &st);
-        assert_eq!((k[0].text.as_str(), k[1].text.as_str()), ("Prev drone", "Hold: back"));
+        assert_eq!((k[0].text.as_str(), k[1].text.as_str(), sub(&k[1]).as_deref()), ("Prev drone", "Back to radar", Some("tap or hold")));
+        assert!(!k[1].primary, "going back is not the page's main action");
         // The banner: Select opens, the others only dismiss.
         ui.new_drone(3, NOW);
         let k = key_labels(&ui, &st);
         assert_eq!((k[0].text.as_str(), k[1].text.as_str(), k[2].text.as_str()), ("Dismiss", "Show details", "Dismiss"));
-        // Settings while editing: the row's action, and "hold: done".
+        // Settings while editing: the row's action, and "hold: finish".
         let mut ui = Ui::default();
         press(&mut ui, &st, &[Button::Up, Button::Select]);
         let k = key_labels(&ui, &st);
-        assert_eq!((k[1].text.as_str(), k[1].hold), ("Change", Some("hold: done")));
-        press(&mut ui, &st, &[Button::Up]);
+        assert_eq!((k[1].text.as_str(), sub(&k[1]).as_deref()), ("Change", Some("hold: finish")));
+        assert!(!k[0].active, "the cursor is at the top: Up does nothing");
+        for _ in 0..5 {
+            press(&mut ui, &st, &[Button::Down]);
+        }
         assert_eq!(key_labels(&ui, &st)[1].text.as_str(), "Place all here");
-        // Empty radar: Select does nothing, and the key says so.
+        press(&mut ui, &st, &[Button::Select]);
+        let k = key_labels(&ui, &st);
+        assert_eq!((k[1].text.as_str(), sub(&k[1]).as_deref()), ("Press again to confirm", Some("place 3 nodes here")));
+        // Empty radar: Select does nothing, and the key says so; the list
+        // page's empty key still says what holding does.
         let k = key_labels(&Ui::default(), &base(true));
         assert!(!k[1].active);
+        let mut ui = Ui::default();
+        press(&mut ui, &base(true), &[Button::Down]);
+        let k = key_labels(&ui, &base(true));
+        assert_eq!((k[1].text.as_str(), sub(&k[1]).as_deref()), ("No drones yet", Some("hold: back to radar")));
 
         assert_eq!(key_at(10, 470), Some(Button::Up));
         assert_eq!(key_at(400, 440), Some(Button::Select));
@@ -1300,5 +1507,47 @@ mod wide_shots {
         assert_eq!(key_at(400, 300), None, "the page is not a key");
         assert_eq!(key_at(400, wide::TOUCH_TOP - 1), None);
         assert_eq!(key_at(400, 480), None);
+        // The drawn keys fill the touch zone.
+        let (_, y, _, h) = wide::key_rect(1);
+        assert!(y - wide::TOUCH_TOP <= 4 && wide::H - (y + h) <= 4);
+    }
+
+    /// A touch on the page finds what the layout drew there.
+    #[test]
+    fn taps_hit_what_is_drawn() {
+        use wide::tap_target;
+        let st = five_drones(true);
+        let ui = Ui::default();
+        // Each radar marker, found from its own plotted position: tap the
+        // readout card instead and get the nearest.
+        let t = tap_target(&ui, &st, 600, 150);
+        let nearest = st.drones[usize::from(st.order()[0])].key;
+        assert_eq!(t, Some(Tap::Drone(nearest)), "the readout card opens the nearest");
+        assert_eq!(tap_target(&ui, &st, 400, 450), None, "the key strip is not the page");
+        assert_eq!(tap_target(&ui, &st, 30, 300), Some(Tap::Nothing));
+        // The list: a row opens its drone.
+        let mut ui = Ui::default();
+        press(&mut ui, &st, &[Button::Down]);
+        let row1 = tap_target(&ui, &st, 400, 38 + 46 + 22 + 10);
+        assert_eq!(row1, Some(Tap::Drone(nearest)));
+        let row2 = tap_target(&ui, &st, 400, 38 + 46 + 22 + 44 + 10);
+        assert_eq!(row2, Some(Tap::Drone(st.drones[usize::from(st.order()[1])].key)));
+        // Settings rows.
+        let mut ui = Ui::default();
+        press(&mut ui, &st, &[Button::Up]);
+        assert_eq!(tap_target(&ui, &st, 400, 38 + 48 + 10), Some(Tap::SettingsRow(0)));
+        // The banner: on it, the banner; off it, nothing (dismiss).
+        let mut ui = Ui::default();
+        ui.new_drone(3, NOW);
+        assert_eq!(tap_target(&ui, &st, 400, 120), Some(Tap::Banner));
+        assert_eq!(tap_target(&ui, &st, 400, 380), Some(Tap::Nothing));
+        // Every plotted drone is reachable at its marker.
+        let ui = Ui::default();
+        for &i in &st.order() {
+            let d = &st.drones[usize::from(i)];
+            let Some(p) = d.drone else { continue };
+            let found = (0..440).step_by(8).flat_map(|x| (38..410).step_by(8).map(move |y| (x, y))).any(|(x, y)| tap_target(&ui, &st, x, y) == Some(Tap::Drone(d.key)));
+            assert!(found, "drone {} at {:?} cannot be tapped", d.key, p);
+        }
     }
 }

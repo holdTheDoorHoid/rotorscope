@@ -54,7 +54,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
     status_bar(s, p, d)?;
     caveats(s, p, d)?;
     if let Some(a) = ui.alert() {
-        alert(a.key, a.more, s, p, d)?;
+        alert(ui.alert_drone(s).map_or(a.key, |d| d.key), a.more, s, p, d)?;
     } else if ui.page_toast() {
         toast(ui.page().title(), p, d)?;
     }
@@ -108,19 +108,19 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     // need to look up now.
     let near = s.conflict.as_ref().is_some_and(|c| c.level >= 2);
     let threat = if near {
-        Some("AIRCRAFT")
+        Some("PLANE NEAR")
     } else if s.threats.jammed {
         Some("JAMMED")
     } else if s.area_gnss.is_some_and(|g| g.spoofing) {
         // GPS around the unit is being faked or jammed (aircraft and
         // drones say so): drone positions may be wrong.
-        Some("AREA FAKE")
+        Some("AREA GPS?")
     } else if s.area_gnss.is_some_and(|g| g.jamming) {
         Some("AREA JAM")
     } else if s.threats.flood_per_s > 0 {
         // Forged drone IDs by the hundred: unconfirmed rows are mostly
         // fakes (tracker `probation`).
-        Some("ID FLOOD")
+        Some("FAKE IDS")
     } else if s.threats.active > 0 {
         Some("ATTACK")
     } else {
@@ -128,6 +128,9 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     };
     if let Some(t) = threat {
         x = text_boxed(d, t, x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
+    } else if !s.nodes.is_empty() && s.nodes.iter().all(|n| !n.alive || !n.kind.hears_drones()) {
+        // No receiver answering: the empty radar must not look calm.
+        x = text_boxed(d, "NOT LISTENING", x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
     } else {
         // Nodes: a filled dot when alive, a hollow crossed one when not, each
         // with its label so the meaning never rests on colour. Four or more
@@ -135,6 +138,13 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         let (to_label, gap) = if s.nodes.len() > 3 { (10, 2) } else { (11, 6) };
         for n in &s.nodes {
             let c = Point::new(x + 4, BAR_H / 2);
+            if !n.alive {
+                // Down: a boxed "5 DOWN", not just a slashed dot.
+                let mut t: String<12> = String::new();
+                let _ = write!(t, "{} DOWN", n.kind.tiny());
+                x = text_boxed(d, &t, x - 1, 1, F_BAR, p.warn_ink, p.warn, 2)? + gap;
+                continue;
+            }
             if n.alive {
                 circle(d, c, 4, p.fg, true, 1)?;
             } else {
@@ -142,7 +152,7 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
                 line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.warn, 1)?;
             }
             let col = if n.alive { p.fg } else { p.warn };
-            x = text(d, n.kind.short(), x + to_label, y, F_BAR, col)?;
+            x = text(d, n.kind.tiny(), x + to_label, y, F_BAR, col)?;
             x += gap;
         }
     }
@@ -480,13 +490,23 @@ fn readout<D: DrawTarget<Color = Rgb565>>(
             }
         }
         None => {
-            let msg: &[&str] = if s.drones.is_empty() {
-                &["Listening", "for drones"]
+            let ws = s.warnings();
+            let msg: &[&str] = if ws.iter().any(|w| matches!(w, Warning::NotListening { .. })) {
+                &["NOT", "LISTENING:", "no receivers"]
+            } else if s.threats.jammed {
+                &["JAMMED:", "drones may", "be missed"]
+            } else if ws.iter().any(|w| matches!(w, Warning::NodesDown { .. })) {
+                &["NOT ALL", "RECEIVERS", "LISTENING"]
+            } else if s.drones.is_empty() {
+                &["No drone IDs", "heard. Drones", "without Remote", "ID may only", "show on Signals"]
             } else {
                 &["No drone", "position yet"]
             };
+            // Ten characters fit in the big face; longer notes go small.
+            let big_ok = msg.iter().all(|l| l.len() <= 10);
+            let (f, pitch) = if big_ok { (F_MED, 18) } else { (F_SMALL, 12) };
             for (i, l) in msg.iter().enumerate() {
-                text(d, l, x0, BAR_H + 40 + 18 * i as i32, F_MED, p.dim)?;
+                text(d, l, x0, BAR_H + 40 + pitch * i as i32, f, p.dim)?;
             }
         }
     }
@@ -649,7 +669,7 @@ fn rows<D: DrawTarget<Color = Rgb565>>(
             if s.threats.jammed {
                 "Jamming: may be missing drones"
             } else {
-                "Listening on every radio"
+                "No IDs heard (see Signals)"
             },
             WIDTH / 2,
             top + 50,
@@ -1051,7 +1071,7 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
 
     text(
         d,
-        "UP/DN next drone   hold SEL back",
+        "UP/DN next drone   SEL back",
         4,
         HEIGHT - 12,
         F_SMALL,
@@ -1363,7 +1383,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         text(d, n.kind.long(), 18, y, F_BODY, col)?;
         if n.alive {
             for (x, v) in [
-                (112, n.frames_per_s as u32),
+                (112, n.frames_per_s.map_or(0, u32::from)),
                 (164, n.rid_found),
                 (222, n.drops),
             ] {
@@ -1371,7 +1391,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
                 let _ = write!(b, "{v}");
                 text_right(d, &b, x + 40, y, F_BODY, col)?;
             }
-            text_right(d, &uptime(n.uptime_s), 314, y, F_BODY, col)?;
+            text_right(d, &uptime_short(n.uptime_s), 314, y, F_BODY, col)?;
         } else {
             text_right(d, "NOT RESPONDING", 314, y, F_BODY, col)?;
         }
@@ -1528,14 +1548,14 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         text(d, &b, 70, y, F_BODY, p.warn)?;
         hint = false;
     }
-    // Attack and jamming alarms, sounding and silenced (WP-11b): the strip
+    // Attack and jamming alarms, active and silenced (WP-11b): the strip
     // says what is muted and until when; this says what it is hiding.
     let (t, q) = (s.threats, s.caveats.silenced);
     if (t.active > 0 || t.muted > 0) && y + 17 + 14 <= HEIGHT {
         y += 17;
         text(d, "ALARMS", 4, y + 2, F_SMALL, p.dim)?;
         let mut b: String<40> = String::new();
-        let _ = write!(b, "{} sounding, {} silenced", t.active, t.muted);
+        let _ = write!(b, "{} active, {} silenced", t.active, t.muted);
         if q.snoozed > 0 {
             let _ = b.push_str(" (snooze)");
         }
@@ -1553,13 +1573,26 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
 // ---------------------------------------------------------------------------
 
 /// What a settings row says: its name and its value (shared with the wide
-/// renderer, which has room for longer names). Brightness has no value text
-/// (it is drawn as bars).
-pub(crate) fn settings_text(ui: &Ui, s: &UiState, row: SettingsRow, short: bool, out: &mut String<40>) -> &'static str {
+/// renderer, which has room for longer names). Brightness's value is the
+/// level and any Red Night cap (it is also drawn as bars). Action rows say
+/// what a press will do, or how the last one went: "done" only once the hub
+/// has said so.
+pub(crate) fn settings_text(ui: &Ui, s: &UiState, row: SettingsRow, short: bool, out: &mut String<64>) -> &'static str {
+    use crate::ui::{ActionState, Request, Theme};
     let st = ui.settings();
-    let done = ui.done_row() == Some(row);
+    let act = ui.action().filter(|a| a.row == row);
     let t = s.threats;
     out.clear();
+    // How an action went, if it ran on this row.
+    let went = |out: &mut String<64>, done: &str| -> bool {
+        match act.map(|a| a.state) {
+            Some(ActionState::Pending) => out.push_str("Working...").is_ok(),
+            Some(ActionState::Done) => out.push_str(done).is_ok(),
+            Some(ActionState::Failed(why)) => out.push_str(why).is_ok(),
+            None => false,
+        }
+    };
+    let confirm = ui.confirming() == Some(row);
     match row {
         SettingsRow::Theme => {
             match st.theme {
@@ -1595,43 +1628,73 @@ pub(crate) fn settings_text(ui: &Ui, s: &UiState, row: SettingsRow, short: bool,
             });
             "Switch at"
         }
-        SettingsRow::Brightness => "Brightness",
+        SettingsRow::Brightness => {
+            let b = st.brightness.clamp(1, 5);
+            let cap = crate::ui::RED_NIGHT_MAX_BRIGHTNESS;
+            let _ = write!(out, "{b}");
+            if b > cap && ui.effective_theme(s) == Theme::RedNight {
+                let _ = write!(out, " ({cap} in Red Night)");
+            } else if b > cap && st.theme == ThemeMode::Auto && st.night_theme == Theme::RedNight {
+                let _ = write!(out, " ({cap} at night)");
+            }
+            "Brightness"
+        }
         SettingsRow::Buzzer => {
             let _ = out.push_str(if st.buzzer { "On" } else { "Off (muted)" });
             "Buzzer"
         }
         // The hub learns where it stands and treats a GPS position far from
-        // there as faked: after moving it on purpose, reset that. While the
-        // hub waits for a decision on a new place: accept it.
-        SettingsRow::HubMoved if s.gps.home_pending => {
-            let _ = out.push_str(if done { "Accepted" } else { "Accept here" });
-            "New home"
+        // there as faked: after moving it on purpose, say so. While the hub
+        // waits for a decision on a new place: use it.
+        SettingsRow::HubMoved if s.gps.home_pending || act.is_some_and(|a| a.request == Request::AcceptHome) => {
+            if !went(out, "Spot in use") {
+                let _ = out.push_str(if confirm { if short { "Press again" } else { "Press again to confirm" } } else { "Use this spot" });
+            }
+            "New spot found"
         }
         SettingsRow::HubMoved => {
-            let _ = out.push_str(if done { "Relearning" } else { "Reset GPS" });
-            "Hub moved"
+            if !went(out, if short { "Learning spot" } else { "Learning new spot..." }) {
+                let _ = out.push_str(if confirm { if short { "Press again" } else { "Press again to confirm" } } else { "I moved the hub" });
+            }
+            "Hub location"
         }
         // Nuisance alarms first (muted for 2 h); safety-critical ones only
         // when nothing else sounds, and only snoozed (5 min): one press
         // never silences a jammer along with a nuisance. A venue's known
-        // false alarm goes in the site file.
+        // false alarm goes in the site file. The row names what it acts on.
         SettingsRow::Alarms => {
-            let _ = if done {
-                write!(out, "Done")
-            } else if t.mutable > 0 {
-                write!(out, "Mute {} (2h)", t.mutable)
-            } else if t.snoozable > 0 {
-                write!(out, "Snooze {} (5m)", t.snoozable)
-            } else if s.caveats.silenced.operator() > 0 {
-                write!(out, "Unmute {}", s.caveats.silenced.operator())
-            } else {
-                write!(out, "None sounding")
+            let done = match act.map(|a| a.request) {
+                Some(Request::MuteAlarms { .. }) => "Muted",
+                Some(Request::SnoozeAlarms { .. }) => "Snoozed",
+                _ => "Unmuted",
             };
+            let name = |w: &'static str| if w.is_empty() { "alarms" } else { w };
+            if !went(out, done) {
+                let _ = if short && t.mutable > 0 {
+                    write!(out, "Mute {}, 2 h", t.mutable)
+                } else if short && t.snoozable > 0 {
+                    write!(out, "Snooze {}, 5 min", t.snoozable)
+                } else if t.mutable > 0 {
+                    write!(out, "Mute {}", name(t.mutable_what)).and_then(|_| {
+                        if t.mutable > 1 { write!(out, " +{}", t.mutable - 1) } else { Ok(()) }
+                    }).and_then(|_| write!(out, " \u{b7} 2 h"))
+                } else if t.snoozable > 0 {
+                    write!(out, "Snooze {}", name(t.snoozable_what)).and_then(|_| {
+                        if t.snoozable > 1 { write!(out, " +{}", t.snoozable - 1) } else { Ok(()) }
+                    }).and_then(|_| write!(out, " \u{b7} 5 min"))
+                } else if s.caveats.silenced.operator() > 0 {
+                    write!(out, "Unmute {}", s.caveats.silenced.operator())
+                } else {
+                    write!(out, "None active")
+                };
+            }
             "Alarms"
         }
         // A wired or bench kit: every node stands at the hub.
         SettingsRow::NodesAtHub => {
-            let _ = out.push_str(if done { "Placed" } else { "Place all here" });
+            if !went(out, "Placed") {
+                let _ = out.push_str(if confirm { if short { "Press again" } else { "Press again to confirm" } } else { "Place all here" });
+            }
             "Nodes at hub"
         }
     }
@@ -1642,7 +1705,7 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
     text(d, "SETTINGS", 4, y0, F_BAR, p.fg)?;
     let st = ui.settings();
     let editing = ui.mode() == Mode::Edit;
-    let rows = st.rows();
+    let rows = ui.rows();
     // Six rows fit; with Auto's three more the list scrolls to keep the
     // cursor in view, with a marker where rows are hidden.
     const PITCH: i32 = 30;
@@ -1650,7 +1713,7 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
     let fit = ((HEIGHT - 14 - top) / PITCH) as usize;
     let cur = if editing { ui.settings_row() } else { 0 };
     let start = if cur >= fit { cur + 1 - fit } else { 0 };
-    let mut v: String<40> = String::new();
+    let mut v: String<64> = String::new();
     let mut y = top;
     for (i, row) in rows.iter().enumerate().skip(start).take(fit) {
         let sel = editing && ui.settings_row() == i;
@@ -1672,7 +1735,9 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
                 }
             }
         } else {
-            text(d, &v, 170, y, F_LARGE, fg)?;
+            // Whole characters that fit the 150 px value column.
+            let fits = v.char_indices().nth(15).map_or(v.len(), |(i, _)| i);
+            text(d, &v[..fits], 170, y, F_LARGE, fg)?;
         }
         y += PITCH;
     }

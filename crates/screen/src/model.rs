@@ -313,18 +313,63 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
-    /// Status-bar label (three characters at most).
+    /// Status-bar label at 800x480 (plain words, six characters at most).
     pub const fn short(self) -> &'static str {
         match self {
             NodeKind::Wifi24 => "2.4",
             NodeKind::Wifi5 => "5",
             NodeKind::Ble => "BT",
             NodeKind::Fpv => "FPV",
-            NodeKind::Adsb => "ADS",
-            NodeKind::DroneId => "DID",
-            NodeKind::Gateway => "GW",
+            NodeKind::Adsb => "PLANES",
+            NodeKind::DroneId => "DJI",
+            NodeKind::Gateway => "LINK",
             NodeKind::Lr => "LR",
         }
+    }
+    /// Status-bar label at 320x240 (three characters at most).
+    pub const fn tiny(self) -> &'static str {
+        match self {
+            NodeKind::Wifi24 => "2.4",
+            NodeKind::Wifi5 => "5",
+            NodeKind::Ble => "BT",
+            NodeKind::Fpv => "FPV",
+            NodeKind::Adsb => "AIR",
+            NodeKind::DroneId => "DJI",
+            NodeKind::Gateway => "LNK",
+            NodeKind::Lr => "LR",
+        }
+    }
+    /// What this receiver listens to, for warning heads set in capitals
+    /// ("5 GHz RECEIVER DOWN": units keep their case).
+    pub const fn band(self) -> &'static str {
+        match self {
+            NodeKind::Wifi24 => "2.4 GHz",
+            NodeKind::Wifi5 => "5 GHz",
+            NodeKind::Ble => "BLUETOOTH",
+            NodeKind::Fpv => "FPV",
+            NodeKind::Adsb => "PLANE",
+            NodeKind::DroneId => "DJI",
+            NodeKind::Gateway => "LINK",
+            NodeKind::Lr => "LR RADIO",
+        }
+    }
+    /// What goes unheard while this receiver is down, for sentences
+    /// ("drones on 5 GHz won't be heard").
+    pub const fn unheard(self) -> &'static str {
+        match self {
+            NodeKind::Wifi24 => "drones on 2.4 GHz",
+            NodeKind::Wifi5 => "drones on 5 GHz",
+            NodeKind::Ble => "drones on Bluetooth",
+            NodeKind::Fpv => "FPV video",
+            NodeKind::Adsb => "planes",
+            NodeKind::DroneId => "DJI DroneID",
+            NodeKind::Gateway => "nodes behind the link",
+            NodeKind::Lr => "control links and planes on LR",
+        }
+    }
+    /// A drone receiver (not the ADS-B receiver for crewed aircraft).
+    pub const fn hears_drones(self) -> bool {
+        !matches!(self, NodeKind::Adsb)
     }
     /// Health-screen label.
     pub const fn long(self) -> &'static str {
@@ -347,14 +392,25 @@ pub struct NodeStatus {
     pub kind: NodeKind,
     /// Heard from recently (the hub decides the timeout).
     pub alive: bool,
-    /// Frames per second the node is sniffing (all frames, not only RID).
-    pub frames_per_s: u16,
+    /// Frames per second the node is sniffing (all frames, not only RID);
+    /// `None` when the hub does not know the rate (yet). `Some(0)` on a
+    /// live node: alive but hearing nothing (a caution on the health page).
+    pub frames_per_s: Option<u16>,
     /// Remote ID frames found since the node started.
     pub rid_found: u32,
     /// Frames lost (node queue overflow + link errors).
     pub drops: u32,
     /// Node uptime, seconds.
     pub uptime_s: u32,
+    /// Seconds since the hub last heard the node; `None` if unknown.
+    pub silent_s: Option<u32>,
+}
+
+impl NodeStatus {
+    /// Alive but hearing nothing at all (its rate is known and zero).
+    pub fn deaf(&self) -> bool {
+        self.alive && self.frames_per_s == Some(0)
+    }
 }
 
 /// What the hub's coverage coordinator asked one node to do (health screen).
@@ -453,16 +509,16 @@ pub struct Switches {
     pub audio_clips: bool,
 }
 
-/// `1h59`, `4m05`, `12s`: time left, short.
-fn left(s: u32) -> String<8> {
+/// `1 h 59 min`, `4:05`, `12 s`: time left (never "m" for minutes).
+pub fn left(s: u32) -> String<12> {
     use core::fmt::Write;
     let mut b = String::new();
     let _ = if s >= 3600 {
-        write!(b, "{}h{:02}", s / 3600, s % 3600 / 60)
+        write!(b, "{} h {:02} min", s / 3600, s % 3600 / 60)
     } else if s >= 60 {
-        write!(b, "{}m{:02}", s / 60, s % 60)
+        write!(b, "{}:{:02}", s / 60, s % 60)
     } else {
-        write!(b, "{s}s")
+        write!(b, "{s} s")
     };
     b
 }
@@ -511,11 +567,62 @@ impl EvidenceStopWhy {
 }
 
 impl Caveats {
+    /// The one fault the strip shows as a filled bar: evidence not being
+    /// written. Everything else is a standing note ([`Caveats::notes`]).
+    pub fn fault(&self) -> Option<String<64>> {
+        self.lines()[0].clone()
+    }
+
+    /// Standing notes (build, link, silenced alarms, collection switches),
+    /// one short phrase each, for the wide screen's muted notes line and
+    /// the health page.
+    pub fn notes(&self) -> Vec<String<48>, 8> {
+        use core::fmt::Write;
+        let mut v: Vec<String<48>, 8> = Vec::new();
+        let mut add = |a: core::fmt::Arguments<'_>| {
+            let mut t = String::new();
+            let _ = t.write_fmt(a);
+            let _ = v.push(t);
+        };
+        match self.key {
+            EvidenceKey::NotShown => {}
+            EvidenceKey::Test => add(format_args!("Log not tamper-proof (test key)")),
+            EvidenceKey::Development => add(format_args!("Log not evidence-grade (dev key)")),
+        }
+        if self.link_open {
+            add(format_args!("Nodes unsecured: reports can be faked"));
+        }
+        if self.bench {
+            add(format_args!("Bench build"));
+        }
+        let q = &self.silenced;
+        if q.muted > 0 {
+            add(format_args!("{} muted, {} left", q.muted, left(q.mute_left_s)));
+        }
+        if q.snoozed > 0 {
+            add(format_args!("{} snoozed, {} left", q.snoozed, left(q.snooze_left_s)));
+        }
+        if q.site > 0 {
+            add(format_args!("{} muted by the site file", q.site));
+        }
+        let w = &self.switches;
+        if w.control_ids {
+            add(format_args!("Control IDs read (site file)"));
+        }
+        if w.control_content {
+            add(format_args!("Control content kept (site file)"));
+        }
+        if w.audio_clips {
+            add(format_args!("Audio clips kept (site file)"));
+        }
+        v
+    }
+
     /// The bottom strip's lines, top to bottom (`None`: no line). The first
     /// is the evidence state (only while evidence is not being written),
     /// the second the build marks (key class, bench build, open link), the
-    /// third the alarms silenced (`MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES
-    /// 3`), the fourth the collection switches that are on.
+    /// third the alarms silenced (`muted 2: 1 h 59 min  snoozed 1: 4:05
+    /// site 3`), the fourth the collection switches that are on.
     pub fn lines(&self) -> [Option<String<64>>; 4] {
         use core::fmt::Write;
         let ev = self.evidence.map(|e| {
@@ -535,14 +642,14 @@ impl Caveats {
         };
         match self.key {
             EvidenceKey::NotShown => {}
-            EvidenceKey::Test => add("TEST KEY: log not evidence"),
-            EvidenceKey::Development => add("DEV KEY: not evidence-grade"),
+            EvidenceKey::Test => add("Test key: log not tamper-proof"),
+            EvidenceKey::Development => add("Dev key: not evidence-grade"),
         }
         if self.bench {
-            add("BENCH BUILD");
+            add("Bench build");
         }
         if self.link_open {
-            add("OPEN LINK");
+            add("Nodes unsecured");
         }
         let q = &self.silenced;
         let mut sil: String<64> = String::new();
@@ -553,13 +660,13 @@ impl Caveats {
             let _ = sil.write_fmt(t);
         };
         if q.muted > 0 {
-            put(format_args!("MUTED {} {}", q.muted, left(q.mute_left_s)));
+            put(format_args!("muted {}: {}", q.muted, left(q.mute_left_s)));
         }
         if q.snoozed > 0 {
-            put(format_args!("SNOOZED {} {}", q.snoozed, left(q.snooze_left_s)));
+            put(format_args!("snoozed {}: {}", q.snoozed, left(q.snooze_left_s)));
         }
         if q.site > 0 {
-            put(format_args!("SITE MUTES {}", q.site));
+            put(format_args!("site {}", q.site));
         }
         let w = &self.switches;
         let mut sw: String<64> = String::new();
@@ -688,9 +795,9 @@ pub enum ControlSure {
 impl ControlSure {
     pub const fn label(self) -> &'static str {
         match self {
-            ControlSure::Energy => "energy",
-            ControlSure::Likely => "likely",
-            ControlSure::Confirmed => "sure",
+            ControlSure::Energy => "energy only",
+            ControlSure::Likely => "looks like",
+            ControlSure::Confirmed => "decoded",
         }
     }
 }
@@ -716,19 +823,57 @@ pub struct ControlView {
 /// Most flag rows the FLAGS page lists.
 pub const MAX_FLAG_ROWS: usize = 12;
 
+impl FlagsView {
+    /// Row indices in the order the page lists them: worst first, then
+    /// longest held. The FLAGS page's chosen row counts in this order.
+    pub fn order(&self) -> Vec<u8, MAX_FLAG_ROWS> {
+        let mut idx: Vec<u8, MAX_FLAG_ROWS> = (0..self.rows.len() as u8).collect();
+        idx.sort_unstable_by_key(|&i| {
+            let r = &self.rows[usize::from(i)];
+            (u8::MAX - r.level, u16::MAX - r.secs)
+        });
+        idx
+    }
+
+    /// The row listed `n`th ([`FlagsView::order`]).
+    pub fn listed(&self, n: usize) -> Option<&FlagRow> {
+        self.order().get(n).map(|&i| &self.rows[usize::from(i)])
+    }
+}
+
 /// One "possible violation" flag (PLAN.md Phase 12), for the FLAGS page.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FlagRow {
     /// Drone ID (or aircraft callsign / ICAO), shortened.
     pub who: String<14>,
-    /// 0 Note, 1 Watch, 2 Warning, 3 Alert.
+    /// 0 Note, 1 Watch, 2 Warning, 3 Alert (shown as Check / Watch /
+    /// Likely / Serious: [`FlagRow::level_word`]).
     pub level: u8,
     /// Short rule code ("HEIGHT", "UASFM", "AREA"...).
     pub rule: &'static str,
-    /// Evidence in a few words ("520ft AGL", "Class B").
-    pub text: String<24>,
+    /// Evidence in plain words, metres first ("260 m (853 ft) above
+    /// ground, limit 400 ft", "Class B").
+    pub text: String<48>,
     /// How long it has held, seconds.
     pub secs: u16,
+    /// The tracked drone it is about (its `DroneView::key`), so the page
+    /// can open its detail; `None` for an aircraft or a drone gone.
+    pub drone: Option<u32>,
+    /// About a crewed aircraft, not a drone.
+    pub aircraft: bool,
+}
+
+impl FlagRow {
+    /// The level as a word: a non-accusatory scale (the hub sees only what
+    /// drones broadcast).
+    pub const fn level_word(level: u8) -> &'static str {
+        match level {
+            0 => "Check",
+            1 => "Watch",
+            2 => "Likely",
+            _ => "Serious",
+        }
+    }
 }
 
 /// The FLAGS page's content. `UiState::flags` is `None` on a hub without
@@ -851,6 +996,10 @@ pub struct Threats {
     /// second while its alarm is raised, 0 otherwise. Unconfirmed drones in
     /// the list are then mostly fakes.
     pub flood_per_s: u16,
+    /// What the "Alarms" row would mute or snooze, named: the first such
+    /// alarm's label ("Flood of fake IDs"); empty when none (or unknown).
+    pub mutable_what: &'static str,
+    pub snoozable_what: &'static str,
 }
 
 impl UiState {
@@ -898,5 +1047,183 @@ impl UiState {
         };
         idx.sort_unstable_by_key(key);
         idx
+    }
+}
+
+/// Conditions that make the screen partly blind, or its numbers doubtful,
+/// in priority order (highest first). The wide screen shows the highest in
+/// a band under the status bar on every page ("+N more"), and the status
+/// bar shows each one as a chip, so an empty radar never reads as "all
+/// clear" while the hub cannot hear, or is being lied to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Warning {
+    /// No drone receiver responding (or none reported at all).
+    NotListening { alive: u8, total: u8 },
+    /// A drone near a crewed aircraft, caution or worse (`conflict`).
+    NearAircraft,
+    /// A node is jammed or blinded (`threats.jammed`).
+    Jamming,
+    /// The hub's own GPS looks faked.
+    GpsFaked,
+    /// Drone and aircraft positions around the hub jumped together.
+    AreaFaked,
+    /// A flood of made-up drone IDs.
+    IdFlood,
+    /// A possible-violation flag at the worst level.
+    SeriousFlag,
+    /// Some (not all) receivers down: `first` is the first one down.
+    NodesDown { first: NodeKind, n: u8 },
+    /// GPS jammed around the hub (aircraft report it).
+    AreaJammed,
+    /// The hub's own GPS looks jammed.
+    GpsJammed,
+    /// No own position: no distances or directions.
+    NoPosition,
+}
+
+/// Most warnings at once.
+pub const MAX_WARNINGS: usize = 11;
+
+impl Warning {
+    /// Worth holding back an automatic theme change for: something is
+    /// happening right now (not a standing state such as a node left
+    /// unplugged or no GPS, which could hold it back for good).
+    pub const fn acute(self) -> bool {
+        matches!(
+            self,
+            Warning::NearAircraft | Warning::Jamming | Warning::GpsFaked | Warning::AreaFaked | Warning::IdFlood | Warning::SeriousFlag
+        )
+    }
+
+    /// The band's text: a bold head and a plain consequence.
+    pub fn text(self, s: &UiState) -> (String<40>, String<56>) {
+        use core::fmt::Write;
+        let mut h: String<40> = String::new();
+        let mut t: String<56> = String::new();
+        let _ = match self {
+            Warning::NotListening { total: 0, .. } => {
+                let _ = h.push_str("NOT LISTENING");
+                t.write_str("no receivers reported")
+            }
+            Warning::NotListening { alive, total } => {
+                let _ = h.push_str("NOT LISTENING");
+                write!(t, "{alive} of {total} receivers responding")
+            }
+            Warning::NearAircraft => {
+                match &s.conflict {
+                    Some(c) => {
+                        let (n, u) = crate::draw::distance(c.range_m);
+                        let _ = write!(h, "DRONE {n} {u} FROM {}", c.aircraft);
+                    }
+                    None => {
+                        let _ = h.push_str("DRONE NEAR A PLANE");
+                    }
+                }
+                t.write_str("a crewed aircraft is close to a drone")
+            }
+            Warning::Jamming => {
+                let _ = h.push_str("JAMMING");
+                t.write_str("drones may be missed")
+            }
+            Warning::GpsFaked => {
+                let _ = h.push_str("GPS MAY BE FAKED");
+                t.write_str("distances may be wrong")
+            }
+            Warning::AreaFaked => {
+                let _ = h.push_str("AREA GPS FAKED");
+                t.write_str("drone positions may be wrong")
+            }
+            Warning::IdFlood => {
+                let _ = h.push_str("FAKE IDS");
+                t.write_str("flood of made-up drone IDs")
+            }
+            Warning::SeriousFlag => {
+                let _ = h.push_str("POSSIBLE SERIOUS RULE ISSUE");
+                t.write_str("see Flags")
+            }
+            Warning::NodesDown { first, n: 1 } => {
+                let _ = write!(h, "{} RECEIVER DOWN", first.band());
+                write!(t, "{} won't be heard", first.unheard())
+            }
+            Warning::NodesDown { n, .. } => {
+                let _ = write!(h, "{n} RECEIVERS DOWN");
+                t.write_str("drones on them won't be heard")
+            }
+            Warning::AreaJammed => {
+                let _ = h.push_str("AREA GPS JAMMED");
+                t.write_str("drones may send no position")
+            }
+            Warning::GpsJammed => {
+                let _ = h.push_str("GPS JAMMED");
+                t.write_str("hub position and time may be old")
+            }
+            Warning::NoPosition => {
+                let _ = h.push_str("NO POSITION");
+                t.write_str("distances and directions unavailable")
+            }
+        };
+        (h, t)
+    }
+}
+
+impl UiState {
+    /// Every active [`Warning`], highest priority first.
+    pub fn warnings(&self) -> Vec<Warning, MAX_WARNINGS> {
+        let mut v: Vec<Warning, MAX_WARNINGS> = Vec::new();
+        let receivers = self.nodes.iter().filter(|n| n.kind.hears_drones());
+        let total = receivers.clone().count() as u8;
+        let alive = receivers.filter(|n| n.alive).count() as u8;
+        if alive == 0 {
+            let _ = v.push(Warning::NotListening { alive, total });
+        }
+        if self.conflict.as_ref().is_some_and(|c| c.level >= 2) {
+            let _ = v.push(Warning::NearAircraft);
+        }
+        if self.threats.jammed {
+            let _ = v.push(Warning::Jamming);
+        }
+        if matches!(self.gps.integrity, GpsIntegrity::SuspectSpoofing | GpsIntegrity::Spoofing) {
+            let _ = v.push(Warning::GpsFaked);
+        }
+        if self.area_gnss.is_some_and(|g| g.spoofing) {
+            let _ = v.push(Warning::AreaFaked);
+        }
+        if self.threats.flood_per_s > 0 {
+            let _ = v.push(Warning::IdFlood);
+        }
+        if self.flags.as_ref().is_some_and(|f| f.rows.iter().any(|r| r.level >= 3)) {
+            let _ = v.push(Warning::SeriousFlag);
+        }
+        // Some down (all down is "not listening" above; the plane receiver
+        // counts here even then).
+        let mut down = self.nodes.iter().filter(|n| !n.alive && (alive > 0 || !n.kind.hears_drones()));
+        if let Some(first) = down.next() {
+            let _ = v.push(Warning::NodesDown { first: first.kind, n: 1 + down.count() as u8 });
+        }
+        if self.area_gnss.is_some_and(|g| g.jamming && !g.spoofing) {
+            let _ = v.push(Warning::AreaJammed);
+        }
+        if matches!(self.gps.integrity, GpsIntegrity::SuspectJamming | GpsIntegrity::Jamming) {
+            let _ = v.push(Warning::GpsJammed);
+        }
+        if !self.gps.has_position() {
+            let _ = v.push(Warning::NoPosition);
+        }
+        v
+    }
+
+    /// Drone radio links heard with no ID or position (Signals page): live
+    /// control links, drone video and DJI controllers, and drone Wi-Fi
+    /// networks. Generic energy is left out.
+    pub fn links_without_position(&self) -> usize {
+        let ctl = self.control.iter().filter(|c| !c.stale).count();
+        let rf = self.emitters.iter().filter(|e| !e.stale && e.kind != EmitterKind::Energy).count();
+        let wifi = self.wifi_drones.iter().filter(|w| !w.stale).count();
+        ctl + rf + wifi
+    }
+
+    /// The worst flag level on a tracked drone, if it has any.
+    pub fn flag_level(&self, key: u32) -> Option<u8> {
+        self.flags.as_ref()?.rows.iter().filter(|r| r.drone == Some(key)).map(|r| r.level).max()
     }
 }
