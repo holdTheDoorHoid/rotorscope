@@ -1,0 +1,76 @@
+name: Documentation site
+
+# Builds the mdBook site from docs/ and publishes it to GitHub Pages.
+# Pull requests only build and check; nothing is published from them.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - "crates/screen/snapshots/**"
+      - "tools/docs-build.sh"
+      - "tools/docs-check.py"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - "tools/docs-build.sh"
+      - "tools/docs-check.py"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install mdBook (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o mdbook.tar.gz "$url"
+          echo "${MDBOOK_SHA256}  mdbook.tar.gz" | sha256sum --check
+          mkdir -p "$HOME/bin"
+          tar -xzf mdbook.tar.gz -C "$HOME/bin"
+          rm mdbook.tar.gz
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build and check links
+        run: tools/docs-build.sh check
+
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/book
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
