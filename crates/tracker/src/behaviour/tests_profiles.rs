@@ -413,6 +413,8 @@ fn the_places_reach_the_state_json_and_the_worst_case_fits() {
         recording: false,
         nodes: &[],
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let signals = crate::json::Signals { places: Some(s.tr.places()), ..Default::default() };
     let mut buf = std::vec![0u8; crate::json::state_full_max_len(0, 0, 0, 0, 0, 0)];

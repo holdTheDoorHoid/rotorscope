@@ -120,7 +120,7 @@ pub fn spawn(listener: TcpListener, shared: Arc<Shared>) {
 }
 
 #[derive(Debug, Default)]
-struct Request {
+pub(crate) struct Request {
     method: String,
     path: String,
     if_none_match: Option<String>,
@@ -131,7 +131,7 @@ struct Request {
 }
 
 /// The request line and headers (no body). Also returns Content-Length.
-fn parse_head(head: &str) -> (Request, usize) {
+pub(crate) fn parse_head(head: &str) -> (Request, usize) {
     let mut lines = head.split("\r\n");
     let mut first = lines.next().unwrap_or("").split(' ');
     let mut r = Request {
@@ -151,10 +151,18 @@ fn parse_head(head: &str) -> (Request, usize) {
                 *slot = Some(v.to_string());
             }
         };
+        // The two headers the origin check reads may be sent once. Sent
+        // twice, which one counts is a guess: the value becomes one the
+        // check refuses (no authority contains a space).
+        let once = |name: &str, slot: &mut Option<String>| {
+            if k.eq_ignore_ascii_case(name) {
+                *slot = Some(if slot.is_some() { "sent twice".to_string() } else { v.to_string() });
+            }
+        };
         set("if-none-match", &mut r.if_none_match);
         set("content-type", &mut r.content_type);
-        set("host", &mut r.host);
-        set("origin", &mut r.origin);
+        once("host", &mut r.host);
+        once("origin", &mut r.origin);
         if k.eq_ignore_ascii_case("content-length") {
             len = v.parse().unwrap_or(usize::MAX);
         }
@@ -164,7 +172,7 @@ fn parse_head(head: &str) -> (Request, usize) {
 
 /// Why a request is turned away before any route sees it.
 #[derive(Debug, PartialEq, Eq)]
-enum Refusal {
+pub(crate) enum Refusal {
     /// `Host` (or `Origin`) is not this server.
     Origin,
     /// A POST that is not `application/json`.
@@ -175,7 +183,7 @@ enum Refusal {
 /// must be `localhost` or an IP literal, never another name: a name is how
 /// DNS rebinding reaches a loopback server. A server bound to one address
 /// answers to that address; one bound to a wildcard answers to any literal.
-fn authority_is(authority: &str, bound: SocketAddr) -> bool {
+pub(crate) fn authority_is(authority: &str, bound: SocketAddr) -> bool {
     let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
         let Some((h, after)) = rest.split_once(']') else {
             return false;
@@ -210,7 +218,7 @@ fn authority_is(authority: &str, bound: SocketAddr) -> bool {
 
 /// The checks every request passes: `Host` names this server, `Origin` (when
 /// sent) is this server's own page, and a POST is JSON.
-fn check(req: &Request, bound: SocketAddr) -> Result<(), Refusal> {
+pub(crate) fn check(req: &Request, bound: SocketAddr) -> Result<(), Refusal> {
     if !req.host.as_deref().is_some_and(|h| authority_is(h, bound)) {
         return Err(Refusal::Origin);
     }
@@ -470,6 +478,16 @@ mod tests {
         // A GET needs no content type but still the right Host.
         let get = req("GET /api/state HTTP/1.1\nHost: 127.0.0.1:8080\n");
         assert_eq!(check(&get, b), Ok(()));
+        // Host or Origin sent twice is refused, whichever order they come in.
+        for twice in [
+            "Host: evil.example\nHost: 127.0.0.1:8080\n",
+            "Host: 127.0.0.1:8080\nHost: evil.example\n",
+            "Host: 127.0.0.1:8080\nhost: 127.0.0.1:8080\n",
+            "Host: 127.0.0.1:8080\nOrigin: http://evil.example\nOrigin: http://127.0.0.1:8080\n",
+        ] {
+            let get = req(&format!("GET /api/state HTTP/1.1\n{twice}"));
+            assert_eq!(check(&get, b), Err(Refusal::Origin), "{twice}");
+        }
         let get = req("GET /api/state HTTP/1.1\nHost: evil.example:8080\n");
         assert_eq!(check(&get, b), Err(Refusal::Origin));
     }

@@ -10,7 +10,7 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 
 | Item | Value |
 |---|---|
-| Chip | ESP32-P4 rev v1.3, 40 MHz crystal, 360 MHz, MAC e8:f6:0a:e3:f6:de |
+| Chip | ESP32-P4 rev v1.3, 40 MHz crystal, 360 MHz, MAC aa:bb:cc:dd:ee:01 |
 | Memory | 16 MB flash, 32 MB PSRAM (AP, 200 MHz) |
 | Display | 800x480 IPS, **16-bit parallel RGB565** (not MIPI-DSI). DE 2, PCLK 3, HSYNC 40, VSYNC 41, B 8/7/6/5/4, G 14/13/12/11/10/9, R 19/18/17/16/15 |
 | Backlight | STC8 MCU on I2C 0x2F, register 0x20 = 0..100 |
@@ -22,7 +22,7 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 | UART3 header | 27 TX / 28 RX (XH2.54, also a 5 V input). **GPS** (since 2026-11-17; node link before). Its power pin is 5 V |
 | Web-head feed | UART2 TX on GPIO31 (wireless-module socket), 921600, to the web head's node-A RX; WEBHEAD.md (2026-11-15) |
 | Radio | ESP32-C6 on SDIO slot 1 (CMD 54, CLK 53, D0-D3 52/51/50/49), factory esp-hosted firmware; no UART/boot pads |
-| Factory image | Backed up: `~/Desktop/rotorscope-backups/elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
+| Factory image | Backed up outside the repository: `elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
 
 ## Build and flash
 
@@ -50,6 +50,10 @@ log seen through a console is always a fresh boot, not a continuation.
 
 ## Results
 
+*Update 2026-11-18: steps 7, 11, 13 and 15 give the pins from before the 2026-11-17 header swap.
+Since then the gateway / node link is on the UART1 header (RX GPIO48, TX GPIO47) and the GPS on
+the UART3-IN header (RX GPIO28, TX GPIO27); see the pin table above.*
+
 | Step | What | Result (2026-11-14) |
 |---|---|---|
 | 1 | Boot, print | PASS: prints, chip revision reads 1.3; image has no CSR 0x347 |
@@ -62,7 +66,7 @@ log seen through a console is always a fresh boot, not a continuation.
 | - | Stack inside L2 cache | FOUND + FIXED (memory.x patch): the kit's RAM overlapped the pre-v3 L2 cache; PSRAM sweeps corrupted the stack. See "Stack and the L2 cache" |
 | 7 | Gateway link on UART3 (RX GPIO28, 921600) | PASS on-chip self-test: UART2 TX drives the same pad; 50 frames/s, 0 corrupt, `Via` attribution right. Not yet with a real wire |
 | 8 | C6 over SDIO | not started; see "C6 and ESP-NOW" |
-| 9 | Hub app (`src/app.rs`) | RUNNING: tracker (64 tracks) fed by the gateway link; the shared `screen` UI drawn at 2x (640x480) in 24-row bands, 4 redraws/s; UP / SELECT / DOWN touch keys in the right 160 px. Self-test frame became a track; 0 corrupt, 0 bytes lost while drawing |
+| 9 | Hub app (`src/app.rs`) | RUNNING: tracker (64 tracks) fed by the gateway link; the shared `screen` UI drawn at 2x (640x480) in 24-row bands, 4 redraws/s; UP / SELECT / DOWN touch keys in the right 160 px (replaced 2026-11-18 by the native layout, see "Screen"). Self-test frame became a track; 0 corrupt, 0 bytes lost while drawing |
 | 10 | Touch (GT911) | PASS 2026-11-14: 46 taps by the owner logged; coordinates match the panel (keys at x 697-759, rows at y 66-126 / 229-276 / 378-439; left-side taps at x 297-404), so no axis swap or mirror. No crash |
 | 11 | Real ESP-NOW chain: nodes -> C5 gateway (c5c) -> wire -> P4 UART3 RX GPIO28 | PASS 2026-11-14: two ESP-NOW nodes (c5a, and c5b on its own power) relayed by the gateway; P4 decoded 520 frames, 0 corrupt, 0 UART errors, 0 ring overflow, nodes=2, while drawing at ~36 fps. Gateway: 0 lost, 0 duplicates, RSSI -47 to -55 dBm on the desk. No test beacon ran (no spare board), so no detections yet |
 | 12 | Test drone end to end: c5b rid-beacon (Wi-Fi beacon, 2.4 GHz ch 6) -> node c5a -> ESP-NOW -> gateway -> wire -> P4 | PASS 2026-11-14: P4 track count went 0 -> 1 about 18 s after the beacon started and held for the rest of the run, 0 corrupt. c5b then returned to node firmware (gateway in sight, 0 failed sends) |
@@ -109,7 +113,8 @@ Measured 2026-11-14, log once a second: `vsync=42..43 eof=42..43` per
 descriptor address different on every sample, main loop ~140k iterations/s,
 longest gap between link polls ~0.26 ms outside the log prints.
 
-**Unverified: nobody has looked at the screen yet.** A person must check it.
+**Unverified: nobody has looked at the screen yet.** A person must check it. *Update 2026-11-18:
+checked: the owner confirmed the colour bars and border by eye on 2026-11-14 (step 6).*
 Expected: eight vertical bars, left to right white, yellow, cyan, green,
 magenta, red, blue, black, each 100 px wide, with a 1-pixel white frame
 around the whole panel (visible against the black bar on the right). If
@@ -180,6 +185,23 @@ environment, or the build stops; such a build shows `BENCH BUILD` on the
 screen and lists itself in the hello line and the evidence boot event
 (docs/BENCH.md "Bench builds").
 
+## Screen: native 800x480 layout and themes (2026-11-18, branch `p4-themes`)
+
+**Not yet seen on the panel.** Built and host-tested only (snapshots in
+`crates/screen/snapshots/wide/`).
+
+| Piece | What |
+|---|---|
+| Layout | `screen::wide` (feature `wide`): status bar 0..38, a warning band 38..72 while any warning holds, page, fault / notes lines, and three context keys at y 414..476 (filling the touch zone) whose labels say what UP / SELECT / DOWN do on the screen showing |
+| Touch | `display::key_at` = `screen::wide::key_at`: y >= 410, x in thirds edge to edge (0..266 UP, 267..532 SELECT, 533..799 DOWN). SELECT held 1000 ms (`screen::wide::HOLD_MS`) = Back; the key fills up while held (redrawn every 100 ms). A touch on the page fires on release where it went down (moved > 20 px: not a tap) and goes to `screen::wide::tap_target` (drone markers, the readout card, list / flag / settings rows, the banner), then `Ui::tap`; a touch that began before the screen changed is ignored |
+| Backlight | Settings Brightness 1..5 -> STC8 register 0x20 at 10/25/45/70/100 %, written when the level changes (100 % at boot until the first frame); Red Night caps it at level 2 (`Ui::backlight_level`). Not verified on the panel |
+| Actions | Settings actions report back (`App::action_result`): "done" shows only when the hub did it; otherwise the reason ("No GPS position: not placed", "Home set in site file: not changed", "Nothing left to mute") |
+| Band | 800 x 48 RGB565 (75 KB) in **PSRAM** at 1 MB (`BAND_OFFSET`, between the framebuffer and the tracker), 10 bands per frame, each copied into the framebuffer, `between(gw)` after each. The old 15 KB internal-RAM band static is gone, so the stack grew |
+| Stack | `_stack_start - _stack_end` = **185,128 B** after the review fixes (185,672 B before them; origin/main 6651ecd: 170,688 B): `.bss` 68,584 -> 53,224 B (the band left), `.data` +376 B, then +544 B |
+| Fonts | Anti-aliased 4-bit glyphs (B612, B612 Mono, IBM Plex Sans Condensed; SIL OFL) in flash: 235 KB of bitmaps plus metrics. Image: `.rodata` 129 KB -> 367 KB, `.text` +12 KB (the 320x240 renderer and its mono fonts are no longer linked), about +250 KB of the 16 MB flash in all |
+| Cost | Host estimate only: a full radar frame takes 2.8 ms on the laptop (release), about 0.3 ms per band. Expect several ms per band on the P4; `max_band` on the `link` line will say. Not measured on the chip |
+| Themes | Settings: Theme Auto / Glass Cockpit / Field Day / Red Night; with Auto, Day theme, Night theme, Switch at. Saved as `theme`, `theme-day`, `theme-night`, `theme-switch` and `brightness` lines appended to `ROTORSCP/SITE.TXT` when an edit ends (one Setting evidence event per line); console `L theme red-night` / `L brightness 2` sets one; the file is applied at mount. No buzzer on this board: the Buzzer row is hidden |
+
 ## GPS, ADS-B and the console (2026-11-15, branch `p4-parity`)
 
 What the S3 hub does and the P4 now does too, and what it cannot yet, is in
@@ -190,9 +212,9 @@ What the S3 hub does and the P4 now does too, and what it cannot yet, is in
 | `src/gps.rs` | GPS on the **UART3-IN header** (hub RX GPIO28, hub TX GPIO27; UART1 peripheral; header power is 5 V), PPS on **GPIO29** (socket pin, rising-edge GPIO interrupt). Hunts 115200 / 9600 / 38400, detects u-blox MAX-M10S (UBX MON-VER) or Quectel LC29H (`$PQTMVERNO`), configures it for this boot only, publishes fix, UTC (PPS-anchored) and the sky view. **Untested with a real module** |
 | `src/adsbee.rs` | ADSBee CSBee on **UART4 RX GPIO30** (socket pin), 115200. **Untested with the real ADSBee** (not wired to the P4) |
 | `src/uartring.rs` | UART1/UART4 receive by interrupt into RAM rings (2 KB / 4 KB), like the gateway link |
-| `src/console.rs` | UART0 (the CH340 USB-C port) taken over from esp-println: log lines and JSON lines go through a 16 KB ring drained without waiting; JSON lines dropped whole when full. Commands `p` / `c` / `h`. Opening this port resets the P4 every time (ROM `POWERON`), even with DTR/RTS held low |
+| `src/console.rs` | UART0 (the CH340 USB-C port) taken over from esp-println: log lines and JSON lines go through a 16 KB ring drained without waiting; JSON lines dropped whole when full. Commands (`main.rs`): `c` clear manual position, `b` time airspace lookups, `a` aero plan, `m` / `H` GPS home, `T` accept GPS time, `L` site line, `n` / `k` / `r` / `u` / `e` evidence, `h` or `?` help; `p` (test position) in `testpoint` builds and `f` fault lines in `faulttest` builds only. Opening this port resets the P4 every time (ROM `POWERON`), even with DTR/RTS held low |
 | `src/report.rs` | 1 Hz JSON lines: `new`, `hub`, `track`, `link`, `aircraft` |
-| `src/gpsloop.rs` | `--features gpsloop` / `gpsloop-m10`: the on-chip loop-back (steps 15, 16). Leave the UART1 header and GPIO29/30 unconnected while it runs |
+| `src/gpsloop.rs` | `--features gpsloop` / `gpsloop-m10`: the on-chip loop-back (steps 15, 16). Leave the UART3-IN header (the UART1 header before 2026-11-17) and GPIO29/30 unconnected while it runs |
 
 Socket pin numbers are from Elecrow's wiki (SX1262 BUSY = 29, NSS = 30):
 check which socket hole is which with a meter before wiring, and keep any

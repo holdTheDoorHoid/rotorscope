@@ -1,7 +1,7 @@
 # Signals: what drones send, where, and what Rotorscope does about each
 
 One table per family. Every frequency is in MHz. "Node" is the job a C5 does to hear it
-(a C5 can do one job at a time). Sources are in [RESEARCH.md](../RESEARCH.md); this page
+(a C5 can do one job at a time). Sources are in [RESEARCH.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/RESEARCH.md); this page
 collects them and adds the state of our code. Written 2026-11-14.
 
 **Status words:**
@@ -33,10 +33,10 @@ channel 165 (5825) is still to be checked.
 |---|---|---|---|---|---|
 | DJI legacy Wi-Fi DroneID (Spark, Mavic Air, Mini SE and other Wi-Fi DJIs) | 2.4 GHz Wi-Fi beacons, any channel | Vendor element, OUI `26:37:12`: serial, drone and pilot position | Wi-Fi 2.4 | **Built**: decoder in `rid::dji`; Wi-Fi nodes forward the element raw as `Frame::DjiWifi` (rate-limited); hub makes a drone track merged with Remote ID by serial, in every output (2026-11-14). Never heard from a real drone | Recorded captures; a real Wi-Fi DJI. We never transmit it |
 | OcuSync DroneID burst (OcuSync 2, 3, 3+) | 2399.5, 2414.5, 2429.5, 2444.5, 2459.5 / 5756.5, 5776.5, 5796.5 | 9 MHz LTE-style burst, about 0.6 ms, every ~640 ms, only while the motors run. Plaintext: serial, drone, pilot and home position | DroneID (raw capture) | **Built, proven on the chip with recordings**: the public recordings, fed through the C5's own capture path over USB, detect and decode 78/78 at 7-9 dB SNR, ~151 ms per decode (2026-11-14). Node sends `Frame::DroneId` over ESP-NOW; hub shows drone, pilot and home, merged with Remote ID by serial. 0 false detections in 200 s on air. HIL re-run 2026-11-15: 26/26 decoded (no regression); chip only, recordings never reach the hub by design. Never a real drone | `tools/droneid-hil` (recordings into the chip, no radio); a real DJI with props off, or a field visit |
-| O4 / O4+ DroneID (Mini 4 Pro, Air 3, Avata 2, Neo, Flip, Mavic 4) | hops 2414.5, 2429.5, 2444.5, 5756.5, 5776.5, 5796.5, 5816.5 | Same burst, encrypted | DroneID | **Built**: detect only, with a session ID. Never decrypted, by design. Hub: presence-only track per session key ID | A real O4 drone |
-| OcuSync / O4 video downlink | 2400–2483; 5725–5850; O4 also 5170–5250 | OFDM, 10/20/40 MHz (O4 up to 60) | Fingerprint (raw capture) | **Not built** (PLAN 11b) | Public RFUAV recordings, then a real drone |
-| DJI controller uplink | same bands | narrow hops, 0.4–5 MHz wide, 0.5–5 ms bursts | Fingerprint | **Not built** | as above |
-| DJI FPV, O3, O4 air units | 5660, 5695, 5735, 5770, 5805, 5839, 5878, 5914 (FCC); O4 also 5170–5250 | LTE-style OFDM video | Fingerprint; RX5808 above 5820 | **Not built** | needs an air unit |
+| O4 / O4+ DroneID (Mini 4 Pro, Air 3, Avata 2, Neo, Flip, Mavic 4) | hops 2414.5, 2429.5, 2444.5, 5756.5, 5776.5, 5796.5, 5816.5 | Same burst, encrypted | DroneID | **Built**: detect only, with a session ID, unless the owner supplies a key at run time (docs/DRONEID-O4.md). Hub: presence-only track per session key ID | A real O4 drone |
+| OcuSync / O4 video downlink | 2400–2483; 5725–5850; O4 also 5170–5250 | OFDM, 10/20/40 MHz (O4 up to 60) | Fingerprint (raw capture) | **Built** (`crates/djilink`, PLAN 11b): checked against public RFUAV recordings through a model of the C5's capture path (2026-11-16); never run on the chip against a live transmitter | Public RFUAV recordings, then a real drone |
+| DJI controller uplink | same bands | narrow hops, 0.4–5 MHz wide, 0.5–5 ms bursts | Fingerprint | **Built** (`crates/djilink`): O4 checked against RFUAV recordings (2026-11-16); never a live transmitter | as above |
+| DJI FPV, O3, O4 air units | 5660, 5695, 5735, 5770, 5805, 5839, 5878, 5914 (FCC); O4 also 5170–5250 | LTE-style OFDM video | Fingerprint; RX5808 above 5820 | **Built** (`crates/djilink`): the DJI FPV drone checked against an RFUAV recording (2026-11-16); never a real air unit | needs an air unit |
 
 ## 3. Analog FPV video (5.8 GHz FM video)
 
@@ -122,7 +122,7 @@ channel.
 | OpenHD | 5745 (ch 149) default | System, air or ground side | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15) | `--group openlink`; real hardware |
 | RubyFPV | 5 GHz Wi-Fi | System, vehicle ID (opt-in) | Wi-Fi 5 | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15) | `--group openlink`; real hardware |
 | DroneBridge | 2.4 / 5 GHz Wi-Fi | System | Wi-Fi | **Built**; fake frames heard on air ch 6/149/161/165 (2026-11-14) and through the P4 hub's open-link table on all four channels (2026-11-15) | `--group openlink`; real hardware |
-| HDZero | R1–R8 (5658–5917, 37 MHz apart), E1 5705, F1 5740, F2 5760, F4 5800, low band 5362–5621 | "HDZero on channel X" by the grid and 27/17 MHz width | Fingerprint; RX5808 above 5820 | **Not built** | HDZero VTX ($40–70); it transmits without pairing |
+| HDZero | R1–R8 (5658–5917, 37 MHz apart), E1 5705, F1 5740, F2 5760, F4 5800, low band 5362–5621 | "HDZero on channel X" by the grid and 27/17 MHz width | Fingerprint; RX5808 above 5820 | **Built** (`crates/fpvscan`, synthetic tests only) | HDZero VTX ($40–70); it transmits without pairing |
 | Walksnail Avatar | same 8-channel plan as DJI (inferred), 20/40 MHz | "LTE-style video link" | Fingerprint | **Not built** | needs a kit |
 
 ## 5. Other drone links
@@ -138,10 +138,10 @@ channel.
 
 | Link | Where | What we can get | Status |
 |---|---|---|---|
-| ExpressLRS 2.4 GHz | 2400–2480, 80 channels; sync near 2440.4 | Presence, rate; ID opt-in | **Not built**, needs an LR2021 radio (Phase 9; not owned). It also covers the FLRC racing mode |
-| ExpressLRS 900 MHz | 903.5–926.9, 40 channels; sync near 915.5 | same | **Can't** on ESP32; LR2021 (Phase 9) |
-| TBS Crossfire / Tracer, ImmersionRC Ghost, FrSky, Spektrum, FlySky | 868/915 or 2.4 GHz | energy only | **Not built**; 2.4 GHz energy maybe on a raw-capture C5 |
-| SiK / RFD900 telemetry | 902–928 | hopping pattern | **Can't** on ESP32 |
+| ExpressLRS 2.4 GHz | 2400–2480, 80 channels; sync near 2440.4 | Presence, rate; ID opt-in | **Built** (`crates/ctrlwatch`, `firmware/node-lr`; Phase 9), no hardware yet: needs an LR2021 radio (not owned). It also covers the FLRC racing mode |
+| ExpressLRS 900 MHz | 903.5–926.9, 40 channels; sync near 915.5 | same | **Can't** on ESP32; LR2021 (Phase 9): **Built**, no hardware yet |
+| TBS Crossfire / Tracer, ImmersionRC Ghost, FrSky, Spektrum, FlySky | 868/915 or 2.4 GHz | energy only | **Built** for the LR2021 node (`crates/ctrlwatch` energy map), no hardware yet; 2.4 GHz energy maybe on a raw-capture C5 |
+| SiK / RFD900 telemetry | 902–928 | hopping pattern | **Can't** on ESP32; LR2021 (Phase 9): **Built**, no hardware yet |
 
 Legal line: presence and energy are the default. Link identifiers are opt-in. Content is never
 decoded (2020 DOJ/FAA/FCC/DHS advisory).

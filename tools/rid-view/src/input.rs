@@ -67,11 +67,11 @@ impl Clock {
 
 /// The longest line kept. A node's JSON lines are a few hundred bytes; a
 /// source that never sends a newline must not grow memory without limit.
-const MAX_LINE: usize = 64 * 1024;
+pub(crate) const MAX_LINE: usize = 64 * 1024;
 
 /// What [`read_line_bounded`] found.
 #[derive(Debug, PartialEq, Eq)]
-enum LineRead {
+pub(crate) enum LineRead {
     Eof,
     /// A line is in the buffer (without its newline when it had one).
     Line,
@@ -81,7 +81,7 @@ enum LineRead {
 
 /// Like `read_until(b'\n')` but keeps at most `max` bytes: the rest of an
 /// over-long line is read and thrown away up to its newline.
-fn read_line_bounded<R: BufRead>(r: &mut R, out: &mut Vec<u8>, max: usize) -> io::Result<LineRead> {
+pub(crate) fn read_line_bounded<R: BufRead>(r: &mut R, out: &mut Vec<u8>, max: usize) -> io::Result<LineRead> {
     out.clear();
     let mut too_long = false;
     let mut any = false;

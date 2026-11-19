@@ -1,0 +1,83 @@
+name: Documentation site
+
+# Builds the mdBook site from docs/ and publishes it to GitHub Pages.
+# Pull requests only build and check; nothing is published from them.
+#
+# Hardened like ci.yml: read-only token except on the deploy job, no secrets,
+# actions pinned to commits (the same versions the moving tags pointed to on
+# 2026-11-19), mdBook checked against a recorded SHA-256.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - "crates/screen/snapshots/**"
+      - "tools/docs-build.sh"
+      - "tools/docs-check.py"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - "tools/docs-build.sh"
+      - "tools/docs-check.py"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  MDBOOK_VERSION: "0.5.4"
+  MDBOOK_SHA256: "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install mdBook (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o mdbook.tar.gz "$url"
+          echo "${MDBOOK_SHA256}  mdbook.tar.gz" | sha256sum --check
+          mkdir -p "$HOME/bin"
+          tar -xzf mdbook.tar.gz -C "$HOME/bin"
+          rm mdbook.tar.gz
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build and check links
+        run: tools/docs-build.sh check
+
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: target/book
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job with more than read access: publishing to GitHub Pages.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

@@ -109,6 +109,9 @@ async fn main(spawner: Spawner) -> ! {
     // Which images this board holds (OTA slots) and the job, if this image
     // was started by a role switch.
     let mut images = node_common::Images::scan(peripherals.FLASH, link::NodeRole::Ble.bit());
+    // The link key: from the board's rskey partition, never from this image.
+    #[cfg(feature = "espnow")]
+    let keystore = images.keystore();
     role::init(images.stored_job(), images.can);
     let names: heapless::Vec<Option<&'static str>, 8> =
         images.slots.iter().map(|s| s.image.map(nodeimage::Image::project)).collect();
@@ -151,10 +154,17 @@ async fn main(spawner: Spawner) -> ! {
             warn!("set_band_mode: {e:?}");
         }
         let now = wifi.esp_now();
-        if let Err(e) = now.set_channel(node_ble::uplink::CHANNEL) {
+        if let Err(e) = now.set_channel(airlink::GATEWAY_CHANNEL) {
             warn!("esp-now set_channel: {e:?}");
         }
-        spawner.spawn(node_ble::uplink::run(now).unwrap());
+        // Blinks while the node is unprovisioned: the XIAO ESP32-C5's user
+        // LED (GPIO27); the S3 board's is not known.
+        #[cfg(feature = "esp32c5")]
+        let led = node_common::linkauth::Led::new(peripherals.GPIO27);
+        #[cfg(not(feature = "esp32c5"))]
+        let led = node_common::linkauth::Led::none();
+        // After `WifiController::new`: the uplink takes the random source then.
+        spawner.spawn(node_ble::uplink::run(now, keystore, led).unwrap());
         wifi
     };
 
@@ -519,6 +529,11 @@ async fn stats_task() {
         if secs.is_multiple_of(hub::HELLO_EVERY_S) {
             out::hub_frame(&hello_frame());
             out::hub_frame(&role::status_frame());
+            // Protocol 14: no per-kind budget here; frames lost to a full
+            // hub pipe count as `other`.
+            let mut shed = [0u32; link::SHED_KINDS];
+            shed[link::SHED_KINDS - 1] = cur.uart_drops;
+            out::hub_frame(&link::Frame::NodeHealth(node_common::node_health(shed, [0, 0])));
         }
         prev = cur;
         prev_spam = spam_tot;

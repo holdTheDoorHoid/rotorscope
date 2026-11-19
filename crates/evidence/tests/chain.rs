@@ -637,3 +637,29 @@ fn describe_does_not_pass_control_characters() {
     assert!(bad.is_empty(), "{bad:?} in {line:?}");
     assert!(line.contains("x?]0;pwn?"), "{line:?}");
 }
+
+/// The `threat` record (17) has grown at its end twice within format 1:
+/// 7 bytes, 13 with the episode fields (WP-14a), 14 with the silence byte
+/// (a muted alarm is recorded too). The checker reads none of its data, so
+/// logs from every firmware generation verify alike, mixed in one log too.
+#[test]
+fn threat_records_of_every_length_verify() {
+    use evidence::format::threat;
+    let mut l = Log::new(9);
+    l.boot(&gps_ctx(100));
+    for (i, len) in [threat::BASE, threat::WITH_EPISODE, threat::WITH_SILENCE].into_iter().enumerate() {
+        let mut data = vec![0u8; len];
+        data[0] = 3;
+        if len > threat::WITH_EPISODE {
+            data[threat::WITH_EPISODE] = threat::MUTED;
+        }
+        let mut b = [0u8; format::MAX_RECORD];
+        let n = l.chain.event(&gps_ctx(1_000 + i as u64), EventCode::Threat, b"deauth (node 1)", &data, &mut b).unwrap();
+        l.push(&b, n);
+    }
+    l.checkpoint(&gps_ctx(60_000), CheckpointReason::Shutdown);
+    let rep = check(&l.bytes);
+    assert_eq!(rep.exit_code(), 0, "{:#?}", rep.findings);
+    assert!(fails(&rep).is_empty());
+    assert_eq!((threat::BASE, threat::WITH_EPISODE, threat::WITH_SILENCE), (7, 13, 14));
+}

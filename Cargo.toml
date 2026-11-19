@@ -12,10 +12,11 @@ members = [
     "crates/airspace", "crates/faarules", "crates/modes",
     "crates/evidence", "crates/djicrypt", "crates/uat", "crates/flarm",
     "crates/aerohop", "crates/lr2021cfg", "crates/ctrlwatch", "crates/mavwatch",
+    "crates/kitkeys", "crates/hublink", "crates/fuzzkit",
     "tools/rid-view", "tools/rid-ble-beacon", "tools/droneid-file", "tools/rfuav-check", "tools/rawcap-pull", "tools/droneid-hil",
     "tools/cc26xx-flash", "tools/airspace-pack", "tools/modes-live",
     "tools/evidence-verify", "tools/evidence-server",
-    "tools/link-key", "tools/flarm-keys",
+    "tools/link-key", "tools/flarm-keys", "tools/fontgen",
 ]
 
 [workspace.package]
@@ -40,7 +41,7 @@ modes = { path = "crates/modes" }
 wifidrone = { path = "crates/wifidrone" }
 droneid = { path = "crates/droneid", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"] }
-heapless = { version = "0.8", features = ["serde"] }
+heapless = { version = "0.9.4", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["heapless"] }
 
 # The jamming tests push millions of synthetic samples through the DSP

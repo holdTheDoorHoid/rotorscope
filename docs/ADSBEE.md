@@ -3,9 +3,9 @@
 Rotorscope reads crewed aircraft from an ADSBee 1090 (Pants for Birds,
 firmware 0.9.0 here) as **CSBee** text: one `#A:` line per aircraft and one
 `#S:` statistics line, once a second, each with a CRC. The parser is
-`crates/adsb`; it has only run against lines built from the format
-definition, never against a real ADSBee. These steps check it on the real
-unit. None of them save settings, touch the ADSBee's Wi-Fi, or update its
+`crates/adsb`; it was first written against lines built from the format
+definition and has since run against the real unit (see "Result" below). These
+steps check it on the real unit. None of them save settings, touch the ADSBee's Wi-Fi, or update its
 firmware.
 
 **Settings are not saved.** `AT+PROTOCOL_OUT` and `AT+BAUD_RATE` change the
@@ -121,7 +121,8 @@ Step 1 on the owner's ADSBee 1090 (firmware 0.9.0, indoors, centre city Philadel
 airliner at 12,000 ft 10 km NNE and one at 24,000 ft 22 km N; one aircraft had no position
 yet. RSSI -71/-72 dBm. The parser (`crates/adsb`) agrees with the real CSBee layout. The console
 output was set back to `CONSOLE,NONE` afterwards; nothing was saved. Not yet tried: the
-ADSBee wired into a hub (the P4 has no `adsbee` input yet; the S3 build does).
+ADSBee wired into a hub (*Update 2026-11-18: the P4 now has its ADSBee input, UART4 RX on
+GPIO30, built and loop-back tested only; the S3 build has one too*).
 
 ## Raw frames and our own decoder (Phase 14a, 2026-11-15)
 

@@ -12,3 +12,6 @@ ctrlwatch = { path = "../ctrlwatch", features = ["serde"] }
 serde.workspace = true
 heapless.workspace = true
 postcard.workspace = true
+
+[dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }

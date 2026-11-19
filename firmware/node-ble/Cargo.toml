@@ -46,7 +46,7 @@ esp32c5 = [
 # second to let it send and hear the gateway (src/uplink.rs). `coex` is
 # esp-radio's coexistence support, needed to run both stacks at all. Makes
 # the node transmit; see docs/ESPNOW.md and README.md "ESP-NOW".
-espnow = ["esp-radio/wifi", "esp-radio/esp-now", "esp-radio/coex", "dep:airlink"]
+espnow = ["esp-radio/wifi", "esp-radio/esp-now", "esp-radio/coex", "dep:airlink", "node-common/espnow"]
 # Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
 # hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). The scan never pauses (no Wi-Fi at all). C5 only; not with `espnow`.
@@ -93,7 +93,7 @@ embedded-io-async = "0.7"
 critical-section = "1.2.0"
 static_cell = "2.1.1"
 
-heapless = { version = "0.8", features = ["serde"] }
+heapless = { version = "0.9.4", features = ["serde"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
 serde-json-core = { version = "0.6", default-features = false }
 postcard = { version = "1", default-features = false, features = ["heapless"] }
@@ -107,3 +107,12 @@ codegen-units = 1
 debug         = 2
 lto           = 'fat'
 opt-level     = 's'
+
+# Patched esp-radio 1.0.0-beta.1, carried by every radio firmware (see
+# ../patches/README.md): its ESP-NOW receive callback drops and counts a
+# received length that is zero, negative or above the ESP-NOW v2 maximum
+# (CVE-2025-52471 defence in depth), and on the ESP32-C5 it keeps the shared RF
+# front-end clocks on while BLE is up. tools/check-wifi-blobs.sh checks both
+# the patched copy and the radio library blobs.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }

@@ -353,6 +353,8 @@ fn state_lists_aircraft_last_and_streams_exactly() {
         recording: false,
         nodes: &[],
         adsb: Some(adsb_status),
+        fix_held: false,
+        utc_held: false,
     };
     let mut buf = std::vec![0u8; json::state_max_len(1, 0, 2, 0)];
     let n = json::state(
@@ -429,6 +431,8 @@ fn state_head_with_adsb_fits_its_bound() {
             aircraft: Some(u16::MAX),
             errors: u32::MAX,
         }),
+        fix_held: true,
+        utc_held: true,
     };
     let mut buf = [0u8; 2048];
     let n = json::state(&[], &[], &[], &ctx, &hub, &mut buf).unwrap();

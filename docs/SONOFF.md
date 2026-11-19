@@ -60,9 +60,9 @@ restarts it. Changes nothing. You should see `wafer 0xBB41 = CC13x2/CC26x2`,
 ## Step 2: back up the Zigbee firmware
 
 ```sh
-mkdir -p ~/rotorscope-backups
-cargo run --release -p cc26xx-flash -- --port "$PORT" read ~/rotorscope-backups/sonoff-zigbee.bin
-sha256sum ~/rotorscope-backups/sonoff-zigbee.bin
+mkdir -p ~/sonoff-backup
+cargo run --release -p cc26xx-flash -- --port "$PORT" read ~/sonoff-backup/sonoff-zigbee.bin
+sha256sum ~/sonoff-backup/sonoff-zigbee.bin
 ```
 
 This takes under a minute. The tool reads every byte, then asks the chip to
@@ -135,7 +135,7 @@ It combines with everything else `rid-view` reads: nodes, `--ble`, `--adsbee`,
 Flash your backup with the same tool:
 
 ```sh
-cargo run --release -p cc26xx-flash -- --port "$PORT" flash ~/rotorscope-backups/sonoff-zigbee.bin
+cargo run --release -p cc26xx-flash -- --port "$PORT" flash ~/sonoff-backup/sonoff-zigbee.bin
 ```
 
 It erases Sniffle, writes the backup, checks it and restarts. The dongle comes
@@ -185,3 +185,6 @@ Tested 2026-11-11 on one ZBDongle-P (CP2102N, CC2652P, Z-Stack 2.7.1 build
   transmitter was at hand; those paths are unit-tested with constructed
   packets), and restoring the Zigbee backup onto the dongle (tested only
   against the simulated chip).
+- *Update 2026-11-18: BT5 extended and Long Range were heard on air on 2026-11-12, from a C5
+  `rid-beacon`: extended with `--sniffle-mode 1m` at -55 dBm, Long Range with `coded` at -56 dBm
+  (commit 8b30df8). The Zigbee restore is still tested only in simulation.*

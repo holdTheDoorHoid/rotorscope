@@ -112,7 +112,7 @@ fn area(
     }
 }
 
-fn sample_pack() -> Vec<u8> {
+pub(crate) fn sample_pack() -> Vec<u8> {
     let mut b = PackBuilder {
         created: 1_794_700_000,
         center: PHL,
@@ -327,7 +327,7 @@ fn grid_size_does_not_wrap() {
     assert_eq!((1u64 << 32) as u32, 0);
 }
 
-fn grid_pack(rows: u32, cols: u32) -> Vec<u8> {
+pub(crate) fn grid_pack(rows: u32, cols: u32) -> Vec<u8> {
     // Build a valid pack with a tiny urban grid, then rewrite the header's
     // rows/cols (and the CRC) so the grid claims more than it holds.
     let b = PackBuilder {
@@ -380,7 +380,7 @@ fn out_of_range_grid_reads_do_not_panic() {
 }
 
 /// A pack whose first area claims ring lengths summing past its points.
-fn ring_pack(fake_len: u16) -> Vec<u8> {
+pub(crate) fn ring_pack(fake_len: u16) -> Vec<u8> {
     let mut b = PackBuilder::default();
     b.areas.push(area(
         AreaKind::ClassB,

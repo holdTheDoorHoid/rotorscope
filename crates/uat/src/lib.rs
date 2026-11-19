@@ -32,7 +32,9 @@ pub mod payload;
 pub mod rs;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod fuzz_tests;
 
 pub use payload::{AirGround, AltKind, ModeStatus, Payload, StateVector, TrackKind};
 

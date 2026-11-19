@@ -9,3 +9,6 @@ license.workspace = true
 link.workspace = true
 ctrlwatch = { path = "../ctrlwatch" }
 heapless.workspace = true
+# `airlink::GATEWAY_CHANNEL`, the gateway channel every ESP-NOW plan visits.
+# airlink holds no key and has no build script.
+airlink = { path = "../airlink" }

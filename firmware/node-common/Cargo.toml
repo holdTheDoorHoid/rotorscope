@@ -24,9 +24,15 @@ esp32c5 = ["esp-hal/esp32c5", "esp-bootloader-esp-idf/esp32c5"]
 # single image, so `Images` is not used there).
 esp32c3 = ["esp-hal/esp32c3", "esp-bootloader-esp-idf/esp32c3"]
 # The wired-bus node (crates/wirebus, docs/WIREBUS.md): many nodes on one hub
-# UART, polled by the hub. `src/bus.rs`; used by node-wifi, node-ble and
-# node-sdr when they are built with their own `wirebus` feature.
+# UART, polled by the hub. `src/bus.rs`; used by node-wifi, node-ble,
+# node-sdr and node-lr when they are built with their own `wirebus` feature.
 wirebus = ["dep:wirebus", "dep:embassy-time", "dep:critical-section", "dep:portable-atomic"]
+# The ESP-NOW link (docs/LINK-KEYS-DESIGN.md, package 13g): `keystore` (the
+# rskey provisioning record at boot) and `linkauth` (the link glue every
+# ESP-NOW image shares; the logic is nodeimage::uplink, host-tested). Turned
+# on by each image's own `espnow` feature; wired and bus builds never build
+# airlink.
+espnow = ["nodeimage/uplink", "dep:airlink", "dep:kitkeys", "dep:critical-section"]
 # Bench only (docs/BENCH.md "Crash recovery"): `fault::console`, typed
 # `fault panic` / `fault hang` on USB to prove the reboot and the watchdog.
 # Enabled only through a firmware's own `faulttest` feature, which is in no
@@ -36,9 +42,11 @@ faulttest = ["dep:embassy-time"]
 [dependencies]
 link      = { path = "../../crates/link" }
 nodeimage = { path = "../../crates/nodeimage" }
+airlink   = { path = "../../crates/airlink", optional = true }
+kitkeys   = { path = "../../crates/kitkeys", optional = true }
 esp-hal                = { version = "~1.2.2", features = ["unstable"] }
 esp-bootloader-esp-idf = { version = "0.6.0" }
-heapless = { version = "0.8", features = ["serde"] }
+heapless = { version = "0.9.4", features = ["serde"] }
 wirebus  = { path = "../../crates/wirebus", optional = true }
 embassy-time     = { version = "0.5.0", optional = true }
 critical-section = { version = "1.2.0", optional = true }

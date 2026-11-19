@@ -9,12 +9,16 @@
 //! `/api/state` list them (`bench`), and the image carries the
 //! `bench-build:<list>` tag tools/dev-board.sh looks for.
 //!
-//! Station mode (PLAN.md O5) is compiled in only when the owner has created
-//! `wifi.local.toml` next to this file. That file is gitignored and holds the
-//! network name and password; this script turns it into the `hub_station` cfg
-//! plus two compile-time environment variables. Without the file, no station
+//! Station mode (PLAN.md O5) is a bench-only build for now. The network name
+//! and password come from `wifi.local.toml` next to this file (gitignored)
+//! and are compiled into the image, so anyone holding the image or a flash
+//! dump can read the password. A build therefore uses that file only when
+//! the bench switch `ROTORSCOPE_BENCH_STATION` is set (which in turn needs
+//! `ROTORSCOPE_BENCH=1`, and tags the image as a bench build), and refuses to
+//! build while the file exists without the switch. Without both, no station
 //! code is built at all, so a kit built from a clean checkout never tries to
-//! join anything.
+//! join anything. The planned replacement, a record written over USB at run
+//! time, is described in README.md ("Station mode").
 
 use std::path::Path;
 
@@ -42,7 +46,7 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
-    benchfence::run("hub", &["demo", "open-hotspot"], &[]);
+    benchfence::run("hub", &["demo", "open-hotspot"], &[STATION_SWITCH]);
 
     station_mode();
     build_time();
@@ -60,6 +64,9 @@ fn check_xtensa_linker(target: &str) {
         panic!("`{linker}` not on PATH: run `. ~/export-esp.sh` first (installed by `espup install`)");
     }
 }
+
+/// The bench switch that lets a build compile `wifi.local.toml` in.
+const STATION_SWITCH: &str = "ROTORSCOPE_BENCH_STATION";
 
 #[derive(serde::Deserialize)]
 struct WifiLocal {
@@ -91,8 +98,26 @@ fn station_mode() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return; // No file: station mode is compiled out.
+    // benchfence::run has already refused the switch without ROTORSCOPE_BENCH=1.
+    let switch = std::env::var_os(STATION_SWITCH).is_some();
+    match (path.exists(), switch) {
+        (false, false) => return, // Station mode is compiled out.
+        (true, false) => panic!(
+            "{}: station credentials would be compiled into the image, where anyone holding the image \
+             or a flash dump can read the password. That is a bench-only build: \
+             ROTORSCOPE_BENCH=1 {STATION_SWITCH}=1 cargo fw. For a field build, move the file out of \
+             firmware/hub (README.md \"Station mode\").",
+            path.display()
+        ),
+        (false, true) => panic!(
+            "{STATION_SWITCH} is set but {} does not exist (after creating it: touch firmware/hub/build.rs)",
+            path.display()
+        ),
+        (true, true) => {}
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => panic!("{}: {e}", path.display()),
     };
     let cfg: WifiLocal = match toml::from_str(&text) {
         Ok(c) => c,
@@ -113,7 +138,7 @@ fn station_mode() {
     println!("cargo:rustc-env=HUB_STA_SSID={}", cfg.ssid);
     println!("cargo:rustc-env=HUB_STA_PSK={}", cfg.psk);
     // Deliberately not printed: build logs get pasted into issues.
-    println!("cargo:warning=station mode ON (wifi.local.toml found; ssid and psk compiled in)");
+    println!("cargo:warning=station mode ON (bench build: wifi.local.toml's ssid and psk compiled in; never share this image)");
 }
 
 /// Build time as Unix milliseconds. Used only by the `demo` feature as a

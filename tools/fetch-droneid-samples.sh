@@ -21,6 +21,8 @@ FILES=(
   "mini2_sm 5a17913cb11cde2919347054700345c9e5595eaff7818980d332b8ac8910bc55"
 )
 
+[[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || { echo "COMMIT must be a full 40-hex commit id" >&2; exit 1; }
+
 FROM=""
 if [[ "${1:-}" == "--from" ]]; then
   FROM="${2:?--from needs a directory}"
@@ -40,10 +42,12 @@ for entry in "${FILES[@]}"; do
     continue
   fi
   tmp="${out}.part"
+  trap 'rm -f "$tmp"' EXIT  # a failed copy or download leaves nothing behind
   if [[ -n "$FROM" ]]; then
     cp "${FROM}/${name}" "$tmp"
   else
-    curl --fail --location --silent --show-error -o "$tmp" "${BASE}/${name}"
+    # https only, also after a redirect.
+    curl --fail --location --proto '=https' --proto-redir '=https' --silent --show-error -o "$tmp" "${BASE}/${name}"
   fi
   got="$(sha256 "$tmp")"
   if [[ "$got" != "$want" ]]; then

@@ -14,7 +14,7 @@
 //! [`AGREE_MS`] of each other (in the node's own uptime), move the clock there (and restart
 //! the rate estimate). A replayed or time-shifted `TimeSync`, or one stepped hub second,
 //! therefore does nothing; an attacker must deliver three consistent ones in a row (which the
-//! link's age check, `airlink::auth`, bounds). The very first sync after boot is taken as is:
+//! link's age check, `airlink::v3`, bounds). The very first sync after boot is taken as is:
 //! there is nothing to compare it with. While candidates disagree with the estimate the old
 //! estimate runs on, and after [`STALE_US`] without an adopted sync the time is unknown, so
 //! the node parks rather than hops on a doubtful clock.

@@ -232,12 +232,67 @@ pub struct Logger {
     pub flarm_key_state: &'static str,
     /// `ROTORSCP/SITE.TXT` as read at mount, until the main loop takes it.
     site: Option<(tracker::site::SiteState, crate::site::FileFacts)>,
+    /// The length of a `SITE.TXT` too long to read, until the main loop
+    /// takes it ([`Logger::take_site_too_big`]).
+    site_too_big: Option<u32>,
     /// `ROTORSCP/GPSMEM.TXT` (remembered home and time) as read at mount,
     /// until the main loop takes it; `Some(None)`: no file.
     gps_mem: Option<Option<crate::gps::Memory>>,
     /// Its next contents, written by `record` when the card is free (WP-12).
     gps_mem_pending: Option<heapless::String<128>>,
     pub gps_mem_writes: u32,
+    /// The boot counter (`hublink::continuity`): the hub's flash counter
+    /// (`rsboot`, also the link epoch) when this boot recorded one, with the
+    /// previous boot's head in the evidence folder's state files; else the
+    /// state files alone, as before.
+    counter: hublink::continuity::HubCounter,
+    /// Records the counter state last said were on the card, and when.
+    state_records: u64,
+    state_at: u64,
+}
+
+/// The boot counter's two state files in `ROTORSCP/EVIDENCE`
+/// (`evidence::continuity::SLOT_NAMES`).
+struct SdSlots<'a> {
+    vm: &'a Vm,
+    dir: RawDirectory,
+}
+
+impl evidence::continuity::Slots for SdSlots<'_> {
+    type Error = FsError;
+    fn read(&mut self, slot: usize, buf: &mut [u8; evidence::continuity::STATE_LEN]) -> Result<Option<usize>, FsError> {
+        let name = evidence::continuity::SLOT_NAMES[slot];
+        let f = match self.vm.open_file_in_dir(self.dir, name, Mode::ReadOnly) {
+            Ok(f) => f,
+            Err(embedded_sdmmc::Error::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let r = (|| {
+            let len = self.vm.file_length(f)? as usize;
+            let want = len.min(buf.len());
+            let mut got = 0;
+            while got < want {
+                let n = self.vm.read(f, &mut buf[got..want])?;
+                if n == 0 {
+                    break;
+                }
+                got += n;
+            }
+            // Short reads count as a short (unreadable) state.
+            Ok(Some(if got < want { got } else { len }))
+        })();
+        let _ = self.vm.close_file(f);
+        r
+    }
+
+    fn write(&mut self, slot: usize, data: &[u8; evidence::continuity::STATE_LEN]) -> Result<(), FsError> {
+        let name = evidence::continuity::SLOT_NAMES[slot];
+        let f = self.vm.open_file_in_dir(self.dir, name, Mode::ReadWriteCreateOrTruncate)?;
+        let w = self.vm.write(f, data);
+        let c = self.vm.close_file(f);
+        w?;
+        c
+    }
 }
 
 /// Node positions and muted alarms (`tracker::site`). The hub only ever
@@ -307,10 +362,25 @@ impl Logger {
             flarm_keys: None,
             flarm_key_state: "none",
             site: None,
+            site_too_big: None,
             gps_mem: None,
             gps_mem_pending: None,
             gps_mem_writes: 0,
+            counter: hublink::continuity::HubCounter::new(),
+            state_records: 0,
+            state_at: 0,
         }
+    }
+
+    /// At boot: this boot's `rsboot` value, when it was recorded (it is
+    /// then the evidence boot counter too, `linkauth.rs`).
+    pub fn set_boot_counter(&mut self, value: Option<u32>) {
+        self.counter.set_flash(value);
+    }
+
+    /// The boot counter's source for the boot record.
+    pub fn counter_source(&self) -> u8 {
+        self.counter.source()
     }
 
     /// The O4 key read from the card, once (the decryptor keeps it).
@@ -395,10 +465,18 @@ impl Logger {
         self.site.take()
     }
 
-    /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (it only
-    /// grows, so it can be any length; later lines win).
+    /// A site file too long to read, as found at mount (its length), until
+    /// the main loop takes it for the evidence log.
+    pub fn take_site_too_big(&mut self) -> Option<u32> {
+        self.site_too_big.take()
+    }
+
+    /// Read `ROTORSCP/SITE.TXT` if present, a piece at a time (later lines
+    /// win). The main loop is stopped while this runs, so it is bounded: a
+    /// file over `MAX_FILE_BYTES` is not read at all, the watchdog is fed at
+    /// every piece, and only the first few ignored lines are printed.
     fn load_site(&mut self) {
-        use tracker::site::{Lines, SiteState, finish_into, read_into};
+        use tracker::site::{Lines, MAX_FILE_BYTES, MAX_IGNORED_NAMED, SiteState, TooBig, finish_into, more_ignored, read_into};
         let (Some(vm), Some(dir)) = (self.vm.as_ref(), self.open.as_ref().map(|o| o.dir)) else { return };
         let f = match vm.open_file_in_dir(dir, SITE_NAME, Mode::ReadOnly) {
             Ok(f) => f,
@@ -411,13 +489,30 @@ impl Logger {
                 return;
             }
         };
+        // A length that cannot be read counts as too long.
+        let len = vm.file_length(f).unwrap_or(u32::MAX);
+        if len > MAX_FILE_BYTES {
+            let _ = vm.close_file(f);
+            println!("hub-p4: {}", TooBig { bytes: len });
+            self.site_too_big = Some(len);
+            return;
+        }
         let (mut st, mut lines) = (SiteState::default(), Lines::default());
-        let refused = |n: u32, e: &str| println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
+        let named = core::cell::Cell::new(0u32);
+        let refused = |n: u32, e: &str| {
+            named.set(named.get().saturating_add(1));
+            if named.get() <= MAX_IGNORED_NAMED {
+                println!("hub-p4: {SITE_NAME} line {n} ignored: {e}");
+            }
+        };
         let mut buf = [0u8; 256];
         let mut total = 0usize;
         // The whole file is hashed as read, for the evidence log (WP-11b).
         let mut sha = evidence::Sha256Stream::new();
-        loop {
+        // The length was checked; the count guards a file that grows or a
+        // card that keeps answering.
+        while total <= MAX_FILE_BYTES as usize {
+            crate::fault::feed();
             match vm.read(f, &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(k) => {
@@ -429,6 +524,9 @@ impl Logger {
         }
         let _ = vm.close_file(f);
         finish_into(&mut st, &mut lines, refused);
+        if more_ignored(named.get()) > 0 {
+            println!("hub-p4: {SITE_NAME}: {} more lines ignored, not listed", more_ignored(named.get()));
+        }
         println!("hub-p4: {DIR}/{SITE_NAME} read ({total} bytes, {} lines)", lines.number);
         let facts = crate::site::FileFacts {
             sha256: sha.finish(),
@@ -557,10 +655,27 @@ impl Logger {
         if let Some(f) = self.ev_file.as_mut() {
             f.flushed_at = 0;
         }
+        // And the boot counter's head right after.
+        self.state_at = 0;
     }
 
     pub fn ev_name(&self) -> &str {
         self.ev_file.as_ref().map_or("-", |f| f.name.as_str())
+    }
+
+    /// Whether the next [`Logger::tick`] may block the loop for long: a card
+    /// probe, the mount (about 0.6 s) or the evidence folder's retry is due.
+    /// False between probes and while recording normally (writes are
+    /// short). The main loop sends a link beacon first when this holds, and
+    /// only then, so beacons keep their period the rest of the time (found
+    /// on the bench, 2026-11-19: asked on every pass, the early beacon made
+    /// the rate 4 a second, not 2).
+    pub fn slow_step_due(&self, now: u64) -> bool {
+        match self.state {
+            State::NoCard(at) | State::Error(at) => now >= at,
+            State::Waking(_, next) => now >= next,
+            State::Recording => self.ev_file.is_none() && now >= self.ev_retry_at,
+        }
     }
 
     /// One step. Call every main-loop pass. `utc_ms`: GPS time now, if
@@ -920,6 +1035,29 @@ impl Logger {
             Ok((file, name, no, prev)) => {
                 ev.card_mounted(name.as_str(), no, prev);
                 self.ev_file = Some(EvFile { dir, file, name, pos: 0, dirty: false, flushed_at: now });
+                // The boot counter (WP-14a): advanced and saved before this
+                // boot writes anything else to this card's state.
+                use evidence::continuity::{BootCounter, Continuity};
+                use hublink::continuity::CardCounter;
+                let mut slots = SdSlots { vm, dir };
+                let source = self.counter.source();
+                match (CardCounter { slots: &mut slots, state: &mut self.counter }).begin(ev.boot_id()) {
+                    Ok(Some(k)) => ev.continuity(&k),
+                    Ok(None) => println!("hub-p4: evidence boot counter {:?}: this boot already counted on this card", self.counter.counter()),
+                    Err(e) => {
+                        println!("hub-p4: evidence boot counter unreadable: {e:?}");
+                        ev.continuity(&Continuity {
+                            source,
+                            status: evidence::continuity::STORE_ERROR,
+                            counter: 0,
+                            prev_boot: [0; 8],
+                            prev_records: 0,
+                            prev_head: [0; 32],
+                        });
+                    }
+                }
+                self.state_records = 0;
+                self.state_at = 0;
                 Ok(())
             }
             Err(e) => {
@@ -984,7 +1122,10 @@ impl Logger {
 
     /// Length, hash of the last whole record, and status (1 whole, 2 ends
     /// in an incomplete record, 3 no whole record) of the evidence file
-    /// `name`. Closes it again whatever happens.
+    /// `name`. Closes it again whatever happens. Out of line: its 2 KB
+    /// buffer is on the stack only for this call (not under the boot
+    /// counter's card reads in `mount_evidence`).
+    #[inline(never)]
     fn previous_tail(vm: &Vm, dir: RawDirectory, name: &str) -> Result<(u32, [u8; 32], u8), FsError> {
         let f = vm.open_file_in_dir(dir, name, Mode::ReadOnly)?;
         let r = (|| {
@@ -1040,6 +1181,23 @@ impl Logger {
                 self.last_io = now;
                 return Ok(Some("ev_flush"));
             }
+        }
+        // The boot counter's state follows what is now on the card (its
+        // own step, at most every PROGRESS_EVERY_MS).
+        if let Some((records, head)) = ev.durable()
+            && records != self.state_records
+            && self.counter.counter().is_some()
+            && (self.state_at == 0 || now.saturating_sub(self.state_at) >= evidence::continuity::PROGRESS_EVERY_MS)
+        {
+            use evidence::continuity::BootCounter;
+            self.state_at = now.max(1);
+            self.state_records = records;
+            let mut slots = SdSlots { vm, dir: f.dir };
+            if let Err(e) = (hublink::continuity::CardCounter { slots: &mut slots, state: &mut self.counter }).progress(records, head) {
+                self.ev_errors += 1;
+                println!("hub-p4: evidence boot counter state not saved: {e:?}");
+            }
+            return Ok(Some("ev_state"));
         }
         let Some(rp) = self.replay.as_mut() else { return Ok(None) };
         // One record line needs ~1.4 KB of console room.

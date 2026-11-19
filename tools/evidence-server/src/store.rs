@@ -5,7 +5,14 @@
 //! <data>/devices/<key-id>/batches/000001.bin each upload exactly as received
 //! <data>/devices/<key-id>/audit.log          one AuditLine (JSON) per line
 //! <data>/devices/<key-id>/timestamps.log     outside time-stamps (JSON lines)
+//! <data>/devices/<key-id>/stamp-queue.log    stamps asked for, and failed attempts (JSON lines)
 //! ```
+//!
+//! A batch is checked in two steps: [`check_batch`] on its own (every
+//! link and signature; no store state, so the server runs it without
+//! holding the store), then [`Device::commit`] against what is stored
+//! (overlaps, links to stored neighbours, and for a batch that does not end
+//! on a checkpoint, the stored continuity record that covers it).
 //!
 //! Batch files are created with `create_new` (never overwritten), synced,
 //! and made read-only. The audit log is only ever appended. Nothing here
@@ -18,8 +25,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use evidence::format::{self, Body};
-use evidence::verify::bundle::{audit_hash, AuditEntry, AuditLine, Batch, Bundle, Device as BDevice, Timestamp, FORMAT};
+use evidence::continuity::Continuity;
+use evidence::format::{self, Body, EventCode};
+use evidence::verify::bundle::{audit_hash, AuditEntry, AuditLine, Batch, Bundle, Device as BDevice, StampFailure, Timestamp, FORMAT};
 use evidence::verify::{self, hex, unhex, Input, Level, Options};
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +58,34 @@ struct Stored {
     prev: [u8; 32],
 }
 
+/// A stored `continuity` record (event 27): it names the head of the boot
+/// before it. Every stored record is covered by a signature (its batch's
+/// checkpoint, or, for a tail, a stored continuity record), so a stored one
+/// can vouch for an earlier boot's tail.
+#[derive(Debug, Clone, Copy)]
+struct Cover {
+    boot: [u8; 8],
+    seq: u64,
+    k: Continuity,
+}
+
+/// An access-log stamp asked for: the audit entry it covers (the newest
+/// when it was queued), its hash, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Queued {
+    pub audit_n: u64,
+    pub audit_hash: String,
+    pub queued_utc_ms: u64,
+}
+
+/// One line of `stamp-queue.log`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+enum QueueLine {
+    Queued(Queued),
+    Failed(StampFailure),
+}
+
 /// A detection for the map and list.
 #[derive(Debug, Clone, Serialize)]
 pub struct Point {
@@ -75,9 +111,17 @@ pub struct Device {
     dir: PathBuf,
     pub batches: Vec<BatchMeta>,
     chains: HashMap<[u8; 8], BTreeMap<u64, Stored>>,
+    covers: Vec<Cover>,
+    /// Batches not indexed for the map and list: their file no longer
+    /// matches what was received (see `load_problems`).
+    unshown: Vec<u64>,
     pub audit: Vec<AuditLine>,
     audit_head: [u8; 32],
     pub timestamps: Vec<Timestamp>,
+    /// Access-log stamps asked for (oldest first) and failed attempts, from
+    /// `stamp-queue.log`.
+    pub queue: Vec<Queued>,
+    pub stamp_failures: Vec<StampFailure>,
     pub points: Vec<Point>,
     pub firmware: Vec<String>,
     /// Problems found when loading from disk (should stay empty).
@@ -103,6 +147,28 @@ pub struct Store {
     pub devices: BTreeMap<String, Device>,
 }
 
+/// A bundle waiting for its batch files (see [`Device::bundle_plan`]).
+pub struct BundlePlan {
+    batches: Vec<BatchMeta>,
+    bundle: Bundle,
+}
+
+impl BundlePlan {
+    /// The server's stamping set-up and backlog for this unit.
+    pub fn stamping(mut self, s: Option<evidence::verify::bundle::Stamping>) -> Self {
+        self.bundle.stamping = s;
+        self
+    }
+
+    pub fn build(mut self) -> Result<Bundle, StoreError> {
+        for b in &self.batches {
+            let bytes = fs::read(&b.path)?;
+            self.bundle.batches.push(Batch { n: b.n, received_utc_ms: b.received_utc_ms, sha256: b.sha256.clone(), records: evidence::b64::encode_vec(&bytes) });
+        }
+        Ok(self.bundle)
+    }
+}
+
 /// What an accepted upload added.
 #[derive(Debug, Clone, Serialize)]
 pub struct UploadResult {
@@ -112,6 +178,84 @@ pub struct UploadResult {
     pub detections: usize,
     pub chains: Vec<ChainRange>,
     pub notes: Vec<String>,
+    /// For a batch that ends unsigned (a boot's tail): the stored record of
+    /// a later boot whose signed continuity record names its last record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_by: Option<CoveredBy>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoveredBy {
+    pub boot: String,
+    pub seq: u64,
+}
+
+/// A batch that checked out on its own (see [`check_batch`]).
+pub struct Checked {
+    boot: [u8; 8],
+    first: u64,
+    last: u64,
+    first_prev: [u8; 32],
+    last_hash: [u8; 32],
+    ends_on_checkpoint: bool,
+    records: usize,
+    detections: usize,
+    notes: Vec<String>,
+}
+
+/// Check a batch on its own against the unit's registered key: every
+/// record, link and signature, whole records only, one boot, contiguous.
+/// Uses no store state (the server runs it without holding the store).
+pub fn check_batch(bytes: &[u8], key: &[u8; 65]) -> Result<Checked, StoreError> {
+    if bytes.is_empty() {
+        return Err(StoreError::Rejected("empty batch".into()));
+    }
+    // The key registered for the device is the outside key. A device
+    // registered with the published test key is stored like any other
+    // (a bench hub with no development key signs with it): the server
+    // keeps what arrives and vouches for nothing; evidence-verify refuses
+    // the test key in a bundle unless --allow-test-key.
+    let opts = Options { gaps_allowed: true, expect_key: Some(*key), allow_test_key: true, ..Options::default() };
+    let rep = verify::verify(&[Input::new("batch", bytes.to_vec())], &opts);
+    let fails: Vec<String> = rep.findings.iter().filter(|f| f.level == Level::Fail).map(|f| format!("{}: {}", f.at, f.what)).collect();
+    if !fails.is_empty() {
+        return Err(StoreError::Rejected(format!("batch does not verify: {}", fails.join("; "))));
+    }
+    // Whole records, one chain, contiguous.
+    let mut run: Option<Checked> = None;
+    let mut covered = 0usize;
+    for (_, off, r) in &rep.records {
+        let p = r.parse();
+        let c = run.get_or_insert(Checked {
+            boot: r.boot,
+            first: r.seq,
+            last: r.seq,
+            first_prev: p.header.prev,
+            last_hash: r.hash,
+            ends_on_checkpoint: false,
+            records: 0,
+            detections: 0,
+            notes: Vec::new(),
+        });
+        if r.boot != c.boot {
+            return Err(StoreError::Rejected("a batch must hold records of one boot only".into()));
+        }
+        if c.records > 0 && c.last.checked_add(1) != Some(r.seq) {
+            return Err(StoreError::Rejected(format!("batch byte {off}: record #{} does not follow #{} (a batch must be contiguous)", r.seq, c.last)));
+        }
+        c.last = r.seq;
+        c.last_hash = r.hash;
+        c.ends_on_checkpoint = r.kind == format::Kind::Checkpoint;
+        c.records += 1;
+        c.detections += usize::from(r.kind == format::Kind::Detection);
+        covered = off + r.bytes.len();
+    }
+    if covered != bytes.len() {
+        return Err(StoreError::Rejected(format!("batch byte {covered}: not a whole record")));
+    }
+    let mut c = run.ok_or_else(|| StoreError::Rejected("no records".into()))?;
+    c.notes = rep.findings.iter().filter(|f| f.level != Level::Fail).map(|f| format!("{} {}: {}", f.level.name(), f.at, f.what)).collect();
+    Ok(c)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,8 +339,10 @@ impl Store {
             let bytes = fs::read(p)?;
             let sha = hex(&evidence::sha256(&bytes));
             let n = p.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok()).unwrap_or(0);
-            if uploads.get(i) != Some(&(n, sha.clone())) {
-                dev.load_problems.push(format!("batch {} does not match its upload entry in the audit log", p.display()));
+            let matches = uploads.get(i) == Some(&(n, sha.clone()));
+            if !matches {
+                dev.load_problems.push(format!("batch {} does not match its upload entry in the audit log: not shown on the map or list", p.display()));
+                dev.unshown.push(n);
             }
             let received = dev
                 .audit
@@ -204,7 +350,7 @@ impl Store {
                 .filter_map(|l| serde_json::from_str::<AuditEntry>(&l.entry).ok())
                 .find(|e| e.action == "upload" && e.detail["batch"].as_u64() == Some(n))
                 .map_or(0, |e| e.utc_ms);
-            if let Err(e) = dev.index_batch(&bytes) {
+            if let Err(e) = dev.index_batch(&bytes, matches) {
                 dev.load_problems.push(format!("batch {}: {e}", p.display()));
             }
             dev.batches.push(BatchMeta { n, received_utc_ms: received, sha256: sha, path: p.clone() });
@@ -213,7 +359,21 @@ impl Store {
             dev.load_problems.push(format!("audit log has {} uploads, {} batch files on disk", uploads.len(), files.len()));
         }
         if let Ok(text) = fs::read_to_string(dir.join("timestamps.log")) {
-            dev.timestamps = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+            for (i, l) in text.lines().enumerate() {
+                match serde_json::from_str(l) {
+                    Ok(t) => dev.timestamps.push(t),
+                    Err(e) => dev.load_problems.push(format!("timestamps.log line {}: {e}", i + 1)),
+                }
+            }
+        }
+        if let Ok(text) = fs::read_to_string(dir.join("stamp-queue.log")) {
+            for (i, l) in text.lines().enumerate() {
+                match serde_json::from_str::<QueueLine>(l) {
+                    Ok(QueueLine::Queued(q)) => dev.queue.push(q),
+                    Ok(QueueLine::Failed(f)) => dev.stamp_failures.push(f),
+                    Err(e) => dev.load_problems.push(format!("stamp-queue.log line {}: {e}", i + 1)),
+                }
+            }
         }
         Ok(dev)
     }
@@ -257,9 +417,13 @@ impl Device {
             dir,
             batches: Vec::new(),
             chains: HashMap::new(),
+            covers: Vec::new(),
+            unshown: Vec::new(),
             audit: Vec::new(),
             audit_head: [0; 32],
             timestamps: Vec::new(),
+            queue: Vec::new(),
+            stamp_failures: Vec::new(),
             points: Vec::new(),
             firmware: Vec::new(),
             load_problems: Vec::new(),
@@ -307,75 +471,61 @@ impl Device {
             .collect()
     }
 
-    /// Check a batch against itself and the stored chains, then keep it.
+    /// Check a batch, then keep it ([`check_batch`] then [`commit`](Self::commit)).
     pub fn upload(&mut self, bytes: &[u8], actor: &str) -> Result<UploadResult, StoreError> {
-        if bytes.is_empty() {
-            return Err(StoreError::Rejected("empty batch".into()));
-        }
-        // The key registered for the device is the outside key. A device
-        // registered with the published test key is stored like any other
-        // (a bench hub with no development key signs with it): the server
-        // keeps what arrives and vouches for nothing; evidence-verify refuses
-        // the test key in a bundle unless --allow-test-key.
-        let opts = Options { gaps_allowed: true, expect_key: Some(self.key), allow_test_key: true, ..Options::default() };
-        let rep = verify::verify(&[Input::new("batch", bytes.to_vec())], &opts);
-        let fails: Vec<String> = rep.findings.iter().filter(|f| f.level == Level::Fail).map(|f| format!("{}: {}", f.at, f.what)).collect();
-        if !fails.is_empty() {
-            return Err(StoreError::Rejected(format!("batch does not verify: {}", fails.join("; "))));
-        }
-        // Whole records, each chain contiguous, ending on a checkpoint.
-        // boot -> (first seq, last seq, first record's prev hash, last record's hash)
-        type Run = (u64, u64, [u8; 32], [u8; 32]);
-        let mut runs: BTreeMap<[u8; 8], Run> = BTreeMap::new();
-        let mut last_kind = None;
-        let mut covered = 0usize;
-        for (_, off, r) in &rep.records {
-            let p = r.parse();
-            let e = runs.entry(r.boot).or_insert((r.seq, r.seq, p.header.prev, r.hash));
-            if r.seq != e.1 && e.1.checked_add(1) != Some(r.seq) {
-                return Err(StoreError::Rejected(format!("batch byte {off}: record #{} does not follow #{} (a batch must be contiguous)", r.seq, e.1)));
-            }
-            e.1 = r.seq;
-            e.3 = r.hash;
-            last_kind = Some(r.kind);
-            covered = off + r.bytes.len();
-        }
-        if covered != bytes.len() {
-            return Err(StoreError::Rejected(format!("batch byte {covered}: not a whole record")));
-        }
-        if last_kind != Some(format::Kind::Checkpoint) || runs.len() != 1 {
-            // One chain per batch, so its last record is its checkpoint.
-            if runs.len() != 1 {
-                return Err(StoreError::Rejected("a batch must hold records of one boot only".into()));
-            }
-            return Err(StoreError::Rejected("a batch must end with a signed checkpoint".into()));
-        }
-        for (boot, &(first, last, first_prev, last_hash)) in &runs {
-            // `range(first..=last)` panics on an inverted range.
-            if first > last {
-                return Err(StoreError::Rejected(format!("records #{first}..#{last} are not in order")));
-            }
-            let stored = self.chains.get(boot);
-            if let Some(m) = stored {
-                if m.range(first..=last).next().is_some() {
-                    let next = m.keys().next_back().map_or(0, |s| s.saturating_add(1));
-                    return Err(StoreError::Conflict(format!(
-                        "records #{first}..#{last} overlap records already stored for boot {}; next new record is #{next}",
-                        hex(boot)
-                    )));
+        let c = check_batch(bytes, &self.key)?;
+        self.commit(&c, bytes, actor)
+    }
+
+    /// Keep a batch [`check_batch`] passed, if it fits what is stored: no
+    /// overlap, links to stored neighbours, and either it ends on a signed
+    /// checkpoint or a stored continuity record of a later boot names its
+    /// last record exactly (that boot's signature then covers it).
+    pub fn commit(&mut self, c: &Checked, bytes: &[u8], actor: &str) -> Result<UploadResult, StoreError> {
+        let (boot, first, last) = (&c.boot, c.first, c.last);
+        let mut covered_by = None;
+        if !c.ends_on_checkpoint {
+            let cover = self.covers.iter().find(|v| {
+                v.boot != *boot && v.k.has_prev() && v.k.prev_boot == *boot && v.k.prev_records.checked_sub(1) == Some(last) && v.k.prev_head == c.last_hash
+            });
+            match cover {
+                Some(v) => covered_by = Some(CoveredBy { boot: hex(&v.boot), seq: v.seq }),
+                None => {
+                    let named = self.covers.iter().filter(|v| v.k.has_prev() && v.k.prev_boot == *boot).map(|v| v.k.prev_records).max();
+                    return Err(StoreError::Rejected(match named {
+                        Some(n) => format!(
+                            "a batch must end with a signed checkpoint, or end exactly at the record a later boot's stored continuity record names (#{} of boot {}, with its hash); this one ends unsigned at #{last}",
+                            n.saturating_sub(1),
+                            hex(boot)
+                        ),
+                        None => "a batch must end with a signed checkpoint (or, for a boot's last records, upload the next boot's records first: its signed continuity record covers them)".into(),
+                    }));
                 }
-                if first > 0
-                    && let Some(p) = m.get(&(first - 1))
-                    && p.hash != first_prev
-                {
-                    return Err(StoreError::Rejected(format!("record #{first} does not link to stored record #{}", first - 1)));
-                }
-                if let Some(after) = last.checked_add(1)
-                    && let Some(n) = m.get(&after)
-                    && n.prev != last_hash
-                {
-                    return Err(StoreError::Rejected(format!("stored record #{after} does not link to this batch's last record #{last}")));
-                }
+            }
+        }
+        // `range(first..=last)` panics on an inverted range.
+        if first > last {
+            return Err(StoreError::Rejected(format!("records #{first}..#{last} are not in order")));
+        }
+        if let Some(m) = self.chains.get(boot) {
+            if m.range(first..=last).next().is_some() {
+                let next = m.keys().next_back().map_or(0, |s| s.saturating_add(1));
+                return Err(StoreError::Conflict(format!(
+                    "records #{first}..#{last} overlap records already stored for boot {}; next new record is #{next}",
+                    hex(boot)
+                )));
+            }
+            if first > 0
+                && let Some(p) = m.get(&(first - 1))
+                && p.hash != c.first_prev
+            {
+                return Err(StoreError::Rejected(format!("record #{first} does not link to stored record #{}", first - 1)));
+            }
+            if let Some(after) = last.checked_add(1)
+                && let Some(n) = m.get(&after)
+                && n.prev != c.last_hash
+            {
+                return Err(StoreError::Rejected(format!("stored record #{after} does not link to this batch's last record #{last}")));
             }
         }
         // Keep it.
@@ -383,43 +533,63 @@ impl Device {
         let path = self.dir.join("batches").join(format!("{n:06}.bin"));
         write_once(&path, bytes)?;
         let sha = hex(&evidence::sha256(bytes));
-        let detections = rep.records.iter().filter(|(_, _, r)| r.kind == format::Kind::Detection).count();
-        let chains: Vec<ChainRange> = runs.iter().map(|(b, r)| ChainRange { boot: hex(b), first: r.0, last: r.1 }).collect();
-        let notes: Vec<String> = rep.findings.iter().filter(|f| f.level != Level::Fail).map(|f| format!("{} {}: {}", f.level.name(), f.at, f.what)).collect();
-        self.audit(
-            actor,
-            "upload",
-            serde_json::json!({ "batch": n, "sha256": sha, "bytes": bytes.len(), "records": rep.records.len(), "chains": chains }),
-        )?;
-        self.index_batch(bytes).map_err(StoreError::Io)?;
+        let chains = vec![ChainRange { boot: hex(boot), first, last }];
+        let mut detail = serde_json::json!({ "batch": n, "sha256": sha, "bytes": bytes.len(), "records": c.records, "chains": chains });
+        if let Some(v) = &covered_by {
+            detail["covered_by"] = serde_json::json!(v);
+        }
+        self.audit(actor, "upload", detail)?;
+        self.index_batch(bytes, true).map_err(StoreError::Io)?;
         self.batches.push(BatchMeta { n, received_utc_ms: now_ms(), sha256: sha.clone(), path });
-        Ok(UploadResult { batch: n, sha256: sha, records: rep.records.len(), detections, chains, notes })
+        Ok(UploadResult { batch: n, sha256: sha, records: c.records, detections: c.detections, chains, notes: c.notes.clone(), covered_by })
     }
 
-    /// Add a stored batch's records to the index and the map.
-    fn index_batch(&mut self, bytes: &[u8]) -> Result<(), String> {
+    /// Add a stored batch's records to the index and, when `show`, to the
+    /// map and list. A batch whose file no longer matches what was received
+    /// is indexed (so its records are not asked for again) but not shown:
+    /// the page must not show as the log what the log does not say.
+    fn index_batch(&mut self, bytes: &[u8], show: bool) -> Result<(), String> {
         for (off, r) in format::records(bytes) {
             let r = r.map_err(|e| format!("byte {off}: {e}"))?;
             let h = r.header;
             self.chains.entry(h.boot_id).or_default().insert(h.seq, Stored { hash: r.hash(), prev: h.prev });
+            if !show {
+                continue;
+            }
             let fw = hex(&h.fw_hash);
             if !self.firmware.contains(&fw) {
                 self.firmware.push(fw);
             }
-            if let Body::Detection(d) = r.body {
-                self.points.push(point(&r, &d));
+            match r.body {
+                Body::Detection(d) => self.points.push(point(&r, &d)),
+                Body::Event(e) if e.code == EventCode::Continuity as u16 => {
+                    if let Some(k) = Continuity::decode(e.data) {
+                        self.covers.push(Cover { boot: h.boot_id, seq: h.seq, k });
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
     }
 
+    /// Batches kept out of the map and list (changed on disk).
+    pub fn unshown_batches(&self) -> Vec<u64> {
+        self.unshown.clone()
+    }
+
     pub fn bundle(&self, server: &str) -> Result<Bundle, StoreError> {
-        let mut batches = Vec::new();
-        for b in &self.batches {
-            let bytes = fs::read(&b.path)?;
-            batches.push(Batch { n: b.n, received_utc_ms: b.received_utc_ms, sha256: b.sha256.clone(), records: evidence::b64::encode_vec(&bytes) });
-        }
-        Ok(Bundle {
+        self.bundle_plan(server).build()
+    }
+
+    /// Everything a bundle holds except the batch files' contents, so the
+    /// files can be read without holding the store.
+    pub fn bundle_plan(&self, server: &str) -> BundlePlan {
+        BundlePlan { batches: self.batches.clone(), bundle: self.bundle_without_batches(server) }
+    }
+
+    fn bundle_without_batches(&self, server: &str) -> Bundle {
+        Bundle {
             format: FORMAT.into(),
             created_utc_ms: now_ms(),
             server: server.into(),
@@ -429,28 +599,115 @@ impl Device {
                 name: self.info.name.clone(),
                 registered_utc_ms: self.info.registered_utc_ms,
             },
-            batches,
+            batches: Vec::new(),
             audit: self.audit.clone(),
             firmware_hashes: self.firmware.clone(),
             timestamps: self.timestamps.clone(),
-        })
+            stamping: None,
+        }
     }
 
     /// The newest stored checkpoint: (boot, seq, record hash).
+    /// From the newest batch that holds one (a boot's tail, stored after
+    /// the next boot's records, holds none).
     pub fn latest_checkpoint(&self) -> Option<([u8; 8], u64, [u8; 32])> {
-        let b = self.batches.last()?;
-        let bytes = fs::read(&b.path).ok()?;
-        format::records(&bytes)
-            .filter_map(|(_, r)| r.ok())
-            .filter(|r| r.header.kind == format::Kind::Checkpoint)
-            .last()
-            .map(|r| (r.header.boot_id, r.header.seq, r.hash()))
+        self.batches.iter().rev().filter(|b| !self.unshown.contains(&b.n)).find_map(|b| {
+            let bytes = fs::read(&b.path).ok()?;
+            format::records(&bytes)
+                .filter_map(|(_, r)| r.ok())
+                .filter(|r| r.header.kind == format::Kind::Checkpoint)
+                .last()
+                .map(|r| (r.header.boot_id, r.header.seq, r.hash()))
+        })
     }
 
     pub fn add_timestamp(&mut self, t: Timestamp) -> std::io::Result<()> {
         append_line(&self.dir.join("timestamps.log"), &serde_json::to_string(&t).unwrap())?;
         self.timestamps.push(t);
         Ok(())
+    }
+
+    /// The audit chain's head: its newest entry's number and hash.
+    pub fn audit_head(&self) -> Option<(u64, [u8; 32])> {
+        let n = self.audit.len().checked_sub(1)?;
+        Some((n as u64, self.audit_head))
+    }
+
+    /// The newest upload in the audit chain: its entry number and time.
+    pub fn newest_upload(&self) -> Option<(u64, u64)> {
+        self.audit.iter().enumerate().rev().find_map(|(i, l)| {
+            let e: AuditEntry = serde_json::from_str(&l.entry).ok()?;
+            (e.action == "upload").then_some((i as u64, e.utc_ms))
+        })
+    }
+
+    /// The newest upload not yet covered by a queued stamp, if any (after a
+    /// restart: the stamp it still needs).
+    pub fn unqueued_upload(&self) -> Option<(u64, u64)> {
+        let (n, t) = self.newest_upload()?;
+        let queued = self.queue.last().map(|q| q.audit_n);
+        queued.is_none_or(|q| q < n).then_some((n, t))
+    }
+
+    /// Ask for a stamp of the access log as it is now.
+    pub fn queue_stamp(&mut self, now: u64) -> Result<Queued, StoreError> {
+        let (n, h) = self.audit_head().ok_or_else(|| StoreError::Rejected("no access log yet".into()))?;
+        let q = Queued { audit_n: n, audit_hash: hex(&h), queued_utc_ms: now };
+        append_line(&self.dir.join("stamp-queue.log"), &serde_json::to_string(&QueueLine::Queued(q.clone())).unwrap())?;
+        self.queue.push(q.clone());
+        Ok(q)
+    }
+
+    /// A failed attempt (refused, unreachable, or a reply that is not a
+    /// stamp of what was sent): kept, never stored as a stamp.
+    pub fn record_stamp_failure(&mut self, f: StampFailure) -> Result<(), StoreError> {
+        append_line(&self.dir.join("stamp-queue.log"), &serde_json::to_string(&QueueLine::Failed(f.clone())).unwrap())?;
+        self.stamp_failures.push(f);
+        Ok(())
+    }
+
+    /// Keep a stamp, then log it in the audit chain (so removing it from
+    /// `timestamps.log` shows).
+    ///
+    /// OpenTimestamps: a pending proof and, later, its completed form are
+    /// each a stamp line and an audit entry (`state`, and `upgrade_of` for the
+    /// completed one); the pending line is never rewritten.
+    pub fn record_stamp(&mut self, t: Timestamp, gen_time_ms: Option<u64>) -> Result<(), StoreError> {
+        let token = evidence::b64::decode_vec(&t.token).unwrap_or_default();
+        let mut detail = serde_json::json!({
+            "authority": t.authority,
+            "covers": t.covers,
+            "audit_n": t.audit_n,
+            "imprint": t.imprint,
+            "token_sha256": hex(&evidence::sha256(&token)),
+        });
+        if let Some(g) = gen_time_ms {
+            detail["gen_time"] = verify::fmt_utc(g).into();
+        }
+        if t.kind == evidence::verify::bundle::KIND_OTS {
+            detail["kind"] = t.kind.clone().into();
+            detail["state"] = crate::ots::state(&token).into();
+            if let Some(u) = &t.upgrade_of {
+                detail["upgrade_of"] = u.clone().into();
+            }
+        }
+        self.add_timestamp(t)?;
+        self.audit("time-stamper", "timestamp", detail)?;
+        Ok(())
+    }
+
+    /// The stamp `authority` still owes: the newest queued one, unless it
+    /// has been received. (A newer stamp covers every older entry, so older
+    /// queued ones it never answered are not asked for again.)
+    pub fn outstanding_for(&self, authority: &str) -> Option<&Queued> {
+        let q = self.queue.last()?;
+        let done = self.timestamps.iter().any(|t| t.authority == authority && t.audit_n == Some(q.audit_n));
+        (!done).then_some(q)
+    }
+
+    /// Newest access-log stamp received from `authority`.
+    pub fn newest_stamp(&self, authority: &str) -> Option<&Timestamp> {
+        self.timestamps.iter().filter(|t| t.authority == authority && t.audit_n.is_some()).max_by_key(|t| t.audit_n)
     }
 
     /// True once the record exists here (for annotations).

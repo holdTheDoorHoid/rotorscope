@@ -4,6 +4,8 @@ target/
 **/target-espnow/
 **/target-bus/
 *.bin
+# Generated glyph atlas, embedded by include_bytes!; must be committed.
+!crates/screen/src/wide/glyphs.bin
 *.elf
 # Hub station-mode credentials: created by the owner, never committed.
 firmware/hub/wifi.local.toml
@@ -31,9 +33,16 @@ O4KEY.TXT
 *.o4key
 *o4key*.txt
 
-# ESP-NOW link key (per kit, made by `cargo run -p link-key -- new`): never commit.
+# The retired one-per-kit ESP-NOW link key (version 2 firmware; nothing reads it
+# any more, but an owner may keep the file until every board is reflashed): never commit.
 tools/link.key
 *.linkkey
+# Kit master and roster (per-node link keys, `cargo run -p link-key -- kit new`):
+# never commit. The roster holds no secrets but is per kit.
+tools/kit.key
+tools/kit.roster
+tools/kit.roster.new
+tools/kit.key.new
 
 # FLARM legacy keys: the owner may use them (2026-11-17) but they are never
 # published. Made by `cargo run -p flarm-keys` from a SoftRF checkout; on the
@@ -41,3 +50,7 @@ tools/link.key
 tools/flarm.keys
 FLARMKEY.TXT
 *.flarmkeys
+
+# Documentation site: the diagram library is fetched by tools/docs-build.sh.
+docs/assets/mermaid.min.js
+/release-out/

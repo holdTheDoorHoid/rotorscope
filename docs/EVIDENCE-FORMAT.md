@@ -7,6 +7,13 @@ document says what was intended and the code has a bug.
 
 Format version 1. All integers little-endian. "SHA-256" is FIPS 180-4.
 
+**Additions within version 1** (a reader that knows only the earlier
+layout reads every log, since fields were only appended to event data and
+codes added): WP-14a (2026-11-18) appended build identity to the boot
+event and the pack's SHA-256 to the pack event, episode fields to `threat`
+(17), and added `threat_ended` (26) and `continuity` (27), key class 3, the
+mixed boot id. Logs written before it verify unchanged.
+
 ## Where the files are
 
 On the hub's SD card (FAT32): `ROTORSCP/EVIDENCE/EVnnnnnn.EVL`, six decimal
@@ -19,8 +26,12 @@ to an existing file. A file is just records
 back to back, no file header.
 
 File numbers are **not** unique over the card's life: if the newest files
-are deleted, the next mount reuses their numbers. Nothing on the card
-records how many files or boots there have been.
+are deleted, the next mount reuses their numbers. The boot counter (below,
+"Continuity across boots") is what numbers the boots.
+
+The same folder holds the boot counter's two state files, `CHAINA.STA` and
+`CHAINB.STA` (96 bytes each, below). They are rewritten as the hub runs;
+they are not evidence files and are not signed.
 
 ## Record
 
@@ -75,23 +86,23 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 
 | code | name | data |
 |---:|---|---|
-| 1 | boot | key class (1), public key (65), chip revision major (1), minor (1). Always and only record #0. |
+| 1 | boot | key class (1), public key (65), chip revision major (1), minor (1); from WP-14a also build date (u64, Unix s: when the build script ran, never later than the build), source commit (20, SHA-1, zero unknown), source tree (1: 0 clean, 1 changed tracked files, 2 unknown), boot counter source (1: 0 none, 1 SD card state file, 2 secure element), how the boot id was made (1: 0 hardware RNG alone, 1 mixed, see "Boot id"). Text: `hub-p4 <version> git <commit>[-dirty] last reset: <why>; bench: <features or none>`. Always and only record #0. |
 | 2 | card_mounted | this file number (u32), previous file number (u32, 0 none), previous file length at mount (u32), SHA-256 of the previous file's last whole record (32), previous file status (1): 0 none, 1 ends on a whole record, 2 ends inside an incomplete record, 3 unreadable |
 | 3 | card_lost | queued bytes that go to the next file (u32) |
-| 4 | setting | new value (1); text says which setting. The P4 hub uses the byte as a tag for some: 3 site file, 4 GPS memory, 5 repeat-visitor history (`ROTORSCP/VISITS.DAT` read, discarded, wiped with console `W`, or switched by `visits on/off`; slice 16d), 6 threat profile changed (a `profile` line from the site file or the console; the text names the profile and what it does; slice 16e) |
+| 4 | setting | new value (1); text says which setting. The P4 hub uses the byte as a tag for some: 3 site file, 4 GPS memory, 5 site file too big to load (then the file's length, u32 LE), 6 threat profile changed (a `profile` line from the site file or the console; the text names the profile and what it does; slice 16e), 7 repeat-visitor history (`ROTORSCP/VISITS.DAT` read, discarded, wiped with console `W`, or switched by `visits on/off`; slice 16d; it was 5 before the site-file size limit took 5) |
 | 5 | clock | old UTC (u64, 0 none), new UTC (u64), step ms (i64), PPS-locked (1) |
 | 6 | gps_fix | (none) |
 | 7 | gps_lost | (none) |
 | 8 | gps_jump | distance m (u32), seconds (u32) |
 | 9 | node_join | station address (6) |
 | 10 | node_leave | station address (6) |
-| 11 | pack | airspace pack build date, Unix s (u32), length (u32), pack format version (u16) |
+| 11 | pack | airspace pack build date, Unix s (u32), length (u32), pack format version (u16); from WP-14a also the SHA-256 of the pack file as loaded (32) |
 | 12 | note | (none); the text is the operator's note |
 | 13 | not_logged | frames received but not recorded (queue full) (u32) |
 | 14 | shutdown | (none); a shutdown checkpoint follows |
 | 15 | gps_receiver | 1 answering, 0 silent |
 | 16 | o4_decrypted | session key ID (4), record selector (1); text is what it decrypted to, never the key |
-| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); text describes it. For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
+| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); from WP-14a also episode (u32, 1 = the alarm entry's first), how it was raised (1: 0 first, 1 again after an earlier episode ended, 2 still sounding when its mute or snooze ended), raises within the last minute (1); then whether a mute rule covered it so no alert was given (1: 0 alerted, 1 snoozed, 2 muted by the operator, 3 muted for good by the site file; absent before 2026-11-18, when only alerted raises were recorded). Data length: 7 before WP-14a, 13 from WP-14a, 14 from 2026-11-18; all within format version 1, and the checker reads none of it, so every length verifies. Text describes it, and for a silenced one says so. One record per raise (see "Threat episodes" below). For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
 | 18 | gnss_jamming | kind (1), level (i16); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
@@ -99,10 +110,93 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 22 | aircraft_conflict | level (1: 1 advisory, 2 caution, 3 warning), drone track id (u32), aircraft address (u32), aircraft source (1); text: the pair, distance, height difference, predicted closest approach |
 | 23, 24 | (reserved) | taken by the acoustic work: 23 `sound`, 24 `sound_clip` (on the acoustic branch) |
 | 25 | id_disputed | drone track id (u32 LE), what (1: bit 0 position, 1 Self-ID, 2 operator ID, 3 a second ID), other claim's source (1: 0 Remote ID, 1 DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none); text: two transmitters claim this ID, how far apart, neither verified (tracker `claims`, docs/SPOOFING.md) |
-| 26, 27 | (reserved) | taken on other branches: 26 `threat_ended`, 27 `continuity` |
+| 26 | threat_ended | kind (1), node station address (6), episode (u32), active ms (u64: first to last report of the episode), frames (u64), reports (u32), peak level (i8: dBm, dB above the floor for jamming), raises in the episode (u32), flags (1: bit 0 held as flapping, bit 1 its alarm entry was removed while it was still sounding), end records lost before this one (u32). Text: the same in words. Closes the latest `threat` record (17) of the same alarm |
+| 27 | continuity | source (1: 1 SD card state file, 2 secure element), status (1: 0 continued, 1 fresh: no counter on the card, 2 the stored counter was unreadable, 3 the new counter could not be saved, 4 the store could not be read), boot counter (u64; 0 unknown), previous boot id (8; zero none), the previous boot's records known stored (u64: its next sequence number), SHA-256 of the last of them (32). Text: the same in words. See "Continuity across boots" |
 | 28 | threat_level | a drone's threat level rose (docs/THREAT-PROFILES.md, tracker `behaviour`), once per rise to caution or above: level (1: 1 notice, 2 caution, 3 warning, 4 critical), drone track id (u32 LE; with flag bit 4, the signal's threat entry id instead), rule numbers of up to four reasons, most serious first (4: 1 in area, 2 pilot near, 3 pilot outside, 4 above ceiling, 5 beeline, 6 fast inbound, 7 loitering, 8 circling, 9 low hover, 10 drop pattern, 11 following (7-11 since slice 16b), 12 getting louder fast (a signal or rotor sound without a position), 13 dark drone (rotor sound, no radio heard) (12-13 since slice 16c), 14 spotter then striker (on the striker; a striker without a position since 16c), 15 several at once (or during jamming or GPS interference), 16 probing, 17 repeat visitor, 18 pilot on the move, 19 identity changed mid-flight (14-19 since slice 16d), 20 last seen inbound, 21 spotter for a striker (part of 14, on the spotter, since 16d); 0 none), flags (1: bit 0 snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3 held after the drone was lost, bit 4 no position: a signal or a sound, not a drone track, since 16c); text: the level, the drone, and each reason with its numbers, e.g. `Warning: drone SN-1 heading for house, 640 m away at 12 m/s, there in about 41 s`, or for a signal (worded as a trend) `Warning: Analog video 5740.0 MHz (no position): FPV video signal getting louder fast on 2 nodes (+8 dB in 7 s), nearing house`, `Warning: rotor sound (no position): rotor sound, no radio heard, for 29 s, near house` |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
+Fields added at the end of an event's data by a later firmware are
+ignored by an older reader: read the fields you know by position, and
+accept data longer than that.
+
+**Threat episodes** (code 17 and 26, from WP-14a). A threat (an alarm entry
+on the hub: one kind from one node, against one target or band) is
+*raised* when first reported, and *raised again* when reported after it
+had ended. It *ends* after 10 s with no report. Each raise is a `threat`
+record and each end of a raised episode a `threat_ended` record, so an
+alarm tripped briefly and then used again for a real attack leaves two
+episodes on record, not one. A threat that **flaps** is bounded: once it
+has been raised 3 times within 60 s, its episode ends only after 60 s with
+no report, and the raises in between are counted into that episode
+(`raises`, flag "held") instead of each getting a record. The third raise's
+text says the hold begins. Records per alarm entry are thus at most about
+four a minute. A silenced (muted or snoozed) alarm is recorded the same
+way, raise and end, with its raise marked silenced (no alert was given);
+when the rule ends while it is still sounding it gets one more raise record
+(how 2, "still sounding after its mute or snooze ended"). Muting stops the
+alert, never the record. Logs written before 2026-11-18 have no raise or
+end record for an alarm that started while a mute covered it (only the
+node's raw frames, and nothing for a hub-raised kind).
+
+### Continuity across boots
+
+The hub keeps a **boot counter** and, for the latest boot, how far its
+chain has reached the card (record count and the hash of the last record
+flushed). Each boot records where it stands in a `continuity` event (27):
+its counter and what it found about the boot before it. Where the counter
+lives is named in the boot event (data byte 97) and in the event:
+
+- **SD card state file** (source 1, today). Read, advanced and saved at
+  the boot's first card mount, so the event comes after the `card_mounted`
+  event, not at boot; a card with a different counter mounted later in the
+  same boot gets its own `continuity` event. After each flush of the
+  evidence file (at most every 10 s, and at once after an eject) the hub
+  rewrites the state with this boot's record count and head. Two files,
+  written in turn, so a power cut during a write leaves the other.
+- **Secure element** (source 2, planned): a monotonic counter, read right
+  after the boot event. Same event, same layout.
+
+State file, 96 bytes: magic `52 53 43 53` ("RSCS"), version `01`, 3 zero
+bytes, counter (u64), boot id (8), records stored (u64), hash of the last
+(32), SHA-256 of bytes 0..63 (32: catches a torn write, not an edit). The
+newer of the two valid files (higher counter, then more records) counts.
+
+**What a checker does with it.** For a boot whose `continuity` event names
+a previous boot with *n* records and head *h*: if that boot's records are
+supplied, record *n-1* must be there and hash to *h*. A previous log that
+ends before *n-1* was cut short (or not supplied in full), a different
+record *n-1* was changed: both failures. (In a server's export bundle, a previous boot that ends on its last
+checkpoint is a gap instead: a server takes a boot's last unsigned records
+only once the next boot's continuity record that names them is stored
+(evidence-server since WP-14b; older bundles never have them), so until
+then they are only on the card.) A
+previous boot not supplied while earlier boots are is a missing boot (a failure, or with `--allow-gaps` a
+gap). The earliest boot supplied has its predecessor named, outside what
+was checked. A previous boot's records after its own last checkpoint, up
+to *n-1*, are covered by the next boot's signature once its `continuity`
+record is signed (it names their head).
+
+**What it cannot show.** The state file is on the card, which its holder
+can rewrite or delete (the next boot then says "fresh" and starts again at
+1). It shows that the boots supplied follow each other and that an older
+boot's log was not cut after a later boot had recorded its head. It cannot
+show that nothing came after the newest boot supplied (the newest files
+deleted, a wiped card), nor protect the newest boot's last records before
+the next boot starts. A secure-element counter that cannot go back, with
+its current value read off the unit by whoever checks, closes the first.
+
+### Boot id
+
+Eight bytes naming one boot's chain; they must differ between boots. The
+ESP32-P4's hardware random number generator is only documented as truly
+random while a radio or an ADC feeds it noise, and the P4 has no radio, so
+since WP-14a (boot data byte 98 = 1) the hub takes the first 8 bytes of
+SHA-256 over, each labelled and length-prefixed: 64 bytes of the hardware
+RNG read in 16 pieces, the CPU cycle counter and system timer sampled
+between the pieces, the time since power-on, the reset cause, and the
+chip's eFuse unique ID and base MAC. The construction is in
+`crates/evidence/src/bootid.rs`. Two boots that share an id would merge
+into one chain and fail the check (two different records #0).
 
 ### Kind 2: detection
 
@@ -138,7 +232,7 @@ It is a convenience: the raw bytes are the record.
 | size | field |
 |---:|---|
 | 1 | reason: 0 periodic (every 60 s), 1 shutdown, 2 requested |
-| 1 | key class: 0 public test key, 1 development software key, 2 hardware key (eFuse) |
+| 1 | key class: 0 public test key, 1 development software key, 2 hardware key (eFuse), 3 hardware key (secure element chip) |
 | 65 | public key, SEC1 uncompressed (`04` x y), NIST P-256 |
 | 8 | record count: equals this record's own sequence number (u64) |
 | lv | note (ASCII), e.g. `DEVELOPMENT KEY, NOT EVIDENCE-GRADE (software key in flash)` |
@@ -153,6 +247,15 @@ copy of a checkpoint. (Firmware built before 2026-11-18 did not normalise
 `s`; about half its checkpoints are high-S and fail.) Those bytes
 include the previous-record hash (the chain head), the count and the time,
 so one valid checkpoint vouches for every record before it in its chain.
+
+**Algorithm.** A checkpoint of format version 1 is ECDSA P-256 with
+SHA-256, by definition: the record's version byte is its algorithm tag,
+and the public key it carries says which key. The hub refuses to write a
+version 1 checkpoint with any other signer. A later algorithm or key type
+gets a new checkpoint version with its own layout; version 1 logs keep
+verifying unchanged, and a checker that meets a version it does not know
+reports it instead of guessing. Whatever form of `s` a signer returns (a
+secure element may return either), the hub writes the low-S form.
 
 The published test key (class 0) has secret scalar
 SHA-256("rotorscope evidence public test key - not secret - do not trust").
@@ -180,11 +283,23 @@ written with class 2.
 4. Records after the last checkpoint are linked but not yet signed.
 5. Files: in file *n*'s card_mounted event, the previous file's length and
    last whole record must match file *n-1* exactly.
-6. Re-decode each detection's raw bytes and compare with the summary.
+6. Boots: each `continuity` event's previous boot, record count and head
+   must match that boot's log, and the counters must follow on (see
+   "Continuity across boots").
+7. Re-decode each detection's raw bytes and compare with the summary.
+8. Time, with no outside reference (records with time source "none" or
+   "untrusted" carry no UTC and are left out): within a boot, UTC minus
+   uptime stays put except at a `clock` event (the hub logs every change of
+   0.5 s or more, within a second or so of the records that show it) and
+   drifts by no more than the hub's 20 ppm steering; no UTC is before the
+   build date in the boot event (the hub never writes such time as GPS
+   time); and a boot's first UTC is not before the previous boot's last.
 
-None of these checks can show that the log is complete: records cut off at
-a checkpoint, the newest files deleted, a reformatted card or a boot never
-copied off leave nothing behind to check.
+None of these checks can show that the log is complete: the newest boot's
+records after the last one copied off, the newest files deleted or a
+reformatted card leave nothing behind to check. The boot counters show
+whether boots are missing *between* the ones you have, and whether an older
+boot's log was cut after the next boot started.
 
 ## Console stream
 
@@ -194,32 +309,119 @@ The hub prints each record on its USB console as one line:
 
 ## Export bundle
 
-JSON, from evidence-server (`/api/devices/{id}/export`):
+JSON, from evidence-server (`/api/devices/{id}/export`). Servers write
+format **2** (since WP-14c, 2026-11-19); the verifier reads 1 and 2 and
+refuses any other, so an older verifier refuses a version 2 bundle rather
+than skip what it does not know. OpenTimestamps stamps (WP-14d) are
+**additive within format 2**: a time-stamp with `"kind": "ots"`, one new
+optional field per time-stamp (`upgrade_of`) and one in `stamping`
+(`ots_calendars`). A format-2 verifier from before WP-14d reads such a
+bundle and reports each OpenTimestamps line as a kind it cannot read (a
+note, never a pass); it still checks the imprint against the audit chain
+and that no logged stamp was removed.
 
 ```text
-{ "format": "rotorscope-evidence-bundle/1",
+{ "format": "rotorscope-evidence-bundle/2",
   "created_utc_ms": ..., "server": "...",
   "device": { "key_id", "public_key" (hex), "name", "registered_utc_ms" },
   "batches": [ { "n", "received_utc_ms", "sha256" (hex), "records" (base64) } ],
   "audit": [ { "entry": "<JSON text>", "hash": hex } ],
   "firmware_hashes": [hex],
-  "timestamps": [ { "kind": "rfc3161", "authority", "imprint", "boot", "seq", "head", "token" (base64) } ] }
+  "timestamps": [ <time-stamp>, ... ],
+  "stamping": { "enabled": bool, "authorities": [url],          (version 2)
+                "ots_calendars": [url],                         (optional; OpenTimestamps on)
+                "outstanding": [ { "authority", "audit_n", "queued_utc_ms" } ],
+                "failures": [ { "authority", "audit_n", "utc_ms", "reason" } ] } }
+
+<time-stamp>, access-log head (version 2):
+  { "kind": "rfc3161", "authority": url, "covers": "audit-head",
+    "imprint": hex, "audit_n", "audit_hash": hex,
+    "queued_utc_ms", "requested_utc_ms", "nonce": hex,
+    "token": base64 (the TimeStampResp exactly as received),
+    "certs", "certs_from", "revocation", "revocation_from",   (optional)
+    "evidence_note" }                                          (optional)
+
+<time-stamp>, OpenTimestamps (version 2, additive):
+  { "kind": "ots", "authority": calendar url, "covers": "audit-head",
+    "imprint": hex, "audit_n", "audit_hash": hex,
+    "queued_utc_ms", "requested_utc_ms",
+    "token": base64 (the whole proof as a .ots file, over digest = imprint),
+    "upgrade_of": hex }   (optional: SHA-256 of the token of the pending
+                           line this line completes)
+
+<time-stamp>, chain head (version 1; "covers" absent means this):
+  { "kind": "rfc3161", "authority", "imprint", "boot", "seq", "head", "token" }
 ```
 
 - **Batches** are the uploads exactly as received: records back to back,
-  one boot's contiguous run, ending on a signed checkpoint.
+  one boot's contiguous run, ending on a signed checkpoint (or a boot's tail
+  that a later boot's stored continuity record names).
 - **Audit chain**: `hash` = SHA-256(previous entry's hash bytes ‖ `entry`
   bytes), the first entry's previous hash being 32 zero bytes. Entry 0 is
   the registration; each upload entry names its batch number and SHA-256.
-  Actions: register, upload, view, annotate, export, timestamp.
+  Actions: register, upload, view, annotate, export, timestamp. A
+  `timestamp` entry (actor `time-stamper`) names the authority, `covers`,
+  `audit_n`, `imprint`, `token_sha256` (SHA-256 of the token bytes) and the
+  authority's `gen_time`.
 - **key_id**: the first 8 bytes of SHA-256 of the public key, hex, grouped
   `xxxx-xxxx-xxxx-xxxx`.
 - **device.public_key** is the key the server registered for the device.
   It is the server's word, not a confirmation of who signed: check the
   records against the unit's key obtained independently.
-- **Time-stamps**: `imprint` = SHA-256(boot id ‖ seq as u64 LE ‖ record
-  hash); `token` is the RFC 3161 TimeStampResp. Check it with
-  `openssl ts -verify -digest <imprint> -in token.tsr -CAfile <roots>`.
+- **Access-log time-stamps** (`covers` = `audit-head`): what was sent to the
+  authority is
+
+  ```text
+  imprint = SHA-256( "rotorscope audit head v1"   24 ASCII bytes
+                     || len(key_id)               1 byte (19)
+                     || key_id                    ASCII, e.g. "1a2b-3c4d-5e6f-7a8b"
+                     || audit_n                   u64 little-endian
+                     || hash of audit entry n )   32 bytes
+  ```
+
+  Because each audit entry's hash covers every entry before it, and each
+  upload entry names its batch's SHA-256, one stamp covers the registration,
+  every batch uploaded so far, and every view, export and note logged
+  before entry `audit_n`. `queued_utc_ms` is when the server queued the
+  request (on its own clock, right after storing the upload),
+  `requested_utc_ms` when it sent it; `nonce` is the request's nonce
+  (INTEGER contents). `certs` and `revocation` are the authority's published
+  certificate chain and revocation list (CRL) as fetched when the stamp was
+  taken, base64 of the bytes received, with the URLs they came from; absent
+  when not configured, with `evidence_note` saying why when a fetch failed.
+- **Checking a stamp by hand**: recompute `audit_hash` by walking the audit
+  chain to entry `audit_n`, recompute `imprint` as above, then, with the
+  token saved as `token.tsr` (base64-decoded) and the authority's root
+  obtained from the authority itself:
+  `openssl ts -verify -in token.tsr -digest <imprint> -CAfile root.pem -attime <genTime in Unix seconds>`
+  (`openssl ts -reply -in token.tsr -text` shows genTime).
+  `evidence-verify --check-timestamps DIR --tsa-ca root.pem bundle.json`
+  does all of this.
+- **OpenTimestamps proofs** (`kind` = `ots`): `token` is a complete
+  `.ots` file in the OpenTimestamps project's published format (magic
+  `00 4f 70 65 6e 54 69 6d 65 73 74 61 6d 70 73 00 00 50 72 6f 6f 66 00 bf
+  89 e2 e8 84 e8 92 94`, version byte `01`, `08` for SHA-256, the 32-byte
+  digest, then the operations and attestations; docs/EVIDENCE.md,
+  "OpenTimestamps"). Its digest is `imprint`, computed as above. The server
+  appends 16 random bytes and hashes (that is what it sends: the proof's
+  first two operations are `append <salt>` and `sha256`); the calendar's
+  reply follows. A **pending** proof ends in a calendar's pending
+  attestation (its promise); a **completed** one also reaches a Bitcoin
+  block-header attestation: the message at that point must equal the
+  Merkle root (bytes 36..68 of the 80-byte header, as stored) of the block at
+  the named height. The server never rewrites a line: the completed proof is
+  a further line with the same imprint and `audit_n` and `upgrade_of` naming
+  the pending line's token. Each line has its own `timestamp` audit entry,
+  with `kind`, `state` (`pending`, or `anchored (Bitcoin block N, ...)`) and,
+  for a completed proof, `upgrade_of`; no `gen_time`.
+- **Chain-head time-stamps** (version 1, from the manual `--tsa` option,
+  now removed): `imprint` = SHA-256(boot id ‖ seq as u64 LE ‖ record hash).
+  Still checked when found in a bundle.
+- **`stamping`** is the server's own account (not proof): whether it was
+  set to stamp, with which RFC 3161 services (`authorities`) and which
+  OpenTimestamps calendars (`ots_calendars`, absent when it was off), which stamps it is still waiting for
+  (per service, the newest one queued that it has not received; older ones
+  are covered by it), and every failed attempt with its reason.
 - **Bundle hash**: SHA-256 of the bundle file. The server returns it in the
   `X-Bundle-SHA256` header and records it in the export audit entry that
   follows (that entry is not inside the bundle it describes).

@@ -135,13 +135,13 @@ embedded-sdmmc      = { version = "0.10", default-features = false }
 nb               = "1"
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
-heapless         = { version = "0.8", features = ["serde"] }
+heapless         = { version = "0.9.4", features = ["serde"] }
 serde            = { version = "1", default-features = false, features = ["derive"] }
 serde-json-core  = { version = "0.6", default-features = false }
 libm             = "0.2"
 
 [build-dependencies]
-# Parses the owner's optional, gitignored wifi.local.toml (station mode).
+# Parses the owner's optional, gitignored wifi.local.toml (station mode, bench builds only).
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 serde = { version = "1", features = ["derive"] }
 
@@ -154,3 +154,12 @@ codegen-units = 1
 debug         = 2
 lto           = "fat"
 opt-level     = "s"
+
+# Patched esp-radio 1.0.0-beta.1, carried by every radio firmware (see
+# ../patches/README.md): its ESP-NOW receive callback drops and counts a
+# received length that is zero, negative or above the ESP-NOW v2 maximum
+# (CVE-2025-52471 defence in depth), and on the ESP32-C5 it keeps the shared RF
+# front-end clocks on while BLE is up. tools/check-wifi-blobs.sh checks both
+# the patched copy and the radio library blobs.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }

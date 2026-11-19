@@ -130,6 +130,8 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
     let ctx = hub.context(now);
     st.now_ms = ctx.now_ms;
     st.utc_ms = ctx.utc_ms;
+    // For the automatic day / night theme (sunrise and sunset here).
+    st.position = ctx.own.map(|o| (o.lat as f32, o.lon as f32));
     if ctx.own.is_none() && st.gps.has_position() {
         st.gps.fix = Fix::None;
     }
@@ -177,10 +179,11 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
         let _ = st.nodes.push(screen::NodeStatus {
             kind,
             alive: n.alive(now),
-            frames_per_s: n.seen_per_s.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+            frames_per_s: n.seen_per_s.map(|f| f.min(u32::from(u16::MAX)) as u16),
             rid_found: n.rid_total(),
             drops,
             uptime_s: n.uptime_s(),
+            silent_s: None,
         });
     });
     // The ADSBee as a node, and the aircraft line (feature `adsbee`).
@@ -188,10 +191,11 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
         let _ = st.nodes.push(screen::NodeStatus {
             kind: NodeKind::Adsb,
             alive: a.alive,
-            frames_per_s: a.frames_per_s.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+            frames_per_s: a.frames_per_s.map(|f| f.min(u32::from(u16::MAX)) as u16),
             rid_found: 0,
             drops: a.errors,
             uptime_s: hub.adsb.get().stats.map_or(0, |s| s.uptime_s),
+            silent_s: None,
         });
         // At most MAX_AIRCRAFT Vincenty solves; yield first.
         embassy_futures::yield_now().await;
@@ -315,7 +319,10 @@ pub async fn display(p: DisplayParts) {
             BUTTONS.fetch_add(1, Relaxed);
             let g = UI_STATE.lock().await;
             if let Some(st) = g.as_ref() {
-                ui.button(b, st);
+                // Select fires on release and Back while held: a press that
+                // began before the banner appeared is ignored by the screen.
+                let pressed = if matches!(b, screen::Button::Select | screen::Button::Back) { keys.select_started() } else { now };
+                ui.button_at(b, st, pressed);
             }
             force = true;
         }
@@ -345,6 +352,9 @@ pub async fn display(p: DisplayParts) {
 
         let g = UI_STATE.lock().await;
         let Some(st) = g.as_ref() else { continue };
+        // Close drones keep their banner; Auto switches when it is quiet.
+        ui.observe(st);
+        let want = ui.backlight_level(st);
         bus.set(Speed::Panel);
         let start = Instant::now();
         let mut flush_us = 0u64;
@@ -363,8 +373,7 @@ pub async fn display(p: DisplayParts) {
         FRAMES.fetch_add(1, Relaxed);
 
         // Backlight on only once there is a picture (no garbage at boot), and
-        // follow the brightness setting.
-        let want = ui.settings().brightness;
+        // follow the brightness setting (capped in Red Night).
         if !lit || want != brightness {
             backlight.set_pct(backlight_pct(want));
             brightness = want;

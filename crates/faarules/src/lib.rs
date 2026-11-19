@@ -8,7 +8,7 @@
 //! # What is checked (PLAN.md checks 1-7)
 //! | Rule | What | Needs pack |
 //! |---|---|---|
-//! | [`Rule::Height`] | more than 400 ft above ground (107.51(b), 44809(a)(6)) | terrain, unless the drone sends height above ground |
+//! | [`Rule::Height`] | more than 400 ft above ground (107.51(b), 44809(a)(6)) | terrain, unless the drone sends height above ground or above take-off |
 //! | [`Rule::FacilityMap`] | above the UAS Facility Map (LAANC) ceiling (107.41) | yes |
 //! | [`Rule::Controlled`] | inside Class B/C/D/E surface airspace, a note: often authorized (107.41, 44809(a)(5)) | yes |
 //! | [`Rule::Area`] | prohibited / restricted / national-security / stadium / TFR / national defense areas | yes |
@@ -640,4 +640,6 @@ impl<const N: usize> Engine<N> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod fuzz_tests;

@@ -108,6 +108,8 @@ mod vectors;
 pub mod turbo;
 #[cfg(test)]
 mod testutil;
+#[cfg(test)]
+mod fuzz_tests;
 
 /// Transport block size with CRC-24A, in bits (173 bytes + 3).
 pub const K: usize = 1408;

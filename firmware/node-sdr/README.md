@@ -109,9 +109,10 @@ full scale (this receiver has no dBm calibration); `snr_db` is the decoder's per
 
 The hub's `Command::Assign` (through the gateway, or the `assign` console command, which takes the
 same fields) sets role and plan. Idempotent: the same role and plan id change nothing. Plans are
-`(centre in 100 kHz units, dwell ms)`. Empty plan = built-in: DroneID 5756.5 / 5776.5 / 5796.5 /
-5816.5 / 2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 700 ms each (the LO sits on the whole MHz
-below, +0.5 MHz off the DC spike; 5816.5 is above the measured 5800 MHz reach, unverified). On top
+`(centre in 100 kHz units, dwell ms)`. Empty plan = built-in: DroneID 5746.5 to 5816.5 every 10 MHz
+(8 hops) / 2414.5 / 2429.5 / 2444.5 / 2459.5 / 2399.5 MHz, 13 hops of 700 ms each (the LO sits on the whole MHz
+below, +0.5 MHz off the DC spike; the hops above the measured 5800 MHz reach tuned normally on
+c5b, 2026-11-17, docs/DJI-LINKS.md). On top
 of the plan the DroneID job follows O4 drones: once three valid O4 packets of a session agree it
 retunes, 50 ms early, to each channel the published schedule predicts (`droneid::follow`,
 docs/DRONEID-O4.md, at most about half the time) and scans the plan in between; the stats line's
@@ -213,9 +214,12 @@ about 6.9 KiB after decodes on 2026-11-14 (`cargo fw-now`). On 2026-11-18 (c5b, 
 sizes (function prologues, llvm-objdump): capture loop 3.5 KiB, `window` 4.0 KiB, `decode_into`
 9.1 KiB, `decode_span` 34.7 KiB. Against a pre-Phase-2 build the live path is 208 B shallower and
 the bench-only `hil train` path 304 B deeper than `hil run`, so the drop since 2026-11-14 predates
-Phase 2 (or is the build flavour). Nothing catches an overflow at run time: esp-hal's guard word
-is stepped over by `decode_span`'s frame, and below the stack is SRAM block 1, the decoder's input,
-so it would be corrupted silently (only the HIL `intact` check would see it). Floor: at least
+Phase 2 (or is the build flavour). esp-hal's guard word is stepped over by `decode_span`'s frame, and below the stack is SRAM
+block 1, the decoder's input. So after every decode the node checks the painted stack itself
+(`stack_check`): when the lowest painted word has been written it panics and restarts, and when
+less than 2 KiB was never touched it prints one `{"t":"fault","why":"stack_low",...}` line and
+carries on. It sees what was written, not what a frame only reserved, so the HIL `intact` check
+and the floor below stay necessary. Built, not yet tried: no board has been made to trip it. Floor: at least
 4.5 KiB after `hil train`; interrupt frames landing on the deepest frame are not measured
 separately.
 

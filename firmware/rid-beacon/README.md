@@ -208,6 +208,9 @@ Each command echoes a `{"t":"cmd",…}` line.
   so **BLE 5 extended and Long Range were not verified on air**. They are only verified as
   accepted by the controller.
 - NAN was not checked from the laptop either. That needs a monitor-mode sniffer or `node-wifi`.
+- *Update 2026-11-18: superseded on 2026-11-12 (docs/BENCH.md): the S3's BLE 5 extended and Long
+  Range were heard by a C5 `node-ble`, and its 2.4 GHz NAN by a C5 `node-wifi` built `cargo fw24`
+  (`s3-to-c5-wifi24-nan`).*
 
 **C5:** see `docs/BENCH.md` for the Remote ID results. Fake open FPV links (2026-11-14): all four
 systems, on channels 6, 149, 161 and 165, heard by a C5 `node-wifi` (16/16 PASS, 0 failed sends,
@@ -233,7 +236,8 @@ about −44 to −38 dBm at a metre).
      other two sets.
 3. **The ESP32-C5 controller defaults to 1 advertising set and 31-byte extended data.** The C5
    build raises these to 4 sets (`multi_adv_instances`) and 251 bytes (`ext_adv_max_size`).
-   This is untested until a C5 is on the bench.
+   This is untested until a C5 is on the bench. *Update 2026-11-18: tested on 2026-11-12: a C5's
+   BLE 5 extended and Long Range were heard by a second C5 and by the S3 (docs/BENCH.md).*
 4. **Wi-Fi and BLE share one radio (`coex`).** Wi-Fi uses modem-sleep power save (as ESP-IDF
    requires with Bluetooth on), so the coexistence arbiter has idle windows to give to BLE.
 5. **esp-radio beta.2 is yanked**, so this pins `=1.0.0-beta.1`.

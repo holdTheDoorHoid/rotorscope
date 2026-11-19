@@ -1,0 +1,112 @@
+// The map and list page. Loaded from the server itself; the server's
+// Content-Security-Policy allows no inline script and no other script
+// source. Every value from the server goes through esc() before innerHTML.
+'use strict';
+const $ = (id) => document.getElementById(id);
+let map = null, layer = null, units = [], stamping = null;
+try { $('actor').value = localStorage.getItem('actor') || ''; } catch (e) {}
+function headers() {
+  const h = { 'X-Actor': $('actor').value || 'anonymous' };
+  if ($('token').value) h['Authorization'] = 'Bearer ' + $('token').value;
+  return h;
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function num(x, d) { return typeof x === 'number' && isFinite(x) ? x.toFixed(d) : '?'; }
+async function devices() {
+  const r = await fetch('/api/devices', { headers: headers() });
+  if (!r.ok) { $('rows').innerHTML = '<tr><td colspan=6>' + esc(r.status) + ' (token?)</td></tr>'; return; }
+  units = await r.json();
+  const s = await fetch('/api/stamping', { headers: headers() });
+  stamping = s.ok ? await s.json() : null;
+  $('dev').innerHTML = units.map(d => `<option value="${esc(d.key_id)}">${esc(d.name)} (${esc(d.key_id)}, ${esc(d.detections)} detections)</option>`).join('');
+}
+function utc(ms) { return typeof ms === 'number' ? new Date(ms).toISOString().replace('.000Z', 'Z') : '?'; }
+function dur(ms) {
+  if (typeof ms !== 'number') return '?';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' s';
+  if (s < 3600) return Math.floor(s / 60) + ' min';
+  if (s < 86400) return Math.floor(s / 3600) + ' h ' + Math.floor(s / 60) % 60 + ' min';
+  return Math.floor(s / 86400) + ' d ' + Math.floor(s / 3600) % 24 + ' h';
+}
+// Outside time-stamps of this unit's access log: what each service has
+// stamped, what is still owed, what failed. Never as proof of when the
+// records were written. RFC 3161 services and OpenTimestamps calendars are
+// shown as two independent kinds of witness; a pending OpenTimestamps
+// proof is shown as a promise, never as a stamp.
+function stampLines(d) {
+  const out = [];
+  if (!stamping) return out;
+  out.push(stamping.what_it_shows + ' ' + (stamping.witnesses || ''));
+  const st = d && d.stamping;
+  if (!stamping.enabled || !st) return out;
+  let ots = false;
+  for (const s of st.services || []) {
+    const n = s.newest;
+    let line;
+    if (s.kind === 'ots') {
+      ots = true;
+      line = '<b>OpenTimestamps</b> ' + esc(s.authority) + ': ';
+      line += n ? `access log through entry #${esc(n.audit_n)} anchored in Bitcoin block ${esc((n.heights || []).join(', '))} (completed proof received ${esc(utc(n.received_utc_ms))}; it proves the block's time, which evidence-verify reads from a block header you supply)` : 'no completed proof yet';
+      const p = s.pending || {};
+      if (p.count > 0) line += `; ${esc(p.count)} proof(s) PENDING: a calendar's promise, not yet proof of any time; the oldest sent ${esc(utc(p.oldest_utc_ms))}`;
+      if (p.given_up > 0) line += `; ${esc(p.given_up)} pending for more than a week and no longer asked about: the calendar may have lost them`;
+    } else {
+      line = '<b>RFC 3161</b> ' + esc(s.authority) + ': ';
+      line += n ? `access log through entry #${esc(n.audit_n)} existed by ${esc(utc(n.gen_time_ms))} (stamped ${esc(dur(n.delay_ms))} after the upload)` : 'no stamp yet';
+    }
+    if (s.outstanding) line += `; a stamp of entry #${esc(s.outstanding.audit_n)} is outstanding since ${esc(utc(s.outstanding.queued_utc_ms))}`;
+    if (s.failures_since_last_stamp > 0 && s.last_failure) line += `; ${esc(s.failures_since_last_stamp)} failed attempt(s) since the last stamp, latest ${esc(utc(s.last_failure.utc_ms))}: ${esc(s.last_failure.reason)}`;
+    out.push(line);
+  }
+  if (ots && stamping.ots_shows) out.push(esc(stamping.ots_shows));
+  return out;
+}
+// What the server knows is wrong or weak about this unit's stored log.
+function warnings(id) {
+  const d = units.find(u => u.key_id === id);
+  const w = [];
+  if (d && d.test_key) w.push('This unit signs with the PUBLISHED TEST KEY: anyone can make records like these. Not evidence.');
+  if (d && Array.isArray(d.problems)) for (const p of d.problems) w.push('Stored files: ' + p);
+  if (stamping) for (const x of stamping.warnings || []) w.push(x);
+  if (d && d.stamping && d.stamping.stale) w.push(`An upload of this unit has waited more than ${stamping ? stamping.alarm_h : '?'} h for any outside time-stamp: check the services' failures below.`);
+  $('warn').hidden = w.length === 0;
+  $('warn').innerHTML = w.length ? '<ul>' + w.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '';
+  const s = stampLines(d);
+  // Lines from stampLines() are already escaped piece by piece.
+  $('stamps').innerHTML = s.length ? '<b>Outside time-stamps.</b> ' + esc(s[0]) + (s.length > 1 ? '<ul>' + s.slice(1).map(x => '<li>' + x + '</li>').join('') + '</ul>' : '') : '';
+}
+async function show() {
+  try { localStorage.setItem('actor', $('actor').value); } catch (e) {}
+  const id = $('dev').value; if (!id) return;
+  warnings(id);
+  const r = await fetch(`/api/devices/${encodeURIComponent(id)}/detections`, { headers: headers() });
+  if (!r.ok) { $('rows').innerHTML = '<tr><td colspan=6>' + esc(r.status) + '</td></tr>'; return; }
+  const pts = await r.json();
+  if (!map && window.L) {
+    map = L.map('map');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+  }
+  const bounds = [];
+  if (map) {
+    if (layer) layer.remove();
+    layer = L.layerGroup().addTo(map);
+    for (const p of pts) {
+      if (typeof p.lat === 'number' && typeof p.lon === 'number') { L.circleMarker([p.lat, p.lon], { radius: 5, color: '#d33' }).bindPopup(`#${esc(p.seq)} ${esc(p.drone_id)}<br>${esc(p.summary)}`).addTo(layer); bounds.push([p.lat, p.lon]); }
+      if (typeof p.hub_lat === 'number' && typeof p.hub_lon === 'number') { L.circleMarker([p.hub_lat, p.hub_lon], { radius: 4, color: '#06f' }).bindPopup('hub (' + esc(p.hub_position) + ')').addTo(layer); bounds.push([p.hub_lat, p.hub_lon]); }
+    }
+    if (bounds.length) map.fitBounds(bounds, { maxZoom: 16 }); else map.setView([39.95, -75.16], 10);
+  }
+  $('rows').innerHTML = pts.slice().reverse().slice(0, 500).map(p => `<tr><td>${esc(p.seq)}</td><td>${p.utc_ms ? esc(new Date(p.utc_ms).toISOString()) : 'NO UTC'} (${esc(p.time_source)})</td><td>${esc(p.drone_id)}</td><td>${p.lat != null ? num(p.lat, 6) + ', ' + num(p.lon, 6) : '-'}</td><td>${p.hub_lat != null ? num(p.hub_lat, 6) + ', ' + num(p.hub_lon, 6) + ' (' + esc(p.hub_position) + ')' : 'NO POSITION'}</td><td class="s">${esc(p.summary)}</td></tr>`).join('');
+  $('export').onclick = async (e) => {
+    e.preventDefault();
+    const r = await fetch(`/api/devices/${encodeURIComponent(id)}/export`, { headers: headers() });
+    if (!r.ok) { alert('Export failed: ' + r.status); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `evidence-${id}.json`; a.click();
+    alert('Bundle SHA-256: ' + r.headers.get('x-bundle-sha256'));
+  };
+}
+$('load').onclick = show;
+devices();

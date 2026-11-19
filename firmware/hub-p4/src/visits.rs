@@ -40,8 +40,9 @@ pub const SAVE_EVERY_MS: u64 = 300_000;
 /// Console `W` must be pressed twice within this long.
 pub const CONFIRM_MS: u64 = 5_000;
 /// The data byte of this module's `Setting` events (3 is the site file, 4
-/// the GPS memory).
-pub const EV_VISITS: u8 = 5;
+/// the GPS memory, 5 a site file too big to load, 6 the threat profile).
+/// It was 5 before main's site-file size limit took 5.
+pub const EV_VISITS: u8 = 7;
 
 #[derive(Default)]
 pub struct VisitsSd {

@@ -30,7 +30,8 @@ never transmits anything that could interfere with a drone.
   Examples are DJI's older Wi-Fi "DroneID" beacons, the Wi-Fi networks of Wi-Fi-controlled
   drones, and analog FPV video carriers.
 - **Out of scope:** drones that are radio-silent, and DJI's OcuSync DroneID. OcuSync needs a
-  real SDR such as a USRP, not an ESP32.
+  real SDR such as a USRP, not an ESP32. *Update 2026-11-18: superseded by Phase 10: a C5 now
+  decodes OcuSync DroneID as a raw-capture radio.*
 
 ---
 
@@ -102,8 +103,10 @@ never transmits anything that could interfere with a drone.
 
 - Taking drones down or interfering with them in any way.
 - Radar, acoustic or camera detection.
-- Decoding DJI OcuSync.
+- Decoding DJI OcuSync. *Update 2026-11-18: Phase 10 decodes OcuSync DroneID; the video and
+  control links are fingerprinted for presence only, their content never decoded.*
 - 900 MHz control links. No ESP32 can tune there, so this needs a separate sub-GHz radio later.
+  *Update 2026-11-18: that radio is Phase 9's LR2021 node, built (no hardware yet).*
 
 ---
 
@@ -527,7 +530,9 @@ database of airspace and restrictions. Works offline from the SD card.
 **Wording rule: "likely", never "illegal".** The hub cannot see waivers, LAANC authorizations,
 public-safety (COA) operations or Part 107 vs recreational status, so every flag is "possible
 violation: <rule>, <evidence>", with the data source and its date. Flags are a log for the owner,
-never sent anywhere automatically.
+never sent anywhere automatically. *Update 2026-11-18: the P4 now forwards flags to its web head,
+which shows them on the phone page and adds them to the drone's CoT remark
+(firmware/hub-p4/WEBHEAD.md).*
 
 **Checks, in order of value and data cost:**
 1. **Height above ground over 400 ft** (Part 107.51(b), 44809(a)(6)). Remote ID gives geodetic
@@ -783,7 +788,8 @@ link yet and keeps no path history). See THREAT-PROFILES.md, "Slice 16e as built
 - **ESP32-S3 N16R8** (8 MB PSRAM): same toolchain and code as today.
   - PSRAM support in esp-hal is still marked unstable.
   - Octal PSRAM reserves GPIO35–37, so re-check the hub pin map.
-- **Not the ESP32-P4.**
+- **Not the ESP32-P4.** *Update 2026-11-18: superseded: the owner moved the hub to the ESP32-P4 on
+  2026-11-14 (firmware/hub-p4/BRINGUP.md); the text below is kept as history.*
   - It has no radio; Wi-Fi comes from a companion C6.
   - Rust can't drive that Wi-Fi.
   - Its PSRAM support in esp-hal is a stub.

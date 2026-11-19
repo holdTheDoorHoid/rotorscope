@@ -18,9 +18,9 @@ suspicious.
 * **A node somewhere else:** add a line with its address (shown on the hub's
   Health page) and its position in decimal degrees, latitude first:
 
-      node 10:bd:a3:ce:bd:18 39.95210 -75.16380   # roof, north corner
+      node aa:bb:cc:dd:ee:01 39.95210 -75.16380   # roof, north corner
 
-* **Forget a node's position:** `node 10:bd:a3:ce:bd:18 clear`
+* **Forget a node's position:** `node aa:bb:cc:dd:ee:01 clear`
 
 ## Where the hub itself stands (`home`)
 
@@ -39,9 +39,12 @@ Each change is an evidence "setting" event.
 
 ## Silencing alarms
 
-A silenced alarm is still recorded in the evidence log and listed in the
-hub's `"t":"threat"` lines (with `"muted":true`), but it no longer raises the
-ATTACK badge. **Nothing silenced ever clears JAMMED, AREA JAM / AREA FAKE or
+A silenced alarm is still listed in the hub's `"t":"threat"` lines (with
+`"muted":true`), but it no longer raises the ATTACK badge. An alarm that was
+sounding before you silenced it is already in the evidence log; one that
+starts while a mute already covers it (a site-file line, for example) is not
+written there as a new alarm, though the mute itself and the site file's
+loading are (*corrected 2026-11-18*). **Nothing silenced ever clears JAMMED, AREA JAM / AREA FAKE or
 ID FLOOD**: those say the hub may be missing drones, and stay on for as long
 as that is true.
 
@@ -258,24 +261,33 @@ trace, so every load writes evidence "setting" events:
    bytes), its size and line count, lines used and ignored, how many mutes for
    good, how many mute lines not honoured, how many node positions, the
    control switches, and how many areas, the bubble's radius and how many
-   friends, then the `crowd` and `visits` switches and the profile. For example `site file
+   friends, then the `crowd` and `visits` switches, the profile and the screen theme. For example `site file
    loaded: sha256 9f2c...e1, 412 bytes, 14 lines (12 used, 2 ignored); 1
    mutes for good, 1 mute lines not honoured; 3 node positions; control ids
    off, control content off; 2 areas, bubble off, 1 friends, several at once
-   from 3 drones, visit history kept, profile default`.
+   from 3 drones, visit history kept, profile default; theme default (day default, night
+   default, switch default, brightness default)`.
 2. **One per change** from what the hub was using: a mute added or removed, a
    node placed, moved (with the old position) or cleared, e.g. `site file
-   changed: node 10:bd:a3:ce:bd:18 at 39.9600000 -75.1638000 (was 39.9521000
+   changed: node aa:bb:cc:dd:ee:01 at 39.9600000 -75.1638000 (was 39.9521000
    -75.1638000); spoof checks use it`; an area set or removed, the bubble,
    a friend added or removed (`site file changed: friend SN1 "our own Mini"
    added (its area alarms are lowered to Notice; fast inbound never is)`),
    the `crowd` or `visits` switch changed, the profile changed (data byte 6).
    The same file loaded again changes nothing and logs only the summary.
-3. **Bounded.** However long the file (it is read a piece at a time; later
-   lines win), the hub holds at most 24 mutes, 16 node positions, 8 areas, a bubble and 8 friends, so one
+3. **Bounded.** However long the file, up to the limit in item 4 (it is read a
+   piece at a time; later lines win), the hub holds at most 24 mutes, 16 node positions, 8 areas, a bubble and 8 friends, so one
    load can change at most 108 things. At most 48 are logged one by one; the
    rest are counted in one more event (`site file changed: N more changes not
    logged one by one`). The hash always covers the whole file.
+4. **A file over 64 KB is not loaded.** The hub stops everything else while it
+   reads the file, so a very long one (planted, or damaged) must not be able
+   to stall it. It writes one event instead (`site file NOT loaded: N bytes is
+   over the limit of 65536 ...`), prints the same line, and uses nothing from
+   the file: no mutes, node positions or switches from the card. A file that
+   you and the hub wrote is a few hundred bytes; shorten a long one on a
+   computer (later lines win, so the old lines they replace can go). The
+   console names the first 8 ignored lines of a load and counts the rest.
 
 Changes to the control switches are logged as their own setting event when
 they take effect, as before.

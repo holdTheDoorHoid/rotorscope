@@ -15,7 +15,7 @@ dependencies = [
 name = "airlink"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "kitkeys",
 ]
 
 [[package]]
@@ -174,7 +174,7 @@ dependencies = [
 name = "ctrlwatch"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "mavwatch",
  "serde",
 ]
@@ -481,7 +481,7 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "futures-core",
  "futures-sink",
- "heapless 0.9.3",
+ "heapless 0.9.4",
 ]
 
 [[package]]
@@ -516,7 +516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "168297bf80aaf114b3c9ad589bf38b01b3009b9af7f97cd18086c5bbf96f5693"
 dependencies = [
  "embassy-executor-timer-queue",
- "heapless 0.9.3",
+ "heapless 0.9.4",
 ]
 
 [[package]]
@@ -651,7 +651,7 @@ dependencies = [
  "esp-config",
  "esp-metadata-generated",
  "esp-println",
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "riscv",
  "xtensa-lx",
 ]
@@ -799,8 +799,6 @@ dependencies = [
 [[package]]
 name = "esp-radio"
 version = "1.0.0-beta.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50247f4e91000fc87661e77254126c74acc4535f822ee247f7778807202dc938"
 dependencies = [
  "allocator-api2",
  "docsplay",
@@ -831,7 +829,7 @@ dependencies = [
  "esp-wifi-sys-esp32s3",
  "esp-wifi-sys-esp32s31",
  "esp32c5 0.4.0",
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "instability",
  "log",
  "num-derive",
@@ -1176,6 +1174,7 @@ dependencies = [
  "embassy-executor",
  "embassy-sync 0.7.2",
  "embassy-time",
+ "embedded-io-async 0.7.0",
  "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
@@ -1184,7 +1183,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-wifi-sys-esp32c5",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
  "log",
  "node-common",
@@ -1266,17 +1265,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
 dependencies = [
  "hash32 0.3.1",
- "serde",
  "stable_deref_trait",
 ]
 
 [[package]]
 name = "heapless"
-version = "0.9.3"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
+checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
 dependencies = [
  "hash32 0.3.1",
+ "serde_core",
  "stable_deref_trait",
 ]
 
@@ -1375,6 +1374,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitkeys"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1391,7 +1397,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "openlink",
  "postcard",
  "rid",
@@ -1451,7 +1457,7 @@ dependencies = [
 name = "mavwatch"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
 ]
 
 [[package]]
@@ -1482,7 +1488,7 @@ dependencies = [
  "embassy-time",
  "esp-bootloader-esp-idf",
  "esp-hal",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
  "nodeimage",
 ]
@@ -1491,7 +1497,7 @@ dependencies = [
 name = "nodeimage"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
  "postcard",
 ]

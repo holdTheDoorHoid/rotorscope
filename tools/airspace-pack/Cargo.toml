@@ -15,6 +15,7 @@ serde_json = "1"
 tiff = "0.9"
 
 [dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }
 faarules.workspace = true
 tracker.workspace = true
 rid = { workspace = true, features = ["serde"] }

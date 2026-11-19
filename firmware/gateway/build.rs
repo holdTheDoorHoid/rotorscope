@@ -7,5 +7,5 @@ mod benchfence;
 
 fn main() {
     println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
-    benchfence::run("gateway", &["faulttest"], &[]);
+    benchfence::run("gateway", &["faulttest", "gwforge"], &[]);
 }

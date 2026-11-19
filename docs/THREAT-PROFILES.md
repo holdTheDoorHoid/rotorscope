@@ -213,7 +213,11 @@ Where it differs from the design above, and why:
   not logged.
 - **Screen.** One red (Warning, Critical) or yellow (Caution) line at the top of the bottom strip,
   for the most serious drone. The strip keeps its four lines: when all five would show, the
-  silenced-alarms and switches lines share one.
+  silenced-alarms and switches lines share one. On the P4's 800x480 layout (merged from main
+  2026-11-19) it is a filled bar at the top of the strip above the keys, over the fault bars and
+  notes lines (red from Warning up, caution-coloured at Caution; an outline in Red Night), cut to
+  the panel's width (the line is at most 64 characters and fits). Simulated only
+  (`wide_threat_bar_above_the_keys` and the `threat_strip_*` snapshots); not yet seen on the panel.
 - **Friends** match any of the drone's IDs, the DJI serial included.
 - Only confirmed tracks (WP-09 probation) are judged, so one forged frame raises nothing.
 - On the console a site line is at most 120 characters, so a polygon of more than about five
@@ -371,7 +375,8 @@ The repeat-visitor history (owner decision: 30 days, wipeable):
   logged; it never crashes the hub.
 - **Wiping**: console `W` twice within 5 s; `visits off` in the site file also wipes. There is no
   screen action: the Settings page's six rows fill the screen. Every load, discard, wipe and
-  switch is an evidence `Setting` event (code 4) with the data byte 5; **no new evidence code**.
+  switch is an evidence `Setting` event (code 4) with the data byte 7 (5 until the merge of main's
+  site-file size limit, which took 5); **no new evidence code**.
 
 Where it differs from the design, or needs a word:
 

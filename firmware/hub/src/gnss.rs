@@ -133,6 +133,18 @@ pub fn utc_from_pps() -> bool {
     time_anchor().is_some_and(|a| a.pps)
 }
 
+/// The fix in use ([`latest_fix`]) is the upstream hub's held one (protocol
+/// 14, `link::HubFix::held`): the phone page must not show it as live.
+pub fn fix_held() -> bool {
+    let own = critical_section::with(|cs| FIX.borrow(cs).get());
+    upstream().is_some_and(|u| u.fix_held && u.fix.is_some_and(|b| own.is_none_or(|a| b.at_ms > a.at_ms)))
+}
+
+/// The UTC in use is the upstream hub's held time (`link::HubFix::utc_held`).
+pub fn utc_held() -> bool {
+    utc_from_upstream() && upstream().is_some_and(|u| u.time_held)
+}
+
 /// UTC comes from the upstream hub, not this board's own receiver.
 pub fn utc_from_upstream() -> bool {
     critical_section::with(|cs| TIME.borrow(cs).get()).is_none() && time_anchor().is_some()
@@ -157,6 +169,10 @@ pub struct Upstream {
     pub status: GpsStatus,
     pub fix: Option<Fix>,
     pub time: Option<TimeAnchor>,
+    /// Protocol 14: the upstream hub holds `fix` / `time` (its GPS checks do
+    /// not trust the receiver just now): never shown as live.
+    pub fix_held: bool,
+    pub time_held: bool,
     /// Hub time the frame arrived.
     pub at_ms: u64,
 }
@@ -197,7 +213,10 @@ pub fn set_upstream(h: &link::HubFix, now: u64) {
         Some(utc_ms) => Some(TimeAnchor { utc_ms, at_ms: now, pps: h.utc_pps }),
         None => prev.and_then(|u| u.time),
     };
-    let u = Upstream { status: GpsStatus { state, sats: h.sats }, fix, time, at_ms: now };
+    // A frame without a position or time keeps the last one, held or not.
+    let fix_held = if h.position.is_some() { h.held } else { prev.is_some_and(|u| u.fix_held) };
+    let time_held = if h.utc_ms.is_some() { h.utc_held } else { prev.is_some_and(|u| u.time_held) };
+    let u = Upstream { status: GpsStatus { state, sats: h.sats }, fix, time, fix_held, time_held, at_ms: now };
     critical_section::with(|cs| UPSTREAM.borrow(cs).set(Some(u)));
     UPSTREAM_FRAMES.fetch_add(1, Relaxed);
 }

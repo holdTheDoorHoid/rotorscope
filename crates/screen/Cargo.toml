@@ -9,6 +9,9 @@ license.workspace = true
 # `from_tracker`: fill a UiState straight from a tracker::Tracker (the hub
 # enables this; the renderer itself does not need the tracker).
 tracker = ["dep:tracker", "dep:rid", "dep:link", "dep:ctrlwatch"]
+# `wide`: the native 800x480 layout with anti-aliased lettering (the P4
+# hub). Adds the glyph tables (see `src/wide/glyphs.rs`) to the flash image.
+wide = []
 
 [dependencies]
 embedded-graphics = "0.8"
@@ -23,7 +26,7 @@ ctrlwatch = { path = "../ctrlwatch", optional = true }
 # Snapshot tests write PNGs of every screen.
 png = "0.17"
 # Tests always see the optional `tracker` feature (the rid crate does the same).
-screen = { path = ".", features = ["tracker"] }
+screen = { path = ".", features = ["tracker", "wide"] }
 # The adapter tests build tracks (and ADS-B reports) the way the tracker's own tests do.
 adsb.workspace = true
 rid = { workspace = true, features = ["encode"] }

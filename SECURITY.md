@@ -39,4 +39,15 @@ These are properties of the signals and hardware, not bugs to report:
   what was claimed on the air; it cannot prove who sent it.
 - Someone holding a board and a USB cable can read or replace its firmware.
   Secure boot and flash encryption are not enabled.
+- The link between boards: a captured node gives away that node's own key
+  (revoke its slot with `link-key revoke`); the hub holds the kit master, so
+  a captured hub is a captured kit until a secure element is fitted; the
+  gateway holds no key. The wired bus between boards is not authenticated.
+  Details: docs/ESPNOW.md, "Securing the link".
+- The fix for CVE-2025-52471 in Espressif's ESP-NOW receive path is
+  established by provenance: the radio libraries every firmware links are the
+  ones Espressif shipped after the fix (`tools/check-wifi-blobs.sh` checks
+  their hashes), and every radio firmware also drops impossible receive
+  lengths itself (firmware/patches/README.md). It has not been tested with
+  malformed frames.
 - Jamming a receiver stops it receiving.

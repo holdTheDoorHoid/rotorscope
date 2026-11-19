@@ -145,6 +145,11 @@ Built and unit-tested only. Nothing has been checked against a real transmitter:
   real frame on hardware.
 - ESP32-C5: builds; not yet run on hardware. First boot should show no `set_channel` errors and
   `per_ch` rising on 149.
+- *Update 2026-11-18: both superseded on air (docs/BENCH.md). On 2026-11-12 the S3 decoded Wi-Fi
+  beacon and NAN Remote ID from a C5 `rid-beacon` (`--group cross`), and the C5 decoded 5 GHz
+  beacon and NAN (`--group c5`) and, built `cargo fw24`, 2.4 GHz beacon and NAN from a C5 and from
+  the S3. On 2026-11-14 the C5 heard fake open FPV links on channels 6, 149, 161 and 165 (16 of 16
+  PASS, `--group openlink`).*
 
 
 ## Bench tests

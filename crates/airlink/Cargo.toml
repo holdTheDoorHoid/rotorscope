@@ -1,17 +1,16 @@
 [package]
 name = "airlink"
-description = "Node-to-gateway ESP-NOW packets: batches of link frames, gateway beacons, per-packet authentication"
+description = "Node-to-hub ESP-NOW packets: batches of link frames, beacons, version 3 per-node authentication, the keyless gateway relay"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-# HMAC-SHA256 tags (src/auth.rs). No default features: no_std, no alloc.
-sha2 = { version = "0.11", default-features = false }
-
-[build-dependencies]
-sha2 = { version = "0.11", default-features = false }
+# Per-node link keys (`LinkKey`, `NodeKey`) and their HMAC for the version 3
+# packets (src/v3). No key is ever compiled in: boards read theirs from flash.
+kitkeys = { path = "../kitkeys" }
 
 [dev-dependencies]
 link.workspace = true
 heapless.workspace = true
+fuzzkit = { path = "../fuzzkit" }

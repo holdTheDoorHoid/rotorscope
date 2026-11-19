@@ -13,6 +13,7 @@ name = "adsb"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -43,15 +44,17 @@ dependencies = [
 name = "airlink"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
+ "kitkeys",
  "link",
- "sha2 0.11.1",
 ]
 
 [[package]]
 name = "airspace"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "libm",
 ]
 
@@ -61,13 +64,20 @@ version = "0.1.0"
 dependencies = [
  "airspace",
  "faarules",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "rid",
  "serde_json",
  "tiff",
  "tracker",
  "ureq",
 ]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "async-broadcast"
@@ -292,9 +302,9 @@ checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
 
 [[package]]
 name = "base16ct"
-version = "0.2.0"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
+checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
 name = "base64"
@@ -377,6 +387,7 @@ dependencies = [
 name = "cc26xx-flash"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "serialport",
 ]
 
@@ -408,6 +419,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmov"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
+
+[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -424,12 +441,6 @@ checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
 ]
-
-[[package]]
-name = "const-oid"
-version = "0.9.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "const-oid"
@@ -454,13 +465,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_maths"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "coverage"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "ctrlwatch",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
 ]
+
+[[package]]
+name = "cpubits"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae"
 
 [[package]]
 name = "cpufeatures"
@@ -512,12 +539,15 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.5.5"
+version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dc92fb57ca44df6db8059111ab3af99a63d5d0f8375d9972e319a379c6bab76"
+checksum = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
 dependencies = [
- "generic-array",
- "rand_core 0.6.4",
+ "cpubits",
+ "ctutils",
+ "hybrid-array",
+ "num-traits",
+ "rand_core 0.10.1",
  "subtle",
  "zeroize",
 ]
@@ -539,6 +569,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -555,19 +586,30 @@ name = "ctrlwatch"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "mavwatch",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "der"
-version = "0.7.10"
+name = "ctutils"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
- "const-oid 0.9.6",
+ "cmov",
+ "subtle",
+]
+
+[[package]]
+name = "der"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a996a108feb8b427a6e12fcf6af4aa83409b79d72c15337d7741368131ee004"
+dependencies = [
+ "const-oid",
  "zeroize",
 ]
 
@@ -578,9 +620,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
- "const-oid 0.9.6",
  "crypto-common 0.1.6",
- "subtle",
 ]
 
 [[package]]
@@ -590,8 +630,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
- "const-oid 0.10.2",
+ "const-oid",
  "crypto-common 0.2.2",
+ "ctutils",
 ]
 
 [[package]]
@@ -612,6 +653,7 @@ dependencies = [
  "aes",
  "ctr",
  "droneid",
+ "fuzzkit",
  "rand_core 0.6.4",
  "sha2 0.10.9",
  "sm2",
@@ -634,6 +676,7 @@ name = "droneid"
 version = "0.1.0"
 dependencies = [
  "droneid",
+ "fuzzkit",
  "sha2 0.10.9",
 ]
 
@@ -655,15 +698,16 @@ dependencies = [
 
 [[package]]
 name = "ecdsa"
-version = "0.16.9"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee27f32b5c5292967d2d4a9d7f1e0b0aed2c15daded5a60300e4abb9d8020bca"
+checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
 dependencies = [
  "der",
- "digest 0.10.7",
+ "digest 0.11.3",
  "elliptic-curve",
  "rfc6979",
  "signature",
+ "zeroize",
 ]
 
 [[package]]
@@ -673,7 +717,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7a6f957c944e22c2c1904618863702e8af302953454ac738e6df0c7038c4d88"
 dependencies = [
  "edge-raw",
- "heapless 0.9.3",
+ "heapless 0.9.4",
  "num_enum",
  "rand_core 0.10.1",
 ]
@@ -686,17 +730,18 @@ checksum = "c87c23c2a56d22076013bbf039425369d05bdb9ac833e3249c48008a46e1f95c"
 
 [[package]]
 name = "elliptic-curve"
-version = "0.13.8"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
+checksum = "900f37e7e18d74a2347389af6cd69e3a30d5cc9e697f40004865679aa75e9c7c"
 dependencies = [
  "base16ct",
  "crypto-bigint",
- "digest 0.10.7",
+ "crypto-common 0.2.2",
+ "digest 0.11.3",
  "ff",
- "generic-array",
  "group",
- "rand_core 0.6.4",
+ "hybrid-array",
+ "rand_core 0.10.1",
  "sec1",
  "subtle",
  "zeroize",
@@ -793,7 +838,8 @@ name = "evidence"
 version = "0.1.0"
 dependencies = [
  "evidence",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "link",
  "p256",
  "postcard",
@@ -809,8 +855,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "evidence",
+ "fuzzkit",
  "getrandom 0.2.17",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -831,6 +878,8 @@ name = "evidence-verify"
 version = "0.1.0"
 dependencies = [
  "evidence",
+ "fuzzkit",
+ "serde_json",
 ]
 
 [[package]]
@@ -839,7 +888,8 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "airspace",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "libm",
  "link",
  "rid",
@@ -863,13 +913,19 @@ dependencies = [
 
 [[package]]
 name = "ff"
-version = "0.13.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0b50bfb653653f9ca9095b427bed08ab8d75a137839d9ad64eb11810d5b6393"
+checksum = "a1f686ab92a9fb0eaf188f6c6c87b89490baa6fdb0db4544ba4dc47f7942489f"
 dependencies = [
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "subtle",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
@@ -883,6 +939,7 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "flarm",
+ "fuzzkit",
  "libm",
 ]
 
@@ -891,6 +948,7 @@ name = "flarm-keys"
 version = "0.1.0"
 dependencies = [
  "flarm",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -911,6 +969,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "fontdue"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e796cb6894e6418daacea84b28dd4f98d3b32c74d5bb452ba1ecfbf5ad8e84ca"
+dependencies = [
+ "hashbrown 0.15.5",
+ "ttf-parser",
+]
+
+[[package]]
+name = "fontgen"
+version = "0.1.0"
+dependencies = [
+ "fontdue",
 ]
 
 [[package]]
@@ -1020,6 +1101,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzkit"
+version = "0.1.0"
+
+[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1027,7 +1112,6 @@ checksum = "4bb6743198531e02858aeaea5398fcc883e71851fcbcb5a2f773e2fb6cb1edf2"
 dependencies = [
  "typenum",
  "version_check",
- "zeroize",
 ]
 
 [[package]]
@@ -1056,15 +1140,18 @@ dependencies = [
 [[package]]
 name = "gnss"
 version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+]
 
 [[package]]
 name = "group"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0f9ef7462f7c099f518d754361858f86d8a07af53ba9af0fe635bbccb151a63"
+checksum = "7fd1a1c7a5206c5b7a3f5a0d7ccd3ff85d0c8f5133d62a02680255b0004af5f4"
 dependencies = [
  "ff",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "subtle",
 ]
 
@@ -1084,6 +1171,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
 ]
 
 [[package]]
@@ -1108,22 +1206,12 @@ dependencies = [
 
 [[package]]
 name = "heapless"
-version = "0.8.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+checksum = "411fdef4df93751117bd9ef8caa0e7f99c65dafec5bd84313eb8e2fdd75e32f2"
 dependencies = [
  "hash32 0.3.1",
- "serde",
- "stable_deref_trait",
-]
-
-[[package]]
-name = "heapless"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
-dependencies = [
- "hash32 0.3.1",
+ "serde_core",
  "stable_deref_trait",
 ]
 
@@ -1141,11 +1229,11 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hmac"
-version = "0.12.1"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
- "digest 0.10.7",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -1194,12 +1282,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
+name = "hublink"
+version = "0.1.0"
+dependencies = [
+ "airlink",
+ "evidence",
+ "fuzzkit",
+ "heapless 0.9.4",
+ "kitkeys",
+ "link",
+ "postcard",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
+ "subtle",
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -1347,7 +1450,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -1381,7 +1484,7 @@ version = "0.1.0"
 dependencies = [
  "droneid",
  "fpvscan",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "link",
  "rawcap",
 ]
@@ -1404,6 +1507,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitkeys"
+version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1420,7 +1531,8 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "openlink",
  "postcard",
  "rid",
@@ -1431,7 +1543,8 @@ dependencies = [
 name = "link-key"
 version = "0.1.0"
 dependencies = [
- "airlink",
+ "fuzzkit",
+ "kitkeys",
 ]
 
 [[package]]
@@ -1467,7 +1580,8 @@ version = "0.1.0"
 dependencies = [
  "aerohop",
  "ctrlwatch",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "link",
  "modes",
 ]
@@ -1491,7 +1605,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mavwatch"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "mavwatch",
 ]
 
@@ -1558,6 +1673,7 @@ name = "modes"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "libm",
 ]
 
@@ -1585,7 +1701,10 @@ dependencies = [
 name = "nodeimage"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "airlink",
+ "fuzzkit",
+ "heapless 0.9.4",
+ "kitkeys",
  "link",
  "postcard",
 ]
@@ -1637,6 +1756,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "openlink"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "openlink",
  "serde",
  "serde_json",
@@ -1654,14 +1774,15 @@ dependencies = [
 
 [[package]]
 name = "p256"
-version = "0.13.2"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
+checksum = "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
 dependencies = [
  "ecdsa",
  "elliptic-curve",
+ "primefield",
  "primeorder",
- "sha2 0.10.9",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -1764,12 +1885,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "primeorder"
-version = "0.13.6"
+name = "primefield"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
+checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
+dependencies = [
+ "crypto-bigint",
+ "crypto-common 0.2.2",
+ "ff",
+ "rand_core 0.10.1",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "primeorder"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06"
 dependencies = [
  "elliptic-curve",
+ "primefield",
+ "wnaf",
 ]
 
 [[package]]
@@ -1836,6 +1973,7 @@ name = "rawcap"
 version = "0.1.0"
 dependencies = [
  "droneid",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -1886,12 +2024,12 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rfc6979"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
+checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
 dependencies = [
+ "crypto-bigint",
  "hmac",
- "subtle",
 ]
 
 [[package]]
@@ -1909,6 +2047,7 @@ dependencies = [
 name = "rid"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "odid-ref",
  "rid",
  "serde",
@@ -1930,7 +2069,8 @@ name = "rid-view"
 version = "0.1.0"
 dependencies = [
  "adsb",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "libc",
  "link",
  "openlink",
@@ -2057,7 +2197,7 @@ dependencies = [
  "adsb",
  "ctrlwatch",
  "embedded-graphics",
- "heapless 0.8.0",
+ "heapless 0.9.4",
  "libm",
  "link",
  "png",
@@ -2078,13 +2218,14 @@ version = "0.1.0"
 
 [[package]]
 name = "sec1"
-version = "0.7.3"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
+checksum = "d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d"
 dependencies = [
  "base16ct",
+ "ctutils",
  "der",
- "generic-array",
+ "hybrid-array",
  "subtle",
  "zeroize",
 ]
@@ -2240,12 +2381,12 @@ dependencies = [
 
 [[package]]
 name = "signature"
-version = "2.2.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
 dependencies = [
- "digest 0.10.7",
- "rand_core 0.6.4",
+ "digest 0.11.3",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2262,12 +2403,15 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sm2"
-version = "0.13.3"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98b22092ef242a118f03ee41dc46b2720c0ca076f544116dbc915cacf532cfaa"
+checksum = "5a9d91aad47b30a5a5011032bed8d4b4192d7d5174ab3ed3e4dd22341ba8a5ac"
 dependencies = [
  "elliptic-curve",
+ "fiat-crypto",
+ "primefield",
  "primeorder",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2555,7 +2699,8 @@ dependencies = [
  "adsb",
  "ctrlwatch",
  "droneid",
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "libm",
  "link",
  "openlink",
@@ -2564,6 +2709,15 @@ dependencies = [
  "serde-json-core",
  "serde_json",
  "wifidrone",
+]
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+dependencies = [
+ "core_maths",
 ]
 
 [[package]]
@@ -2577,6 +2731,7 @@ name = "uat"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "libm",
 ]
 
@@ -2749,6 +2904,7 @@ version = "0.1.0"
 dependencies = [
  "edge-dhcp",
  "flate2",
+ "fuzzkit",
  "sha2 0.11.1",
 ]
 
@@ -2761,12 +2917,16 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wifidrone"
 version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+]
 
 [[package]]
 name = "wifiwatch"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "link",
  "mavwatch",
  "wifidrone",
@@ -2873,10 +3033,23 @@ dependencies = [
 name = "wirebus"
 version = "0.1.0"
 dependencies = [
- "heapless 0.8.0",
+ "fuzzkit",
+ "heapless 0.9.4",
  "link",
  "postcard",
  "rid",
+]
+
+[[package]]
+name = "wnaf"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
+dependencies = [
+ "ff",
+ "group",
+ "hybrid-array",
+ "primefield",
 ]
 
 [[package]]

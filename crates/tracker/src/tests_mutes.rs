@@ -108,6 +108,7 @@ fn mute_all_never_silences_jamming_or_unseen_alarms() {
     // out for an alert, are not in "Mute N".
     tr.ingest_threat(3, &sighting(ThreatKind::BeaconFlood, 4, 0xff, 0), 1_500);
     assert_eq!(tr.alarm_counts(1_000, 1_500), (2, 1), "two nuisance alarms to mute, one to snooze");
+    assert_eq!(tr.alarm_names(1_000, 1_500), ("Wi-Fi deauth attack", "Jamming (wideband)"), "the screen names what it acts on");
     let rules = tr.mute_seen(1_000, 1_500);
     assert_eq!(rules.len(), 2);
     assert!(rules.iter().all(|m| !threats::is_safety_kind(m.kind)));
@@ -137,12 +138,15 @@ fn operator_mutes_expire_site_mutes_stay_and_old_catch_alls_are_dropped() {
     tr.ingest_threat(1, &twin("CafeWiFi", 8), 2_000);
     assert_eq!(announced(&mut tr, 2_000).len(), 1);
     // Still heard two hours later: the mute ends and it alarms again.
+    // Meanwhile each time it comes back is recorded, silenced (no alert).
     let end = 1_000 + OPERATOR_MUTE_MS;
     let mut t = 2_000;
     while t < end - 1_000 {
         t += 60_000;
         tr.ingest_threat(1, &twin("CafeWiFi", 7), t.min(end - 1_000));
-        assert!(announced(&mut tr, t).is_empty());
+        assert_eq!(announced(&mut tr, t), [a]);
+        assert_eq!(tr.get_threat(a).unwrap().silence(), Some(threats::Silence::Muted));
+        assert_eq!(tr.active_threats(t.min(end - 1_000)).count(), 0, "no alert");
     }
     assert!(tr.get_threat(a).unwrap().muted);
     tr.ingest_threat(1, &twin("CafeWiFi", 7), end + 1_000);
@@ -159,12 +163,15 @@ fn operator_mutes_expire_site_mutes_stay_and_old_catch_alls_are_dropped() {
     assert_eq!(tr.mute(venue, end), Ok(true));
     let v = tr.ingest_threat(2, &twin("Venue Guest", 9), end + 2_000).unwrap();
     assert!(tr.get_threat(v).unwrap().muted);
-    // Days later (a new entry by then): still muted, never announced.
+    // Days later (a new entry by then): still muted, never alerted on, but
+    // its raise is recorded as muted by the site file.
     let later = end + 10 * OPERATOR_MUTE_MS;
     let v = tr.ingest_threat(2, &twin("Venue Guest", 9), later).unwrap();
     tr.expire(later);
     assert!(tr.get_threat(v).unwrap().muted, "for good");
-    assert!(!announced(&mut tr, later).contains(&v));
+    assert!(announced(&mut tr, later).contains(&v));
+    assert_eq!(tr.get_threat(v).unwrap().silence(), Some(threats::Silence::ForGood));
+    assert!(tr.active_threats(later).all(|t| t.id != v), "no alert");
 
     // Rules an older hub saved on the card: the catch-alls and the kinds
     // that can only be snoozed are not honoured, with a reason.
@@ -210,4 +217,47 @@ fn a_contested_link_without_identifiers_mutes_only_that_link() {
     s2.source[5] = 2;
     tr.ingest_threat(4, &s2, 2_000);
     assert_eq!(announced(&mut tr, 2_000).len(), 1);
+}
+
+/// docs/LINK-KEYS-DESIGN.md 7.5: a node number can change hands (a slot
+/// re-provisioned at a higher generation, a different wired board, an
+/// evicted table entry). The operator's mute or snooze was for the board
+/// that had the number, never for whichever board gets it next.
+#[test]
+fn mute_does_not_follow_number_to_new_node() {
+    let mut tr: Tracker = Tracker::default();
+    // Node 3: a deauth flood (one entry per node) muted, a blinded snoozed.
+    let flood = tr.ingest_threat(3, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 1_000).unwrap();
+    let blind = tr.threats.ingest(3, true, &blinded(), 1_000).unwrap();
+    // Node 4: the same, muted too; and a site-file rule naming no node.
+    let other = tr.ingest_threat(4, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 1_000).unwrap();
+    announced(&mut tr, 1_000);
+    for id in [flood, blind, other] {
+        assert!(tr.silence(id, 1_000).is_some());
+    }
+    let site = Mute { source: [0x02, 0, 0, 0, 0, 9], ssid: "Cafe".try_into().unwrap(), ..Mute::empty(ThreatKind::EvilTwin) };
+    assert_eq!(tr.mute(site.clone(), 1_000), Ok(true));
+    assert_eq!(tr.mutes().len(), 4);
+
+    // Node 3 falls silent; a minute later its number goes to another board.
+    tr.forget_node(3, 70_000);
+    assert_eq!(tr.mutes().len(), 2, "node 3's mute and snooze are gone");
+    assert!(tr.mutes().iter().all(|m| m.node != 3));
+    assert!(tr.mutes().contains(&site), "a rule naming no node stays");
+
+    // The new node 3 reports a deauth flood and is blinded: both sound.
+    let f = tr.ingest_threat(3, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 71_000).unwrap();
+    let b = tr.threats.ingest(3, true, &blinded(), 71_000).unwrap();
+    assert!(!tr.get_threat(f).unwrap().muted);
+    assert!(!tr.get_threat(b).unwrap().muted);
+    let new = announced(&mut tr, 71_000);
+    assert!(new.contains(&f) && new.contains(&b), "{new:?}");
+    // Node 4 is still muted.
+    let o = tr.ingest_threat(4, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 71_000).unwrap();
+    assert!(tr.get_threat(o).unwrap().muted);
+    // Its new episode is handed out for the record (muting stops the alert,
+    // never the record), marked as silenced, and it does not alert.
+    let _ = announced(&mut tr, 71_000);
+    assert!(tr.get_threat(o).unwrap().silence().is_some());
+    assert!(!tr.active_threats(71_000).any(|t| t.id == o), "no alert from the muted node");
 }

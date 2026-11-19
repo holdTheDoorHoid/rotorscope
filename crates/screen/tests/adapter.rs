@@ -464,3 +464,38 @@ fn a_signal_getting_louder_reaches_the_strip() {
     let strip = st.threat_strip.as_ref().expect("strip");
     assert_eq!((strip.level, strip.text.as_str()), (3, "WARNING rotor sound, no radio heard"));
 }
+
+/// The P4 saves theme and brightness changes as site-file lines and reads them back at
+/// mount: every change survives the round trip, and only changes are
+/// written.
+#[test]
+fn theme_settings_round_trip_through_site_lines() {
+    use screen::from_tracker::{apply_site_theme, theme_changes};
+    use screen::{Settings, SwitchAt, Theme, ThemeMode};
+    use tracker::site::{SiteLine, SiteState, parse_line, write_theme};
+    let before = Settings::default();
+    let after = Settings {
+        theme: ThemeMode::Auto,
+        day_theme: Theme::GlassCockpit,
+        night_theme: Theme::RedNight,
+        switch_at: SwitchAt::Sunrise,
+        brightness: 5,
+        ..before
+    };
+    let mut text = std::string::String::new();
+    theme_changes(&before, &after, |t| {
+        let mut l: heapless::String<40> = heapless::String::new();
+        write_theme(&mut l, t).unwrap();
+        text.push_str(&l);
+    });
+    assert_eq!(text, "theme auto\ntheme-day glass-cockpit\ntheme-switch sunrise\nbrightness 5\n", "night theme unchanged: not written");
+    let mut st = SiteState::default();
+    for l in text.lines() {
+        let p = parse_line(l).unwrap();
+        assert!(matches!(p, SiteLine::Theme(_)));
+        st.apply(p);
+    }
+    let loaded = apply_site_theme(&st.theme, Settings::default());
+    assert_eq!(loaded, after, "brightness survives too");
+    theme_changes(&after, &after, |_| panic!("no change, no line"));
+}

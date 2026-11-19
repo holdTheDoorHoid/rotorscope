@@ -16,6 +16,18 @@
 #                                                       partition table, otadata + rsjob (and any
 #                                                       --erase LABEL) erased so it boots ota_0,
 #                                                       each ELF into its slot
+#   tools/dev-board.sh --pt <csv> <elf> [seconds] [board]
+#                                                       single image with that partition table
+#                                                       (single-image ESP-NOW nodes:
+#                                                       tools/partitions-single.csv, which has rskey)
+#   tools/dev-board.sh --self-test                      dry-run checks of this script (no board)
+#
+# Provisioning partitions are never erased: rskey (a node's link key record,
+# docs/LINK-KEYS-DESIGN.md 4.4), rskit and rsboot (the hub's master, roster and
+# boot counter). `--erase` refuses them, the default erase list is only otadata
+# and rsjob, and an app flash rewrites only the bootloader, the table and the
+# app, so a reflash with the same table leaves the key where it was. Only
+# tools/link-key writes them (`espflash write-bin`, through `--run`).
 #
 # Options (before the positional arguments):
 #   --send KEYS        after the reset, type these characters on the board's console
@@ -31,16 +43,15 @@
 # feature or switch carries "bench-build:<list>"; flashing one needs
 # ROTORSCOPE_BENCH=1 (as building it did), and it is announced either way.
 #
-# ESP-NOW link key: before flashing, every ELF that carries a link-key tag
-# (gateway, ESP-NOW nodes) is checked against the kit key (tools/link.key, or
-# $ROTORSCOPE_LINK_KEY_FILE): a WARNING if it was built without a key or with
-# another one (docs/ESPNOW.md "Securing the link"). Only key IDs are printed,
-# never a key.
+# ESP-NOW link keys are not in any image: each board's key record lives in its
+# rskey partition (docs/LINK-KEYS-DESIGN.md 4.4), so images are the same for
+# every kit and nothing here looks for a key.
 #
 # Boards are addressed by their USB by-id path (it contains the MAC), never by
 # /dev/ttyACMn and never by a serial number. Names (s3, s3b, c5a, c5b, ...) are
 # looked up in tools/boards.local (gitignored; created by --register; override
-# with $ROTORSCOPE_BOARDS). The built-in `s3` below is only a fallback.
+# with $ROTORSCOPE_BOARDS). There is no built-in board: a name that is not
+# registered is an error that says to run --register.
 #
 # Locks: one file per board, keyed on the by-id path (so two names for one board
 # share a lock), in $ROTORSCOPE_LOCK_DIR (default ~/.local/state/rotorscope/locks),
@@ -52,9 +63,7 @@ here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 boards_file=${ROTORSCOPE_BOARDS:-$here/boards.local}
 lock_dir=${ROTORSCOPE_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/rotorscope/locks}
 
-declare -A BOARDS=(
-  [s3]=/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_E8:F6:0A:81:6D:F0-if00
-)
+declare -A BOARDS=()
 declare -A CHIPS=()
 if [[ -f $boards_file ]]; then
   while read -r bname bpath bchip _; do
@@ -69,33 +78,12 @@ chip_of() {  # chip_of <board>
   elif [[ $1 == c5* ]]; then echo esp32c5
   else echo esp32s3; fi
 }
-lock_name() { local b; b=$(basename "$1"); echo "${b//[^A-Za-z0-9_.:-]/_}.lock"; }
-
-# The link-key tag an ELF was built with ("none" or 8 hex digits), empty if it
-# has none (not an ESP-NOW image).
-elf_link_key() { grep -aoE 'link-key:(none|[0-9a-f]{8})' "$1" 2>/dev/null | head -1 | cut -d: -f2 || true; }
-check_link_keys() {  # check_link_keys <elf>...: report each image's key, warn on a mismatch
-  local f k kit="" keyfile=${ROTORSCOPE_LINK_KEY_FILE:-$here/link.key}
-  for f in "$@"; do
-    [[ -f $f ]] || continue
-    k=$(elf_link_key "$f"); [[ -n $k ]] || continue
-    if [[ -z $kit ]]; then
-      if [[ $keyfile != none && -f $keyfile ]]; then
-        kit=$(cd "$here/.." && cargo run -q -p link-key -- id "$keyfile" 2>/dev/null) || kit="?"
-      else
-        kit=none
-      fi
-    fi
-    if [[ $k == none ]]; then
-      echo "dev-board: WARNING: $(basename "$f") was built WITHOUT a link key; its ESP-NOW link is not authenticated" >&2
-    else
-      echo "dev-board: $(basename "$f"): link key $k"
-    fi
-    if [[ $kit != "?" && $k != "$kit" ]]; then
-      echo "dev-board: WARNING: $(basename "$f") has link key '$k' but the kit key is '$kit' ($keyfile): it will not talk to the rest of the kit; rebuild it" >&2
-    fi
-  done
+unknown_board() {  # unknown_board <name>: say what is registered and how to register, exit 1
+  local known=${!BOARDS[*]}
+  echo "unknown board $1 (registered: ${known:-none}). Register the attached boards with: tools/dev-board.sh --register (writes $boards_file)" >&2
+  exit 1
 }
+lock_name() { local b; b=$(basename "$1"); echo "${b//[^A-Za-z0-9_.:-]/_}.lock"; }
 
 # The bench list an ELF was built with, empty for a normal build.
 elf_bench() { grep -aoE 'bench-build:[A-Za-z0-9_,:-]+' "$1" 2>/dev/null | grep -v '^bench-build:none$' | head -1 | cut -d: -f2- || true; }
@@ -113,11 +101,75 @@ check_bench() {  # check_bench <dry> <elf>...: announce bench images; refuse the
   done
 }
 
+# Partitions this script never erases (see the header).
+protected_part() { [[ $1 == rskey || $1 == rskit || $1 == rsboot ]]; }
+
+# ---- self-test: dry runs only, no board, no lock ----------------------------
+self_test() {
+  local t fails=0 out rc
+  set +e  # the checks look at failures; nothing after this runs anything real
+  t=$(mktemp -d); trap 'rm -rf "$t"' RETURN
+  printf 'c5x  /dev/serial/by-id/usb-Espressif_selftest_02:00:00:00:00:01-if00  esp32c5\n' >"$t/boards"
+  : >"$t/a.elf"; : >"$t/b.elf"; printf 'xx bench-build:faulttest xx' >"$t/bench.elf"
+  printf 'rskey, data, undefined, 0x611000, 0x1000\n' >"$t/pt.csv"
+  run() { ROTORSCOPE_BOARDS=$t/boards ROTORSCOPE_LOCK_DIR=$t/locks ROTORSCOPE_BENCH= "$here/dev-board.sh" "$@" 2>&1; }
+  check() {  # check <name> <condition result>
+    if [[ $2 == 0 ]]; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails + 1)); fi
+  }
+  # 1. A multi-image flash erases exactly otadata and rsjob, never rskey.
+  out=$(run --dry-run --pt "$t/pt.csv" --app "ota_0=$t/a.elf" --app "ota_1=$t/b.elf" --multi 5 c5x); rc=$?
+  grep -q 'erase-parts .* otadata rsjob$' <<<"$out"; check "multi: default erase list is otadata rsjob" $(( rc != 0 || $? ))
+  ! grep -q 'rskey\|rskit\|rsboot' <<<"$(grep -E 'erase|espflash' <<<"$out")"; check "multi: no espflash line touches rskey/rskit/rsboot" $?
+  # 2. Asking for it is refused, whatever else is asked.
+  for p in rskey rskit rsboot; do
+    out=$(run --dry-run --pt "$t/pt.csv" --erase ota_2 --erase "$p" --app "ota_0=$t/a.elf" --multi 5 c5x); rc=$?
+    [[ $rc == 2 ]] && grep -q "refusing to erase $p" <<<"$out" && ! grep -q '\[dry-run\]' <<<"$out"
+    check "--erase $p refused (exit 2, nothing planned)" $?
+  done
+  # 3. Other partitions can still be erased on request.
+  out=$(run --dry-run --pt "$t/pt.csv" --erase ota_2 --app "ota_0=$t/a.elf" --multi 5 c5x)
+  grep -q 'erase-parts .* otadata rsjob ota_2$' <<<"$out"; check "--erase ota_2 added, rskey still absent" $?
+  # 4. A single image with a table gets that table; without one, espflash's default.
+  out=$(run --dry-run --pt "$t/pt.csv" "$t/a.elf" 5 c5x)
+  grep -q "espflash flash .*--partition-table $t/pt.csv .*a.elf" <<<"$out" && ! grep -q erase <<<"$out"; check "single image: --pt passed, nothing erased" $?
+  out=$(run --dry-run "$t/a.elf" 5 c5x)
+  grep -q 'espflash flash ' <<<"$out" && ! grep -q 'partition-table' <<<"$out"; check "single image without --pt: default table" $?
+  # 5. Bench images are announced as refused without ROTORSCOPE_BENCH=1.
+  out=$(run --dry-run "$t/bench.elf" 5 c5x)
+  grep -q 'BENCH build (faulttest); refusing' <<<"$out"; check "bench image refused without ROTORSCOPE_BENCH=1" $?
+  # 6. Images carry no key: an old image's compiled key tag is not looked at,
+  #    and no key file is read (keys live in each board's rskey partition).
+  printf 'xx link-key:0a1b2c3d xx' >"$t/oldkey.elf"
+  out=$(ROTORSCOPE_LINK_KEY_FILE=$t/nonexistent run --dry-run "$t/oldkey.elf" 5 c5x)
+  ! grep -qi 'link key\|link\.key' <<<"$out" && grep -q 'espflash flash ' <<<"$out"; check "no compiled-key check, no key file read" $?
+  # 7. No board is built in: an unregistered name, with or without a boards
+  #    file, is refused with the advice to register, and nothing is planned.
+  out=$(run --dry-run "$t/a.elf" 5 s3); rc=$?
+  [[ $rc == 1 ]] && grep -q 'unknown board s3 (registered: c5x).*--register' <<<"$out" && ! grep -q '\[dry-run\]' <<<"$out"
+  check "unregistered board refused, --register suggested" $?
+  out=$(ROTORSCOPE_BOARDS=$t/none ROTORSCOPE_LOCK_DIR=$t/locks ROTORSCOPE_BENCH= "$here/dev-board.sh" --resolve s3 2>&1); rc=$?
+  [[ $rc == 1 ]] && grep -q 'registered: none' <<<"$out"; check "no boards file: nothing is known" $?
+  # 8. The real espflash can read every table we ship. It panics on a data
+  #    subtype it has no name for (found on the bench, 2026-11-19: `0x40`),
+  #    which a dry run never shows. Skipped, and said so, without espflash.
+  if command -v espflash >/dev/null; then
+    for f in "$here"/partitions-*.csv; do
+      out=$(espflash partition-table "$f" 2>&1); rc=$?
+      (( rc == 0 )) && ! grep -qi 'panicked' <<<"$out"; check "espflash reads ${f##*/}" $?
+    done
+  else
+    echo "skip espflash not installed: shipped partition tables not parsed"
+  fi
+  (( fails == 0 )) && echo "dev-board self-test: all passed" || echo "dev-board self-test: $fails FAILED"
+  return $(( fails > 0 ))
+}
+
 # ---- sub-commands that do not flash -----------------------------------------
 case ${1:-} in
+  --self-test) self_test; exit $? ;;
   --resolve)
     b=${2:?usage: --resolve <board>}
-    [[ -n ${BOARDS[$b]:-} ]] || { echo "unknown board $b (known: ${!BOARDS[*]})" >&2; exit 1; }
+    [[ -n ${BOARDS[$b]:-} ]] || unknown_board "$b"
     echo "${BOARDS[$b]} $(chip_of "$b")"; exit 0 ;;
   --list)
     printf '%-6s %-8s %-9s %s\n' NAME CHIP STATE PORT
@@ -210,7 +262,12 @@ while [[ ${1:-} == --* && ${1:-} != --log && ${1:-} != --multi ]]; do
   case $1 in
     --pt) pt=${2:?--pt needs a CSV}; shift 2 ;;
     --app) apps+=("${2:?--app needs LABEL=ELF}"); shift 2 ;;
-    --erase) erase+=("${2:?--erase needs a partition label}"); shift 2 ;;
+    --erase)
+      if protected_part "${2:?--erase needs a partition label}"; then
+        echo "dev-board: refusing to erase $2: it holds provisioning (a link key record, the hub's master or its boot counter; docs/LINK-KEYS-DESIGN.md 4.4). Re-provision with tools/link-key instead." >&2
+        exit 2
+      fi
+      erase+=("$2"); shift 2 ;;
     --send) send=${2:?--send needs KEYS}; shift 2 ;;
     --send-after) send_after=${2:?}; shift 2 ;;
     --dry-run) dry=1; shift ;;
@@ -228,18 +285,17 @@ elif [[ -n $run && ( $# -lt 1 || ${1:-} =~ ^[0-9]+$ ) ]]; then elf=""; secs=${1:
 elif [[ ${1:-} == --log ]]; then elf=""; shift; secs=${1:-15}; board=${2:-s3}
 else elf=${1:?usage: dev-board.sh <elf>|--log [seconds] [board]  (or --register / --list)}; shift; secs=${1:-15}; board=${2:-s3}; fi
 port=${BOARDS[$board]:-}
-if [[ -z $port ]]; then echo "unknown board $board (known: ${!BOARDS[*]}). Run: tools/dev-board.sh --register" >&2; exit 1; fi
+[[ -n $port ]] || unknown_board "$board"
 chip=$(chip_of "$board")
 
 link_elfs=(); [[ -n $elf ]] && link_elfs+=("$elf")
 for a in "${apps[@]}"; do link_elfs+=("${a#*=}"); done
-(( ${#link_elfs[@]} )) && check_link_keys "${link_elfs[@]}"
 (( ${#link_elfs[@]} )) && check_bench "$dry" "${link_elfs[@]}"
 
 if (( dry )); then
   echo "[dry-run] board=$board chip=$chip port=$port"
   echo "[dry-run] lock: $lock_dir/$(lock_name "$port")"
-  [[ -n $elf ]] && echo "[dry-run] espflash flash --chip $chip --port $port --non-interactive $elf"
+  [[ -n $elf ]] && echo "[dry-run] espflash flash --chip $chip --port $port --non-interactive ${pt:+--partition-table $pt }$elf"
   if (( multi )); then
     echo "[dry-run] espflash erase-parts --chip $chip --port $port --partition-table $pt -a no-reset ${erase[*]}"
     for a in "${apps[@]}"; do echo "[dry-run] espflash flash --chip $chip --port $port --non-interactive --partition-table $pt --target-app-partition ${a%%=*} ${a#*=}"; done
@@ -267,12 +323,14 @@ printf 'pid=%s since=%s cmd=%s %s\n' "$$" "$(date +%T)" "$(basename "$label")" "
 
 if [[ -n $hold ]]; then echo "holding $board for ${hold}s"; sleep "$hold"; exit 0; fi
 if [[ -n $elf ]]; then
-  espflash flash --chip "$chip" --port "$port" --non-interactive "$elf" 2>&1 | tail -3
+  pt_args=(); [[ -n $pt ]] && pt_args=(--partition-table "$pt")
+  espflash flash --chip "$chip" --port "$port" --non-interactive "${pt_args[@]}" "$elf" 2>&1 | tail -3
 fi
 if (( multi )); then
   # Erase the boot selection (so the bootloader starts ota_0) and any stored
   # job, then write each image into its slot. The chip stays in the ROM
   # loader between steps; the last one resets it into the new firmware.
+  for e in "${erase[@]}"; do protected_part "$e" && { echo "dev-board: refusing to erase $e" >&2; exit 2; }; done
   espflash erase-parts --chip "$chip" --port "$port" --non-interactive --partition-table "$pt" -a no-reset "${erase[@]}" 2>&1 | tail -2
   n=${#apps[@]}; i=0
   for a in "${apps[@]}"; do

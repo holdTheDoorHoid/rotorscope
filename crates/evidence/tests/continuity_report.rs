@@ -1,0 +1,60 @@
+//! What the checker reports about continuity (WP-14a): the previous boot's
+//! unsigned tail vouched for by the next boot's signature, and the newest
+//! boot named in the NOT PROVEN line.
+
+mod common;
+
+use common::unit::Unit;
+use evidence::verify::{self, Input, Options};
+
+#[test]
+fn the_next_boot_vouches_for_the_unsigned_tail() {
+    let mut u = Unit::new();
+    let a = u.boot(1, 6, 2, "first");
+    let b = u.boot(2, 6, 0, "second");
+    let opts = Options { allow_test_key: true, ..Options::default() };
+    // Alone, boot 1's last two notes are not signed: a gap.
+    let r = verify::verify(&[Input::new("boot1.bin", a.bytes.clone())], &opts);
+    assert_eq!(r.exit_code(), 3, "{:?}", r.findings);
+    // With boot 2, whose signed continuity record names their head: covered.
+    let r = verify::verify(&[Input::new("boot1.bin", a.bytes), Input::new("boot2.bin", b.bytes)], &opts);
+    assert_eq!(r.exit_code(), 0, "{:?}", r.findings);
+    let c = r.chains.iter().find(|c| c.boot == [1; 8]).unwrap();
+    assert_eq!(c.vouched_by_next, c.last_seq);
+    assert_eq!(c.signed_through, c.last_seq);
+    let k = r.chains.iter().find(|c| c.boot == [2; 8]).unwrap().continuity.unwrap();
+    assert_eq!((k.counter, k.prev_boot), (2, [1; 8]));
+    assert!(r.not_proven().contains("boot counter 2"), "{}", r.not_proven());
+    assert!(r.not_proven().starts_with(verify::NOT_PROVEN));
+}
+
+#[test]
+fn logs_without_continuity_keep_the_plain_not_proven_line() {
+    let r = verify::verify(&[], &Options::default());
+    assert_eq!(r.not_proven(), verify::NOT_PROVEN);
+}
+
+/// A boot whose own continuity record is still unsigned (it stopped before
+/// its first checkpoint) is covered by the boot after it; that coverage
+/// must reach the boot before it too, whatever the boot ids' order.
+#[test]
+fn coverage_passes_down_a_chain_of_three_boots() {
+    for ids in [[1u8, 2, 3], [9, 5, 1], [4, 8, 2]] {
+        let mut u = Unit::new();
+        let a = u.boot(ids[0], 6, 2, "first");
+        // No checkpoint at all: its continuity record (naming the first
+        // boot's head) is signed only through the third boot.
+        let b = u.boot(ids[1], 0, 2, "second");
+        let c = u.boot(ids[2], 6, 0, "third");
+        let opts = Options { allow_test_key: true, ..Options::default() };
+        let r = verify::verify(&[Input::new("boot1.bin", a.bytes), Input::new("boot2.bin", b.bytes), Input::new("boot3.bin", c.bytes)], &opts);
+        // No gap and no failure. (Not exit 0: the second boot holds no
+        // checkpoint, so no signature of its own names its signer.)
+        let bad: Vec<_> = r.findings.iter().filter(|f| f.level != verify::Level::Note).collect();
+        assert!(bad.is_empty(), "ids {ids:?}: {bad:?}");
+        for id in &ids[..2] {
+            let ch = r.chains.iter().find(|c| c.boot == [*id; 8]).unwrap();
+            assert_eq!(ch.signed_through, ch.last_seq, "ids {ids:?}, boot {id}");
+        }
+    }
+}

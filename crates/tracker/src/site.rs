@@ -10,8 +10,8 @@
 //!
 //! ```text
 //! # Node positions (the station address the hub's Health page shows):
-//! node 10:bd:a3:ce:bd:18 39.95210 -75.16380   roof, north corner
-//! node 10:bd:a3:ce:bd:18 clear
+//! node 02:00:00:00:00:18 39.95210 -75.16380   roof, north corner
+//! node 02:00:00:00:00:18 clear
 //! node all here          # (console/screen only) every node at the hub
 //!
 //! # Alarms muted for good: a venue's known false alarm, one specific
@@ -47,6 +47,13 @@
 //! # A preset of the thresholds and level weights (slice 16e; later wins;
 //! # a crowd line wins over it whatever the order):
 //! profile home           # default, home, facility, event or patrol
+//!
+//! # The screen's colour theme (P4 hub; also set on the Settings page):
+//! theme auto              # auto | glass-cockpit | field-day | red-night
+//! theme-day field-day     # Auto's theme while the sun is up
+//! theme-night red-night   # Auto's theme at night (and before it knows)
+//! theme-switch twilight   # twilight (civil dawn and dusk) | sunrise (sunrise and sunset)
+//! brightness 3            # screen backlight 1..5 (Red Night caps it at 2)
 //! ```
 //!
 //! At most [`places::MAX_AREAS`] areas and [`places::MAX_FRIENDS`] friends:
@@ -79,7 +86,7 @@ use crate::behaviour::profile::Profile;
 use crate::threats::{Mute, NOT_HONOURED};
 
 /// Every kind, in `ThreatKind` order, for reading names back.
-const KINDS: [ThreatKind; 23] = [
+const KINDS: [ThreatKind; 24] = [
     ThreatKind::Deauth,
     ThreatKind::Disassoc,
     ThreatKind::BeaconFlood,
@@ -103,6 +110,7 @@ const KINDS: [ThreatKind; 23] = [
     ThreatKind::MavlinkAttack,
     ThreatKind::AreaGnss,
     ThreatKind::IdFlood,
+    ThreatKind::LinkLoss,
 ];
 
 /// A threat kind from its `name()` (`"evil_twin"`).
@@ -158,6 +166,103 @@ pub enum SiteLine {
     /// `profile default|home|facility|event|patrol` (slice 16e,
     /// [`crate::behaviour::profile`]).
     Profile(Profile),
+    /// `theme ...`, `theme-day ...`, `theme-night ...`, `theme-switch ...`:
+    /// the screen's colours. Not a security setting; kept here so the
+    /// operator's choice survives a reboot.
+    Theme(ThemeSetting),
+}
+
+/// The screen themes a site file can name (the screen crate's
+/// `screen::Theme`; the tracker does not depend on it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeName {
+    GlassCockpit,
+    FieldDay,
+    RedNight,
+}
+
+impl ThemeName {
+    pub const ALL: [ThemeName; 3] = [ThemeName::GlassCockpit, ThemeName::FieldDay, ThemeName::RedNight];
+    pub const fn word(self) -> &'static str {
+        match self {
+            ThemeName::GlassCockpit => "glass-cockpit",
+            ThemeName::FieldDay => "field-day",
+            ThemeName::RedNight => "red-night",
+        }
+    }
+    pub fn from_word(w: &str) -> Option<ThemeName> {
+        Self::ALL.into_iter().find(|t| t.word().eq_ignore_ascii_case(w))
+    }
+}
+
+/// One theme line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeSetting {
+    /// `theme auto` (`None`) or one theme always.
+    Theme(Option<ThemeName>),
+    Day(ThemeName),
+    Night(ThemeName),
+    /// `theme-switch twilight` (`true`: civil dawn and dusk) or `sunrise`.
+    SwitchTwilight(bool),
+    /// `brightness 1..5`: the screen backlight level.
+    Brightness(u8),
+}
+
+/// The theme lines' state: each `None` until a line sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ThemeSite {
+    /// `Some(None)`: auto.
+    pub theme: Option<Option<ThemeName>>,
+    pub day: Option<ThemeName>,
+    pub night: Option<ThemeName>,
+    pub switch_twilight: Option<bool>,
+    pub brightness: Option<u8>,
+}
+
+impl ThemeSite {
+    pub fn apply(&mut self, t: ThemeSetting) {
+        match t {
+            ThemeSetting::Theme(x) => self.theme = Some(x),
+            ThemeSetting::Day(x) => self.day = Some(x),
+            ThemeSetting::Night(x) => self.night = Some(x),
+            ThemeSetting::SwitchTwilight(x) => self.switch_twilight = Some(x),
+            ThemeSetting::Brightness(x) => self.brightness = Some(x),
+        }
+    }
+
+    /// Nothing said.
+    pub fn is_empty(&self) -> bool {
+        *self == ThemeSite::default()
+    }
+}
+
+impl core::fmt::Display for ThemeSite {
+    /// `theme auto (day field-day, night red-night, switch twilight)`; the
+    /// parts the file never set say `default`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = |t: Option<ThemeName>| t.map_or("default", |t| t.word());
+        f.write_str("theme ")?;
+        match self.theme {
+            None => f.write_str("default")?,
+            Some(None) => f.write_str("auto")?,
+            Some(Some(t)) => f.write_str(t.word())?,
+        }
+        write!(
+            f,
+            " (day {}, night {}, switch {}",
+            name(self.day),
+            name(self.night),
+            match self.switch_twilight {
+                None => "default",
+                Some(true) => "twilight",
+                Some(false) => "sunrise",
+            }
+        )?;
+        match self.brightness {
+            Some(b) => write!(f, ", brightness {b})"),
+            None => f.write_str(", brightness default)"),
+        }
+    }
 }
 
 /// The two control-link opt-ins (docs/CONTROL-LINKS.md).
@@ -187,7 +292,8 @@ pub fn parse_mac(s: &str) -> Option<[u8; 6]> {
     let mut parts = s.split([':', '-']);
     for b in out.iter_mut() {
         let p = parts.next()?;
-        if p.len() != 2 {
+        // Two hex digits: `from_str_radix` would take a sign ("+f" as 0x0f).
+        if p.len() != 2 || !p.bytes().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
         *b = u8::from_str_radix(p, 16).ok()?;
@@ -387,6 +493,36 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
             _ => Err("say: profile NAME (default, home, facility, event or patrol)"),
         };
     }
+    if let Some(kind) = word.get(..5).filter(|h| h.eq_ignore_ascii_case("theme")).and_then(|_| word.get(5..)) {
+        let v = it.next().ok_or("say: theme auto|glass-cockpit|field-day|red-night")?;
+        if it.next().is_some() {
+            return Err("one word after theme, theme-day, theme-night or theme-switch");
+        }
+        let name = || ThemeName::from_word(v).ok_or("theme names: glass-cockpit, field-day, red-night");
+        let t = match kind {
+            "" if v.eq_ignore_ascii_case("auto") => ThemeSetting::Theme(None),
+            "" => ThemeSetting::Theme(Some(name()?)),
+            w if w.eq_ignore_ascii_case("-day") => ThemeSetting::Day(name()?),
+            w if w.eq_ignore_ascii_case("-night") => ThemeSetting::Night(name()?),
+            w if w.eq_ignore_ascii_case("-switch") => match v {
+                v if v.eq_ignore_ascii_case("twilight") => ThemeSetting::SwitchTwilight(true),
+                v if v.eq_ignore_ascii_case("sunrise") => ThemeSetting::SwitchTwilight(false),
+                _ => return Err("say: theme-switch twilight|sunrise"),
+            },
+            _ => return Err("say: theme, theme-day, theme-night or theme-switch"),
+        };
+        return Ok(SiteLine::Theme(t));
+    }
+    if word.eq_ignore_ascii_case("brightness") {
+        let v = it.next().ok_or("say: brightness 1..5")?;
+        if it.next().is_some() {
+            return Err("say: brightness 1..5");
+        }
+        return match v.parse::<u8>() {
+            Ok(b @ 1..=5) => Ok(SiteLine::Theme(ThemeSetting::Brightness(b))),
+            _ => Err("brightness is a level from 1 to 5"),
+        };
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -423,7 +559,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, home, mute, unmute, control, area, bubble, friend, crowd, visits, profile)")
+    Err("unknown line (node, home, mute, unmute, control, theme, brightness, area, bubble, friend, crowd, visits, profile)")
 }
 
 /// Whether a places line fits: a new area or friend when the list is full
@@ -496,6 +632,8 @@ pub struct SiteState {
     pub home: Option<(f64, f64, Option<f64>)>,
     /// Areas, the bubble and friendly drones (threat levels).
     pub places: Places,
+    /// The screen theme lines.
+    pub theme: ThemeSite,
     pub used: u32,
     pub ignored: u32,
     /// `mute` lines not honoured: too broad, or for a kind that can only be
@@ -538,6 +676,7 @@ impl SiteState {
             SiteLine::Control { what: ControlSetting::Content, on } => self.control_content = Some(on),
             SiteLine::Home { lat, lon, alt } => self.home = Some((lat, lon, alt)),
             SiteLine::HomeClear => self.home = None,
+            SiteLine::Theme(t) => self.theme.apply(t),
             SiteLine::AllNodesHere | SiteLine::AreaHere { .. } => {
                 self.ignored += 1;
                 return;
@@ -562,6 +701,49 @@ impl SiteState {
 /// Longest line kept; a longer one is ignored as a whole. (160 before the
 /// `area ... poly` lines: 16 corners at 7 decimals take about 330.)
 pub const MAX_LINE: usize = 384;
+
+/// The largest site file the hub reads. A file the hub and its owner write
+/// (a line per node, per mute, per switch) is a few hundred bytes; this is
+/// room for more than a thousand changes. A longer one is not read at all
+/// ([`TooBig`]): reading costs time on the card with the hub's main loop
+/// stopped, so a huge or planted file must not be able to stall the hub or
+/// trip its watchdog at every mount.
+pub const MAX_FILE_BYTES: u32 = 64 * 1024;
+
+/// Ignored lines named one by one on the console per load; the rest are
+/// only counted ([`more_ignored`]). A file of junk lines would otherwise
+/// keep the console (and the loop behind it) busy for minutes.
+pub const MAX_IGNORED_NAMED: u32 = 8;
+
+/// How many ignored lines of a load were not named on the console.
+pub fn more_ignored(ignored: u32) -> u32 {
+    ignored.saturating_sub(MAX_IGNORED_NAMED)
+}
+
+/// A site file longer than [`MAX_FILE_BYTES`]: not read, nothing in it used.
+/// Its text is the console line and the evidence "setting" event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooBig {
+    pub bytes: u32,
+}
+
+impl core::fmt::Display for TooBig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "site file NOT loaded: {} bytes is over the limit of {MAX_FILE_BYTES}; nothing in it is used (no mutes, node positions or switches from the card). Shorten it on a computer",
+            self.bytes
+        )
+    }
+}
+
+impl TooBig {
+    /// The event's data: tag 5, then the file's length (u32, little-endian).
+    pub fn data(&self) -> [u8; 5] {
+        let b = self.bytes.to_le_bytes();
+        [5, b[0], b[1], b[2], b[3]]
+    }
+}
 
 /// Splits a byte stream fed in pieces into lines.
 #[derive(Debug, Default)]
@@ -661,6 +843,18 @@ pub fn write_mute<W: Write>(w: &mut W, m: &Mute) -> core::fmt::Result {
 /// The line that sets a control-link opt-in (ends in `\n`).
 pub fn write_control<W: Write>(w: &mut W, what: ControlSetting, on: bool) -> core::fmt::Result {
     writeln!(w, "control {} {}", what.word(), if on { "on" } else { "off" })
+}
+
+/// The line that recreates one theme setting (ends in `\n`).
+pub fn write_theme<W: Write>(w: &mut W, t: ThemeSetting) -> core::fmt::Result {
+    match t {
+        ThemeSetting::Theme(None) => writeln!(w, "theme auto"),
+        ThemeSetting::Theme(Some(n)) => writeln!(w, "theme {}", n.word()),
+        ThemeSetting::Day(n) => writeln!(w, "theme-day {}", n.word()),
+        ThemeSetting::Night(n) => writeln!(w, "theme-night {}", n.word()),
+        ThemeSetting::SwitchTwilight(tw) => writeln!(w, "theme-switch {}", if tw { "twilight" } else { "sunrise" }),
+        ThemeSetting::Brightness(b) => writeln!(w, "brightness {b}"),
+    }
 }
 
 /// The line that places a node (ends in `\n`).
@@ -843,7 +1037,8 @@ impl core::fmt::Display for LoadSummary<'_> {
             None => f.write_str(", several at once not counted (profile)")?,
         }
         f.write_str(if st.places.visits { ", visit history kept" } else { ", no visit history (visits off)" })?;
-        write!(f, ", profile {}", st.places.profile.name())
+        write!(f, ", profile {}", st.places.profile.name())?;
+        write!(f, "; {}", st.theme)
     }
 }
 
@@ -974,15 +1169,15 @@ mod tests {
     fn reads_every_kind_of_line() {
         assert_eq!(parse_line("  # just a comment"), Ok(SiteLine::Nothing));
         assert_eq!(parse_line(""), Ok(SiteLine::Nothing));
-        let mac = [0x10, 0xbd, 0xa3, 0xce, 0xbd, 0x18];
-        match parse_line("NODE 10:BD:a3:ce:bd:18  39.9521 -75.1638  roof # north").unwrap() {
+        let mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x1a];
+        match parse_line("NODE 02:00:00:00:00:1A  39.9521 -75.1638  roof # north").unwrap() {
             SiteLine::NodeAt { mac: m, lat, lon } => {
                 assert_eq!(m, mac);
                 assert!((lat - 39.9521).abs() < 1e-9 && (lon + 75.1638).abs() < 1e-9);
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(parse_line("node 10-bd-a3-ce-bd-18 clear"), Ok(SiteLine::NodeClear { mac }));
+        assert_eq!(parse_line("node 02-00-00-00-00-1a clear"), Ok(SiteLine::NodeClear { mac }));
         assert_eq!(parse_line("node all here"), Ok(SiteLine::AllNodesHere));
         assert_eq!(parse_line("unmute all"), Ok(SiteLine::UnmuteAll));
         let SiteLine::Mute(m) = parse_line("mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi Guest ").unwrap() else {
@@ -1029,11 +1224,77 @@ mod tests {
     }
 
     #[test]
+    fn brightness_lines_read_back() {
+        assert_eq!(parse_line("brightness 3"), Ok(SiteLine::Theme(ThemeSetting::Brightness(3))));
+        assert_eq!(parse_line("BRIGHTNESS 5 # full"), Ok(SiteLine::Theme(ThemeSetting::Brightness(5))));
+        for bad in ["brightness", "brightness 0", "brightness 6", "brightness 2 3", "brightness high", "brightness -1"] {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
+        for b in 1..=5 {
+            let mut s: heapless::String<32> = heapless::String::new();
+            write_theme(&mut s, ThemeSetting::Brightness(b)).unwrap();
+            assert_eq!(parse_line(&s), Ok(SiteLine::Theme(ThemeSetting::Brightness(b))), "{s}");
+        }
+        let st = load("brightness 4\ntheme red-night\nbrightness 2\n");
+        assert_eq!(st.theme.brightness, Some(2), "the last line wins");
+        assert!(std::format!("{}", st.theme).ends_with("brightness 2)"));
+    }
+
+    #[test]
+    fn theme_lines_read_back_and_last_one_wins() {
+        use ThemeName::*;
+        assert_eq!(parse_line("theme auto"), Ok(SiteLine::Theme(ThemeSetting::Theme(None))));
+        assert_eq!(parse_line("THEME Red-Night # dark site"), Ok(SiteLine::Theme(ThemeSetting::Theme(Some(RedNight)))));
+        assert_eq!(parse_line("theme-day glass-cockpit"), Ok(SiteLine::Theme(ThemeSetting::Day(GlassCockpit))));
+        assert_eq!(parse_line("Theme-Night field-day"), Ok(SiteLine::Theme(ThemeSetting::Night(FieldDay))));
+        assert_eq!(parse_line("theme-switch sunrise"), Ok(SiteLine::Theme(ThemeSetting::SwitchTwilight(false))));
+        assert_eq!(parse_line("theme-switch twilight"), Ok(SiteLine::Theme(ThemeSetting::SwitchTwilight(true))));
+        for bad in ["theme", "theme night", "theme auto please", "theme-day auto", "theme-switch dusk", "theme-colour red-night", "themé x"] {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
+        // Every line the hub writes reads back as itself.
+        let mut all = std::vec![ThemeSetting::Theme(None), ThemeSetting::SwitchTwilight(true), ThemeSetting::SwitchTwilight(false)];
+        for n in ThemeName::ALL {
+            all.extend([ThemeSetting::Theme(Some(n)), ThemeSetting::Day(n), ThemeSetting::Night(n)]);
+        }
+        for t in all {
+            let mut s: heapless::String<40> = heapless::String::new();
+            write_theme(&mut s, t).unwrap();
+            assert!(s.ends_with('\n'));
+            assert_eq!(parse_line(&s), Ok(SiteLine::Theme(t)), "{s}");
+        }
+        // A file: later lines win, and the summary says what it set.
+        let st = load("theme red-night\ntheme-night glass-cockpit\ntheme auto\ntheme-switch sunrise\n");
+        assert_eq!(
+            st.theme,
+            ThemeSite { theme: Some(None), day: None, night: Some(GlassCockpit), switch_twilight: Some(false), brightness: None }
+        );
+        assert_eq!(st.used, 4);
+        let sum = LoadSummary { st: &st, sha256: &[0; 32], bytes: 1, lines: 4 };
+        let text = std::format!("{sum}");
+        assert!(text.ends_with("; theme auto (day default, night glass-cockpit, switch sunrise, brightness default)"), "{text}");
+        assert!(std::format!("{}", ThemeSite::default()).starts_with("theme default"));
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_named_with_its_size() {
+        let t = TooBig { bytes: 3_500_000 };
+        let text = std::format!("{t}");
+        assert!(text.starts_with("site file NOT loaded: 3500000 bytes is over the limit of 65536;"), "{text}");
+        assert!(text.len() <= 192, "fits the hub's event text buffer: {}", text.len());
+        assert_eq!(t.data(), [5, 0xe0, 0x67, 0x35, 0x00]);
+        // The limit leaves room for a long life of appended lines.
+        assert!(MAX_FILE_BYTES as usize / MAX_LINE >= 400);
+        assert_eq!((more_ignored(0), more_ignored(8), more_ignored(9), more_ignored(50_000)), (0, 0, 1, 49_992));
+    }
+
+    #[test]
     fn refuses_bad_lines_with_a_reason() {
         for bad in [
-            "node 10:bd:a3 1 2",
-            "node 10:bd:a3:ce:bd:18 91 0",
-            "node 10:bd:a3:ce:bd:18 39.9",
+            "node 02:00:00 1 2",
+            "node +2:00:00:00:00:18 39.9 -75.1",
+            "node 02:00:00:00:00:18 91 0",
+            "node 02:00:00:00:00:18 39.9",
             "node all there",
             "mute no_such_kind",
             "mute deauth target=zz",
@@ -1057,13 +1318,13 @@ mod tests {
         let mut text = std::string::String::new();
         // 300 appended changes, far more than any buffer: the last ones win.
         for i in 0..300 {
-            text += &std::format!("node 10:bd:a3:ce:bd:{:02x} 1.{i} 2.0\n", i % 20);
+            text += &std::format!("node 02:00:00:00:00:{:02x} 1.{i} 2.0\n", i % 20);
             text += "mute deauth target=ff:ff:ff:ff:ff:ff\n";
             if i % 7 == 0 {
                 text += "unmute all\n";
             }
         }
-        text += "node 10:bd:a3:ce:bd:00 clear\nbad line here\n";
+        text += "node 02:00:00:00:00:00 clear\nbad line here\n";
         text += &"x".repeat(400);
         text += "\nmute evil_twin source=02:00:00:00:00:01 ssid=Last One"; // no final newline
         for piece in [1usize, 7, 512] {
@@ -1093,7 +1354,7 @@ mod tests {
 
     #[test]
     fn a_load_is_summarised_and_only_changes_are_listed() {
-        let text = "node 10:bd:a3:ce:bd:18 39.9521 -75.1638\n\
+        let text = "node 02:00:00:00:00:18 39.9521 -75.1638\n\
                     mute evil_twin source=02:11:22:33:44:55 ssid=Cafe WiFi\n\
                     mute deauth\n\
                     control ids on\n";
@@ -1112,11 +1373,11 @@ mod tests {
             seen[0],
             "site file changed: added mute for good (site file): Evil twin network; claimed source 02:11:22:33:44:55; claimed name \"Cafe WiFi\""
         );
-        assert!(seen[1].contains("node 10:bd:a3:ce:bd:18 at 39.9521000 -75.1638000 (new)"), "{seen:?}");
+        assert!(seen[1].contains("node 02:00:00:00:00:18 at 39.9521000 -75.1638000 (new)"), "{seen:?}");
         // The same file again: nothing changed.
         assert_eq!(changes(&st, &load(text), |_| panic!("no change")), 0);
         // An edited card: the node moved and the mute is gone.
-        let edited = load("node 10:bd:a3:ce:bd:18 39.9600 -75.1638\ncontrol ids on\n");
+        let edited = load("node 02:00:00:00:00:18 39.9600 -75.1638\ncontrol ids on\n");
         let mut seen = std::vec::Vec::new();
         assert_eq!(changes(&st, &edited, |c| seen.push(std::format!("{}", Text(c)))), 2);
         assert!(seen[0].starts_with("site file changed: removed mute for good"), "{seen:?}");
@@ -1297,7 +1558,7 @@ mod tests {
         assert_eq!(place_changes(p, &p.clone(), |_| panic!()), 0);
         let sha = [0; 32];
         let sum = std::format!("{}", LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 });
-        assert!(sum.ends_with("8 areas, bubble 250 m, 1 friends, several at once from 5 drones, no visit history (visits off), profile default"), "{sum}");
+        assert!(sum.contains("; 8 areas, bubble 250 m, 1 friends, several at once from 5 drones, no visit history (visits off), profile default; theme "), "{sum}");
         assert_eq!(&LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 }.data()[37..], &[8, 25, 1]);
     }
 }
@@ -1359,7 +1620,7 @@ mod tests_profile {
         let st = state(&["profile event"]);
         let sha = [0; 32];
         let sum = std::format!("{}", LoadSummary { st: &st, sha256: &sha, bytes: 1, lines: 1 });
-        assert!(sum.ends_with("several at once not counted (profile), visit history kept, profile event"), "{sum}");
+        assert!(sum.contains("several at once not counted (profile), visit history kept, profile event; theme "), "{sum}");
     }
 }
 

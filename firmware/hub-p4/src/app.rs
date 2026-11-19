@@ -2,10 +2,8 @@
 //! the ADSBee (aircraft), own position from the GPS or a manual position,
 //! the shared screen UI on the panel, touch keys.
 
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::RgbColor;
 use esp_hal::time::Instant;
-use screen::{Band, NodeKind, NodeStatus, Ui, UiState};
+use screen::{NodeKind, NodeStatus, Ui, UiState};
 use tracker::Tracker;
 
 use crate::bb::BbI2c;
@@ -70,11 +68,24 @@ fn clean<const N: usize>(text: &str) -> heapless::String<N> {
 const NODE_ALIVE_MS: u64 = 5_000;
 /// Redraw at most this often (and at once after a key).
 const FRAME_MS: u64 = 250;
-/// Holding SELECT this long is Back.
-const HOLD_MS: u64 = 700;
+/// Holding SELECT this long is Back (the key fills up meanwhile).
+const HOLD_MS: u64 = screen::wide::HOLD_MS as u64;
+/// Redraw this often while SELECT is held (the fill moves).
+const HELD_FRAME_MS: u64 = 100;
+/// A touch on the page that moves further than this (px) is not a tap.
+const TAP_SLOP: u16 = 20;
+
+/// A finger down on the page (not a key): where and when it went down,
+/// and whether it has moved too far to be a tap.
+#[derive(Clone, Copy)]
+struct PageTouch {
+    x: u16,
+    y: u16,
+    at: u64,
+    moved: bool,
+}
 /// No touch report for this long while SELECT is held counts as released.
 const RELEASE_GAP_MS: u64 = 250;
-const BAND_PX: usize = screen::WIDTH as usize * screen::BAND_ROWS;
 
 pub fn now_ms() -> u64 {
     Instant::now().duration_since_epoch().as_millis()
@@ -85,11 +96,14 @@ pub struct App {
     ui: Ui,
     state: UiState,
     touch: Gt911,
-    band: &'static mut [Rgb565; BAND_PX],
+    /// One band of the frame, raw RGB565 (`display::BAND_PX`, in PSRAM).
+    band: &'static mut [u16],
     last_frame: u64,
     lit: Option<(screen::Button, u64)>,
     /// SELECT is down since this time; true once it has fired Back.
     sel_down: Option<(u64, bool)>,
+    /// A finger on the page; a tap fires on release ([`screen::wide::tap_target`]).
+    page_down: Option<PageTouch>,
     last_touch: u64,
     pub frames_drawn: u32,
     pub max_band_us: u64,
@@ -117,16 +131,22 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(tracker: &'static mut HubTracker, band: &'static mut [Rgb565; BAND_PX]) -> Self {
+    pub fn new(tracker: &'static mut HubTracker, band: &'static mut [u16]) -> Self {
         Self {
             tracker,
-            ui: Ui::new(Default::default()),
+            ui: {
+                // No buzzer on this board: the Buzzer row is left out.
+                let mut ui = Ui::new(Default::default());
+                ui.set_has_buzzer(false);
+                ui
+            },
             state: UiState::default(),
             touch: Gt911::default(),
             band,
             last_frame: 0,
             lit: None,
             sel_down: None,
+            page_down: None,
             last_touch: 0,
             frames_drawn: 0,
             max_band_us: 0,
@@ -206,6 +226,22 @@ impl App {
     #[inline(never)]
     fn node_health(&mut self, gw: &mut GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
         use core::fmt::Write;
+        // Node numbers that changed hands (docs/LINK-KEYS-DESIGN.md 7.5):
+        // no mute or snooze follows a number to another board.
+        while let Some(n) = gw.forget.pop() {
+            let dropped = self.tracker.forget_node(n, now);
+            crate::println!("hub-p4: node {n} changed hands: its link history forgotten, {dropped} mute/snooze rule(s) naming it dropped");
+        }
+        // Delivery accounting (7.3): what was verified from each node, then
+        // what each node says it sent.
+        for (node, n) in gw.received.iter_mut().enumerate() {
+            if *n > 0 {
+                self.tracker.link_received(node as u8, core::mem::take(n));
+            }
+        }
+        while let Some((node, h)) = gw.health.pop_front() {
+            self.tracker.ingest_node_health(node, &h, now);
+        }
         while let Some(d) = gw.stats_due.pop() {
             if let Some(role) = d.role {
                 self.tracker.ingest_status(d.node, role, d.can, d.plan, now);
@@ -252,7 +288,7 @@ impl App {
         f: link::Frame,
         now: u64,
     ) {
-        let relay = node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| (n.mac, n.rssi));
+        let relay = gw.node(node).map(|n| (n.mac, n.rssi));
         ev.frame(node, relay, &f);
         self.tracker.ingest_frame(node, &f, now);
         match &f {
@@ -312,71 +348,110 @@ impl App {
         }
     }
 
-    /// New attacks and jamming (protocol 9, and the hub's own deaf-node
-    /// check): one evidence event and one console line each, once.
+    /// Attacks and jamming (protocol 9, and the hub's own deaf-node check):
+    /// one evidence event and one console line each time a threat is raised
+    /// (again after it ended, WP-14a; a silenced one too, saying so), and
+    /// one more when that episode ends,
+    /// with what it totalled. A flapping threat is bounded (tracker
+    /// `threats::FLAP_RAISES`) and the records say so. Out of line: the
+    /// main loop's frame is the P4's tightest stack budget.
+    #[inline(never)]
     fn announce_threats(&mut self, gw: &GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
         use core::fmt::Write;
+        use evidence::format::threat;
+        let mac_of = |node: u8| gw.node(node).map(|n| n.mac).unwrap_or([0; 6]);
         while let Some(id) = self.tracker.take_new_threat(now) {
             let Some(t) = self.tracker.get_threat(id) else { continue };
-            let mac = t.node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
+            let mut text: heapless::String<384> = heapless::String::new();
+            // Hub-raised kinds are about the hub (area GPS: all zero) or the
+            // node in their detail (id_flood of table `node`).
+            let mac = if t.kind == link::ThreatKind::AreaGnss { [0; 6] } else { mac_of(t.node) };
             if t.kind == link::ThreatKind::AreaGnss {
                 // Raised by the hub from aircraft and drones: its own text.
-                let text = tracker::area_gnss::describe(t);
-                let mut data = [0u8; 7];
-                data[0] = t.kind as u8;
-                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
-                crate::println!("hub-p4: THREAT {}", text);
-                continue;
-            }
-            if t.kind == link::ThreatKind::IdFlood {
+                let _ = text.push_str(&tracker::area_gnss::describe(t));
+            } else if t.kind == link::ThreatKind::LinkLoss {
+                // Raised by the hub's delivery accounting (tracker
+                // `delivery`): the node says it sent far more than arrived,
+                // or its reports stopped arriving.
+                let _ = text.push_str(&tracker::delivery::describe(t, mac));
+            } else if t.kind == link::ThreatKind::IdFlood {
                 // Raised by the tracker itself (WP-09, `tracker::probation`):
                 // a flood of forged drone IDs, aircraft addresses or
                 // control links, with the rate seen; or one node shedding
                 // a flood (its address; zero for the hub-wide tables).
-                let text = tracker::probation::describe(t);
-                let mut data = [0u8; 7];
-                data[0] = t.kind as u8;
-                data[1..7].copy_from_slice(&mac);
-                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
-                crate::println!("hub-p4: THREAT {}", text);
-                continue;
-            }
-            let mut text: heapless::String<192> = heapless::String::new();
-            let _ = write!(text, "{} (node {}", t.label(), t.node);
-            if t.channel != 0 {
-                let _ = write!(text, ", ch {}", t.channel);
-            }
-            if t.freq != 0 {
-                let _ = write!(text, ", {:.1} MHz", t.freq_mhz());
-            }
-            let _ = if let Some(d) = t.contested() {
-                // A control link with more transmitters than it can have.
-                write!(
-                    text,
-                    ", {}, {} transmitters, {}, {} events, {} dBm)",
-                    d.system.map_or("?", |s| s.label()),
-                    d.transmitters,
-                    ctrlwatch::contested::rule_name(d.rules),
-                    t.count,
-                    t.level
-                )
-            } else if t.kind.is_jamming() {
-                write!(text, ", +{} dB, detail {})", t.level, t.detail)
+                let _ = text.push_str(&tracker::probation::describe(t));
             } else {
-                write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
-            };
-            if !t.ssid.is_empty() {
-                // From a link frame: never printed or logged as received,
-                // and only what the frame claimed (WP-11b).
-                let _ = write!(text, " claimed \"{}\"", link::printable::Printable(&t.ssid));
+                let _ = write!(text, "{} (node {}", t.label(), t.node);
+                if t.channel != 0 {
+                    let _ = write!(text, ", ch {}", t.channel);
+                }
+                if t.freq != 0 {
+                    let _ = write!(text, ", {:.1} MHz", t.freq_mhz());
+                }
+                let _ = if let Some(d) = t.contested() {
+                    // A control link with more transmitters than it can have.
+                    write!(
+                        text,
+                        ", {}, {} transmitters, {}, {} events, {} dBm)",
+                        d.system.map_or("?", |s| s.label()),
+                        d.transmitters,
+                        ctrlwatch::contested::rule_name(d.rules),
+                        t.count,
+                        t.level
+                    )
+                } else if t.kind.is_jamming() {
+                    write!(text, ", +{} dB, detail {})", t.level, t.detail)
+                } else {
+                    write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
+                };
+                if !t.ssid.is_empty() {
+                    // From a link frame: never printed or logged as received,
+                    // and only what the frame claimed (WP-11b).
+                    let _ = write!(text, " claimed \"{}\"", link::printable::Printable(&t.ssid));
+                }
+                if let Some(maker) = tracker::threats::drone_maker(t) {
+                    let _ = write!(text, " ({maker})");
+                }
             }
-            if let Some(maker) = tracker::threats::drone_maker(t) {
-                let _ = write!(text, " ({maker})");
-            }
-            let mut data = [0u8; 7];
+            // Raised again, and the flapping bound when it starts.
+            let _ = tracker::threats::raise_note(t, &mut text);
+            let mut data = [0u8; threat::WITH_SILENCE];
             data[0] = t.kind as u8;
-            data[1..].copy_from_slice(&mac);
+            data[1..7].copy_from_slice(&mac);
+            data[7..11].copy_from_slice(&t.episode().to_le_bytes());
+            data[11] = match t.raise_kind() {
+                tracker::threats::RaiseKind::First => threat::RAISE_FIRST,
+                tracker::threats::RaiseKind::Again => threat::RAISE_AGAIN,
+                tracker::threats::RaiseKind::AfterSilence => threat::RAISE_AFTER_SILENCE,
+            };
+            data[12] = t.raises_in_window().min(255) as u8;
+            // Muting stops the alert, never the record.
+            data[13] = match t.silence() {
+                None => threat::ALERTED,
+                Some(tracker::threats::Silence::Snoozed) => threat::SNOOZED,
+                Some(tracker::threats::Silence::Muted) => threat::MUTED,
+                Some(tracker::threats::Silence::ForGood) => threat::MUTED_FOR_GOOD,
+            };
             ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+            crate::println!("hub-p4: THREAT {}", text);
+        }
+        while let Some(e) = self.tracker.take_ended_threat(now) {
+            use evidence::format::threat_ended as te;
+            let mut text: heapless::String<320> = heapless::String::new();
+            let _ = tracker::threats::end_text(&e, &mut text);
+            let mac = if e.kind == link::ThreatKind::AreaGnss { [0; 6] } else { mac_of(e.node) };
+            let mut d = [0u8; te::LEN];
+            d[0] = e.kind as u8;
+            d[1..7].copy_from_slice(&mac);
+            d[7..11].copy_from_slice(&e.episode.to_le_bytes());
+            d[11..19].copy_from_slice(&e.duration_ms().to_le_bytes());
+            d[19..27].copy_from_slice(&e.count.to_le_bytes());
+            d[27..31].copy_from_slice(&e.reports.to_le_bytes());
+            d[31] = e.peak_level as u8;
+            d[32..36].copy_from_slice(&e.raises.to_le_bytes());
+            d[36] = if e.held { te::HELD } else { 0 } | if e.why == tracker::threats::EndWhy::Removed { te::REMOVED } else { 0 };
+            d[37..41].copy_from_slice(&e.lost_before.to_le_bytes());
+            ev.event(evidence::format::EventCode::ThreatEnded, text.as_bytes(), &d);
             crate::println!("hub-p4: THREAT {}", text);
         }
     }
@@ -527,16 +602,45 @@ impl App {
         self.ui.take_request()
     }
 
+    /// The operator finished editing the settings and something changed:
+    /// (before, after), once (for the site file).
+    pub fn take_settings_change(&mut self) -> Option<(screen::Settings, screen::Settings)> {
+        self.ui.take_settings_change()
+    }
+
+    pub fn settings(&self) -> screen::Settings {
+        *self.ui.settings()
+    }
+
+    /// The hub's answer to the settings action it took ([`Self::take_request`]).
+    pub fn action_result(&mut self, r: Result<(), &'static str>) {
+        self.ui.action_result(r);
+        self.last_frame = 0;
+    }
+
+    /// The Brightness level to light the panel at (capped in Red Night).
+    pub fn backlight_level(&self) -> u8 {
+        self.ui.backlight_level(&self.state)
+    }
+
+    /// Settings from the site file (or a console line): applied at once,
+    /// not reported back as a change.
+    pub fn set_settings(&mut self, s: screen::Settings) {
+        self.ui.set_settings(s);
+        self.last_frame = 0;
+    }
+
     /// Redraw at once (e.g. the own position changed).
     pub fn redraw_now(&mut self) {
         self.last_frame = 0;
     }
 
-    /// Poll touch; a press on a key is a button event.
+    /// Poll touch; a press on a key is a button event, a tap on the page
+    /// (released where it went down) goes to what is drawn there.
     ///
     /// UP and DOWN act at once. SELECT waits: released before [`HOLD_MS`] it
     /// is Select; still held at [`HOLD_MS`] it is Back (once), like the long
-    /// press on the S3 hub's button.
+    /// press on the S3 hub's button. While it is held the key fills up.
     pub fn touch(&mut self, i2c: &mut BbI2c<'_>, now: u64) {
         if let Some(t) = self.touch.poll(i2c) {
             self.last_touch = now;
@@ -547,28 +651,51 @@ impl App {
                         self.sel_down = Some((now, false));
                         self.light(screen::Button::Select, now);
                     }
-                    Some(b) => self.press(b, now),
-                    None => {}
+                    Some(b) => self.press(b, now, now),
+                    None => self.page_down = Some(PageTouch { x: t.x, y: t.y, at: now, moved: false }),
+                }
+            } else if let Some(p) = self.page_down.as_mut()
+                && (t.x.abs_diff(p.x) > TAP_SLOP || t.y.abs_diff(p.y) > TAP_SLOP)
+            {
+                p.moved = true;
+            }
+        }
+        // Released: the chip says so, or (if that report was missed) it has
+        // sent nothing for a while; it reports continuously while touched.
+        let released = !self.touch.is_down() || now.saturating_sub(self.last_touch) > RELEASE_GAP_MS;
+        if released && let Some(p) = self.page_down.take() {
+            if !p.moved {
+                self.state.now_ms = now;
+                if let Some(tap) = screen::wide::tap_target(&self.ui, &self.state, i32::from(p.x), i32::from(p.y)) {
+                    crate::println!("hub-p4: tap {:?}", tap);
+                    self.ui.tap(tap, &self.state, p.at);
+                    self.last_frame = 0;
                 }
             }
         }
         let Some((start, fired)) = self.sel_down else { return };
-        // Released: the chip says so, or (if that report was missed) it has
-        // sent nothing for a while; it reports continuously while touched.
-        let released = !self.touch.is_down() || now.saturating_sub(self.last_touch) > RELEASE_GAP_MS;
         if released {
             self.sel_down = None;
+            self.ui.set_held(None);
             if !fired {
-                self.press(screen::Button::Select, now);
+                self.press(screen::Button::Select, now, start);
+            } else {
+                self.last_frame = 0;
             }
         } else if !fired && now.saturating_sub(start) >= HOLD_MS {
             self.sel_down = Some((start, true));
-            self.press(screen::Button::Back, now);
+            self.ui.set_held(None);
+            self.press(screen::Button::Back, now, start);
+        } else if !fired {
+            self.ui.set_held(Some(now.saturating_sub(start) as u32));
         }
     }
 
-    fn press(&mut self, b: screen::Button, now: u64) {
-        self.ui.button(b, &self.state);
+    /// A key event; `pressed` is when its key went down (a press begun
+    /// before the new-drone banner appeared is ignored by the screen).
+    fn press(&mut self, b: screen::Button, now: u64, pressed: u64) {
+        self.state.now_ms = now;
+        self.ui.button_at(b, &self.state, pressed);
         self.light(b, now);
     }
 
@@ -590,26 +717,32 @@ impl App {
         mut between: impl FnMut(&mut GatewayLink<'_>),
     ) {
         self.ui.tick(now);
-        if now.saturating_sub(self.last_frame) < FRAME_MS {
+        let every = if self.sel_down.is_some_and(|(_, fired)| !fired) { HELD_FRAME_MS } else { FRAME_MS };
+        if now.saturating_sub(self.last_frame) < every {
             return;
         }
         self.last_frame = now;
         self.fill_state(gw, ext, now);
-        if self.lit.is_some_and(|(_, t)| now.saturating_sub(t) > 300) {
+        // Close drones keep their banner; Auto switches when it is quiet.
+        self.ui.observe(&self.state);
+        if self.lit.is_some_and(|(_, t)| now.saturating_sub(t) > 300) && self.sel_down.is_none() {
             self.lit = None;
         }
-        let mut band = Band::new(&mut self.band[..]);
+        // The native 800x480 layout, band by band into the PSRAM band,
+        // each finished band copied into the framebuffer (the panel only
+        // ever shows finished pixels), the link serviced in between.
+        let lit = self.lit.map(|(b, _)| b);
         let mut top = 0;
-        while top < screen::HEIGHT {
+        while top < screen::wide::H {
             let t0 = Instant::now();
-            band.set_top(top);
-            let _ = screen::render(&self.ui, &self.state, &mut band);
-            display::blit_band(panel.fb_mut(), &band);
+            let mut c = screen::wide::Canvas::new(&mut self.band[..], top);
+            let rows = c.rows();
+            screen::wide::render(&self.ui, &self.state, lit, &mut c);
+            display::blit_band(panel.fb_mut(), top, c.pixels());
             self.max_band_us = self.max_band_us.max(t0.elapsed().as_micros());
             between(gw);
-            top += screen::BAND_ROWS as i32;
+            top += rows;
         }
-        display::draw_keys(panel.fb_mut(), self.lit.map(|(b, _)| b));
         panel.flush();
         self.frames_drawn += 1;
     }
@@ -645,7 +778,11 @@ impl App {
         // The "Alarms" row acts on what this frame shows (`seen` = now).
         // Its Snooze also snoozes drones at Warning or above (threat levels).
         let (mutable, snoozable) = self.tracker.alarm_counts(now, now);
-        let snoozable = snoozable.saturating_add(self.tracker.snoozable_levels(now).min(255) as u8);
+        let levels = self.tracker.snoozable_levels(now).min(255) as u8;
+        let snoozable = snoozable.saturating_add(levels);
+        let (mutable_what, snoozable_what) = self.tracker.alarm_names(now, now);
+        // Only threat levels to snooze: name them, not "alarms".
+        let snoozable_what = if snoozable_what.is_empty() && levels > 0 { "threat levels" } else { snoozable_what };
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
@@ -656,6 +793,8 @@ impl App {
             muted: self.tracker.threats().iter().filter(|t| t.muted && t.active(now)).count().min(255) as u8,
             mutable,
             snoozable,
+            mutable_what,
+            snoozable_what,
         };
         // No battery sense on this board (the BAT connector's voltage is not
         // wired to a GPIO): report USB power, as a bench S3 does.
@@ -663,7 +802,7 @@ impl App {
         self.state.hub_uptime_s = (now / 1000) as u32;
         self.state.nodes.clear();
         self.state.assigned.clear();
-        for n in gw.nodes.iter() {
+        for (i, n) in gw.nodes.iter().enumerate() {
             let kind = match n.role {
                 Some(link::NodeRole::Wifi5) => NodeKind::Wifi5,
                 Some(link::NodeRole::Ble) => NodeKind::Ble,
@@ -680,13 +819,17 @@ impl App {
                 plan,
                 applied: n.applied,
             }));
+            // The rate the deaf-node check learned (relayed nodes are
+            // tracker nodes 1.. in gateway order); unknown until it has one.
+            let rate = self.tracker.node_rates(i as u8 + 1, now).map(|(_, r)| r.max(0.0).min(f32::from(u16::MAX)) as u16);
             let _ = self.state.nodes.push(NodeStatus {
                 kind,
                 alive: now.saturating_sub(n.last_ms) < NODE_ALIVE_MS,
-                frames_per_s: 0,
+                frames_per_s: rate,
                 rid_found: n.rid_found,
                 drops: n.dropped,
                 uptime_s: n.uptime_s,
+                silent_s: Some((now.saturating_sub(n.last_ms) / 1000).min(u64::from(u32::MAX)) as u32),
             });
         }
         // The ADSBee as a node, and the aircraft line.
@@ -694,10 +837,11 @@ impl App {
             let _ = self.state.nodes.push(NodeStatus {
                 kind: NodeKind::Adsb,
                 alive: a.alive,
-                frames_per_s: a.frames_per_s.unwrap_or(0).min(u32::from(u16::MAX)) as u16,
+                frames_per_s: a.frames_per_s.map(|f| f.min(u32::from(u16::MAX)) as u16),
                 rid_found: 0,
                 drops: a.errors,
                 uptime_s: up,
+                silent_s: None,
             });
             let _ = self.state.assigned.push(None);
             self.state.aircraft = Some(screen::from_tracker::aircraft_summary(self.tracker.aircraft(), &ctx));
@@ -707,6 +851,6 @@ impl App {
             self.state.conflict = None;
         }
         self.state.area_gnss = self.area.as_deref().and_then(|a| screen::from_tracker::area_gnss_view(a.status()));
-        let _ = (links::BAUD, Rgb565::BLACK);
+        let _ = links::BAUD;
     }
 }

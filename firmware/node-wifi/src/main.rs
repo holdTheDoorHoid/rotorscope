@@ -139,6 +139,9 @@ async fn main(spawner: Spawner) -> ! {
     // Which images this board holds (OTA slots) and the job, if this image
     // was started by a role switch.
     let mut images = node_common::Images::scan(peripherals.FLASH, chip::OWN_ROLES);
+    // The link key: from the board's rskey partition, never from this image.
+    #[cfg(feature = "espnow")]
+    let keystore = images.keystore();
     role::init(images.stored_job(), images.can);
     let names: heapless::Vec<Option<&'static str>, 8> =
         images.slots.iter().map(|s| s.image.map(nodeimage::Image::project)).collect();
@@ -184,8 +187,15 @@ async fn main(spawner: Spawner) -> ! {
     sniffer.set_receive_cb(rx::on_frame);
     sniffer.set_promiscuous_mode(true).expect("promiscuous mode");
 
+    // The status LED blinks while the node is unprovisioned: the XIAO
+    // ESP32-C5's user LED (GPIO27); the S3 board's is not known.
+    #[cfg(all(feature = "espnow", feature = "esp32c5"))]
+    let led = node_common::linkauth::Led::new(peripherals.GPIO27);
+    #[cfg(all(feature = "espnow", not(feature = "esp32c5")))]
+    let led = node_common::linkauth::Led::none();
+    // After `WifiController::new`: the uplink takes the TRNG then.
     #[cfg(feature = "espnow")]
-    spawner.spawn(uplink::run(wifi.esp_now()).expect("spawn uplink"));
+    spawner.spawn(uplink::run(wifi.esp_now(), keystore, led).expect("spawn uplink"));
     spawner.spawn(drain().expect("spawn drain"));
     spawner.spawn(stats().expect("spawn stats"));
     spawner.spawn(role::control(images).expect("spawn control"));
@@ -630,6 +640,18 @@ async fn stats() {
             ],
             mavp: MAV_PRESSURE.each_ref().map(|c| c.load(Relaxed)),
             dnet: [drones.learned, drones.evicted, drones.refused],
+            robust: {
+                let h = node_common::health();
+                [
+                    h.plans_refused,
+                    h.deaf_fallbacks,
+                    h.deaf_blamed,
+                    h.deaf_outages,
+                    h.deaf_refused,
+                    h.switches_refused,
+                    h.switch_wait_s,
+                ]
+            },
         };
         last_seen = seen;
         report::stats_json(&line);
@@ -638,6 +660,7 @@ async fn stats() {
         usb::line(node_common::bus::json_line().as_bytes());
         if tick.is_multiple_of(5) {
             report::hello_hub();
+            report::node_health_hub();
         }
     }
 }

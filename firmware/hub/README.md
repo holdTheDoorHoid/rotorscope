@@ -57,13 +57,14 @@ tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 60
 
 As the P4 hub's **web head** (hotspot, phone page, CoT and station mode for the P4, which has no
 radio): `cargo fw --features webhead`, with P4 GPIO31 wired to node A RX (GPIO4) plus ground. See
-`firmware/hub-p4/WEBHEAD.md`. Every build understands a relayed link (an ESP-NOW gateway or a P4
-hub): `Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone node list), the
+`firmware/hub-p4/WEBHEAD.md`. Every build understands a relayed link (a P4 hub; an ESP-NOW gateway
+only up to link protocol 13: a protocol 14 gateway speaks `link::gw`, which only the P4 reads):
+`Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone node list), the
 P4's GPS (`HubFix`) becomes the own position and UTC when this board has no GPS of its own, and
 protocol 4 frames reach the tracker; `webhead` adds the aircraft table for forwarded ADS-B lines.
 
 **Web head trust.** Each link reader sorts its frames by the one table of who may send what
-(`link::origin`, docs/ESPNOW.md "Who may send what"), as the P4 and the gateway do. `HubFix` (the
+(`link::origin`, docs/ESPNOW.md "Who may send what"), as the P4 does. `HubFix` (the
 kit's own position and clock), `Csbee` (aircraft) and `Flags` (FAA flags) describe the P4 itself,
 so they are applied only when they come from the relay itself, never when a `Via` marker says the
 relay passed them on for one of its nodes. A relayed frame must be one a node may send (a relayed
@@ -182,7 +183,7 @@ reports `"show_link_ids"`. Video and MAVLink content is never decoded.
 
 | | |
 |---|---|
-| SSID | `Rotorscope-XXXX`: the last two bytes of the chip's MAC, in hex (bench board: `Rotorscope-6DF0`) |
+| SSID | `Rotorscope-XXXX`: the last two bytes of the chip's MAC, in hex (bench board: `Rotorscope-A1B2`) |
 | Channel | **11**. Remote ID lives on channel 6, where Node A spends about 75% of its time, so the hub (the only transmitter in the box) stays as far from it as 2.4 GHz allows |
 | Security | WPA2-PSK with the unit's own password (below). With `--features open-hotspot` (a bench build) it is open; that build prints a warning on USB at every boot and the phone page shows the bench banner |
 | Address | `192.168.4.1/24`. DHCP hands out .50-.57 (8 addresses, 10-minute leases), with the hub as router and DNS |
@@ -191,7 +192,7 @@ reports `"show_link_ids"`. Video and MAVLink content is never decoded.
 
 ### Password scheme
 
-Each unit has its own password, for example `tx2y-b8g4-b4xd`: 12 characters in 3 groups (60 bits),
+Each unit has its own password, for example `7k2m-q9xw-4thc`: 12 characters in 3 groups (60 bits),
 lower-case Crockford base32 (no i, l, o or u, so nothing is misread as 1 or 0).
 
 ```
@@ -234,7 +235,7 @@ Press and hold BOOT *after* the hub has started (held during power-up or RESET, 
 downloader instead), then type `h`:
 
 ```
-{"t":"hotspot","ssid":"Rotorscope-6DF0","channel":11,"security":"wpa2","password":"…","salt":"stored",…}
+{"t":"hotspot","ssid":"Rotorscope-A1B2","channel":11,"security":"wpa2","password":"…","salt":"stored",…}
 ```
 
 Without the button the same line has no `password` field, and a `help` line says how to get it. The
@@ -249,29 +250,68 @@ Each new password costs one erase of the salt sector.
 `salt` in the `hotspot` line: `stored` (as last boot), `new` (first boot or after `R`; a `warn` line
 says how to read it), `this_boot_only` (see above), `none` (`open-hotspot`).
 
-## Station mode (fixed sensor, O5): owner's steps
+## Station mode (fixed sensor, O5): a bench build for now
 
-Station mode is compiled in **only** if `firmware/hub/wifi.local.toml` exists when you build. The file
-is gitignored, so it never gets committed. Without it, no station code is built.
+Station mode lets the hub join your own Wi-Fi network as well as running its hotspot. Today the
+network name and password are compiled into the firmware image from a file, so anyone holding the
+image, or a dump of the hub's flash, can read the password, and every site needs its own image.
+Until the run-time record below exists, a build therefore takes the file only as a **bench build**
+that says so, and refuses to build while the file is present without the bench switch.
 
-1. Create `firmware/hub/wifi.local.toml` yourself, with your network's name and password:
+1. Create `firmware/hub/wifi.local.toml` yourself (it is gitignored), with your network's name and
+   password:
 
    ```toml
    ssid = "YourNetwork"
    psk  = "your-wifi-password"   # "" for an open network
    ```
 
-2. Tell cargo the file is new, then build as usual: `touch firmware/hub/build.rs` (or build once
-   with `HUB_WIFI_RESCAN=1 cargo fw`). Cargo cannot see a file appear by itself without
-   recompiling the hub on every build; edits and deletion of an existing file are noticed
-   automatically. Cargo prints
-   `warning: station mode ON (wifi.local.toml found; ssid and psk compiled in)`. The SSID and password
-   are never printed.
-3. Flash the hub. The boot line shows `"station":true`. Then `{"t":"sta","state":"up","ch":N}`
-   appears once the hub has joined.
-4. To turn station mode off, delete the file and rebuild.
+2. Tell cargo the file is new: `touch firmware/hub/build.rs` (or build once with
+   `HUB_WIFI_RESCAN=1`). Cargo cannot see a file appear by itself without recompiling the hub on
+   every build; edits and deletion of an existing file are noticed automatically.
+3. Build as a bench build, from `firmware/hub/s3`:
 
-The password ends up inside the firmware image, so don't share images built with station mode on.
+   ```bash
+   ROTORSCOPE_BENCH=1 ROTORSCOPE_BENCH_STATION=1 cargo fw
+   ```
+
+   Cargo prints `warning: station mode ON (bench build: ...)`. The SSID and password are never
+   printed. The image carries `bench-build:env:ROTORSCOPE_BENCH_STATION`, so `tools/dev-board.sh`
+   flashes it only with `ROTORSCOPE_BENCH=1`, and the boot line lists it under `bench`.
+4. Flash the hub. The boot line shows `"station":true`. Then `{"t":"sta","state":"up","ch":N}`
+   appears once the hub has joined.
+5. To turn station mode off, move the file out of `firmware/hub` and rebuild without the switch.
+   While the file is there, a build without `ROTORSCOPE_BENCH_STATION=1` stops with an error, so
+   a field image can never pick up the password by accident.
+
+Do not share or field an image built this way: the password is inside it.
+
+### Planned: the network set at run time (design, not built)
+
+The image will carry no network details, so one image serves every site and an image on its own
+gives nothing away:
+
+- **Where the record lives.** One flash sector of the `nvs` partition, beside the hotspot salt
+  (which uses the last sector). It holds a magic number, a version, the SSID (1-32 bytes), the
+  passphrase (empty or 8-63 characters), `allow_writes`, and a CRC. No record means no station: the
+  hub behaves as a build without station mode does today.
+- **How it gets there.** Over USB only, with the **BOOT** button held, as for reading the hotspot
+  password: a console command takes the SSID and the passphrase and writes the record, and another
+  erases it. Nothing on the hotspot or the station network can set, read or change it. A host tool
+  can also write the sector with `espflash write-bin`, as `tools/link-key` does for the nodes'
+  `rskey`.
+- **How the password is protected at rest.** Honestly: by the hub being in your hands. The record is
+  in the hub's own flash, not in any image, log or SD card (the SD card leaves the box, so the
+  card's `SITE.TXT` was ruled out). Anyone who can read that hub's flash over USB can read the
+  password, as with any Wi-Fi device. Only Espressif's flash encryption (an eFuse setting that
+  cannot be undone) protects against that; it is a separate decision for the kit. The USB console
+  never prints the passphrase, even with BOOT held.
+- **What the phone page shows.** Whether a station network is set, its SSID, joined or not, the
+  channel, and the channel-6 warning. Never the passphrase, and no control to change it.
+- **Boot line.** `"station":true` when a record is present, as now.
+
+Not started. The current build-time path stays, as a bench build, until this exists and has been
+tried on a board.
 
 On the joined network the hub serves the same page and API on port 80 (one connection at a time). It
 also sends CoT multicast there, and gets its address by DHCP.
@@ -296,7 +336,7 @@ radio brings two limits:
   every channel, and phones on the hotspot see short stalls. To limit this, retries happen only once
   every 30 s.
 
-Station mode has not been run on hardware yet. Nobody has created the file.
+Station mode has not been run on hardware yet (**built, not yet tried**).
 
 ## Endpoints
 

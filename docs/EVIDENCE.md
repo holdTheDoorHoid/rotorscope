@@ -3,6 +3,8 @@
 PLAN.md Phase 13, first part (bench-safe). Status 2026-11-15: working on the
 P4 bench hub with a **development key**. Not yet evidence-grade.
 
+*Update 2026-11-18: a hub built without its own development key signs with the published test key and says so on screen and in every checkpoint; see [SD card and logs](use/sd-card.md#checking-an-evidence-log-with-evidence-verify).*
+
 **Whether a court accepts any of this is the court's decision. Have a lawyer
 review the method and these documents before relying on them.**
 
@@ -23,25 +25,43 @@ laptop that built the firmware.
   so a log checked only against the key it names proves nothing about who
   made it: the verifier says **VERIFIED** only when you give it the unit's
   key from outside the log (`--key` or `--keys`, see "Who signed" below).
-- **that the log is complete.** Nothing records, across power-cycles or
-  card changes, how much was written. A log cut off at a checkpoint, the
-  newest card files deleted, a reformatted card, or a whole boot never
-  uploaded leave no trace in what is left. The verifier says so on every run.
+- **that the log is complete.** Since WP-14a each boot records a boot
+  counter and how far the boot before it had reached the card, so a boot
+  missing *between* the ones supplied, or an older boot's log cut short
+  after the next boot started, now fails. But the counter is kept on the SD
+  card, which whoever holds it can rewrite or wipe: the newest boot's last
+  records, the newest card files deleted, or a wiped card still leave no
+  trace. The verifier says so on every run, naming the newest boot counter
+  it saw.
 - **that the times are true.** Times come from the unit's own GPS receiver
-  and clock; nothing outside the unit vouches for them unless someone asked
-  the server for an outside time-stamp, and that only shows the records
-  existed by the time of the stamp. Since WP-12 the hub only writes GPS time
+  and clock; nothing outside the unit vouches for them. An outside
+  time-stamp (when the server's operator has turned them on, below) only
+  shows the records existed by the time of the stamp, which is after they
+  were uploaded. Since WP-12 the hub only writes GPS time
   it trusts, and its clock follows GPS by no more than a crystal could drift,
   but a spoofer present from the very first boot, or walking the time by
   under about 1.7-3.5 s a day, is not caught (docs/GNSS-INTEGRITY.md).
+  The verifier checks what it can without an outside reference (WP-14a):
+  UTC before the firmware's build date **fails** (the hub never writes such
+  time); a jump of UTC against the hub's own uptime with no clock event, a
+  drift beyond the hub's own steering, and a boot whose time starts before
+  the previous boot's ended are **noted** (they cast doubt on the time, not
+  on the records). A log from a hub that never had GPS time verifies as
+  before, its records marked "no UTC".
 
 **Still missing before it could be court-grade:**
 
 1. a signing key held in hardware, which software cannot read (design
    below, nothing burned yet);
-2. a counter that survives reboots and card changes, written into every
-   boot, so missing boots and missing newest files show;
-3. outside time-stamping as a matter of course, not on request;
+2. a counter that cannot be set back (a secure element: the SD card
+   counter of WP-14a is behind the same interface and in the same format),
+   so that missing newest boots show to a checker who reads the unit's
+   current counter;
+3. outside time-stamping turned on, with two independent witnesses (built
+   in WP-14c and WP-14d and automatic once on, but off by default: one free
+   RFC 3161 service qualifies as a built-in default, and OpenTimestamps,
+   anchored in Bitcoin, is the built-in second witness with `--stamp-ots`;
+   see "Outside time-stamps");
 4. reproducible firmware builds, plus secure boot, so the firmware hash in
    each record can be matched to published source and only that firmware
    can run.
@@ -75,9 +95,9 @@ An **export bundle** is one file with everything: the records exactly as
 uploaded, the unit's public key, the firmware fingerprints, the server's
 access log for them, and any outside time-stamps. The **verifier**
 (`evidence-verify`, open source, runs on any laptop) checks all of it and
-says, for any problem it can see, which file, record and byte. It does not
-check the time-stamp token itself (use `openssl ts -verify`, see
-EVIDENCE-FORMAT.md).
+says, for any problem it can see, which file, record and byte. With
+`--check-timestamps` it also checks each time-stamp's signature, using the
+`openssl` tool (see "Outside time-stamps").
 
 ## Who signed: give the verifier the key
 
@@ -122,6 +142,46 @@ the log (see "Who signed").
   The access log is not signed, so whoever runs the server can rewrite it
   whole; signing it is later work.
 - **A batch altered on the way to the server**: refused on arrival.
+- **A boot's last records on the server** (WP-14b): a batch must end on a
+  signed checkpoint, except a boot's tail (its records after its last
+  checkpoint), which the server takes once the next boot's records are
+  stored and only if that boot's continuity record names the tail's last
+  record by number and hash; that boot's signature then covers it. The
+  uploader sends tails by itself after the signed batches. A tail that no
+  stored continuity record names, or that runs past the record named, is
+  refused. So an export of several boots shows no gap at each boot's end,
+  except the newest boot's (nothing names it yet).
+- **The server under load and against hostile peers** (WP-14b): an upload
+  is checked (every link and signature) without holding the server's
+  store, a few at a time, so a large or slow upload does not hold up other
+  requests; two uploads of the same records at once keep one and refuse
+  the other as an overlap. Size caps: 16 MiB per upload, 64 KiB for other
+  request bodies, a unit's name 100 characters (no control characters), a
+  note 4000 characters, a time-stamp reply 256 KiB; TLS handshakes time
+  out after 15 s, request headers after 30 s. The uploader reads console
+  lines with a length cap (and keeps a line split by a pause, which it used
+  to drop), holds at most 512 MiB of records, reads server replies up to
+  1 MiB and prints server text without control characters.
+- **The page** (WP-14b): its script, style and map library (Leaflet 1.9.4,
+  BSD-2-Clause, kept in `tools/evidence-server/src/static/`, byte-identical
+  to the published release, checked by a test against the SRI hashes
+  leafletjs.com publishes) are served by the server itself, under a
+  Content-Security-Policy that allows no inline script and no script from
+  anywhere else. Map tiles still come from tile.openstreetmap.org (images
+  only: they can show a wrong map, not change the records or the list;
+  they also tell OpenStreetMap which area is being viewed). The page warns
+  when a unit signs with the published test key or when a stored file
+  failed its check at start-up; such a file's detections are not shown.
+  The page is a view; the export bundle checked with `evidence-verify` is
+  the evidence.
+- **A boot left out, or an older boot's log cut short** (WP-14a): each
+  boot's `continuity` record names its boot counter and the previous boot's
+  record count and last record. Given both boots, a log cut back to a
+  checkpoint after the next boot started fails, and a boot missing between
+  two supplied ones fails (a gap with `--allow-gaps`); the earliest boot
+  supplied says which boot came before it. A previous boot's last records
+  after its own last checkpoint are covered by the next boot's signature.
+  The counter is on the SD card: see "What is NOT protected yet".
 - **An earlier card file shortened or extended** after the hub moved on:
   each new card file names the previous file's exact length and last
   record, so this shows, provided the newer file is there. **A missing file
@@ -135,6 +195,27 @@ the log (see "Who signed").
   Logs written by firmware built before 2026-11-18 have the other form on
   about half their checkpoints and now fail those checks; rebuild the hub
   firmware.
+- **Attacks that come and go** (WP-14a): every time an attack or jamming
+  alarm is raised it gets a record, and every time it ends a `threat_ended`
+  record with what it totalled (how long, how many frames, how strong), so
+  an alarm tripped briefly and then used for a real attack minutes later
+  shows as two episodes. An alarm that flaps (raised three times within a
+  minute) is held as one episode until it has been quiet for a minute, so
+  it cannot flood the log; the records say when that happens and how many
+  raises the episode held. A re-raised alarm counts as not yet seen on the
+  screen, so "Mute seen alarms" does not silence it.
+- **Muted alarms are still on record** (fixed 2026-11-18): muting or
+  snoozing an alarm stops the alert, not the record. An alarm that starts
+  while a mute or a site-file rule already covers it gets its `threat`
+  record and its `threat_ended` record like any other, marked as silenced
+  and by which kind of rule. Before this, such an alarm left no record of
+  its own (only the node's raw frames, and nothing at all for alarms the
+  hub raises itself, such as "node blinded" or an ID flood).
+- **Which build and which airspace data** (WP-14a): the boot event names
+  the build date, the source commit and whether the source had changes
+  ("-dirty"); the verifier notes a changed or unknown source. The firmware
+  hash still names the exact image. The `pack` event carries the airspace
+  pack's SHA-256.
 - **No GPS**: records made without GPS time say "time source: none" and
   carry only time since power-on; records without a GPS position say so. The
   verifier counts and prints them. A typed-in position is marked "manual".
@@ -147,15 +228,22 @@ the log (see "Who signed").
   own clock: docs/GNSS-INTEGRITY.md "Time") is ever written as GPS time; held
   time is "free running" with its age. The verifier counts "untrusted"
   records separately.
-- **Outside time-stamp**: the server can have a public time-stamp authority
-  (tested with DigiCert's free service, no account) sign a chain fingerprint,
-  proving the records existed by that time. Only a fingerprint leaves the
-  server. Off unless the server is started with `--tsa`.
+- **Outside time-stamps** (WP-14c): when the server's operator turns them
+  on, the server has public RFC 3161 time-stamp services sign a fingerprint
+  of each unit's access log after uploads, automatically, showing the whole
+  log existed by then. Only the fingerprint leaves the server. Off unless
+  the server is started with `--stamp`. With `--stamp-ots` (WP-14d) the same
+  fingerprint, salted, also goes to OpenTimestamps calendars, whose proofs
+  are anchored in a Bitcoin block after some hours: a second witness that
+  needs no certificate authority, checked offline against a block header
+  the checker supplies. Details in "Outside time-stamps".
 
 ## What is NOT protected yet (be plain about this in any report)
 
 1. **Development key.** The signing key was made on a laptop and built into
-   the firmware. Anyone with the firmware file, the laptop, or the unit
+   the firmware. (The hub signs only through one interface, so a hardware
+   key in a secure element can replace it without changing the log format;
+   that chip is not chosen yet.) Anyone with the firmware file, the laptop, or the unit
    (reading its flash) can sign records that look like this unit's. Every
    checkpoint says "DEVELOPMENT KEY, NOT EVIDENCE-GRADE", and the verifier
    shows the class the log claims. So today the signatures show the records
@@ -168,12 +256,28 @@ the log (see "Who signed").
    a different one from running.
 3. **The end of the log.** Records after the newest signature are chained
    but not yet signed; the verifier reports them as "not covered by a
-   signature". Cutting the log back to any checkpoint, or deleting the
-   newest card files, leaves no trace at all. There is no counter that
-   survives a reboot or a card change, so a whole boot that was never
-   uploaded, or a reformatted card, does not show either.
-4. **Time-stamps are not automatic.** Someone has to ask the server for one
-   (button/API), and only while it is online.
+   signature" (the next boot's signed continuity record covers them once it
+   exists). Cutting the **newest** boot's log back to a checkpoint, or
+   deleting the newest card files, leaves no trace. The boot counter
+   (WP-14a) lives in two state files on the SD card: whoever holds the card
+   can rewrite them, delete them (the next boot then says the card held no
+   counter and starts at 1) or wipe the card. So boots after the newest one
+   supplied do not show unless you know the unit's current counter (the hub
+   prints `evidence boot counter N` on its console at each card mount; a
+   secure-element counter would make that number trustworthy).
+4. **Time-stamps: off by default, one built-in service, no renewal.**
+   Automatic stamping is built (WP-14c) but stays off until the server's
+   operator turns it on. Only one free RFC 3161 service (FreeTSA) says on
+   its own pages that anyone may use it, so it is the only built-in one:
+   with it alone the server warns that it has fewer than two independent
+   witnesses. OpenTimestamps (WP-14d, `--stamp-ots`) is the second: its two
+   built-in calendars have one operator, its proofs take hours to complete
+   and show only a block's time (coarse), and reading proofs from the
+   reference client and the real calendars is untested (no real proof may be
+   downloaded here).
+   A stamp shows the log existed by the service's time, which is after the
+   upload, not when records were written. Old tokens are not re-stamped yet
+   (see "Not built yet" under "Outside time-stamps").
 5. **The re-decode shares our decoder.** The verifier decodes the raw bytes
    again, but with the same `rid` code the hub uses, so it shows the summary
    matches the bytes, not that our decoding is right. The raw Remote ID
@@ -192,6 +296,417 @@ the log (see "Who signed").
    access log is whatever the person typed. Real accounts are later work.
 9. **Over-the-air frames.** The node keeps the Remote ID messages, not the
    whole Wi-Fi or Bluetooth packet they came in.
+
+## Outside time-stamps (WP-14c, WP-14d)
+
+**What a stamp shows.** That the unit's access log on the server, and so
+every batch uploaded and every view, export and note logged up to that
+entry, existed exactly as it is by the time a service outside the owner's
+control vouches for. Nothing in it can have been changed, added or removed
+after that time without the stamp failing. It does **not** show when the
+records were written: they reach the server only when uploaded (minutes
+with the live uploader, days if a card is read later). The verifier and the
+page show the delay between the upload and the stamp, and between the
+newest GPS time in the records and the stamp, and say plainly that the
+stamp is not proof of when the records were written.
+
+**When.** After an upload is stored and answered, the server marks the
+unit. At most once every 10 minutes per unit while uploads continue, and
+once more 2 minutes after they stop, it queues a stamp of the access log's
+newest entry. Each service is asked on its own (one being down or slow does
+not hold up another); a failed attempt is retried after 1 minute, doubling
+to at most 1 hour; a service is sent at most one request every 2 seconds
+(FreeTSA allows one per second per address). An upload never waits for a
+service and never fails because of one. A server restart picks the queue up
+again (`stamp-queue.log`), including an upload stored just before it stopped.
+
+**What leaves the server.** Per stamp, one HTTP POST to the service's URL:
+
+```text
+POST /tsr HTTP/1.1
+Host: <the service>
+User-Agent: rfc3161-client
+Accept: */*
+Content-Type: application/timestamp-query
+Accept-Encoding: identity
+Content-Length: 69
+
+<69 bytes: DER TimeStampReq = SHA-256 algorithm id, the 32-byte imprint,
+ an 8-byte random nonce, certReq true>
+```
+
+The imprint is a SHA-256 over the unit's key id, the entry number and that
+entry's hash (EVIDENCE-FORMAT.md, "Export bundle"): it names nothing and
+cannot be reversed. No cookies, no referrer, no proxy settings taken from the
+environment, no redirects followed. When a certificate chain or revocation
+list URL is configured, the server also fetches those files (plain GETs with
+the same headers), at most once an hour per service. The service sees this
+server's IP address and the times of the requests. A test checks the exact
+bytes sent, and passes both in a build of the server alone and in a
+workspace-wide build (where another crate turns on the HTTP client's gzip
+support, which used to add `Accept-Encoding: gzip`; the headers are now set
+explicitly, and a compressed reply is refused in either build). One case
+remains build-dependent: a reply both compressed and chunked is unpacked
+by a workspace-wide build instead of refused; it must still be a stamp of
+exactly the imprint and nonce sent.
+
+**What is kept.** A reply is kept only if it is a granted stamp whose
+imprint and nonce are exactly the ones sent; anything else (refused,
+unreachable, timed out after 30 s, larger than 256 KiB, compressed, of
+unstated length, a redirect, another imprint, another or no nonce, not a
+time-stamp reply at all) is recorded as
+a failure with its reason and never stored as a stamp. A stamp is a line in
+`timestamps.log` with the service's reply as received, the nonce, when it
+was queued and sent, and the chain and revocation list fetched then; plus
+an audit entry naming the token's SHA-256, so removing a stamp shows.
+Export bundles carry all of it, plus the server's list of outstanding and
+failed stamps (bundle format 2).
+
+**Turning it on** (the server's operator; it sends fingerprints to third
+parties, so it is never on by default):
+
+```text
+evidence-server serve --data DIR --token T --stamp \
+  --stamp-tsa 'https://freetsa.org/tsr,chain=https://freetsa.org/files/cacert.pem,crl=https://www.freetsa.org/crl/root_ca.crl' \
+  --stamp-tsa '<a second service, of a different operator>'
+```
+
+- `--stamp` alone uses the built-in list (FreeTSA only) and warns, at
+  start-up and on the page, that fewer than two independent services are
+  configured.
+- Each `--stamp-tsa URL[,chain=URL][,crl=URL]` replaces the built-in list,
+  so list every service you want, FreeTSA included. Any RFC 3161 URL works.
+  Two services count as independent when their host names differ; whether
+  they share an operator is for you to check.
+- `--stamp-every MIN` (default 10), `--stamp-idle SEC` (default 120),
+  `--stamp-alarm-hours H` (default 24: the page and the server's log warn
+  when an upload has waited that long for any stamp).
+- `POST /api/devices/{id}/timestamp` asks for a stamp at the next round
+  (about a second) instead of waiting for the 10 minutes. The old `--tsa`
+  option (one manual stamp of a chain head) is gone; bundles holding such
+  stamps still verify.
+
+**Time-stamp services** (checked 2026-11-19 on the operators' own pages;
+the server never contacted any of them during development or tests). A
+service is built in only if its operator says free general use is allowed.
+
+| service | operator | URL | free general use stated by the operator? | rate limit stated | hashes | certificate chain | built in |
+|---|---|---|---|---|---|---|---|
+| FreeTSA | an individual (the site names a contact, no company) | `https://freetsa.org/tsr` | **yes**: "Timestamps issued by FreeTSA may be used for commercial purposes." and "FreeTSA provides a publicly accessible timestamping service." ([freetsa.org/freetsa.html](https://freetsa.org/freetsa.html)); best effort, no SLA | "a maximum of one timestamping request per second per IP address" (same page) | SHA-1, -224, -256, -384, -512 ([freetsa.org](https://freetsa.org/)) | root `https://freetsa.org/files/cacert.pem`, TSA `https://freetsa.org/files/tsa.crt`, CRL `https://www.freetsa.org/crl/root_ca.crl`, OCSP `http://www.freetsa.org:2560` | **yes** |
+| DigiCert | DigiCert, Inc. | `http://timestamp.digicert.com` | not stated: the page gives the URL and chain only ([knowledge.digicert.com](https://knowledge.digicert.com/general-information/rfc3161-compliant-time-stamp-authority-server)) | none stated | not stated (SHA-256/384/512 responder certificates listed) | on the same page | no: works technically; terms not confirmed |
+| Sectigo | Sectigo | `http://timestamp.sectigo.com` | not stated ([sectigo.com](https://www.sectigo.com/resource-library/time-stamping-server)) | asks scripts for "a delay of 15 seconds or more" between requests (same page) | SHA-384 signing by default; request hash chosen by the request | not found | no: works technically; terms not confirmed |
+| Sigstore public TSA | the Sigstore community (OpenSSF) | `https://timestamp.sigstore.dev/api/v1/timestamp` | not stated; Sigstore's docs list it among public TSAs ([docs.sigstore.dev](https://docs.sigstore.dev/cosign/verifying/timestamps/)) | none stated | SHA-256/384/512 per its software's documentation | self-signed root; publication point not found | no: works technically; terms not confirmed |
+| Certum | Asseco Data Systems S.A. | `http://time.certum.pl` | no: its TSA policy (Polish) treats free use as for code signing (Authenticode) and warns of claims against users without an agreement | none stated | not stated | CRLs and OCSP at `crl.certum.pl`, `ocsp.certum.pl` | no: do not enable without an agreement |
+| Apple | Apple Inc. | (third-party lists only) | no: its time-stamp CPS says its users are internal to Apple | - | - | - | no |
+| Microsoft | Microsoft | `http://timestamp.acs.microsoft.com` | no: for its Artifact Signing subscribers | - | - | - | no |
+| GlobalSign, DFN, SSL.com, Entrust | the CAs | various | not confirmed on operator pages (DFN: a university page says non-commercial use within DFN only; SSL.com: by arrangement; Entrust: no public endpoint found) | - | - | - | no |
+
+The owner chose two independent free services. Only one qualifies today,
+so the server ships with one and says so. To have two, the owner can ask
+DigiCert or Sectigo (or another operator) for written permission, or use a
+paid or EU-qualified provider as the second (docs/EVIDENCE-TIMESTAMPING-DESIGN.md).
+
+**Checking stamps** (`evidence-verify`): for every stamp in a bundle it
+recomputes the imprint from the bundle's own access log (a stamp naming an
+entry that is missing or was changed, a token over another hash, or a stamp
+the access log records but the bundle lacks, **fails**) and says, e.g.:
+
+```text
+NOTE  time-stamp 0 (https://freetsa.org/tsr): the access log through entry #2
+      (registration, 2 uploaded batches and every view, export and note logged
+      before it) existed by 2026-11-19T01:12:36.000Z, by https://freetsa.org/tsr's
+      clock (its signature is checked only with --check-timestamps). Stamped
+      4 min after the newest upload it covers was stored (server clock); 2 h 5 min
+      after the newest GPS time in the records it covers. A stamp shows the log
+      existed by then; it does not show when the records in it were written
+```
+
+It also lists the server's outstanding and failed stamps and warns when
+fewer than two independent services were used. With
+`--check-timestamps DIR --tsa-ca ROOT.pem` (one `--tsa-ca` per service,
+the root obtained from the service itself) it writes each token, chain and
+revocation list to `DIR` and runs
+`openssl ts -verify -in DIR/stamp-N.tsr -digest <imprint> -CAfile ROOT.pem -attime <the token's time>`
+on each: a signature that does not check is a **failure**. Without
+`--tsa-ca` it checks against the chain the server stored and says that
+proves less (the server supplied it). Without `openssl` it prints the
+commands to run elsewhere. The stored revocation list is written out but
+not checked automatically (`openssl crl -in DIR/stamp-N.crl -noout -text`).
+No Rust code checks token signatures (no new dependencies); the reader in
+`crates/evidence/src/tsp.rs` only takes out the time, imprint and nonce.
+
+### OpenTimestamps: the second, independent witness (WP-14d)
+
+**Two kinds of witness.** An RFC 3161 stamp (above) is one service signing
+"this log existed by T" with its own clock and certificate, within seconds.
+An OpenTimestamps proof puts a fingerprint of the same log into a Bitcoin
+block: it shows "this log existed by the block's time", with no certificate
+authority and nothing that expires. Neither depends on the other; each is
+checked and reported on its own, and one failing does not touch the other.
+
+**What it shows, and how coarsely.** A proof is first **pending**: it holds
+only a calendar's promise and shows **no time at all**; the checker says
+"NOT YET ANCHORED" and never counts it. Calendars batch the submissions they
+receive into one Bitcoin transaction every so often (their own pages, read
+2026-11-18, gave an average time between their transactions over the last
+week of 1.3 h for Alice, 6.2 h for Finney, 9.3 h for Catallaxy); the
+transaction then has to be mined. So expect **hours** between an upload and a
+completed proof. The time a completed proof shows is **the block's time**,
+written into the block header by its miner: Bitcoin accepts block times
+that are off by up to about two hours, so the precision is tens of minutes
+to hours, never the second of the upload. It is a second witness to "the
+log existed by then", not a better clock.
+
+**What leaves the server.** Per stamp and calendar, one POST:
+
+```text
+POST /digest HTTP/1.1
+Host: <the calendar>
+User-Agent: ots-client
+Accept: application/vnd.opentimestamps.v1
+Content-Type: application/x-www-form-urlencoded
+Accept-Encoding: identity
+Content-Length: 32
+
+<32 bytes: SHA-256( imprint || 16 random bytes )>
+```
+
+The imprint is the same access-log imprint the RFC 3161 stamps use, but not
+even that leaves: the 16 random bytes (a fresh salt per stamp, kept inside
+the proof, as the reference client does) hide it. Later, to complete a
+proof, one GET per waiting proof, at most every 30 minutes:
+
+```text
+GET /timestamp/<hex of the calendar's commitment> HTTP/1.1
+Host: <the calendar>
+User-Agent: ots-client
+Accept: application/vnd.opentimestamps.v1
+Accept-Encoding: identity
+```
+
+The commitment is a value the calendar itself sent back. The GET goes only
+to the calendar URL configured on the server, never to a host named inside
+a reply; no cookies, no proxy settings from the environment, no redirects.
+The calendar sees the server's IP address and the times. A test checks the
+exact bytes and headers of both requests against a fake calendar on
+127.0.0.1.
+
+**What is kept.** A reply is read only if it is at most 10 000 bytes,
+uncompressed and of stated length, and parses within the proof limits
+(at most 256 operations deep, 4096 items, messages of at most 4096 bytes).
+The submit reply must lead from the digest sent to a pending promise from
+that calendar itself (or to a Bitcoin attestation); otherwise it is a
+failure, never a stamp. The pending proof is then kept at once as a line in
+`timestamps.log` with `kind` `ots` and an audit entry (`state`: pending).
+Each round, the worker asks each calendar about its waiting proofs that are
+due (30 minutes after the last ask; at most 20 per unit per round). A 404
+means not yet; a reply that does not lead from the commitment to a Bitcoin
+attestation is not a completion; a broken reply is a failure line ("completing
+the proof: ...") with the usual back-off. A completion is kept as a
+**further** line: the whole proof with the path to the block grafted on, the
+same imprint and entry number, and `upgrade_of` naming the pending line,
+which is never rewritten; plus its own audit entry (`state`: anchored, block
+N). The server cannot check the anchor itself (it has no block headers): the
+page says "anchored in Bitcoin block N" as the calendar's claim, to be
+checked with `evidence-verify`. A proof still pending after 7 days is no
+longer asked about, and the page says the calendar may have lost it. A
+pending proof does not clear the "waited too long for a stamp" alarm.
+
+**Turning it on.** OpenTimestamps is off unless the server's operator adds
+`--stamp-ots` (it needs `--stamp`, which turns stamping on at all):
+
+```text
+evidence-server serve --data DIR --token T --stamp --stamp-ots
+# other calendars (each replaces the built-in list):
+evidence-server serve ... --stamp --stamp-ots \
+  --stamp-ots-calendar https://alice.btc.calendar.opentimestamps.org \
+  --stamp-ots-calendar https://finney.calendar.eternitywall.com
+```
+
+**Counting witnesses.** The start-up and page warning "fewer than two
+independent witnesses" counts RFC 3161 services on different hosts, plus
+**one** for OpenTimestamps when it is on with at least one calendar (all
+calendars together are one witness: the anchor is the Bitcoin chain). With
+`--stamp` alone (FreeTSA) that is one, and the warning names `--stamp-ots`;
+with `--stamp --stamp-ots` it is two and the warning goes. Without `--stamp`,
+`--stamp-ots` turns nothing on and says so. The bundle's `stamping` lists
+the calendars separately (`ots_calendars`) and the checker counts the same
+way.
+
+**Calendars** (checked 2026-11-18 on the operators' pages; the server never
+contacted any calendar during development or tests). A calendar is built in
+only if its operator's own pages say public use is allowed.
+
+| calendar | operator | URL | public use stated by the operator? | built in |
+|---|---|---|---|---|
+| Alice | the OpenTimestamps project (run by Peter Todd, per the reference client's source: `# Run by Peter Todd`) | `https://alice.btc.calendar.opentimestamps.org` | **yes**, on the project's own site, which the calendar's domain belongs to: "These servers are free to use and they don't require any registration or api key." and "The following are the, free to use, default calendars used by OpenTimestamps." ([opentimestamps.org](https://opentimestamps.org/)); the calendar's own page states no terms, only a donation address | **yes** |
+| Bob | the same | `https://bob.btc.calendar.opentimestamps.org` | the same | **yes** |
+| Finney | Eternity Wall (Riccardo Casatta, per the reference client's source) | `https://finney.calendar.eternitywall.com` | not on its operator's own pages: its page states no terms (a donation address only); opentimestamps.org lists it among the "free to use" defaults, but that is not its operator's page | no: works technically; terms not confirmed |
+| Catallaxy | Catallaxy (Vincent Cloutier, per the reference client's source) | `https://ots.btc.catallaxy.com` | the same as Finney | no: works technically; terms not confirmed |
+| aggregators `a.pool.opentimestamps.org`, `b.pool.opentimestamps.org`, `a.pool.eternitywall.com` | as above | | the reference client submits to these, which forward to calendars | not used: the server submits straight to calendars, so it only ever asks back the calendar that made the promise |
+
+So **two** calendars qualify, but both have **one operator**: they are two
+for availability (one being down does not stop a proof), not two
+independent parties. That does not weaken the anchor (the Bitcoin chain),
+but a pending proof depends on that one operator until it is completed.
+
+**Checking it** (`evidence-verify`, offline). For each OpenTimestamps line
+the checker recomputes the imprint from the bundle's own access log (as for
+RFC 3161: a line naming a missing or changed entry, or a proof that is not
+over the stored imprint, **fails**), replays the proof's operations from
+the imprint, and for each Bitcoin attestation compares the message reached
+with the Merkle root of the block header **you supply** for that height:
+
+```text
+evidence-verify --key <hex> --btc-headers headers.txt bundle.json
+evidence-verify --key <hex> --btc-header 850000:<160 hex digits> bundle.json
+```
+
+`headers.txt` holds `HEIGHT HEX` per line (`#` comments). The checker never
+fetches a header. Get them from your own Bitcoin node
+(`bitcoin-cli getblockheader $(bitcoin-cli getblockhash HEIGHT) false` prints
+the 80-byte header in hex), or, failing that, the same header from two or
+more block explorers run by different people. The checker:
+
+- refuses a header that does not meet the proof-of-work target it states,
+  or whose target is easier than Bitcoin's main chain allows (**fail**);
+- refuses a header whose difficulty is below the **floor for the height the
+  proof names** (**fail**, saying why). A header at the easiest target can
+  be made for any Merkle root on one computer (the test fixture's took 38
+  minutes on this laptop); real blocks at recent heights carry vastly more
+  work. The floors, each well below the real chain's lowest difficulty since
+  that height, so that no genuine header is refused:
+
+  | from height | least difficulty | real difficulty there | lowest real difficulty since (as found) | margin |
+  |---:|---:|---|---|---:|
+  | 600,000 | 10^12 | 13.0 x 10^12 at block 600,000, October 2019 ([blockchain.com explorer](https://www.blockchain.com/explorer/blocks/btc/600000)) | about 13.67 x 10^12, July 2021, after China's mining ban, reported as the lowest since January 2020 ([The Block](https://www.theblock.co/news/ecosystems/2021-07-19-bitcoin-mining-difficulty-lowest-january-2020-111816), [CoinDesk](https://www.coindesk.com/bitcoin-network-sees-fourth-straight-downward-difficulty-adjustment)) | about 13x |
+  | 800,000 | 10^13 | 53.9 x 10^12 at block 800,000, July 2023 ([blockchain.com explorer](https://www.blockchain.com/explorer/blocks/btc/800000)) | about 52.3 x 10^12, the epoch before the adjustment of 9 August 2023 ([Bitcoin.com News](https://news.bitcoin.com/bitcoin-network-adjusts-mining-difficulty-rises-0-12-to-52-39-trillion)); above 100 x 10^12 since late 2024 ([The Block](https://www.theblock.co/amp/post/324537/bitcoin-mining-difficulty-100-trillion)) | about 5x |
+
+  Not confirmed from a primary source: the exact lowest difficulty since
+  each height (the figures above are from an explorer and the press; the
+  late-2019 values were not found, but the July 2021 low was reported as
+  the lowest since January 2020). A floor makes forging a header cost what
+  real mining at that height costs (at 10^13, about 4 x 10^22 hashes: some
+  days of a large (100 PH/s) mining farm's output); it does **not** prove the header is on
+  the real chain. Below height 600,000 only the easiest-target rule applies,
+  and the checker says that proofs anchored that long ago get no
+  height-based check;
+- **fails** a proof whose operations do not lead to that header's Merkle
+  root, or that is not over the imprint;
+- otherwise prints the block height, the block hash and the block time,
+  and says plainly that it checked against **your** header only: it is the
+  real block only if you got it from a source you trust; compare the block
+  hash;
+- for a pending proof, prints "NOT YET ANCHORED" (a note, never a pass);
+  for a completed proof whose header you did not supply, "NOT CHECKED" and
+  how to get it;
+- reports nothing as a stamp in either of those cases ("no readable outside
+  time-stamp" when there is no other).
+
+What it prints (from the tests, with the synthetic fixtures; wrapped):
+
+```text
+pending:
+NOTE  time-stamp 0 (https://alice.calendar.test): OpenTimestamps proof from
+      https://alice.calendar.test over the access log through entry #2 (...):
+      NOT YET ANCHORED. It holds only the promise of https://alice.calendar.test
+      to put it into a Bitcoin block (usually within hours); a pending proof
+      shows no time. The server fetches the completed proof later; export
+      again to get it
+NOTE  time-stamping: no readable outside time-stamp: nothing but the server's
+      own word shows when this log existed
+
+completed, header supplied:
+NOTE  time-stamp 0 (https://alice.calendar.test): the access log through entry
+      #2 (...) existed by about 2026-11-18T11:30:05.000Z: an OpenTimestamps
+      proof (via https://alice.calendar.test) leads from this log's imprint to
+      the Merkle root of Bitcoin block 500000 (block hash 00000000d52c84c0...,
+      block time 2026-11-18T11:30:05.000Z from the header you supplied).
+      Checked offline against your header only: that it is the real block
+      500000 is as good as the source you got it from, so compare the block
+      hash with a source you trust. Note: block 500000 is before height
+      600000: this checker has no height-based floor on a header's work that
+      far back, so the header is checked only against Bitcoin's easiest
+      target; a header that easy can be made on one computer in under an
+      hour. The time is the block's, set by its miner
+      (it can be off by up to about two hours), not the upload's: it is
+      coarse. Block time 13 min after the newest upload it covers was stored
+      (server clock); 3 h 8 min after the newest GPS time in the records it
+      covers. A stamp shows the log existed by then; it does not show when
+      the records in it were written
+
+completed, no header supplied:
+NOTE  ... claims Bitcoin block 500000: NOT CHECKED, no header for block 500000
+      was supplied. Give it with --btc-header 500000:HEX or --btc-headers FILE
+      (from your own Bitcoin node: bitcoin-cli getblockheader $(bitcoin-cli
+      getblockhash 500000) false; or the same header from two or more block
+      explorers run by different people)
+
+failed (a header for another block, with valid work):
+FAIL  time-stamp 0 (https://alice.calendar.test): OpenTimestamps proof from
+      https://alice.calendar.test does not lead to the Merkle root of the
+      header supplied for Bitcoin block 500000: it does not show this log in
+      that block (a wrong header, or a proof that is not over this log)
+```
+
+(The synthetic fixture names block 500,000, below the first floor, because
+its header was mined on a laptop at the easiest difficulty.) At a height
+with a floor, the success line says instead that the header's work is at or
+above the floor, "so forging it would cost what real mining at that height
+costs; that still does not prove it is on the real chain".
+
+A failed time-stamp or proof makes the check fail (exit 1), as a failed
+RFC 3161 stamp does. When stamps are the only failures, the verdict says so
+instead of "the log is not what its signer wrote":
+
+```text
+FAILED (TIME-STAMP): the log's own records and signatures check out against a
+key you supplied; but a time-stamp did not check out: time-stamp 0
+(https://alice.calendar.test). A stamp fails when its token or proof is bad,
+or when the server's access log it covers was changed after it was stamped;
+either way, what that stamp would show (that the log existed by its time) is
+not shown. See the FAIL lines above.
+```
+
+Any failure in the records or signatures keeps the old verdict. A pending or
+unchecked proof is a note and changes no verdict.
+
+With `--check-timestamps DIR`, each proof is also written as
+`DIR/stamp-N.ots` (a standard `.ots` file over the digest printed with it),
+for other OpenTimestamps tools.
+
+**What is not verified.** The parser, the builder and the checker were
+written from the OpenTimestamps project's published reference code and
+tested against proofs and a block header made independently by a script
+(`crates/evidence/tests/fixtures/ots`), all **synthetic**. Whether they read
+proofs made by the reference client and the real calendars, and whether the
+real calendars accept the server's requests, is **unverified**: nothing here
+may download a real proof or contact a calendar. A test that checks a real
+proof is ready (`cargo test -p evidence --test ots -- --ignored reference`;
+it says which files to put where). Not confirmed from a primary source:
+the order the reference code sorts several operations or attestations at
+one node in (it does not change what a proof proves, only its bytes); the
+content type a calendar expects (the server sends what the reference
+client's HTTP library sends); which operations today's calendars emit
+(SHA-256, append and prepend as far as the reference code shows; RIPEMD-160
+in early proofs, supported; SHA-1 and Keccak-256 are recognised but not
+computed: such a branch is reported, not followed).
+
+**Not built yet, and what that means.**
+
+- **Re-stamping (archive time-stamps, RFC 4998).** A token stays checkable
+  only while its service's certificate chain, the revocation status at
+  stamping time and its algorithms (SHA-256, the service's signature
+  algorithm) can be trusted. The server keeps the chain and a revocation
+  list fetched at stamping time when their URLs are configured (built in
+  for FreeTSA; it fetches a CRL, not an OCSP response), so a token can be
+  checked at its own time after the certificate expires (FreeTSA's current
+  one runs to 2040). But if a service's key is ever compromised, or its
+  algorithms weaken, tokens taken before then lose their value unless they
+  were stamped again, by a fresh service, before it happened. Nothing does
+  that yet; the `Stamper` trait in `tools/evidence-server/src/stamp.rs` is
+  where a yearly re-stamp would go.
+- Stamps are taken at the server, after upload: the hub has no network.
 
 ## Privacy
 
@@ -279,7 +794,50 @@ Every run also prints: "NOT PROVEN: that the log is complete."
   altered in transit, re-uploads, gaps filled later, bundles with a record
   edited / deleted / truncated, a batch dropped or reordered, audit entries
   edited / dropped / reordered, the key swapped, a stored batch altered on
-  the server's disk; the no-GPS marking.
+  the server's disk; the no-GPS marking. WP-14b (`tests/hardening.rs`,
+  `lines`, `plan`, `tsa` unit tests): a bad upload refused while the store
+  is held by something else, six simultaneous uploads of the same records
+  (one kept), the page's policy and the vendored library's hashes, body
+  and field caps, a tail taken only once covered and only up to the named
+  record (and not for another unit), a changed batch file kept off the
+  map, the newest checkpoint found past a tail, a console line with no end,
+  a line split by a timeout, batches split at checkpoints under a size cap,
+  an endless time-stamp reply. WP-14c (`crates/evidence/tests/stamps.rs`,
+  `tools/evidence-server/tests/stamping.rs`,
+  `tools/evidence-verify/tests/timestamps.rs`, fake services on 127.0.0.1
+  and canned tokens from two throwaway openssl test authorities, never a
+  real service): the exact bytes and headers sent; replies that are
+  refused, garbage, over another imprint, with another or no nonce,
+  oversized, a 500, a redirect (not followed) or too slow all recorded as
+  failures and never kept as stamps; two services independent with their
+  own back-off; an upload answered at once while a service hangs; the queue
+  re-read after a restart; the coalescing rule with a fake clock; the export
+  carrying stamps, outstanding and failed ones; the checker failing a cut or
+  edited access log, a token over another hash, a removed stamp, a broken
+  token signature and an untrusted root; version 1 bundles still verify;
+  the DER reader on malformed input and 5000 random mutations of a token;
+  a three-boot continuity chain (fixed in WP-14c: the checker now follows
+  the boots' continuity records, not their ids). WP-14d (OpenTimestamps;
+  `crates/evidence/tests/ots.rs`, the same server and checker test files,
+  fake calendars on 127.0.0.1, never a real calendar or block explorer):
+  proofs built by the Rust code byte for byte equal to ones made separately
+  by a Python script, and checked against a synthetic, mined block header;
+  RIPEMD-160 against its published vectors and Python's; the exact bytes and
+  headers of the submit and the later fetch; a pending proof kept at once,
+  completed later as a further line, the first line unchanged; garbage,
+  oversized, too deep, trailing, a promise from another calendar, a 500 and
+  a redirect all failures, never stamps; giving up after a week; a pending
+  proof reported as not anchored, never a pass; a completed proof failing
+  over another digest, against a header with another Merkle root, and with
+  a header that does not meet its own target or the main chain's limit;
+  truncated proofs, 20 000 random mutations and 20 000 random inputs through
+  every parser, no panic and nothing wrongly accepted; the witness count
+  with and without OpenTimestamps. End to end with the binaries: a two-boot
+  card through `evidence-upload` -> server -> export -> `evidence-verify`:
+  VERIFIED, 0 gaps, boot 1's tail sent as its own batch; the 2026-11-18
+  bench logs (`final-replay`, `spoofboot-stream`) upload and verify, and
+  `spoofboot-stream`'s two records after its last checkpoint stay on the
+  laptop (no later boot names them).
 - Bench, 2026-11-15, P4 CrowPanel (chip v1.3) with the `fakedrone` build,
   two real nodes via the gateway, no GPS attached: detections went hub ->
   USB -> laptop uploader -> server -> export bundle -> verifier: **VERIFIED**
@@ -296,7 +854,9 @@ Every run also prints: "NOT PROVEN: that the log is complete."
 
 Cost on the P4: about 400 bytes per detection record (base64 on the console
 about 550 bytes); building one takes up to 1.8 ms; signing a checkpoint
-33 ms once a minute (software P-256 at 360 MHz); SD steps for the evidence
+54 ms once a minute (software P-256 at 360 MHz; measured on 2026-11-19 with
+`p256` 0.14, whose arithmetic was hardened against timing leaks; it was
+33 ms with 0.13); SD steps for the evidence
 file at most about 18 ms (a flush, same as the CSV's); opening the evidence
 file at mount about 50 ms (400 ms the very first time, when the folder is
 created). Records queue in 256 KB of PSRAM (about 10 minutes of one

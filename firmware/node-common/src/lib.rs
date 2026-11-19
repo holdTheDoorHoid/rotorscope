@@ -14,19 +14,127 @@
 //! its own roles and refuses to switch.
 //!
 //! Flash wear: `rsjob` is erased once per image switch; the hub's coordinator
-//! changes a node's role at most once a minute.
+//! changes a node's role at most once a minute, and the node limits itself
+//! as well, whatever it is asked (`nodeimage::switchlimit`: 60 s of uptime
+//! before a switch, doubling with each quick switch in a row, at most 1 h;
+//! the streak travels in the job record).
+//!
+//! Node robustness counters (WP-13 section 7, for `NodeHealth`): plans
+//! refused, deaf fall-backs and their verdicts ([`DeafWatch`]), switches
+//! refused and seconds
+//! until the next switch is allowed, read with [`health`].
 #![no_std]
 
 #[cfg(feature = "wirebus")]
 pub mod bus;
 pub mod fault;
+#[cfg(feature = "espnow")]
+pub mod keystore;
+#[cfg(feature = "espnow")]
+pub mod linkauth;
 
 use esp_bootloader_esp_idf::ota_updater::OtaUpdater;
 use esp_bootloader_esp_idf::partitions::{
     self, AppPartitionSubType, DataPartitionSubType, FlashStorage, PARTITION_TABLE_MAX_LEN, PartitionType,
 };
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
+
 use link::{Assignment, NodeRole};
+pub use nodeimage::deaf::{Counts as DeafCounts, DEAF_MS, DeafWatch, Event as DeafEvent, PROBATION_MS};
+use nodeimage::switchlimit;
 use nodeimage::{HEAD_LEN, Image, JOB_LABEL, JOB_MAX};
+
+// Counters. Each has one writer (the image's control task), so a plain load
+// and store is enough: the C3 has no atomic read-modify-write.
+static PLANS_REFUSED: AtomicU32 = AtomicU32::new(0);
+// The image's `DeafWatch` counters, copied here for `health`.
+static DEAF_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static DEAF_BLAMED: AtomicU32 = AtomicU32::new(0);
+static DEAF_OUTAGES: AtomicU32 = AtomicU32::new(0);
+static DEAF_REFUSED: AtomicU32 = AtomicU32::new(0);
+static SWITCHES_REFUSED: AtomicU32 = AtomicU32::new(0);
+/// The switch streak this image was started with (from the job record).
+static STREAK: AtomicU8 = AtomicU8::new(0);
+
+fn bump(c: &AtomicU32) {
+    c.store(c.load(Relaxed).wrapping_add(1), Relaxed);
+}
+
+/// A plan from the hub or the stored job was refused (it would make the
+/// node deaf to the gateway, or failed another check).
+pub fn count_plan_refused() {
+    bump(&PLANS_REFUSED);
+}
+
+/// Publish the image's deaf counters ([`DeafWatch::counts`]) for [`health`].
+pub fn set_deaf_counts(c: DeafCounts) {
+    DEAF_FALLBACKS.store(c.fallbacks, Relaxed);
+    DEAF_BLAMED.store(c.blamed, Relaxed);
+    DEAF_OUTAGES.store(c.outages, Relaxed);
+    DEAF_REFUSED.store(c.refused, Relaxed);
+}
+
+/// Seconds since boot.
+pub fn uptime_s() -> u32 {
+    let s = esp_hal::time::Instant::now().duration_since_epoch().as_secs();
+    u32::try_from(s).unwrap_or(u32::MAX)
+}
+
+/// The node's robustness counters since boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    pub plans_refused: u32,
+    /// Fall-backs to the built-in plan, and what each turned out to be:
+    /// the plan was blamed (gateway heard within the probation) or the
+    /// gateway was away (outage). Assigns turned away while a blamed id is
+    /// refused.
+    pub deaf_fallbacks: u32,
+    pub deaf_blamed: u32,
+    pub deaf_outages: u32,
+    pub deaf_refused: u32,
+    pub switches_refused: u32,
+    /// Seconds until an image switch is allowed (0: allowed now).
+    pub switch_wait_s: u32,
+}
+
+pub fn health() -> Health {
+    Health {
+        plans_refused: PLANS_REFUSED.load(Relaxed),
+        deaf_fallbacks: DEAF_FALLBACKS.load(Relaxed),
+        deaf_blamed: DEAF_BLAMED.load(Relaxed),
+        deaf_outages: DEAF_OUTAGES.load(Relaxed),
+        deaf_refused: DEAF_REFUSED.load(Relaxed),
+        switches_refused: SWITCHES_REFUSED.load(Relaxed),
+        switch_wait_s: switchlimit::wait_s(STREAK.load(Relaxed), uptime_s()),
+    }
+}
+
+/// `Frame::NodeHealth` (protocol 14, docs/LINK-KEYS-DESIGN.md 6.4 and 7.3),
+/// sent every 5 s by every node image, wired ones included: uptime, the
+/// robustness counters ([`health`]), and with `espnow` the link's delivery
+/// accounting and refusals (as `linkauth::publish` last left them). `shed`
+/// (per `wifiwatch::shed::Kind`) and `alternations` (DJI, Wi-Fi drone) come
+/// from the image; one without them passes zeros.
+pub fn node_health(shed: [u32; link::SHED_KINDS], alternations: [u32; 2]) -> link::NodeHealth {
+    let h = health();
+    #[allow(unused_mut)]
+    let mut n = link::NodeHealth {
+        uptime_s: uptime_s(),
+        shed,
+        alternations,
+        plans_refused: h.plans_refused,
+        deaf_fallbacks: h.deaf_fallbacks,
+        deaf_blamed: h.deaf_blamed,
+        deaf_outages: h.deaf_outages,
+        deaf_refused: h.deaf_refused,
+        switches_refused: h.switches_refused,
+        switch_wait_s: h.switch_wait_s,
+        ..link::NodeHealth::default()
+    };
+    #[cfg(feature = "espnow")]
+    nodeimage::uplink::fill_health(&linkauth::counts(), &mut n);
+    n
+}
 
 /// One app slot.
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +157,10 @@ pub enum SwitchError {
     NoJobSector,
     /// A flash operation failed.
     Flash,
+    /// Refused: this image has not been up long enough since the last
+    /// switch ([`health`]`().switch_wait_s` says how long is left). The
+    /// node keeps its role and plan.
+    TooSoon,
 }
 
 impl SwitchError {
@@ -58,6 +170,7 @@ impl SwitchError {
             SwitchError::NoOta => "no OTA slots",
             SwitchError::NoJobSector => "no rsjob sector",
             SwitchError::Flash => "flash error",
+            SwitchError::TooSoon => "too soon after the last switch",
         }
     }
 }
@@ -118,12 +231,23 @@ impl<'d> Images<'d> {
 
     /// The job this image was switched in for, if any (left in place: after a
     /// power cycle the same image starts with the same job; a newer command
-    /// from the hub replaces it in memory).
+    /// from the hub replaces it in memory). Also takes the switch streak
+    /// from the record (an old `RSJ1` record counts as streak 0), so call
+    /// it once at boot, before any switch.
     pub fn stored_job(&mut self) -> Option<Assignment> {
         let at = self.job_offset?;
         let mut raw = [0u8; JOB_MAX];
         flash_read(&mut self.flash, at, &mut raw).ok()?;
-        nodeimage::decode_job(&raw)
+        let stored = nodeimage::decode_job(&raw)?;
+        STREAK.store(stored.streak, Relaxed);
+        Some(stored.job)
+    }
+
+    /// The provisioning record (`rskey`), read with this flash handle. Call
+    /// once at boot.
+    #[cfg(feature = "espnow")]
+    pub fn keystore(&mut self) -> keystore::Keystore {
+        keystore::read_from(&mut self.flash)
     }
 
     /// The slot to start for `role`, if this board holds an image for it.
@@ -135,15 +259,24 @@ impl<'d> Images<'d> {
     }
 
     /// Store `job`, make its image the boot image and reset. Returns only on
-    /// failure, before anything that would change what boots next.
+    /// failure, before anything that would change what boots next. Refused
+    /// ([`SwitchError::TooSoon`], counted) until this image has been up for
+    /// `switchlimit::min_uptime_s(streak)`.
     pub fn switch(&mut self, job: &Assignment) -> SwitchError {
         let Some(slot) = self.slot_for(job.role) else { return SwitchError::NoImage };
         if !self.ota {
             return SwitchError::NoOta;
         }
         let Some(at) = self.job_offset else { return SwitchError::NoJobSector };
+        let (streak, up) = (STREAK.load(Relaxed), uptime_s());
+        if !switchlimit::allowed(streak, up) {
+            bump(&SWITCHES_REFUSED);
+            return SwitchError::TooSoon;
+        }
         let mut rec = [0u8; JOB_MAX];
-        let Some(raw) = nodeimage::encode_job(job, &mut rec) else { return SwitchError::NoJobSector };
+        let Some(raw) = nodeimage::encode_job(job, switchlimit::next_streak(streak, up), &mut rec) else {
+            return SwitchError::NoJobSector;
+        };
         // esp-storage's `write` erases the sector and read-modify-writes it.
         if self.flash.write(at, raw).is_err() {
             return SwitchError::Flash;

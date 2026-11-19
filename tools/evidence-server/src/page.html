@@ -4,21 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rotorscope evidence</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<style>
-  :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --accent: #0b5fff; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #141414; --fg: #eee; --muted: #999; --line: #333; --accent: #6ea0ff; } }
-  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
-  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-  header h1 { font-size: 16px; margin: 0 12px 0 0; }
-  input, select, button { font: inherit; padding: 4px 6px; }
-  #map { height: 50vh; }
-  .note { color: var(--muted); padding: 6px 16px; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  td.s { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
-  .wrap { overflow-x: auto; padding: 0 8px 24px; }
-</style>
+<link rel="stylesheet" href="/static/leaflet.css">
+<link rel="stylesheet" href="/static/page.css">
 </head>
 <body>
 <header>
@@ -29,57 +16,12 @@
   <button id="load">Show</button>
   <a id="export" href="#">Export bundle</a>
 </header>
-<div class="note">Every view, export and note is written to this unit's audit log with the name above. Detections show where the drone said it was (Remote ID) and where the hub was. A detection shows a broadcast was received, not who was flying.</div>
+<div class="note">Every view, export and note is written to this unit's audit log with the name above. Detections show where the drone said it was (Remote ID) and where the hub was. A detection shows a broadcast was received, not who was flying. This page is a view: the export bundle, checked with evidence-verify and the unit's key, is the evidence.</div>
+<div id="warn" class="warn" hidden></div>
+<div id="stamps" class="note"></div>
 <div id="map"></div>
 <div class="wrap"><table><thead><tr><th>#</th><th>UTC (source)</th><th>Drone ID</th><th>Drone</th><th>Hub</th><th>Decode</th></tr></thead><tbody id="rows"></tbody></table></div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>
-const $ = (id) => document.getElementById(id);
-let map = null, layer = null;
-try { $('actor').value = localStorage.getItem('actor') || ''; } catch (e) {}
-function headers() {
-  const h = { 'X-Actor': $('actor').value || 'anonymous' };
-  if ($('token').value) h['Authorization'] = 'Bearer ' + $('token').value;
-  return h;
-}
-async function devices() {
-  const r = await fetch('/api/devices', { headers: headers() });
-  if (!r.ok) { $('rows').innerHTML = '<tr><td colspan=6>' + r.status + ' (token?)</td></tr>'; return; }
-  const list = await r.json();
-  $('dev').innerHTML = list.map(d => `<option value="${esc(d.key_id)}">${esc(d.name)} (${esc(d.key_id)}, ${esc(d.detections)} detections)</option>`).join('');
-}
-function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-async function show() {
-  try { localStorage.setItem('actor', $('actor').value); } catch (e) {}
-  const id = $('dev').value; if (!id) return;
-  const r = await fetch(`/api/devices/${id}/detections`, { headers: headers() });
-  const pts = await r.json();
-  if (!map && window.L) {
-    map = L.map('map');
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
-  }
-  const bounds = [];
-  if (map) {
-    if (layer) layer.remove();
-    layer = L.layerGroup().addTo(map);
-    for (const p of pts) {
-      if (p.lat != null) { L.circleMarker([p.lat, p.lon], { radius: 5, color: '#d33' }).bindPopup(`#${p.seq} ${esc(p.drone_id)}<br>${esc(p.summary)}`).addTo(layer); bounds.push([p.lat, p.lon]); }
-      if (p.hub_lat != null) { L.circleMarker([p.hub_lat, p.hub_lon], { radius: 4, color: '#06f' }).bindPopup('hub (' + esc(p.hub_position) + ')').addTo(layer); bounds.push([p.hub_lat, p.hub_lon]); }
-    }
-    if (bounds.length) map.fitBounds(bounds, { maxZoom: 16 }); else map.setView([39.95, -75.16], 10);
-  }
-  $('rows').innerHTML = pts.slice().reverse().slice(0, 500).map(p => `<tr><td>${p.seq}</td><td>${p.utc_ms ? new Date(p.utc_ms).toISOString() : 'NO UTC'} (${esc(p.time_source)})</td><td>${esc(p.drone_id)}</td><td>${p.lat != null ? p.lat.toFixed(6) + ', ' + p.lon.toFixed(6) : '-'}</td><td>${p.hub_lat != null ? p.hub_lat.toFixed(6) + ', ' + p.hub_lon.toFixed(6) + ' (' + esc(p.hub_position) + ')' : 'NO POSITION'}</td><td class="s">${esc(p.summary)}</td></tr>`).join('');
-  $('export').onclick = async (e) => {
-    e.preventDefault();
-    const r = await fetch(`/api/devices/${id}/export`, { headers: headers() });
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = `evidence-${id}.json`; a.click();
-    alert('Bundle SHA-256: ' + r.headers.get('x-bundle-sha256'));
-  };
-}
-$('load').onclick = show;
-devices();
-</script>
+<script src="/static/leaflet.js"></script>
+<script src="/static/page.js"></script>
 </body>
 </html>

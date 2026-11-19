@@ -1,0 +1,115 @@
+/* Rotorscope documentation: a light layer over mdBook's own themes.
+   Colours echo the device screen: amber on near-black. */
+
+:root {
+    --rs-amber: #d98a00;
+    --rs-amber-soft: rgba(217, 138, 0, 0.12);
+    --rs-rule: rgba(128, 128, 128, 0.28);
+    --content-max-width: 820px;
+}
+.navy, .coal, .ayu {
+    --rs-amber: #ffb000;
+    --rs-amber-soft: rgba(255, 176, 0, 0.12);
+}
+
+/* Reading comfort */
+.content main { line-height: 1.65; }
+.content main h1 {
+    margin-block-end: 0.4em;
+    padding-block-end: 0.25em;
+    border-block-end: 3px solid var(--rs-amber);
+}
+.content main h2 {
+    margin-block-start: 2em;
+    padding-block-end: 0.2em;
+    border-block-end: 1px solid var(--rs-rule);
+}
+.content main h3 { margin-block-start: 1.6em; }
+
+/* The "Level:" line that opens every page */
+.content main p.level-line {
+    padding: 0.6em 0.9em;
+    border-inline-start: 4px solid var(--rs-amber);
+    background: var(--rs-amber-soft);
+    border-radius: 0 6px 6px 0;
+}
+
+/* Tables: full width, readable, scroll sideways on a phone instead of
+   squeezing the page */
+.content main .table-wrapper { overflow-x: auto; }
+.content main table {
+    width: 100%;
+    margin: 1.2em 0;
+    border-collapse: collapse;
+    font-size: 0.95em;
+}
+.content main table th {
+    text-align: start;
+    white-space: nowrap;
+    border-block-end: 2px solid var(--rs-amber);
+}
+.content main table td, .content main table th {
+    padding: 0.5em 0.75em;
+    border-inline: none;
+    vertical-align: top;
+}
+.content main table td { border-block: 1px solid var(--rs-rule); }
+
+/* Screen snapshots are 320x240 pixel art: enlarge them crisply */
+.content main img[src*="images/screen/"] {
+    width: 320px;
+    max-width: 100%;
+    image-rendering: pixelated;
+    border: 6px solid #111;
+    border-radius: 8px;
+    background: #000;
+    margin: 0.3em 0.4em 0.3em 0;
+}
+@media (min-width: 720px) {
+    .content main img[src*="images/screen/"] { width: 400px; }
+}
+/* The P4 hub's 800x480 pictures have smooth lettering: full size, never
+   enlarged, scaled down smoothly on a narrow window */
+.content main img[src*="images/screen/wide/"] {
+    width: 800px;
+    image-rendering: auto;
+}
+.content main img { max-width: 100%; height: auto; }
+
+/* Diagrams */
+.content main .mermaid {
+    margin: 1.4em 0;
+    text-align: center;
+    overflow-x: auto;
+}
+.content main .mermaid svg { max-width: 100%; height: auto; }
+.content main .mermaid-failed {
+    white-space: pre;
+    font-family: var(--mono-font);
+    text-align: start;
+}
+
+/* Callouts sit a little apart from the text */
+.content main blockquote.blockquote-tag { margin: 1.4em 0; border-radius: 6px; }
+
+/* Sidebar: part titles as quiet section labels */
+.sidebar .chapter li.part-title {
+    margin-block-start: 1.4em;
+    font-size: 0.78em;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--rs-amber);
+}
+.sidebar .chapter li a.active { color: var(--rs-amber); }
+
+/* Wide code blocks scroll rather than widen the page */
+.content main pre { overflow-x: auto; }
+
+/* Phone-page pictures: phone sized, side by side when there is room */
+.content main img[src*="images/phone/"] {
+    width: 260px;
+    max-width: 46%;
+    border: 6px solid #111;
+    border-radius: 18px;
+    margin: 0.3em 0.4em 0.3em 0;
+}

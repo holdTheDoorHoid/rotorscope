@@ -13,4 +13,5 @@ adsb.workspace = true
 libm = "0.2"
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 adsb = { workspace = true, features = ["encode"] }

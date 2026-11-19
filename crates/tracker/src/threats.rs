@@ -4,8 +4,8 @@
 //! These are not drones. A deauth flood, beacon spam, an evil twin or a
 //! jammer is something attacking the radios around the detector (or the
 //! detector), or drowning out the bands drones use. They are kept in their
-//! own table with their own ids and handed out once each by
-//! [`Tracker::take_new_threat`] for an alert.
+//! own table with their own ids and handed out once per episode by
+//! [`Tracker::take_new_threat`] for the record (a silenced one too, said so).
 //!
 //! **Same threat.** One kind from one node against one target is one threat
 //! while it lasts; a jamming kind is also keyed by band (a jammer seen at
@@ -81,6 +81,18 @@ pub fn is_reserved_kind(kind: ThreatKind) -> bool {
 /// A threat not reported for this long has ended (it stays listed, as
 /// "ended", until [`crate::Config::remove_after_ms`]).
 pub const THREAT_ACTIVE_MS: u64 = 10_000;
+/// Flapping (WP-14a): a threat raised this many times within
+/// [`FLAP_WINDOW_MS`] (each raise after it had ended) is flapping. Its
+/// episode then ends only after [`FLAP_QUIET_MS`] of quiet, and raises in
+/// between are counted into that episode instead of being announced (and
+/// logged) one by one. The end record says how many there were.
+pub const FLAP_RAISES: u16 = 3;
+/// See [`FLAP_RAISES`].
+pub const FLAP_WINDOW_MS: u64 = 60_000;
+/// How long a flapping threat must be quiet before its episode ends.
+pub const FLAP_QUIET_MS: u64 = 60_000;
+/// Episode ends waiting for the main loop after their entry left the table.
+pub const MAX_PENDING_ENDS: usize = 4;
 /// Two jamming reports this close (100 kHz units, 300 MHz) are one band.
 pub const SAME_JAM_BAND: u32 = 3_000;
 
@@ -115,6 +127,7 @@ pub const fn threat_label(kind: ThreatKind) -> &'static str {
         ThreatKind::MavlinkAttack => "Hostile drone telemetry",
         ThreatKind::AreaGnss => "GPS interference nearby",
         ThreatKind::IdFlood => "Flood of fake IDs",
+        ThreatKind::LinkLoss => "Node reports going missing",
     }
 }
 
@@ -159,12 +172,19 @@ pub struct Threat {
     pub source: [u8; 6],
     pub target: [u8; 6],
     pub ssid: heapless::String<32>,
+    /// When this table entry was first raised (whole life of the entry).
     pub first_seen_ms: u64,
+    /// When the current episode was raised: the latest raise after the
+    /// threat had ended, coalesced raises of a flapping episode included.
+    /// An alarm raised after the operator last looked is unseen
+    /// ([`Tracker::alarm_counts`]).
+    pub raised_ms: u64,
     pub last_seen_ms: u64,
     pub reports: u32,
     /// Silenced: matches a mute rule (an operator's timed mute, a snooze,
-    /// or a site-file mute). Kept and logged, but no alert and no badge. It
-    /// still counts as jamming: [`Tracker::partly_blind`] ignores mutes.
+    /// or a site-file mute). Kept and logged (its raise record says it was
+    /// silenced, [`Threat::silence`]), but no alert and no badge. It still
+    /// counts as jamming: [`Tracker::partly_blind`] ignores mutes.
     pub muted: bool,
     /// Silenced by a snooze (a safety-critical kind, [`SNOOZE_MS`]).
     pub snoozed: bool,
@@ -174,6 +194,136 @@ pub struct Threat {
     /// latest victim, `count` and `reports` add up every victim's.
     pub per_node: bool,
     pub(crate) announced: bool,
+    pub(crate) ep: Episode,
+}
+
+/// How an announced raise came about ([`Threat::raise_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RaiseKind {
+    /// The entry's first episode.
+    #[default]
+    First,
+    /// Raised again after an earlier episode of the same entry ended.
+    Again,
+    /// Announced again in the same episode: its mute or snooze ended while
+    /// it was still sounding.
+    AfterSilence,
+}
+
+/// Why a threat is silenced ([`Threat::silence`]), for its raise record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Silence {
+    /// Snoozed: a safety-critical kind, for [`SNOOZE_MS`].
+    Snoozed,
+    /// An operator's timed mute ([`OPERATOR_MUTE_MS`] at most).
+    Muted,
+    /// A site-file mute, for good.
+    ForGood,
+}
+
+/// One episode of a threat: from a raise (first report, or the first report
+/// after it had ended) to its end. Kept per table entry (WP-14a, TR-16).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct Episode {
+    /// 1 for the entry's first episode.
+    number: u32,
+    started_ms: u64,
+    /// The entry's totals when the episode started.
+    count0: u64,
+    reports0: u32,
+    peak: i8,
+    /// Raises in this episode: 1, more when held as flapping.
+    raises: u32,
+    /// Not yet ended.
+    open: bool,
+    /// Its raise was announced (console line and evidence record): only
+    /// such an episode gets an end record.
+    logged: bool,
+    how: RaiseKind,
+    /// Hub ms + 1 of the latest [`FLAP_RAISES`] raises (0 = none), oldest
+    /// first, across episodes.
+    recent: [u64; FLAP_RAISES as usize],
+}
+
+impl Episode {
+    fn push_raise(&mut self, now_ms: u64) {
+        self.recent.rotate_left(1);
+        self.recent[FLAP_RAISES as usize - 1] = now_ms + 1;
+    }
+
+    /// The latest [`FLAP_RAISES`] raises fell within [`FLAP_WINDOW_MS`].
+    fn flapping(&self) -> bool {
+        let r = &self.recent;
+        r[0] != 0 && r[r.len() - 1] - r[0] < FLAP_WINDOW_MS
+    }
+
+    fn start(&mut self, now_ms: u64, count: u64, reports: u32, level: i8) {
+        self.number = self.number.saturating_add(1);
+        self.started_ms = now_ms;
+        self.count0 = count;
+        self.reports0 = reports;
+        self.peak = level;
+        self.raises = 1;
+        self.open = true;
+        self.logged = false;
+        self.how = RaiseKind::First;
+        self.push_raise(now_ms);
+    }
+}
+
+/// Why an episode ended ([`EpisodeEnd::why`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndWhy {
+    /// Not reported for [`THREAT_ACTIVE_MS`] ([`FLAP_QUIET_MS`] when it
+    /// was flapping).
+    Quiet,
+    /// Its table entry was removed (to make room for a newer threat, or
+    /// expired) before it ended: it may still be going on.
+    Removed,
+}
+
+impl EndWhy {
+    pub fn name(self) -> &'static str {
+        match self {
+            EndWhy::Quiet => "quiet",
+            EndWhy::Removed => "removed",
+        }
+    }
+}
+
+/// An announced episode that ended: what it totalled. Handed out once by
+/// [`Tracker::take_ended_threat`] for the console and the evidence log.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeEnd {
+    pub id: ThreatId,
+    pub kind: ThreatKind,
+    pub node: u8,
+    pub by_hub: bool,
+    pub label: &'static str,
+    /// 1 for the entry's first episode.
+    pub episode: u32,
+    pub started_ms: u64,
+    /// Last report.
+    pub last_ms: u64,
+    /// Frames (bursts, dwells) and reports in this episode.
+    pub count: u64,
+    pub reports: u32,
+    /// Strongest level in this episode.
+    pub peak_level: i8,
+    /// Raises in the episode: 1, or more when it was held as flapping.
+    pub raises: u32,
+    /// Held as flapping ([`FLAP_RAISES`]).
+    pub held: bool,
+    pub why: EndWhy,
+    /// Earlier end records lost because too many were waiting at once
+    /// ([`MAX_PENDING_ENDS`]); counted here so the loss is on record.
+    pub lost_before: u32,
+}
+
+impl EpisodeEnd {
+    pub fn duration_ms(&self) -> u64 {
+        self.last_ms.saturating_sub(self.started_ms)
+    }
 }
 
 impl Threat {
@@ -216,6 +366,69 @@ impl Threat {
     /// Still being reported.
     pub fn active(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.last_seen_ms) < THREAT_ACTIVE_MS
+    }
+
+    /// The current episode's number for this entry (1 = its first).
+    pub fn episode(&self) -> u32 {
+        self.ep.number
+    }
+
+    /// How the latest announcement came about.
+    pub fn raise_kind(&self) -> RaiseKind {
+        self.ep.how
+    }
+
+    /// The rule silencing it now, by type (`None`: it alerts).
+    pub fn silence(&self) -> Option<Silence> {
+        if !self.muted {
+            None
+        } else if self.snoozed {
+            Some(Silence::Snoozed)
+        } else if self.silenced_until_s == 0 {
+            Some(Silence::ForGood)
+        } else {
+            Some(Silence::Muted)
+        }
+    }
+
+    /// Raises within [`FLAP_WINDOW_MS`] up to the latest (at most
+    /// [`FLAP_RAISES`]; at that number further raises are held).
+    pub fn raises_in_window(&self) -> u16 {
+        let r = &self.ep.recent;
+        let newest = r[r.len() - 1];
+        r.iter().filter(|&&t| t != 0 && newest - t < FLAP_WINDOW_MS).count() as u16
+    }
+
+    /// Flapping: the latest [`FLAP_RAISES`] raises fell within
+    /// [`FLAP_WINDOW_MS`], so its episode ends only after [`FLAP_QUIET_MS`].
+    pub fn flapping(&self) -> bool {
+        self.ep.flapping()
+    }
+
+    /// Quiet long enough for its open episode to end.
+    fn end_due(&self, now_ms: u64) -> bool {
+        let need = if self.ep.flapping() { FLAP_QUIET_MS } else { THREAT_ACTIVE_MS };
+        now_ms.saturating_sub(self.last_seen_ms) >= need
+    }
+
+    fn episode_end(&self, why: EndWhy, lost_before: u32) -> EpisodeEnd {
+        EpisodeEnd {
+            id: self.id,
+            kind: self.kind,
+            node: self.node,
+            by_hub: self.by_hub,
+            label: self.label(),
+            episode: self.ep.number,
+            started_ms: self.ep.started_ms,
+            last_ms: self.last_seen_ms,
+            count: self.count.saturating_sub(self.ep.count0),
+            reports: self.reports.saturating_sub(self.ep.reports0),
+            peak_level: self.ep.peak,
+            raises: self.ep.raises,
+            held: self.ep.flapping(),
+            why,
+            lost_before,
+        }
     }
 
     /// Hub ms the silence on it ends (`None`: not silenced, or for good).
@@ -288,10 +501,12 @@ pub const NODE_ANY: u8 = 0xFF;
 
 /// Kinds that say the hub may be missing drones, or that its picture is
 /// being forged: jamming and Blinded (a node is deaf), GPS interference in
-/// the area, a flood of fake IDs, forged node traffic. They can only be
-/// snoozed for [`SNOOZE_MS`], never muted, and never from the site file.
+/// the area, a flood of fake IDs, forged node traffic, a node's reports
+/// going missing on the link. They can only be snoozed for [`SNOOZE_MS`],
+/// never muted, and never from the site file.
 pub fn is_safety_kind(kind: ThreatKind) -> bool {
-    kind.is_jamming() || matches!(kind, ThreatKind::AreaGnss | ThreatKind::IdFlood | ThreatKind::ForgedLink)
+    kind.is_jamming()
+        || matches!(kind, ThreatKind::AreaGnss | ThreatKind::IdFlood | ThreatKind::ForgedLink | ThreatKind::LinkLoss)
 }
 
 /// Which fields of a rule must equal the threat's (see [`key_of`]).
@@ -319,6 +534,7 @@ pub mod key {
 /// | AreaGnss | target (1 jamming, 2 spoofing) |
 /// | IdFlood | table, node (0 for the hub-wide tables; the shedding node) |
 /// | ForgedLink | node, source |
+/// | LinkLoss | node |
 /// | EvilTwin, DroneNetClone, AttackTool | network name, source |
 /// | Karma, MavlinkAttack | source |
 /// | DroneDeauth, DroneTakeover | target (the drone's network) |
@@ -524,11 +740,51 @@ pub struct ThreatTable {
     mutes: Vec<Mute, MAX_MUTES>,
     /// New threats dropped: the table was full of ones it may not remove.
     dropped: u32,
+    /// Ends of announced episodes whose entry left the table before the
+    /// main loop took them, oldest first.
+    ended: Vec<EpisodeEnd, MAX_PENDING_ENDS>,
+    /// End records lost because `ended` was full (said in the next one).
+    ends_lost: u32,
 }
 
 impl ThreatTable {
     pub const fn new() -> Self {
-        Self { v: Vec::new(), next_id: 1, mutes: Vec::new(), dropped: 0 }
+        Self { v: Vec::new(), next_id: 1, mutes: Vec::new(), dropped: 0, ended: Vec::new(), ends_lost: 0 }
+    }
+
+    /// Keep the end of an announced episode for the main loop.
+    fn keep_end(&mut self, e: EpisodeEnd) {
+        if self.ended.push(e).is_err() {
+            self.ends_lost = self.ends_lost.saturating_add(1);
+        }
+    }
+
+    /// Remove entry `i`; an announced episode still open gets its end.
+    fn retire(&mut self, i: usize, now_ms: u64) {
+        let t = self.v.remove(i);
+        if t.ep.open && t.ep.logged {
+            let why = if t.end_due(now_ms) { EndWhy::Quiet } else { EndWhy::Removed };
+            let lost = core::mem::take(&mut self.ends_lost);
+            self.keep_end(t.episode_end(why, lost));
+        }
+    }
+
+    /// The next ended episode to announce (see [`Tracker::take_ended_threat`]).
+    fn take_ended(&mut self, now_ms: u64) -> Option<EpisodeEnd> {
+        if !self.ended.is_empty() {
+            return Some(self.ended.remove(0));
+        }
+        let lost = self.ends_lost;
+        for t in self.v.iter_mut() {
+            if t.ep.open && t.end_due(now_ms) {
+                t.ep.open = false;
+                if t.ep.logged {
+                    self.ends_lost = 0;
+                    return Some(t.episode_end(EndWhy::Quiet, lost));
+                }
+            }
+        }
+        None
     }
 
     /// Whether a flood sighting's victim has a rule of its own (then its
@@ -602,10 +858,24 @@ impl ThreatTable {
         &self.v
     }
 
+    /// Node number `node` changed hands (docs/LINK-KEYS-DESIGN.md 7.5):
+    /// drop every mute and snooze that names it, so none lands on the board
+    /// that gets the number next. Rules naming no node stay. Threats that
+    /// were silenced only by those rules sound again if still active.
+    /// Returns how many rules were dropped.
+    pub fn forget_node(&mut self, node: u8, now_ms: u64) -> usize {
+        let before = self.mutes.len();
+        self.mutes.retain(|m| !(m.key() & key::NODE != 0 && m.node == node));
+        let dropped = before - self.mutes.len();
+        if dropped > 0 {
+            self.remute(now_ms);
+        }
+        dropped
+    }
+
     pub(crate) fn ingest(&mut self, node: u8, by_hub: bool, s: &ThreatSighting, now_ms: u64) -> Option<ThreatId> {
         let per_node = is_flood_kind(s.kind) && !self.sighting_muted(s, now_ms);
         let i = match self.v.iter().position(|t| t.same(node, by_hub, per_node, s)) {
-            Some(i) => i,
             None => {
                 // Floods hold at most MAX_FLOOD_THREATS entries: a new one
                 // over that replaces the oldest flood (ended ones first).
@@ -620,9 +890,7 @@ impl ThreatTable {
                     None
                 };
                 match victim {
-                    Some(i) => {
-                        self.v.remove(i);
-                    }
+                    Some(i) => self.retire(i, now_ms),
                     None if self.v.is_full() => {
                         self.dropped = self.dropped.saturating_add(1);
                         return None;
@@ -647,6 +915,7 @@ impl ThreatTable {
                     target: s.target,
                     ssid: s.ssid.clone(),
                     first_seen_ms: now_ms,
+                    raised_ms: now_ms,
                     last_seen_ms: now_ms,
                     reports: 0,
                     muted: false,
@@ -654,11 +923,41 @@ impl ThreatTable {
                     silenced_until_s: 0,
                     per_node,
                     announced: false,
+                    ep: Episode::default(),
                 });
-                self.v.len() - 1
+                let i = self.v.len() - 1;
+                self.v[i].ep.start(now_ms, 0, 0, s.level);
+                i
             }
+            Some(i) if !self.v[i].active(now_ms) => {
+                // It had ended (by activity): a re-raise (WP-14a, TR-16).
+                let t = &self.v[i];
+                if t.ep.open && !t.end_due(now_ms) {
+                    // Flapping: inside the hold, counted into the episode.
+                    // Unseen by the operator all the same.
+                    let t = &mut self.v[i];
+                    t.ep.raises = t.ep.raises.saturating_add(1);
+                    t.ep.push_raise(now_ms);
+                    t.raised_ms = now_ms;
+                } else {
+                    if t.ep.open && t.ep.logged {
+                        // Its end was due but not taken yet: keep it, in order.
+                        let lost = core::mem::take(&mut self.ends_lost);
+                        let e = t.episode_end(EndWhy::Quiet, lost);
+                        self.keep_end(e);
+                    }
+                    let t = &mut self.v[i];
+                    let (count, reports) = (t.count, t.reports);
+                    t.ep.start(now_ms, count, reports, s.level);
+                    t.raised_ms = now_ms;
+                    t.announced = false;
+                }
+                i
+            }
+            Some(i) => i,
         };
         let t = &mut self.v[i];
+        t.ep.peak = t.ep.peak.max(s.level);
         t.channel = s.channel;
         if s.freq != 0 {
             t.freq = s.freq;
@@ -706,7 +1005,13 @@ impl ThreatTable {
     }
 
     pub(crate) fn expire(&mut self, now_ms: u64, remove_after_ms: u64) {
-        self.v.retain(|t| now_ms.saturating_sub(t.last_seen_ms) < remove_after_ms);
+        let mut i = self.v.len();
+        while i > 0 {
+            i -= 1;
+            if now_ms.saturating_sub(self.v[i].last_seen_ms) >= remove_after_ms {
+                self.retire(i, now_ms);
+            }
+        }
         if self.mutes.iter().any(|m| !m.live(now_ms)) {
             self.remute(now_ms);
         }
@@ -942,8 +1247,10 @@ impl DeafWatch {
 }
 
 /// Announced, raised by `seen_ms`, sounding at `now_ms`, not silenced.
+/// "Raised" is the current episode's latest raise ([`Threat::raised_ms`]): a
+/// threat that ended and came back after the operator looked is unseen.
 fn seen_alarm(t: &Threat, seen_ms: u64, now_ms: u64) -> bool {
-    t.announced && !t.muted && t.first_seen_ms <= seen_ms && t.active(now_ms)
+    t.announced && !t.muted && t.raised_ms <= seen_ms && t.active(now_ms)
 }
 
 // --------------------------------------------------------------- tracker --
@@ -1051,6 +1358,17 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         (m, s)
     }
 
+    /// What [`Tracker::alarm_counts`] counts, named: the label of the first
+    /// nuisance alarm the "Mute" action would silence and of the first
+    /// safety-critical one "Snooze" would (empty when none), so the screen
+    /// can say what a press acts on.
+    pub fn alarm_names(&self, seen_ms: u64, now_ms: u64) -> (&'static str, &'static str) {
+        let mut seen = self.threats.all().iter().filter(|t| seen_alarm(t, seen_ms, now_ms));
+        let mute = seen.clone().find(|t| !is_safety_kind(t.kind)).map_or("", |t| t.label());
+        let snooze = seen.find(|t| is_safety_kind(t.kind)).map_or("", |t| t.label());
+        (mute, snooze)
+    }
+
     /// Settings "Mute": mute every nuisance alarm the operator has seen
     /// ([`Tracker::alarm_counts`]), each on its own rule, for
     /// [`OPERATOR_MUTE_MS`]. Never a safety-critical one, never one raised
@@ -1105,6 +1423,18 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         refused
     }
 
+    /// Node number `node` now belongs to another board (an ESP-NOW slot
+    /// re-provisioned at a higher generation, a different wired board, or
+    /// an evicted entry; docs/LINK-KEYS-DESIGN.md 7.5). Every mute and
+    /// snooze naming the number is dropped ([`ThreatTable::forget_node`]),
+    /// and what the hub learned about the old board's link (its normal frame
+    /// rate, its delivery counts) is forgotten. Returns the rules dropped.
+    pub fn forget_node(&mut self, node: u8, now_ms: u64) -> usize {
+        self.deaf.reset(node);
+        self.delivery.forget(node);
+        self.threats.forget_node(node, now_ms)
+    }
+
     /// Drop the operator's mutes and snoozes, keep the site file's.
     pub fn unmute_operator(&mut self, now_ms: u64) {
         self.threats.mutes.retain(|m| m.permanent());
@@ -1139,18 +1469,44 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         self.threats.all().iter().any(|t| t.active(now_ms) && t.kind.is_jamming())
     }
 
-    /// The next threat to alert on, exactly once each (and once more when
-    /// a mute or snooze on it ends while it is still sounding). Silenced
-    /// threats are not handed out.
+    /// The next threat raise to record, exactly once per episode (and once
+    /// more when a mute or snooze on it ends while it is still sounding).
+    ///
+    /// A silenced threat is handed out too: muting stops the alert, not the
+    /// record. [`Threat::silence`] says which rule covered it, so the
+    /// console line and the evidence record can say no alert was given,
+    /// and its episode gets an end record like any other. (It used not to
+    /// be: an alarm already covered by a mute when it started left no
+    /// `threat` record at all, and a hub-raised kind has no raw frame
+    /// either.)
+    ///
+    /// Every episode is announced (WP-14a, TR-16): a threat that ended and
+    /// is reported again is handed out again ([`Threat::raise_kind`] says
+    /// [`RaiseKind::Again`]), except inside a flapping hold
+    /// ([`FLAP_RAISES`]), whose raises are counted into the episode and
+    /// reported with its end ([`Tracker::take_ended_threat`]).
     pub fn take_new_threat(&mut self, _now_ms: u64) -> Option<ThreatId> {
-        loop {
-            // A MAVLink suspicion waits until it is backed.
-            let t = self.threats.v.iter_mut().find(|t| !t.announced && !t.suspect())?;
-            t.announced = true;
-            if !t.muted {
-                return Some(t.id);
-            }
-        }
+        // A MAVLink suspicion waits until it is backed.
+        let t = self.threats.v.iter_mut().find(|t| !t.announced && !t.suspect())?;
+        t.announced = true;
+        t.ep.how = if t.ep.logged {
+            RaiseKind::AfterSilence
+        } else if t.ep.number > 1 {
+            RaiseKind::Again
+        } else {
+            RaiseKind::First
+        };
+        t.ep.logged = true;
+        Some(t.id)
+    }
+
+    /// The next announced episode that ended, exactly once each: quiet for
+    /// [`THREAT_ACTIVE_MS`] (for a flapping one [`FLAP_QUIET_MS`]), or its
+    /// entry removed from the table. Episodes that were never announced
+    /// (a MAVLink suspicion never backed) have no end either; silenced
+    /// ones were announced and do.
+    pub fn take_ended_threat(&mut self, now_ms: u64) -> Option<EpisodeEnd> {
+        self.threats.take_ended(now_ms)
     }
 
     /// Normal and current frame rate of a node (frames/s), once learned.
@@ -1164,6 +1520,71 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     pub fn take_deaf_relearn(&mut self) -> Option<Relearned> {
         self.deaf.take_relearned()
     }
+}
+
+// ------------------------------------------------------- episode texts --
+
+/// What to add to a raise announcement (console line and evidence text)
+/// about the episode: nothing for an entry's first raise; for a raise after
+/// an earlier episode ended, its number and how many raises fell within a
+/// minute, and when that reaches [`FLAP_RAISES`], that further raises will
+/// be held (so the bound on the log is itself on record). Then, for a
+/// silenced one, that no alert was given and which rule covered it.
+pub fn raise_note(t: &Threat, w: &mut impl core::fmt::Write) -> core::fmt::Result {
+    raise_kind_note(t, w)?;
+    match t.silence() {
+        None => Ok(()),
+        Some(Silence::Snoozed) => write!(w, " - silenced: snoozed, no alert"),
+        Some(Silence::Muted) => write!(w, " - silenced: muted by the operator until hub uptime {} s, no alert", t.silenced_until_s),
+        Some(Silence::ForGood) => write!(w, " - silenced: muted by the site file, no alert"),
+    }
+}
+
+fn raise_kind_note(t: &Threat, w: &mut impl core::fmt::Write) -> core::fmt::Result {
+    match t.raise_kind() {
+        RaiseKind::First => Ok(()),
+        RaiseKind::AfterSilence => write!(w, " - still sounding after its mute or snooze ended"),
+        RaiseKind::Again => {
+            let n = t.raises_in_window();
+            write!(w, " - raised again (episode {}; {} raises within a minute)", t.episode(), n)?;
+            if n >= FLAP_RAISES {
+                write!(
+                    w,
+                    "; flapping: until it is quiet for {} s, further raises are counted into this episode and reported when it ends",
+                    FLAP_QUIET_MS / 1000
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The text of an episode's end (console line and evidence text).
+pub fn end_text(e: &EpisodeEnd, w: &mut impl core::fmt::Write) -> core::fmt::Result {
+    write!(w, "ended: {} (node {}", e.label, e.node)?;
+    if e.by_hub {
+        write!(w, ", raised by the hub")?;
+    }
+    write!(
+        w,
+        "), episode {}: active {:.1} s, {} frames in {} reports, peak {} {}",
+        e.episode,
+        e.duration_ms() as f32 / 1000.0,
+        e.count,
+        e.reports,
+        e.peak_level,
+        if e.kind.is_jamming() { "dB" } else { "dBm" }
+    )?;
+    if e.raises > 1 || e.held {
+        write!(w, "; raised {} times in this episode (flapping: held as one episode until quiet {} s)", e.raises, FLAP_QUIET_MS / 1000)?;
+    }
+    if e.why == EndWhy::Removed {
+        write!(w, "; its alarm entry was removed (table full or expired) while it was still sounding: it may not be over")?;
+    }
+    if e.lost_before > 0 {
+        write!(w, "; {} earlier end record(s) lost (too many at once)", e.lost_before)?;
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ json --
@@ -1253,6 +1674,10 @@ struct ThreatLine<'a> {
     says: Option<&'a str>,
     n: u32,
     first_ms: u64,
+    /// The current episode's latest raise, and its number for this entry
+    /// (1 = first). Added with WP-14a.
+    raised_ms: u64,
+    episode: u32,
     last_ms: u64,
     age_ms: u64,
 }
@@ -1312,6 +1737,8 @@ pub fn threat_line(t: &Threat, ctx: &Context, buf: &mut [u8]) -> Result<usize, F
         says: says.as_ref().map(|s| s.as_str()),
         n: t.reports,
         first_ms: t.first_seen_ms,
+        raised_ms: t.raised_ms,
+        episode: t.ep.number,
         last_ms: t.last_seen_ms,
         age_ms: ctx.now_ms.saturating_sub(t.last_seen_ms),
     };
@@ -1679,9 +2106,13 @@ mod tests {
         assert_eq!(tr.active_threats(1_000).count(), 0);
         assert!(tr.partly_blind(1_000), "a snoozed jammer still blinds");
         assert_eq!(tr.threats().len(), 2, "kept for the record");
-        // The same twin again: still muted, no new alert. A different name
-        // or jamming on the other band is not.
-        tr.ingest_threat(3, &twin, 2_000);
+        // The same twin again: still muted, no new alert, but recorded as
+        // silenced (muting stops the alert, never the record). A different
+        // name or jamming on the other band is not muted.
+        let t3 = tr.ingest_threat(3, &twin, 2_000).unwrap();
+        assert_eq!(tr.take_new_threat(2_000), Some(t3));
+        assert_eq!(tr.get_threat(t3).unwrap().silence(), Some(Silence::Muted));
+        assert_eq!(tr.active_threats(2_000).count(), 0, "no alert");
         assert!(tr.take_new_threat(2_000).is_none());
         let mut other = twin.clone();
         other.ssid = heapless::String::try_from("Other").unwrap();

@@ -2,7 +2,7 @@
 //! -> export -> verifier; tampering with an upload, the stored files or the
 //! bundle makes the server or the verifier refuse and say where.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -102,7 +102,7 @@ impl T {
         let dir = std::env::temp_dir().join(format!("evsrv-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::open(&dir).unwrap();
-        let app = Arc::new(App { store: Mutex::new(store), token: None, open_registration: true, server_name: "test".into(), tsa_url: None });
+        let app = Arc::new(App::new(store, None, true, "test".into(), None));
         T { app: router(app.clone()), shared: app, dir }
     }
 
@@ -450,13 +450,7 @@ fn app_with(name: &str, token: Option<&str>, open: bool) -> (axum::Router, std::
     let dir = std::env::temp_dir().join(format!("evsrv-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = Store::open(&dir).unwrap();
-    let app = Arc::new(App {
-        store: Mutex::new(store),
-        token: token.map(str::to_string),
-        open_registration: open,
-        server_name: "test".into(),
-        tsa_url: None,
-    });
+    let app = Arc::new(App::new(store, token.map(str::to_string), open, "test".into(), None));
     (router(app), dir)
 }
 
@@ -532,10 +526,16 @@ async fn registration_needs_the_token_unless_opened_explicitly() {
 /// `esc()` (there is no JS runner here, so this checks the source).
 #[test]
 fn page_escapes_server_text() {
-    let page = include_str!("../src/page.html");
+    let page = include_str!("../src/static/page.js");
     assert!(!page.contains("${d.name}"), "the unit name must be escaped");
     assert!(page.contains("${esc(d.name)}"));
     for raw in ["${d.key_id}", "${p.time_source}", "p.hub_position +", "+ p.hub_position"] {
         assert!(!page.contains(raw), "{raw} is not escaped");
     }
+    // Time-stamp lines: every server value escaped (the authority URL and a
+    // failure reason come from configuration and from a third party).
+    for raw in ["${s.authority}", "s.authority +", "${s.last_failure.reason}", "${n.audit_n}", "${s.outstanding.audit_n}"] {
+        assert!(!page.contains(raw), "{raw} is not escaped");
+    }
+    assert!(page.contains("esc(s.authority)") && page.contains("esc(s.last_failure.reason)"));
 }

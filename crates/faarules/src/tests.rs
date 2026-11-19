@@ -18,7 +18,7 @@ use super::*;
 const C: (f64, f64) = (39.90, -75.20);
 const GROUND_HAE: f32 = -23.0;
 /// 2026-07-01 03:00 UTC (23:00 EDT): night in Philadelphia.
-const NIGHT_MS: u64 = 1_782_874_800_000;
+pub(crate) const NIGHT_MS: u64 = 1_782_874_800_000;
 /// 2026-07-01 17:00 UTC: midday.
 const DAY_MS: u64 = 1_782_925_200_000;
 
@@ -47,7 +47,7 @@ fn area(kind: AreaKind, name: &str, ring: Vec<(f64, f64)>, ceil_ft: i32) -> Area
     }
 }
 
-fn pack_bytes() -> Vec<u8> {
+pub(crate) fn pack_bytes() -> Vec<u8> {
     let mut b = PackBuilder {
         created: 1_794_700_000,
         center: C,
@@ -508,7 +508,7 @@ fn compact_item_text() {
 }
 
 /// One frame from drone `mac`/`sn` with a fresh location at `agl` m.
-fn heard<const T: usize, const A: usize>(tr: &mut Tracker<T, A>, mac: u32, sn: &str, agl: f32, now: u64) {
+pub(crate) fn heard<const T: usize, const A: usize>(tr: &mut Tracker<T, A>, mac: u32, sn: &str, agl: f32, now: u64) {
     let mut o = obs(Transport::WifiBeacon, now);
     o.mac = [0x02, 0, (mac >> 24) as u8, (mac >> 16) as u8, (mac >> 8) as u8, mac as u8];
     let msgs = [basic(sn), Message::Location(loc(C.0 + 0.001, C.1, agl))];
@@ -594,4 +594,19 @@ fn engine_sizes() {
         core::mem::size_of::<Engine<32>>(),
         core::mem::size_of::<Engine<96>>()
     );
+}
+
+/// The wide screen's words: metres first, feet where the rule is in feet,
+/// and every rule fits its 48 characters.
+#[test]
+fn screen_words_lead_with_metres() {
+    let f = |rule, ev| Flag { rule, area: None, level: 2, ev, src: 0, name: heapless::String::new(), secs: 1.0, no_clock: false };
+    let h = crate::text::screen_words(&f(Rule::Height, [260.0, 5.0, 121.92]));
+    assert_eq!(h.as_str(), "260 m (853 ft) above ground, limit 400 ft");
+    let v = crate::text::screen_words(&f(Rule::Vlos, [640.0, 1.0, 10.0]));
+    assert_eq!(v.as_str(), "640 m from its pilot");
+    for rule in (0..=20).filter_map(Rule::from_u8) {
+        let t = crate::text::screen_words(&f(rule, [9_999.0, 9_999.0, 9_999.0]));
+        assert!(!t.is_empty(), "{rule:?}");
+    }
 }

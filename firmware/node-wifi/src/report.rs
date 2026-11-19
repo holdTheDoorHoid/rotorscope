@@ -166,7 +166,9 @@ pub fn hello_json(images: &[Option<&'static str>]) {
         faulttest: cfg!(feature = "faulttest"),
         bench: node_common::bench_list(env!("ROTORSCOPE_BENCH_LIST")),
     };
-    emit(&line, &mut [0u8; 768], "hello");
+    // Worst case about 1 KB: a 49-hop plan (`role::MAX_HOPS`, each hop up to
+    // `[177,10000],`) is 589 bytes, eight bench names and eight slots.
+    emit(&line, &mut [0u8; 1280], "hello");
     // Bench features compiled in (build.rs): say so, with the tag
     // tools/flash-node.sh looks for in the ELF.
     if !env!("ROTORSCOPE_BENCH_LIST").is_empty() {
@@ -175,6 +177,17 @@ pub fn hello_json(images: &[Option<&'static str>]) {
             env!("ROTORSCOPE_BENCH_TAG")
         );
     }
+}
+
+/// `Frame::NodeHealth` (protocol 14), every 5 s with the Hello: shed per
+/// kind, alternations, and from `node_common` the robustness counters and
+/// (ESP-NOW) the link's delivery accounting and refusals. Queued as the
+/// node's own health, so a flood of other frames cannot crowd it out.
+pub fn node_health_hub() {
+    let (shed, _, _) = shed_counts();
+    let shed = [shed.rid_known, shed.rid_new, shed.health, shed.threat, shed.wdrone, shed.dji, shed.open, shed.other];
+    let alt = [crate::detect::DJI_ALT.load(Relaxed), crate::detect::WIFI_DRONE_ALT.load(Relaxed)];
+    to_hub_as(Kind::Health, &link::Frame::NodeHealth(node_common::node_health(shed, alt)));
 }
 
 /// Hello, then Status (protocol 4: the hub learns `can` and the plan id).
@@ -201,7 +214,8 @@ struct AssignLine<'a> {
 
 /// A new job from the hub, applied.
 pub fn assign_json(job: &role::Job) {
-    emit(&AssignLine { t: "assign", role: job.role, plan_id: job.id, plan: &job.plan }, &mut [0u8; 512], "assign");
+    // Worst case 645 bytes: a 49-hop plan is 589 (see `hello_json`).
+    emit(&AssignLine { t: "assign", role: job.role, plan_id: job.id, plan: &job.plan }, &mut [0u8; 768], "assign");
 }
 
 /// About to switch image for `a`.
@@ -299,6 +313,12 @@ pub struct StatsLine {
     /// Drone networks (`wifiwatch::drones::Totals`): [learned, displaced
     /// while holding evidence, newcomers that had to wait], totals.
     pub dnet: [u32; 3],
+    /// Node robustness (`node_common::health`, WP-13 section 7): [plans
+    /// refused, deaf fall-backs, of those blamed on the plan, of those an
+    /// outage of the gateway, Assigns refused while a blamed plan id is
+    /// refused, image switches refused, seconds until a switch is allowed].
+    /// Totals since boot, then the wait now.
+    pub robust: [u32; 7],
 }
 
 pub fn stats_json(line: &StatsLine) {

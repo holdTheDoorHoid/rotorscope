@@ -79,6 +79,8 @@ pub mod util;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod fuzz_tests;
 
 pub use link::{ThreatKind, ThreatSighting};
 pub use tools::TOOLS;

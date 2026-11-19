@@ -12,7 +12,7 @@ use core::fmt::Write;
 use crate::draw::{self, *};
 use crate::model::*;
 use crate::theme::Palette;
-use crate::ui::{Mode, Page, Theme, Ui};
+use crate::ui::{AutoStatus, Mode, Page, SettingsRow, ThemeMode, Ui};
 
 pub const WIDTH: i32 = 320;
 pub const HEIGHT: i32 = 240;
@@ -36,7 +36,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
     s: &UiState,
     d: &mut D,
 ) -> Result<(), D::Error> {
-    let p = ui.settings().theme.palette();
+    let p = ui.effective_theme(s).palette();
     d.clear(p.bg)?;
 
     match ui.mode() {
@@ -54,7 +54,7 @@ pub fn render<D: DrawTarget<Color = Rgb565>>(
     status_bar(s, p, d)?;
     caveats(s, p, d)?;
     if let Some(a) = ui.alert() {
-        alert(a.key, a.more, s, p, d)?;
+        alert(ui.alert_drone(s).map_or(a.key, |d| d.key), a.more, s, p, d)?;
     } else if ui.page_toast() {
         toast(ui.page().title(), p, d)?;
     }
@@ -75,7 +75,7 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     if let Some(badge) = s.gps.integrity.badge() {
         // The hub's own GPS looks jammed or faked: say so instead of the
         // satellite count, boxed like a missing fix.
-        x = text_boxed(d, badge, x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        x = text_boxed(d, badge, x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
     } else {
         match s.gps.fix {
             Fix::Fix2D | Fix::Fix3D => {
@@ -92,10 +92,10 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
                 x = text(d, "MAN", x + 4, y + 2, F_SMALL, p.dim)?;
             }
             Fix::None => {
-                x = text_boxed(d, "NO FIX", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+                x = text_boxed(d, "NO FIX", x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
             }
             Fix::Absent => {
-                x = text_boxed(d, "NO GPS", x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+                x = text_boxed(d, "NO GPS", x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
             }
         }
     }
@@ -108,26 +108,29 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
     // need to look up now.
     let near = s.conflict.as_ref().is_some_and(|c| c.level >= 2);
     let threat = if near {
-        Some("AIRCRAFT")
+        Some("PLANE NEAR")
     } else if s.threats.jammed {
         Some("JAMMED")
     } else if s.area_gnss.is_some_and(|g| g.spoofing) {
         // GPS around the unit is being faked or jammed (aircraft and
         // drones say so): drone positions may be wrong.
-        Some("AREA FAKE")
+        Some("AREA GPS?")
     } else if s.area_gnss.is_some_and(|g| g.jamming) {
         Some("AREA JAM")
     } else if s.threats.flood_per_s > 0 {
         // Forged drone IDs by the hundred: unconfirmed rows are mostly
         // fakes (tracker `probation`).
-        Some("ID FLOOD")
+        Some("FAKE IDS")
     } else if s.threats.active > 0 {
         Some("ATTACK")
     } else {
         None
     };
     if let Some(t) = threat {
-        x = text_boxed(d, t, x - 2, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+        x = text_boxed(d, t, x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
+    } else if !s.nodes.is_empty() && s.nodes.iter().all(|n| !n.alive || !n.kind.hears_drones()) {
+        // No receiver answering: the empty radar must not look calm.
+        x = text_boxed(d, "NOT LISTENING", x - 2, 1, F_BAR, p.warn_ink, p.warn, 2)?;
     } else {
         // Nodes: a filled dot when alive, a hollow crossed one when not, each
         // with its label so the meaning never rests on colour. Four or more
@@ -135,14 +138,21 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         let (to_label, gap) = if s.nodes.len() > 3 { (10, 2) } else { (11, 6) };
         for n in &s.nodes {
             let c = Point::new(x + 4, BAR_H / 2);
+            if !n.alive {
+                // Down: a boxed "5 DOWN", not just a slashed dot.
+                let mut t: String<12> = String::new();
+                let _ = write!(t, "{} DOWN", n.kind.tiny());
+                x = text_boxed(d, &t, x - 1, 1, F_BAR, p.warn_ink, p.warn, 2)? + gap;
+                continue;
+            }
             if n.alive {
                 circle(d, c, 4, p.fg, true, 1)?;
             } else {
-                circle(d, c, 4, p.accent, false, 1)?;
-                line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.accent, 1)?;
+                circle(d, c, 4, p.warn, false, 1)?;
+                line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.warn, 1)?;
             }
-            let col = if n.alive { p.fg } else { p.accent };
-            x = text(d, n.kind.short(), x + to_label, y, F_BAR, col)?;
+            let col = if n.alive { p.fg } else { p.warn };
+            x = text(d, n.kind.tiny(), x + to_label, y, F_BAR, col)?;
             x += gap;
         }
     }
@@ -180,11 +190,11 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
                 7,
                 level,
                 5,
-                if pct <= 15 { p.accent } else { p.fg },
+                if pct <= 15 { p.warn } else { p.fg },
             )?;
             rx = bx - 3;
             rx = if pct <= 15 {
-                text_right(d, &b, rx, y, F_BAR, p.accent)?
+                text_right(d, &b, rx, y, F_BAR, p.warn)?
             } else {
                 text_right(d, &b, rx, y, F_BAR, p.fg)?
             } - 9;
@@ -197,7 +207,7 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         // show REC for that.
         SdLog::Recording if s.caveats.evidence.is_some() => {
             let w = width("NO EVID", F_BAR) + 4;
-            text_boxed(d, "NO EVID", rx - w, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+            text_boxed(d, "NO EVID", rx - w, 1, F_BAR, p.warn_ink, p.warn, 2)?;
         }
         SdLog::Recording => {
             let l = text_right(d, "REC", rx, y, F_BAR, p.fg)?;
@@ -209,7 +219,7 @@ fn status_bar<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
         }
         SdLog::Error => {
             let w = width("SD!", F_BAR) + 4;
-            text_boxed(d, "SD!", rx - w, 1, F_BAR, p.accent_ink, p.accent, 2)?;
+            text_boxed(d, "SD!", rx - w, 1, F_BAR, p.warn_ink, p.warn, 2)?;
         }
     }
     let _ = x;
@@ -229,10 +239,12 @@ fn caveats<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -
     let (cw, sp) = (F_SMALL.character_size.width as i32, F_SMALL.character_spacing as i32);
     let fits = ((WIDTH - 6 + sp) / (cw + sp)) as usize;
     for (l, threat) in lines.iter().flatten() {
-        // A drone's threat level: red from Warning up.
-        let bg = if *threat && s.threat_strip.as_ref().is_some_and(|t| t.level >= 3) { p.rec } else { p.accent };
+        // A drone's threat level: red from Warning up; the rest (Caution,
+        // and the caveats) in the caution colour.
+        let red = *threat && s.threat_strip.as_ref().is_some_and(|t| t.level >= 3);
+        let (bg, ink) = if red { (p.rec, p.accent_ink) } else { (p.warn, p.warn_ink) };
         fill(d, 0, y, WIDTH, CAVEAT_H, bg)?;
-        text(d, &l[..l.len().min(fits)], 3, y + 1, F_SMALL, p.accent_ink)?;
+        text(d, &l[..l.len().min(fits)], 3, y + 1, F_SMALL, ink)?;
         y += CAVEAT_H;
     }
     Ok(())
@@ -476,19 +488,29 @@ fn readout<D: DrawTarget<Color = Rgb565>>(
             text(d, &b, x0, 163, F_BODY, col)?;
             if dv.disputed {
                 // Two transmitters claim it: say so where the ID would be.
-                text_boxed(d, "DISPUTED", x0, 179, F_SMALL, p.accent_ink, p.accent, 2)?;
+                text_boxed(d, "DISPUTED", x0, 179, F_SMALL, p.warn_ink, p.warn, 2)?;
             } else {
                 text(d, &short_id(dv, 11), x0, 180, F_LABEL, p.dim)?;
             }
         }
         None => {
-            let msg: &[&str] = if s.drones.is_empty() {
-                &["Listening", "for drones"]
+            let ws = s.warnings();
+            let msg: &[&str] = if ws.iter().any(|w| matches!(w, Warning::NotListening { .. })) {
+                &["NOT", "LISTENING:", "no receivers"]
+            } else if s.threats.jammed {
+                &["JAMMED:", "drones may", "be missed"]
+            } else if ws.iter().any(|w| matches!(w, Warning::NodesDown { .. })) {
+                &["NOT ALL", "RECEIVERS", "LISTENING"]
+            } else if s.drones.is_empty() {
+                &["No drone IDs", "heard. Drones", "without Remote", "ID may only", "show on Signals"]
             } else {
                 &["No drone", "position yet"]
             };
+            // Ten characters fit in the big face; longer notes go small.
+            let big_ok = msg.iter().all(|l| l.len() <= 10);
+            let (f, pitch) = if big_ok { (F_MED, 18) } else { (F_SMALL, 12) };
             for (i, l) in msg.iter().enumerate() {
-                text(d, l, x0, BAR_H + 40 + 18 * i as i32, F_MED, p.dim)?;
+                text(d, l, x0, BAR_H + 40 + pitch * i as i32, f, p.dim)?;
             }
         }
     }
@@ -547,16 +569,16 @@ fn count_block<D: DrawTarget<Color = Rgb565>>(
 // ---------------------------------------------------------------------------
 
 fn no_fix_banner<D: DrawTarget<Color = Rgb565>>(p: &Palette, d: &mut D, y: i32) -> Res<D::Error> {
-    fill(d, 0, y, WIDTH, 18, p.accent)?;
-    text(d, "!", 6, y + 2, F_BAR, p.accent_ink)?;
-    text(d, "NO POSITION", 18, y + 2, F_BAR, p.accent_ink)?;
+    fill(d, 0, y, WIDTH, 18, p.warn)?;
+    text(d, "!", 6, y + 2, F_BAR, p.warn_ink)?;
+    text(d, "NO POSITION", 18, y + 2, F_BAR, p.warn_ink)?;
     text(
         d,
         "- distances unavailable",
         18 + width("NO POSITION ", F_BAR),
         y + 3,
         F_LABEL,
-        p.accent_ink,
+        p.warn_ink,
     )?;
     Ok(())
 }
@@ -651,7 +673,7 @@ fn rows<D: DrawTarget<Color = Rgb565>>(
             if s.threats.jammed {
                 "Jamming: may be missing drones"
             } else {
-                "Listening on every radio"
+                "No IDs heard (see Signals)"
             },
             WIDTH / 2,
             top + 50,
@@ -1031,7 +1053,7 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
     // What the data is: a claim. Quiet unless two transmitters disagree.
     label(d, "CLAIM", y)?;
     if dv.disputed {
-        let x = text_boxed(d, "DISPUTED", vx, y - 1, F_SMALL, p.accent_ink, p.accent, 2)?;
+        let x = text_boxed(d, "DISPUTED", vx, y - 1, F_SMALL, p.warn_ink, p.warn, 2)?;
         b.clear();
         match (dv.other_claim, dv.claims_apart_m) {
             (Some(o), _) => {
@@ -1053,7 +1075,7 @@ fn detail<D: DrawTarget<Color = Rgb565>>(
 
     text(
         d,
-        "UP/DN next drone   hold SEL back",
+        "UP/DN next drone   SEL back",
         4,
         HEIGHT - 12,
         F_SMALL,
@@ -1238,7 +1260,7 @@ fn signals<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) -
 // Flags (PLAN.md Phase 12)
 // ---------------------------------------------------------------------------
 
-/// Level colours: Alert in the accent, Warning in full ink, Watch and Note
+/// Level colours: Alert in the caution colour, Warning in full ink, Watch and Note
 /// quieter. Words carry the meaning too (no colour-only signal).
 fn level_label(level: u8) -> &'static str {
     match level {
@@ -1293,7 +1315,7 @@ fn flags_page<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D
             break;
         }
         let col = match r.level {
-            3 => p.accent,
+            3 => p.warn,
             2 => p.fg,
             _ => p.dim,
         };
@@ -1354,18 +1376,18 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
     hline(d, 0, WIDTH, y + 11, p.grid)?;
     y += 15;
     for (i, n) in s.nodes.iter().enumerate() {
-        let col = if n.alive { p.fg } else { p.accent };
+        let col = if n.alive { p.fg } else { p.warn };
         let c = Point::new(9, y + 6);
         if n.alive {
             circle(d, c, 4, p.fg, true, 1)?;
         } else {
-            circle(d, c, 4, p.accent, false, 1)?;
-            line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.accent, 1)?;
+            circle(d, c, 4, p.warn, false, 1)?;
+            line(d, c + Point::new(-3, 3), c + Point::new(3, -3), p.warn, 1)?;
         }
         text(d, n.kind.long(), 18, y, F_BODY, col)?;
         if n.alive {
             for (x, v) in [
-                (112, n.frames_per_s as u32),
+                (112, n.frames_per_s.map_or(0, u32::from)),
                 (164, n.rid_found),
                 (222, n.drops),
             ] {
@@ -1373,7 +1395,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
                 let _ = write!(b, "{v}");
                 text_right(d, &b, x + 40, y, F_BODY, col)?;
             }
-            text_right(d, &uptime(n.uptime_s), 314, y, F_BODY, col)?;
+            text_right(d, &uptime_short(n.uptime_s), 314, y, F_BODY, col)?;
         } else {
             text_right(d, "NOT RESPONDING", 314, y, F_BODY, col)?;
         }
@@ -1388,13 +1410,13 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
                 18,
                 y - 4,
                 F_SMALL,
-                if a.applied { p.dim } else { p.accent },
+                if a.applied { p.dim } else { p.warn },
             )?;
             y += 9;
         }
     }
     if s.nodes.is_empty() {
-        text(d, "no radio nodes reported", 18, y, F_LABEL, p.accent)?;
+        text(d, "no radio nodes reported", 18, y, F_LABEL, p.warn)?;
         y += ROW_H;
     }
 
@@ -1457,7 +1479,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
     }
     if let Some(a) = &s.aircraft {
         // A quiet line, never an alert: crewed aircraft are not what the
-        // unit hunts. "LOW" is the only emphasis, in the accent colour.
+        // unit hunts. "LOW" is the only emphasis, in the caution colour.
         text(d, "AIRCRAFT", 4, y + 2, F_SMALL, p.dim)?;
         let mut b: String<40> = String::new();
         if a.total == 0 {
@@ -1469,7 +1491,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         if a.low_nearby > 0 {
             b.clear();
             let _ = write!(b, " {} LOW", a.low_nearby);
-            x = text(d, &b, x, y, F_BODY, p.accent)?;
+            x = text(d, &b, x, y, F_BODY, p.warn)?;
         }
         if let Some(n) = &a.nearest {
             b.clear();
@@ -1501,7 +1523,7 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
             let ft = (z * 3.28084) as i32;
             let _ = write!(b, " {ft:+}ft");
         }
-        let col = if c.level >= 2 { p.accent } else { p.fg };
+        let col = if c.level >= 2 { p.warn } else { p.fg };
         text(d, &b, 70, y, F_BODY, col)?;
         hint = false;
     }
@@ -1527,21 +1549,21 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
         if g.own_agrees {
             let _ = b.push_str(" +hub");
         }
-        text(d, &b, 70, y, F_BODY, p.accent)?;
+        text(d, &b, 70, y, F_BODY, p.warn)?;
         hint = false;
     }
-    // Attack and jamming alarms, sounding and silenced (WP-11b): the strip
+    // Attack and jamming alarms, active and silenced (WP-11b): the strip
     // says what is muted and until when; this says what it is hiding.
     let (t, q) = (s.threats, s.caveats.silenced);
     if (t.active > 0 || t.muted > 0) && y + 17 + 14 <= HEIGHT {
         y += 17;
         text(d, "ALARMS", 4, y + 2, F_SMALL, p.dim)?;
         let mut b: String<40> = String::new();
-        let _ = write!(b, "{} sounding, {} silenced", t.active, t.muted);
+        let _ = write!(b, "{} active, {} silenced", t.active, t.muted);
         if q.snoozed > 0 {
             let _ = b.push_str(" (snooze)");
         }
-        text(d, &b, 70, y, F_BODY, if t.active > 0 { p.accent } else { p.fg })?;
+        text(d, &b, 70, y, F_BODY, if t.active > 0 { p.warn } else { p.fg })?;
         hint = false;
     }
     if hint {
@@ -1554,62 +1576,159 @@ fn health<D: DrawTarget<Color = Rgb565>>(s: &UiState, p: &Palette, d: &mut D) ->
 // Settings
 // ---------------------------------------------------------------------------
 
+/// What a settings row says: its name and its value (shared with the wide
+/// renderer, which has room for longer names). Brightness's value is the
+/// level and any Red Night cap (it is also drawn as bars). Action rows say
+/// what a press will do, or how the last one went: "done" only once the hub
+/// has said so.
+pub(crate) fn settings_text(ui: &Ui, s: &UiState, row: SettingsRow, short: bool, out: &mut String<64>) -> &'static str {
+    use crate::ui::{ActionState, Request, Theme};
+    let st = ui.settings();
+    let act = ui.action().filter(|a| a.row == row);
+    let t = s.threats;
+    out.clear();
+    // How an action went, if it ran on this row.
+    let went = |out: &mut String<64>, done: &str| -> bool {
+        match act.map(|a| a.state) {
+            Some(ActionState::Pending) => out.push_str("Working...").is_ok(),
+            Some(ActionState::Done) => out.push_str(done).is_ok(),
+            Some(ActionState::Failed(why)) => out.push_str(why).is_ok(),
+            None => false,
+        }
+    };
+    let confirm = ui.confirming() == Some(row);
+    match row {
+        SettingsRow::Theme => {
+            match st.theme {
+                ThemeMode::Fixed(t) => {
+                    let _ = out.push_str(t.name());
+                }
+                ThemeMode::Auto => {
+                    let _ = out.push_str("Auto");
+                    let what = match ui.auto_status(s) {
+                        AutoStatus::Waiting { day: None } => " (no GPS)",
+                        AutoStatus::Waiting { day: Some(_) } => " (no time)",
+                        AutoStatus::Sun { day: true, .. } => " (day)",
+                        AutoStatus::Sun { day: false, .. } => " (night)",
+                        AutoStatus::Off => "",
+                    };
+                    let _ = out.push_str(what);
+                }
+            }
+            "Theme"
+        }
+        SettingsRow::DayTheme => {
+            let _ = out.push_str(st.day_theme.name());
+            "Day theme"
+        }
+        SettingsRow::NightTheme => {
+            let _ = out.push_str(st.night_theme.name());
+            "Night theme"
+        }
+        SettingsRow::SwitchAt => {
+            let _ = out.push_str(match (st.switch_at, short) {
+                (crate::ui::SwitchAt::Sunrise, true) => "Sunrise/set",
+                (a, _) => a.name(),
+            });
+            "Switch at"
+        }
+        SettingsRow::Brightness => {
+            let b = st.brightness.clamp(1, 5);
+            let cap = crate::ui::RED_NIGHT_MAX_BRIGHTNESS;
+            let _ = write!(out, "{b}");
+            if b > cap && ui.effective_theme(s) == Theme::RedNight {
+                let _ = write!(out, " ({cap} in Red Night)");
+            } else if b > cap && st.theme == ThemeMode::Auto && st.night_theme == Theme::RedNight {
+                let _ = write!(out, " ({cap} at night)");
+            }
+            "Brightness"
+        }
+        SettingsRow::Buzzer => {
+            let _ = out.push_str(if st.buzzer { "On" } else { "Off (muted)" });
+            "Buzzer"
+        }
+        // The hub learns where it stands and treats a GPS position far from
+        // there as faked: after moving it on purpose, say so. While the hub
+        // waits for a decision on a new place: use it.
+        SettingsRow::HubMoved if s.gps.home_pending || act.is_some_and(|a| a.request == Request::AcceptHome) => {
+            if !went(out, "Spot in use") {
+                let _ = out.push_str(if confirm { if short { "Press again" } else { "Press again to confirm" } } else { "Use this spot" });
+            }
+            "New spot found"
+        }
+        SettingsRow::HubMoved => {
+            if !went(out, if short { "Learning spot" } else { "Learning new spot..." }) {
+                let _ = out.push_str(if confirm { if short { "Press again" } else { "Press again to confirm" } } else { "I moved the hub" });
+            }
+            "Hub location"
+        }
+        // Nuisance alarms first (muted for 2 h); safety-critical ones only
+        // when nothing else sounds, and only snoozed (5 min): one press
+        // never silences a jammer along with a nuisance. A venue's known
+        // false alarm goes in the site file. The row names what it acts on.
+        SettingsRow::Alarms => {
+            let done = match act.map(|a| a.request) {
+                Some(Request::MuteAlarms { .. }) => "Muted",
+                Some(Request::SnoozeAlarms { .. }) => "Snoozed",
+                _ => "Unmuted",
+            };
+            let name = |w: &'static str| if w.is_empty() { "alarms" } else { w };
+            if !went(out, done) {
+                let _ = if short && t.mutable > 0 {
+                    write!(out, "Mute {}, 2 h", t.mutable)
+                } else if short && t.snoozable > 0 {
+                    write!(out, "Snooze {}, 5 min", t.snoozable)
+                } else if t.mutable > 0 {
+                    write!(out, "Mute {}", name(t.mutable_what)).and_then(|_| {
+                        if t.mutable > 1 { write!(out, " +{}", t.mutable - 1) } else { Ok(()) }
+                    }).and_then(|_| write!(out, " \u{b7} 2 h"))
+                } else if t.snoozable > 0 {
+                    write!(out, "Snooze {}", name(t.snoozable_what)).and_then(|_| {
+                        if t.snoozable > 1 { write!(out, " +{}", t.snoozable - 1) } else { Ok(()) }
+                    }).and_then(|_| write!(out, " \u{b7} 5 min"))
+                } else if s.caveats.silenced.operator() > 0 {
+                    write!(out, "Unmute {}", s.caveats.silenced.operator())
+                } else {
+                    write!(out, "None active")
+                };
+            }
+            "Alarms"
+        }
+        // A wired or bench kit: every node stands at the hub.
+        SettingsRow::NodesAtHub => {
+            if !went(out, "Placed") {
+                let _ = out.push_str(if confirm { if short { "Press again" } else { "Press again to confirm" } } else { "Place all here" });
+            }
+            "Nodes at hub"
+        }
+    }
+}
+
 fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d: &mut D) -> Res<D::Error> {
     let y0 = BAR_H + 4;
     text(d, "SETTINGS", 4, y0, F_BAR, p.fg)?;
     let st = ui.settings();
     let editing = ui.mode() == Mode::Edit;
-    let done = |row: usize| ui.done_row() == Some(row);
-    let mut alarms: String<20> = String::new();
-    let t = s.threats;
-    // Nuisance alarms first (muted for 2 h); safety-critical ones only when
-    // nothing else sounds, and only snoozed (5 min): one press never
-    // silences a jammer along with a nuisance.
-    let _ = if done(4) {
-        write!(alarms, "Done")
-    } else if t.mutable > 0 {
-        write!(alarms, "Mute {} (2h)", t.mutable)
-    } else if t.snoozable > 0 {
-        write!(alarms, "Snooze {} (5m)", t.snoozable)
-    } else if s.caveats.silenced.operator() > 0 {
-        write!(alarms, "Unmute {}", s.caveats.silenced.operator())
-    } else {
-        write!(alarms, "None sounding")
-    };
-    let rows: [(&str, &str); 6] = [
-        (
-            "Theme",
-            match st.theme {
-                Theme::Night => "Night (dark)",
-                Theme::Day => "Day (light)",
-            },
-        ),
-        ("Brightness", ""),
-        ("Buzzer", if st.buzzer { "On" } else { "Off (muted)" }),
-        // The hub learns where it stands and treats a GPS position far from
-        // there as faked: after moving it on purpose, reset that.
-        // While the hub waits for a decision on a new place: accept it.
-        if s.gps.home_pending {
-            ("New home", if done(3) { "Accepted" } else { "Accept here" })
-        } else {
-            ("Hub moved", if done(3) { "Relearning" } else { "Reset GPS" })
-        },
-        // Nuisance alarms: mute them for a while (a venue's known false
-        // alarm goes in the site file). Jamming and the like: snooze only.
-        ("Alarms", alarms.as_str()),
-        // A wired or bench kit: every node stands at the hub.
-        ("Nodes at hub", if done(5) { "Placed" } else { "Place all here" }),
-    ];
-    let mut y = y0 + 22;
-    for (i, (k, v)) in rows.iter().enumerate() {
+    let rows = ui.rows();
+    // Six rows fit; with Auto's three more the list scrolls to keep the
+    // cursor in view, with a marker where rows are hidden.
+    const PITCH: i32 = 30;
+    let top = y0 + 22;
+    let fit = ((HEIGHT - 14 - top) / PITCH) as usize;
+    let cur = if editing { ui.settings_row() } else { 0 };
+    let start = if cur >= fit { cur + 1 - fit } else { 0 };
+    let mut v: String<64> = String::new();
+    let mut y = top;
+    for (i, row) in rows.iter().enumerate().skip(start).take(fit) {
         let sel = editing && ui.settings_row() == i;
-        let (fg, bg) = if sel { (p.bg, p.fg) } else { (p.fg, p.bg) };
+        let fg = if sel { p.bg } else { p.fg };
         if sel {
             fill(d, 0, y - 3, WIDTH, 26, p.fg)?;
             text(d, ">", 6, y, F_LARGE, fg)?;
         }
+        let k = settings_text(ui, s, *row, true, &mut v);
         text(d, k, 24, y, F_LARGE, fg)?;
-        if i == 1 {
+        if *row == SettingsRow::Brightness {
             for lvl in 0..5u8 {
                 let x = 170 + i32::from(lvl) * 22;
                 let h = 6 + i32::from(lvl) * 3;
@@ -1620,10 +1739,17 @@ fn settings<D: DrawTarget<Color = Rgb565>>(ui: &Ui, s: &UiState, p: &Palette, d:
                 }
             }
         } else {
-            text(d, v, 170, y, F_LARGE, fg)?;
+            // Whole characters that fit the 150 px value column.
+            let fits = v.char_indices().nth(15).map_or(v.len(), |(i, _)| i);
+            text(d, &v[..fits], 170, y, F_LARGE, fg)?;
         }
-        let _ = bg;
-        y += 30;
+        y += PITCH;
+    }
+    if start > 0 {
+        text_right(d, "^ more", WIDTH - 4, y0 + 2, F_SMALL, p.dim)?;
+    }
+    if start + fit < rows.len() {
+        text_right(d, "v more", WIDTH - 4, HEIGHT - 12, F_SMALL, p.dim)?;
     }
     let hint = if editing {
         "UP/DN choose  SEL change  hold SEL done"

@@ -22,6 +22,27 @@
 //!   --allow-test-key     accept the published test key (this project's
 //!                        own tests only: anyone can sign with it)
 //!   --quiet              verdict lines only
+//!   --check-timestamps DIR   (bundles) write each RFC 3161 token, and the
+//!                        chain and revocation list stored with it, to DIR
+//!                        and check its signature with the system's
+//!                        `openssl ts -verify` at the token's own time; the
+//!                        command is printed, so it can be run elsewhere when
+//!                        openssl is not installed here
+//!   --tsa-ca FILE        a time-stamp authority's root certificate (PEM)
+//!                        obtained OUTSIDE the bundle, e.g. from its website;
+//!                        repeat for each authority. Without it the check
+//!                        uses the chain the server stored, which proves
+//!                        less (the server supplied it)
+//!   --btc-header H:HEX   (bundles) the 80-byte header of Bitcoin block H, hex,
+//!                        to check OpenTimestamps proofs against; repeat
+//!   --btc-headers FILE   the same, one `H HEX` per line, `#` comments.
+//!                        Headers are never fetched: get them from your own
+//!                        Bitcoin node (bitcoin-cli getblockheader
+//!                        $(bitcoin-cli getblockhash H) false) or from
+//!                        several sources you trust. A pending proof is
+//!                        reported as not yet anchored; with
+//!                        --check-timestamps each proof is also written out
+//!                        as DIR/stamp-N.ots for other OpenTimestamps tools
 //!
 //! exit codes:
 //!   0  VERIFIED: every link and signature checks out against a key given
@@ -50,16 +71,47 @@ use std::process::ExitCode;
 use evidence::format;
 use evidence::verify::{self, hex, Input, Level, Options, Report};
 
+#[cfg(test)]
+mod fuzz_tests;
+
 fn usage() -> ExitCode {
     eprintln!("usage: evidence-verify [--list] [--key HEX | --keys FILE] [--allow-gaps] [--allow-test-key] [--quiet] <EVIDENCE-dir | EVnnnnnn.EVL... | records.bin | bundle.json>");
     eprintln!("  --key HEX    the unit's public key (130 hex digits), confirmed outside the log:");
     eprintln!("               from the unit's screen or console at setup, or your own key record");
     eprintln!("  --keys FILE  trusted keys, one per line: HEX then a label; # comments");
+    eprintln!("  --check-timestamps DIR [--tsa-ca ROOT.pem]...  check a bundle's time-stamp tokens with openssl");
+    eprintln!("  --btc-header H:HEX | --btc-headers FILE   Bitcoin block headers (you supply them) for OpenTimestamps proofs");
     eprintln!("  Without --key or --keys the log is checked only against the key it names itself,");
     eprintln!("  which anyone could have generated: the result is never VERIFIED.");
     eprintln!("exit: 0 verified, 1 failed, 2 could not run, 3 signer checked but gaps or unsigned records,");
     eprintln!("      4 self-consistent but signer not checked (no key supplied)");
     ExitCode::from(2)
+}
+
+/// `HEIGHT:HEX` (or `HEIGHT HEX`).
+fn parse_header_arg(s: &str) -> Option<(u64, evidence::ots::BlockHeader)> {
+    let (h, x) = s.split_once([':', ' '])?;
+    Some((h.trim().parse().ok()?, evidence::ots::BlockHeader::from_hex(x)?))
+}
+
+/// A headers file: `HEIGHT HEX` per line, `#` comments, blank lines.
+fn load_headers(path: &Path) -> Result<Vec<(u64, evidence::ots::BlockHeader)>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(h) = line.split_once(char::is_whitespace).and_then(|(h, x)| parse_header_arg(&format!("{h}:{}", x.trim()))) else {
+            return Err(format!("{} line {}: not HEIGHT and an 80-byte header in hex (160 digits)", path.display(), i + 1));
+        };
+        out.push(h);
+    }
+    if out.is_empty() {
+        return Err(format!("{}: no headers", path.display()));
+    }
+    Ok(out)
 }
 
 fn parse_key(h: &str) -> Option<[u8; 65]> {
@@ -94,6 +146,9 @@ fn main() -> ExitCode {
     let mut quiet = false;
     let mut opts = Options::default();
     let mut paths: Vec<PathBuf> = Vec::new();
+    let mut stamp_dir: Option<PathBuf> = None;
+    let mut tsa_cas: Vec<PathBuf> = Vec::new();
+    let mut headers_given = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -125,6 +180,42 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--check-timestamps" => match args.next() {
+                Some(d) => stamp_dir = Some(d.into()),
+                None => {
+                    eprintln!("--check-timestamps needs a folder to write the tokens to");
+                    return usage();
+                }
+            },
+            "--tsa-ca" => match args.next() {
+                Some(f) => tsa_cas.push(f.into()),
+                None => {
+                    eprintln!("--tsa-ca needs a PEM file");
+                    return usage();
+                }
+            },
+            "--btc-header" => {
+                let Some(h) = args.next().as_deref().and_then(parse_header_arg) else {
+                    eprintln!("--btc-header needs HEIGHT:HEX (the 80-byte block header, 160 hex digits)");
+                    return usage();
+                };
+                opts.btc_headers.push(h);
+                headers_given = true;
+            }
+            "--btc-headers" => {
+                let Some(f) = args.next() else {
+                    eprintln!("--btc-headers needs a file");
+                    return usage();
+                };
+                match load_headers(Path::new(&f)) {
+                    Ok(h) => opts.btc_headers.extend(h),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                headers_given = true;
+            }
             "-h" | "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -137,7 +228,20 @@ fn main() -> ExitCode {
         return usage();
     }
 
-    let report = if paths.len() == 1 && paths[0].extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+    let is_bundle = paths.len() == 1 && paths[0].extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if (stamp_dir.is_some() || !tsa_cas.is_empty()) && !is_bundle {
+        eprintln!("--check-timestamps and --tsa-ca take one export bundle (.json)");
+        return ExitCode::from(2);
+    }
+    if headers_given && !is_bundle {
+        eprintln!("--btc-header and --btc-headers take one export bundle (.json)");
+        return ExitCode::from(2);
+    }
+    if !tsa_cas.is_empty() && stamp_dir.is_none() {
+        eprintln!("--tsa-ca goes with --check-timestamps DIR");
+        return ExitCode::from(2);
+    }
+    let mut report = if is_bundle {
         let bytes = match std::fs::read(&paths[0]) {
             Ok(b) => b,
             Err(e) => {
@@ -150,7 +254,14 @@ fn main() -> ExitCode {
             println!("bundle {}  SHA-256 {sha}", paths[0].display());
             println!("  (compare with the export entry in the server's audit log and the custody record)");
         }
-        verify::verify_bundle(&bytes, &opts)
+        let mut r = verify::verify_bundle(&bytes, &opts);
+        if let Some(dir) = &stamp_dir
+            && let Err(e) = check_timestamps(&bytes, dir, &tsa_cas, &mut r, quiet)
+        {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+        r
     } else {
         let inputs = match load(&paths) {
             Ok(i) => i,
@@ -166,13 +277,119 @@ fn main() -> ExitCode {
         }
         verify::verify(&inputs, &opts)
     };
+    report.findings.sort_by_key(|f| std::cmp::Reverse(f.level));
     if !quiet {
         print_report(&report, list);
     }
     let code = report.exit_code();
     println!("{}", report.verdict());
-    println!("{}", verify::NOT_PROVEN);
+    println!("{}", report.not_proven());
     ExitCode::from(code as u8)
+}
+
+/// `--check-timestamps`: each RFC 3161 token written to `dir` with what was
+/// stored beside it, and checked with `openssl ts -verify` at the token's
+/// own time against the roots given with `--tsa-ca` (or, saying so, the
+/// chain the server stored). Results are added to the report.
+fn check_timestamps(json: &[u8], dir: &Path, cas: &[PathBuf], rep: &mut Report, quiet: bool) -> Result<(), String> {
+    use evidence::verify::{Finding, Where};
+    let Ok(b) = verify::bundle::parse(json) else { return Ok(()) };
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let roots = if cas.is_empty() {
+        None
+    } else {
+        let mut all = Vec::new();
+        for c in cas {
+            all.extend(std::fs::read(c).map_err(|e| format!("{}: {e}", c.display()))?);
+            all.push(b'\n');
+        }
+        let p = dir.join("trusted-roots.pem");
+        std::fs::write(&p, all).map_err(|e| format!("{}: {e}", p.display()))?;
+        Some(p)
+    };
+    let openssl = std::process::Command::new("openssl").arg("version").output().is_ok_and(|o| o.status.success());
+    let mut add = |level: Level, at: String, what: String| rep.findings.push(Finding { level, at: Where { source: at, ..Default::default() }, what });
+    if !quiet {
+        println!("time-stamp tokens written to {}", dir.display());
+    }
+    for (i, t) in b.timestamps.iter().enumerate() {
+        let at = format!("time-stamp {i} ({})", t.authority);
+        if t.kind == verify::bundle::KIND_OTS {
+            // For other OpenTimestamps tools (e.g. `ots info`); the digest it
+            // is over is the imprint stored beside it.
+            if let Some(token) = evidence::b64::decode_vec(&t.token) {
+                let p = dir.join(format!("stamp-{i}.ots"));
+                std::fs::write(&p, &token).map_err(|e| format!("{}: {e}", p.display()))?;
+                if !quiet {
+                    println!("  {at}: OpenTimestamps proof over digest {}: {}", t.imprint, p.display());
+                }
+            }
+            continue;
+        }
+        if t.kind != verify::bundle::KIND_RFC3161 {
+            continue;
+        }
+        let Some(token) = evidence::b64::decode_vec(&t.token) else { continue };
+        let Ok(info) = evidence::tsp::tst_info(&token) else { continue };
+        let w = |name: String, bytes: &[u8]| -> Result<PathBuf, String> {
+            let p = dir.join(name);
+            std::fs::write(&p, bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+            Ok(p)
+        };
+        let tsr = w(format!("stamp-{i}.tsr"), &token)?;
+        let chain = match t.certs.as_deref().and_then(evidence::b64::decode_vec) {
+            Some(c) => Some(w(format!("stamp-{i}-chain.pem"), &c)?),
+            None => None,
+        };
+        if let Some(c) = t.revocation.as_deref().and_then(evidence::b64::decode_vec) {
+            let p = w(format!("stamp-{i}.crl"), &c)?;
+            if !quiet {
+                println!("  {at}: revocation list as fetched when stamped ({}): {} (openssl crl -in FILE -noout -text; add -inform DER if it is binary)", t.revocation_from.as_deref().unwrap_or("?"), p.display());
+            }
+        }
+        let (ca, outside) = match (&roots, &chain) {
+            (Some(r), _) => (r.clone(), true),
+            (None, Some(c)) => (c.clone(), false),
+            (None, None) => {
+                add(Level::Note, at, "signature not checked: no certificate to check it against (give the authority's root with --tsa-ca)".into());
+                continue;
+            }
+        };
+        let mut args: Vec<String> = vec!["ts".into(), "-verify".into(), "-in".into(), tsr.display().to_string(), "-digest".into(), t.imprint.clone(), "-CAfile".into(), ca.display().to_string()];
+        if outside && let Some(c) = &chain {
+            args.extend(["-untrusted".into(), c.display().to_string()]);
+        }
+        args.extend(["-attime".into(), (info.gen_time_ms / 1000).to_string()]);
+        if !quiet {
+            println!("  {at}: openssl {}", args.join(" "));
+        }
+        if !openssl {
+            add(Level::Note, at, "signature not checked here: openssl not found; run the command shown".into());
+            continue;
+        }
+        let out = std::process::Command::new("openssl").args(&args).output().map_err(|e| format!("openssl: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        if out.status.success() && text.contains("Verification: OK") {
+            let whose = if outside {
+                "the roots given with --tsa-ca".to_string()
+            } else {
+                "the certificate the server stored with it (it came from the server: give the authority's own root with --tsa-ca for an outside check)".to_string()
+            };
+            add(Level::Note, at, format!("openssl: the token's signature checks out against {whose}, at the token's time {}", verify::fmt_utc(info.gen_time_ms)));
+        } else {
+            // openssl's reason ("Verify error:...", or its error line), else its last line.
+            let why = text
+                .lines()
+                .find_map(|l| l.split_once("Verify error:").map(|(_, r)| r))
+                .or_else(|| text.lines().find(|l| l.contains("error:")).map(|l| l.rsplit(':').next().unwrap_or(l)))
+                .or_else(|| text.lines().rev().find(|l| !l.trim().is_empty()))
+                .unwrap_or("no output")
+                .trim()
+                .to_string();
+            add(Level::Fail, at, format!("openssl ts -verify failed: {why}"));
+        }
+    }
+    Ok(())
 }
 
 /// Directories expand to their EVnnnnnn.EVL files; card files are sorted by
@@ -245,6 +462,18 @@ fn print_report(r: &Report, list: bool) {
         if let Some(f) = c.fw_hash {
             println!("  firmware SHA-256 {}{}", hex(&f), if f == [0; 32] { " (not filled in: flashed without espflash)" } else { "" });
         }
+        if let Some(b) = c.build {
+            let state = match b.git_state {
+                format::boot::GIT_CLEAN => "",
+                format::boot::GIT_DIRTY => " WITH CHANGES",
+                _ => " (tree state unknown)",
+            };
+            println!(
+                "  built {} from source commit {}{state}",
+                verify::fmt_utc(b.built_unix_s.saturating_mul(1000)),
+                if b.git == [0; 20] { "unknown".to_string() } else { hex(&b.git) }
+            );
+        }
         match (c.utc_first, c.utc_last) {
             (Some(a), Some(b)) => println!("  UTC {} .. {}", verify::fmt_utc(a), verify::fmt_utc(b)),
             _ => println!("  UTC: none (no GPS time in any record)"),
@@ -253,6 +482,16 @@ fn print_report(r: &Report, list: bool) {
             "  time: {} records without UTC ({} no GPS time yet, {} GPS time untrusted), {} free-running; position: {} without, {} typed in",
             c.no_time, c.no_time - c.untrusted_time, c.untrusted_time, c.free_running, c.no_position, c.manual_position
         );
+        if let Some(k) = c.continuity {
+            println!(
+                "  boot counter {} ({}); previous boot {} with {} records stored{}",
+                k.counter,
+                evidence::continuity::Continuity::status_name(k.status),
+                if k.prev_boot == [0; 8] { "-".to_string() } else { hex(&k.prev_boot) },
+                k.prev_records,
+                c.vouched_by_next.map_or(String::new(), |l| format!("; records to #{l} vouched for by the next boot"))
+            );
+        }
         for (a, b) in &c.missing {
             println!("  missing records #{a}..#{b}");
         }

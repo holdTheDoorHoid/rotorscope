@@ -19,7 +19,7 @@ use core::{
 use docsplay::Display;
 use esp_hal::time::Duration;
 use esp_sync::NonReentrantMutex;
-use portable_atomic::{AtomicBool, AtomicU8, Ordering};
+use portable_atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use super::*;
 #[cfg(feature = "csi")]
@@ -61,6 +61,18 @@ static ESP_NOW_SEND_STATUS: AtomicBool = AtomicBool::new(true);
 
 static ESP_NOW_TX_WAKER: AtomicWaker = AtomicWaker::new();
 static ESP_NOW_RX_WAKER: AtomicWaker = AtomicWaker::new();
+
+// ROTORSCOPE PATCH (see firmware/patches/README.md): CVE-2025-52471 defence in
+// depth. `rcv_cb` drops a received length that is zero, negative or above the
+// ESP-NOW v2 maximum (and a null pointer) instead of turning it into a slice,
+// and counts it here. Only the Wi-Fi task writes it, so no read-modify-write.
+static BAD_RX_LEN: AtomicU32 = AtomicU32::new(0);
+
+/// Received ESP-NOW packets dropped for an impossible length or a null
+/// pointer (Rotorscope patch; zero on a healthy radio library).
+pub fn bad_rx_len_drops() -> u32 {
+    BAD_RX_LEN.load(Ordering::Relaxed)
+}
 
 macro_rules! check_error {
     ($block:block) => {
@@ -932,6 +944,11 @@ unsafe extern "C" fn rcv_cb(
     data: *const u8,
     data_len: i32,
 ) {
+    // ROTORSCOPE PATCH: CVE-2025-52471 defence in depth (see `BAD_RX_LEN`).
+    if esp_now_info.is_null() || data.is_null() || data_len <= 0 || data_len as usize > ESP_NOW_MAX_DATA_LEN_V2 {
+        BAD_RX_LEN.store(BAD_RX_LEN.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+        return;
+    }
     let src = unsafe {
         [
             (*esp_now_info).src_addr.offset(0).read(),

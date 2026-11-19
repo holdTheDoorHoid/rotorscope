@@ -420,4 +420,4 @@ pub fn report(m: &Meta, f: &mavwatch::Finding, fr: &mavwatch::Frame<'_>, now_ms:
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

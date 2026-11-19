@@ -94,7 +94,8 @@ cargo run --release -p rid-view -- --sniffle "$PORT" --sniffle-mode coded   # Lo
   adverts per second (217 in 30 s), RSSI −37 to −40 dBm, every field decoded,
   all labelled `B4`. Extended and Long Range decode is unit-tested with
   constructed packets only; nothing here transmits BT5 (`hci0` is BT 4.2,
-  `hci1` BT 4.0).
+  `hci1` BT 4.0). *Update 2026-11-18: on 2026-11-12 the Sonoff also heard BT5 extended
+  (`--sniffle-mode 1m`, -55 dBm) and Long Range (`coded`, -56 dBm) on air from a C5 `rid-beacon`.*
 
 ## Laptop test transmitter (`tools/rid-ble-beacon`)
 

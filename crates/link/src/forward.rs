@@ -240,7 +240,7 @@ mod tests {
 
     fn hub_only() -> [Frame; 3] {
         [
-            Frame::HubFix(crate::HubFix { state: crate::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true }),
+            Frame::HubFix(crate::HubFix { state: crate::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true, held: false, utc_held: false }),
             Frame::Csbee(b"#A:x".iter().copied().collect()),
             Frame::Flags(crate::FlagReport { who: "x".try_into().unwrap(), level: 3, items: heapless::Vec::new(), pack_date: 0 }),
         ]

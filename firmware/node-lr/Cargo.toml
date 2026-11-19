@@ -25,9 +25,11 @@ bench = false
 [features]
 default = []
 # Report to the hub over ESP-NOW through the gateway (crates/airlink,
-# docs/ESPNOW.md), keyed with tools/link.key when it exists (else open, and
-# the node says so at boot). Wi-Fi sits on the gateway's channel 6.
-espnow = ["dep:esp-radio", "esp-radio/wifi", "esp-radio/esp-now", "esp-rtos/esp-radio", "dep:airlink"]
+# docs/ESPNOW.md), keyed by the board's rskey provisioning record
+# (docs/LINK-KEYS-DESIGN.md; flash with tools/partitions-single.csv), open
+# with an open record, silent but announcing itself without one. Wi-Fi sits
+# on the gateway's channel 6.
+espnow = ["dep:esp-radio", "esp-radio/wifi", "esp-radio/esp-now", "esp-rtos/esp-radio", "dep:airlink", "node-common/espnow"]
 # The wired bus (crates/wirebus, docs/WIREBUS.md): TX open-drain, see
 # src/board.rs. Not with `espnow`.
 wirebus = ["node-common/wirebus"]
@@ -45,7 +47,7 @@ mavwatch  = { path = "../../crates/mavwatch" }
 airlink   = { path = "../../crates/airlink", optional = true }
 # Crash recovery (`node_common::fault`), and the wired-bus glue (`wirebus`).
 node-common = { path = "../node-common", features = ["esp32c3"] }
-heapless  = { version = "0.8", features = ["serde"] }
+heapless  = { version = "0.9.4", features = ["serde"] }
 
 esp-hal                = { version = "~1.2.2", features = ["esp32c3", "unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["esp32c3", "embassy", "esp-alloc"] }
@@ -78,3 +80,12 @@ codegen-units = 1
 debug         = 2
 lto           = "fat"
 opt-level     = "s"
+
+# Patched esp-radio 1.0.0-beta.1, carried by every radio firmware (see
+# ../patches/README.md): its ESP-NOW receive callback drops and counts a
+# received length that is zero, negative or above the ESP-NOW v2 maximum
+# (CVE-2025-52471 defence in depth), and on the ESP32-C5 it keeps the shared RF
+# front-end clocks on while BLE is up. tools/check-wifi-blobs.sh checks both
+# the patched copy and the radio library blobs.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }

@@ -78,17 +78,21 @@ the wrong way at power-on would stop it starting.
 ```
 cd firmware/node-lr
 cargo build --release                     # wired UART to the hub
-cargo build --release --features espnow   # ESP-NOW to the gateway (uses tools/link.key if present)
+cargo build --release --features espnow   # ESP-NOW to the gateway (key from the board's rskey)
 cargo build --release --features wirebus  # the wired bus (docs/WIREBUS.md)
 ```
 
 Output: `target/riscv32imc-unknown-none-elf/release/node-lr`. Sizes on 2026-11-17: 427 KB of
 code (wired), 431 KB (wired bus), 863 KB (ESP-NOW, with the Wi-Fi driver); a C3 has 4 MB of
 flash. No flashing script handles this board yet (`tools/flash-node.sh` is for the C5
-multi-image nodes); flash with `espflash flash --chip esp32c3` once there is a board.
+multi-image nodes); flash an ESP-NOW build with `tools/dev-board.sh --pt
+tools/partitions-single.csv <elf>` (espflash's default table has no `rskey`) once there is a board.
 
-Without `tools/link.key` the ESP-NOW build runs unauthenticated and says so at boot (a
-`"what":"link_key"` warning line), exactly like the other nodes.
+No build carries a key (since 2026-11-18). The ESP-NOW build reads the node's own key record from
+its `rskey` partition at boot, written by `cargo run -p link-key -- node <board> --table
+tools/partitions-single.csv`; with an open record it runs unauthenticated, and with none it sends
+no reports, saying so at boot in a `"what":"link_key"` warning line, exactly like the other nodes
+([ESPNOW.md](ESPNOW.md), "Securing the link").
 
 ## Hub side
 
@@ -119,9 +123,11 @@ with an aero node.** Branch `aero-hub`.
   mounted, says only "loaded", "bad", "none" or "error", wipes its copy of the file, and never
   prints, logs or sends the keys to any other board. Never put it in the repository.
 - **Time for the node.** Once a second, when the hub has GPS time, it sends that time to the
-  nodes: on the wired bus, and through the ESP-NOW gateway, which passes it on to every aero
-  node and adds the time it held it, so the node's clock is not late. The time is written into
-  the message at the last moment before it leaves each box.
+  nodes: on the wired bus, and through the ESP-NOW gateway. Since 2026-11-18 the hub seals one
+  time message per ESP-NOW node, at the last moment before it leaves the hub, and the gateway
+  only puts it on the air (first in line, given up after 300 ms); a node refuses one more than
+  about half a second late. (Before that, the gateway sent it to every aero node and added the
+  time it held it.)
 - **What the node listens to.** A lone aero node takes turns: 978 MHz UAT for 10 s, FLARM for
   10 s, OGN trackers for 5 s. If the hub has not heard its ADSBee for a minute, 1090 MHz joins
   the turns for 10 s (the ADSBee normally covers 1090). Two or more aero nodes split these
@@ -149,8 +155,9 @@ with an aero node.** Branch `aero-hub`.
    decoded`; a damaged file: `... refused (<reason>)`. The `{"t":"hub"}` line's
    `"aero":{"keys":...}` says the same (`loaded` / `none` / `bad` / `error`).
 3. With a GPS time (`"utc_src"` not null): `"aero":{..."syncs":N}` grows by one a second. With
-   the gateway attached, its USB JSON `{"t":"gw",...}` shows `hub_syncs` growing at the same
-   rate, and `time_nobody` growing too (no aero node yet). Without GPS time, `syncs` stays still.
+   a gateway attached, the hub's `hub-p4: gwlink` console line counts `time_syncs` sealed for the
+   nodes it has synced (none while no node is linked). Before 2026-11-18 the gateway's own
+   `{"t":"gw",...}` line counted them as `hub_syncs`. Without GPS time, `syncs` stays still.
 4. Console `a` four times then once more: `cmd aero plan: 1090 ES only`, `UAT 978 only`, `FLARM
    hop only`, `OGN hop only`, `auto (coverage default)`.
 
@@ -170,9 +177,10 @@ with an aero node.** Branch `aero-hub`.
   hub's GPS time, else the hub's GPS time.
 - Time sync: `bus::time_sync` keeps one pending `TimeSync`; the bus/UART pump encodes it only
   when the command queue is empty (so never between a `To` and its `Assign`), stamped at that
-  moment. The gateway (`firmware/gateway`) sends it to each aero node as its own command
-  packet (sequence numbers with bit 15 set, so a node never drops it as a repeat of a queued
-  command), unicast, sealed with the node's session echo when keyed, no retries.
+  moment. To a protocol 14 gateway the hub instead seals one `TimeSync` per synced node, alone in
+  its own command packet, as the line to the gateway is free (`hublink::link`,
+  `HubLink::time_sync_step`), and the gateway sends it unicast as an urgent `Transmit` with a
+  300 ms limit. (Before 2026-11-18 the gateway made and sealed that packet itself.)
 - Coverage: `crates/coverage` `plans::aero_plan` and `Coordinator::aero`. Aero nodes are not on
   the ladder; they always get role Aero.
 - Evidence: `Frame::Air` is frame kind 7 (`AIRCRAFT`), band RF, frequency in 100 kHz units.

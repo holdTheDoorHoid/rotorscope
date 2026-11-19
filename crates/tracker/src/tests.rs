@@ -901,6 +901,8 @@ fn state_golden() {
         recording: true,
         nodes: &nodes,
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let mut buf = [0u8; 4096];
     let n = json::state(
@@ -952,6 +954,8 @@ fn state_without_fix_or_tracks() {
         recording: false,
         nodes: &[],
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let mut buf = [0u8; 512];
     let n = json::state(
@@ -1007,6 +1011,8 @@ fn state_several_tracks_and_small_buffers() {
         recording: false,
         nodes: &nodes,
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let mut buf = std::vec![0u8; json::state_max_len(3, 0, 0, 2)];
     let n = json::state(
@@ -1081,11 +1087,21 @@ fn state_head_and_nodes_fit_their_bounds() {
         recording: false,
         nodes,
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let mut buf = [0u8; 2048];
     let head = json::state(&[], &[], &[], &ctx, &hub(&[]), &mut buf).unwrap();
     std::println!("worst-case state head: {head} bytes");
     assert!(head <= json::STATE_HEAD_MAX, "{head}");
+    // Protocol 14: a held GPS fix and held time add `"held":true` to `own`
+    // and `"utc_held":true` to the head.
+    let held = json::HubStatus { own_source: json::OwnSource::Gps, fix_held: true, utc_held: true, ..hub(&[]) };
+    let n = json::state(&[], &[], &[], &ctx, &held, &mut buf).unwrap();
+    let text = core::str::from_utf8(&buf[..n]).unwrap();
+    assert!(text.contains(r#""source":"gps","age_ms":"#) && text.contains(r#","held":true},"#), "{text}");
+    assert!(text.contains(r#","utc_held":true,"open_links""#), "{text}");
+    assert!(n <= json::STATE_HEAD_MAX, "{n}");
     let with = json::state(&[], &[], &[], &ctx, &hub(&[node; 4]), &mut buf).unwrap();
     assert!(with - head <= 4 * json::STATE_NODE_MAX, "{}", with - head);
 }

@@ -482,6 +482,10 @@ const ROLE = {Wifi24: ['2.4', 'Wi-Fi 2.4 GHz'], Wifi5: ['5G', 'Wi-Fi 5 GHz'], Bl
   DroneId: ['DID', 'DJI DroneID'], Gateway: ['GW', 'ESP-NOW gateway']};
 const role = r => ROLE[r] || [String(r), String(r)];
 
+// The position in use is the hub's GPS, held: its checks stopped trusting
+// the receiver and it keeps the last trusted fix. Never shown as live.
+const isHeld = o => !!(o && o.source === 'gps' && o.held);
+
 // Hub time -> local clock text. Uses the hub's GPS time when it has one.
 function clockText() {
   const d = st && st.utc_ms != null ? new Date(st.utc_ms + (Date.now() - lastOk)) : new Date();
@@ -716,7 +720,9 @@ function renderStrip(lost) {
   // While lost, the hub's state is unknown: show no stale ticks.
   if (st && !lost) {
     const g = st.gps || {};
-    if (st.own && st.own.source === 'gps') {
+    if (isHeld(st.own)) {
+      p.push(`<span class="chip bad" title="GPS not trusted just now: last trusted position kept"><span aria-hidden="true">&#9888;</span> GPS HELD</span>`);
+    } else if (st.own && st.own.source === 'gps') {
       p.push(`<span class="chip good">GPS &#10003; ${esc(g.state || '')}${g.sats != null ? ' &middot; ' + g.sats + ' sat' : ''}</span>`);
     } else if (st.own) {
       p.push(`<span class="chip">&#9998; TYPED POS</span>`);
@@ -1465,7 +1471,7 @@ function renderSettings() {
     const gps = {absent: 'no GPS receiver found', searching: 'searching for satellites', '2d': '2D fix', '3d': '3D fix'}[g.state] || 'unknown';
     const lines = [];
     lines.push(own
-      ? `<strong>In use: ${own.source === 'gps' ? 'hub GPS' : 'typed position'}</strong> &middot; ${coordHTML(own.lat, own.lon)}`
+      ? `<strong>In use: ${isHeld(own) ? 'hub GPS, held (last trusted position, not live)' : own.source === 'gps' ? 'hub GPS' : 'typed position'}</strong> &middot; ${coordHTML(own.lat, own.lon)}`
       : `<strong>&#9888; No position in use.</strong> Distances and directions are off.`);
     lines.push(`Hub GPS: ${esc(gps)}${g.sats != null ? ` (${g.sats} satellites)` : ''}`);
     if (!(own && own.source === 'manual')) lines.push(m ? `Typed position on file: ${coordHTML(m.lat, m.lon)}${m.alt != null ? ', ' + fmtAlt(m.alt) : ''}` +
@@ -1530,7 +1536,7 @@ function renderHub() {
     row('SD-card log', st.rec ? '&#9679; recording' : 'off') +
     (st.cot == null ? '' : row('TAK feed (CoT)', st.cot ? 'on' : '<strong>off</strong> (switched off on USB or by a phone)')) +
     (st.bench && st.bench.length ? row('Bench build', esc(st.bench.join(', '))) : '') +
-    row('Hub clock', st.utc_ms != null ? 'GPS time' : 'no GPS time yet (shown: phone time)') +
+    row('Hub clock', st.utc_ms == null ? 'no GPS time yet (shown: phone time)' : st.utc_held ? 'GPS time held (running on the hub clock)' : 'GPS time') +
     row('Hub up for', fmtAge(st.now_ms).replace(' ago', '')) + `</dl>`);
   setHTML('hub', o.join(''));
 }

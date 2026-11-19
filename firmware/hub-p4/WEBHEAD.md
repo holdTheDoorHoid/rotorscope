@@ -130,7 +130,7 @@ builds have no feed.
 | `cargo test -p link` (host) | Forwarder: stream unchanged byte-for-byte through odd-sized writes, `Via` + frame dropped together when the queue is full, own frames never steal a held `Via`, orphan `Via` dropped; protocol 5 tags 10/11, round trip, worst case fits `MAX_FRAME` |
 | `--features webheadloop` on the P4, 2026-11-15 (UART4 RX moved onto the GPIO31 pad, decoding what UART2 sends; NMEA and CSBee fed from inside the chip; real gateway with 2 nodes connected) | 45 s: 8724 bytes sent = 8724 received, 306 frames sent = 306 decoded (69 Via, 23 Hello, 79 Stats, 15 Status, 40 HubFix, 80 Csbee), **0 corrupt, 0 orphan Via, 0 dropped**, every Csbee line passed `adsb::parse` (CRC), HubFix carried the test point (39.9526, -75.1652, 12.5 m) and UTC. Gateway meanwhile: 2 nodes, 0 corrupt, 0 UART errors |
 | `--features webheadloop,fakedrone` on the P4 | Detections forwarded too (33 in 40 s), 0 corrupt |
-| S3 hub builds | `webhead`, stock, `adsbee`, `webhead,adsbee`, `demo,webhead`, `webhead,open-hotspot`; C5 hub with `webhead` |
+| S3 hub builds | `webhead`, stock, `adsbee`, `webhead,adsbee`, `demo,webhead`, `webhead,open-hotspot`; C5 hub with `webhead`. *Update 2026-11-18: the S3 firmware no longer links (static RAM over by 18,088 bytes; firmware/hub/README.md, docs/BENCH.md)* |
 | Normal P4 build | Feed running with nothing on GPIO31; see BRINGUP.md step 18 |
 
 **Not tested:** the web head itself on hardware (the S3 board was unplugged)

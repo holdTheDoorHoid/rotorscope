@@ -230,18 +230,29 @@ pub struct AssignLine {
     pub plan_id: u16,
 }
 
-/// ESP-NOW uplink counters, totals since boot (`uplink.rs`).
+/// ESP-NOW uplink counters, totals since boot (`uplink.rs`; most are the
+/// link's, `nodeimage::uplink::Counts`).
 #[derive(Serialize)]
 pub struct UplinkLine {
     pub t: &'static str,
     pub gw: bool,
+    /// `keyed`, `open`, or why the node sends nothing.
+    pub auth: &'static str,
+    /// Gateway packets that proved the gateway; beacons, syncs and commands taken.
+    pub heard: u32,
     pub beacons: u32,
+    pub syncs: u32,
     pub cmds: u32,
     pub cmd_dups: u32,
+    /// Batches the radio acknowledged and their frames; sends not
+    /// acknowledged; batches given up; frames thrown away while blocked;
+    /// announcements sent.
     pub pkts: u32,
     pub frames: u32,
     pub failed: u32,
     pub dropped: u32,
+    pub not_sent: u32,
+    pub announced: u32,
     pub oversize: u32,
     /// Wi-Fi gaps the scan loop gave, and sends tried in them.
     pub gaps: u32,

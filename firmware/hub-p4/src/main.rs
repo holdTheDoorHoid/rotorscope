@@ -39,12 +39,14 @@ mod downlink;
 mod evlog;
 mod faa;
 mod fault;
+mod flashrom;
 mod gps;
 mod gpsmem;
 #[cfg(feature = "gpsloop")]
 mod gpsloop;
 #[cfg(feature = "modesloop")]
 mod modesloop;
+mod linkauth;
 mod links;
 mod psram_test;
 mod report;
@@ -66,6 +68,15 @@ use esp_hal::{
     time::{Duration, Instant},
 };
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Strings anyone holding the ELF can find (`grep -a`): the bench tag
+/// tools/dev-board.sh looks for (`bench-build:none` for a normal build) and
+/// the source commit (`-dirty` if tracked files were changed). The hello
+/// line and the evidence boot event say the same. Each ends in a NUL so
+/// whatever the linker puts next cannot run on into the tag.
+#[used]
+static BUILD_TAGS: [&str; 2] =
+    [concat!(env!("ROTORSCOPE_BENCH_TAG"), "\0"), concat!("rotorscope-git:", env!("ROTORSCOPE_GIT"), "\0")];
 
 /// Unattended hub: after a panic (backtrace already printed on the USB-C
 /// console), reboot rather than sit halted on a stale screen (`fault.rs`).
@@ -203,7 +214,8 @@ fn main() -> ! {
     // Console first: from here on log lines never block the loop.
     console::init(p.UART0, p.GPIO37, p.GPIO38);
     println!(
-        "hub-p4: hello, chip revision {:?}, last reset: {} (cause {:#04x}), evidence key: {} ({}), bench: [{}]{}",
+        "hub-p4: hello, git {}, chip revision {:?}, last reset: {} (cause {:#04x}), evidence key: {} ({}), bench: [{}]{}",
+        evlog::GIT,
         esp_hal::efuse::chip_revision(),
         fault::reset_reason(),
         fault::reset_code(),
@@ -230,6 +242,11 @@ fn main() -> ! {
 
     let psram = psram_test::run(p.PSRAM, esp_hal::psram::SpiRamFreq::Mhz80);
     println!("hub-p4: psram ok = {}", psram.is_some());
+    // WP-13e: kit records and boot counter from flash, keys derived once,
+    // the link's state in PSRAM. Before the node link's UART interrupt and
+    // the panel's DMA start (linkauth.rs, flashrom.rs).
+    let link_parts = linkauth::boot(psram);
+    let boot_counter = link_parts.counter.epoch();
 
     println!("hub-p4: i2c idle sda/scl high = {:?}", i2c.levels());
     for addr in 0x08u8..0x78 {
@@ -272,7 +289,7 @@ fn main() -> ! {
 
     // Node link on the UART1 header (RX GPIO48, TX GPIO47), driven by the
     // UART3 peripheral; the GPS has the UART3-IN header. Swapped 2026-11-17.
-    let mut gw = links::GatewayLink::new(p.UART3, unsafe_link_rx(), p.GPIO47);
+    let mut gw = links::GatewayLink::new(p.UART3, unsafe_link_rx(), p.GPIO47, link_parts);
     println!(
         "hub-p4: node link on the UART1 header RX GPIO48, TX GPIO47 at {} baud: {}",
         links::BAUD,
@@ -341,6 +358,8 @@ fn main() -> ! {
     let mut modesloop = modesloop::Loop::new();
     // microSD log (1-bit native mode, bit-banged): CLK 43, CMD 44, D0 39.
     let mut sdlog = sd::Logger::new(Flex::new(p.GPIO43), Flex::new(p.GPIO44), Flex::new(p.GPIO39));
+    // One boot counter: the rsboot value is also the evidence log's.
+    sdlog.set_boot_counter(boot_counter);
     // Phase 12: the airspace pack goes to PSRAM above the framebuffer.
     // SAFETY: taken exactly once, here (a static; the rule engine itself,
     // ~84 KB, is placed in PSRAM by Faa::new at faa::ENGINE_OFFSET).
@@ -349,10 +368,14 @@ fn main() -> ! {
         (*(&raw mut FAA)).assume_init_mut()
     };
 
-    // Phase 13: the evidence log (evlog.rs). A random boot id names this
-    // boot's chain.
-    let mut boot_id = [0u8; 8];
-    esp_hal::rng::Rng::new().read(&mut boot_id);
+    // Phase 13: the evidence log (evlog.rs). A boot id names this boot's
+    // chain: the hardware RNG mixed with timing and the chip's own ids
+    // (WP-14a: the RNG alone is not a proven entropy source on the P4).
+    let (boot_id, rng_first) = evlog::make_boot_id(fault::reset_code());
+    println!(
+        "hub-p4: boot id inputs: rng first bytes {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} (compare across power cycles: they must differ)",
+        rng_first[0], rng_first[1], rng_first[2], rng_first[3], rng_first[4], rng_first[5], rng_first[6], rng_first[7]
+    );
     let mut ev = evlog::Evidence::new(psram, boot_id);
     let chip = esp_hal::efuse::chip_revision();
     {
@@ -364,7 +387,12 @@ fn main() -> ! {
         );
     }
     ev.ctx.uptime_ms = app::now_ms();
-    ev.boot((chip.major, chip.minor), fault::reset_reason());
+    ev.boot(
+        (chip.major, chip.minor),
+        fault::reset_reason(),
+        sdlog.counter_source(),
+        evidence::format::boot::BOOT_ID_MIXED,
+    );
     let mut note: Option<heapless::String<120>> = None;
     // Console `L`: one site-file line being typed (node position / mute).
     let mut site_line: Option<heapless::String<120>> = None;
@@ -381,8 +409,7 @@ fn main() -> ! {
     let mut whloop = webheadloop::Loop::new();
 
     let tracker = place_tracker(psram);
-    // SAFETY: the static is taken exactly once, here, before the loop.
-    let band = unsafe { &mut *(&raw mut BAND) };
+    let band = place_band(psram);
     let mut app = app::App::new(tracker, band);
     // Protocol 12: drone control links from the same nodes, in PSRAM.
     if control_table.is_none() {
@@ -404,6 +431,8 @@ fn main() -> ! {
     let mut bench = bench::Bench::default();
     let mut last = Instant::now();
     let mut last_report = 0u64;
+    // The backlight level last written (0: none yet; boot wrote 100%).
+    let mut backlight = 0u8;
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
     let mut prev = Instant::now();
@@ -450,14 +479,14 @@ fn main() -> ! {
             // nodes follow FLARM/OGN hops with it), on the bus or through
             // the gateway. Stamped again as it is written (bus.rs).
             if let (Some(a), Some(utc)) = (gps.time, gps.utc_ms(ms)) {
-                bus::time_sync(utc, ms * 1000, a.pps);
+                gw.time_sync(utc, ms, a.pps);
             }
             #[cfg(not(feature = "modes"))]
             app.aero.report(aero_es.as_deref_mut(), app.tracker, gw.feed.as_mut(), ms);
             app.aero.print(if app.aero.has_keys() { "loaded" } else { sdlog.flarm_key_state }, bus::syncs(), ms);
             site.apply(&mut app, &gw);
             control_settings(&site, &mut down, &mut app, &mut ev);
-            ev.watch(&gps, &gw.nodes, faa.pack(), ms);
+            ev.watch(&gps, &gw.nodes, faa.pack().zip(faa.pack_sha256()), ms);
             gpsmem.tick(&mut gps, &mut sdlog, &mut ev, ms);
             faa.tick(app.tracker, ms, gps.utc_ms(ms));
             let (frames, lost) = (gw.stats.frames, gw.stats.corrupt + gw.stats.overflow + gw.stats.uart_err + gw.stats.ring_full);
@@ -469,17 +498,35 @@ fn main() -> ! {
             report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, faa, ms);
         }
         app.touch(&mut i2c, ms);
-        match app.take_request() {
-            Some(screen::Request::HubMoved) => gpsmem.forget_home(&mut gps, &mut sdlog, &mut ev, "screen", ms),
-            Some(screen::Request::AcceptHome) => gpsmem.confirm_home(&mut gps, &mut sdlog, &mut ev, "screen", ms),
-            Some(screen::Request::MuteAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, false, ms, &mut ev),
-            Some(screen::Request::SnoozeAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, true, ms, &mut ev),
-            Some(screen::Request::UnmuteAlarms) => site.unmute_operator(&mut app, ms, &mut ev),
+        // A settings action: done, then the result back to the screen
+        // (it says "done" only when the hub says so).
+        let result = match app.take_request() {
+            Some(screen::Request::HubMoved) => Some(gpsmem.forget_home(&mut gps, &mut sdlog, &mut ev, "screen", ms)),
+            Some(screen::Request::AcceptHome) => Some(gpsmem.confirm_home(&mut gps, &mut sdlog, &mut ev, "screen", ms)),
+            Some(screen::Request::MuteAlarms { seen_ms }) => Some(site.silence_seen(&mut app, seen_ms, false, ms, &mut ev)),
+            Some(screen::Request::SnoozeAlarms { seen_ms }) => Some(site.silence_seen(&mut app, seen_ms, true, ms, &mut ev)),
+            Some(screen::Request::UnmuteAlarms) => Some(site.unmute_operator(&mut app, ms, &mut ev)),
             Some(screen::Request::NodesAtHub) => {
                 let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
-                site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen);
+                Some(site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen))
             }
-            None => {}
+            None => None,
+        };
+        if let Some(r) = result {
+            app.action_result(r);
+        }
+        // The backlight follows Brightness (capped in Red Night): written
+        // when the level changes.
+        let level = app.backlight_level();
+        if level != backlight {
+            let pct = screen::backlight_pct(level);
+            let ack = i2c.write(STC8_ADDR, &[STC8_BACKLIGHT, pct]);
+            println!("hub-p4: backlight level {level} ({pct}%): ack {ack}");
+            backlight = level;
+        }
+        // A finished settings edit that changed the theme: to the card.
+        if let Some((before, after)) = app.take_settings_change() {
+            site.settings_changed(&before, &after, &mut sdlog, &mut ev);
         }
         let utc = gps.utc_ms(ms);
         sd::set_clock(utc, ms);
@@ -498,9 +545,18 @@ fn main() -> ! {
                 console::pump();
             });
         }
+        // The SD step can block ~0.6 s (a card probe or the mount): when one
+        // is due, a beacon first if the last is 250 ms old, so the beacon gap
+        // stays under 1 s. Not on every pass: that halved the beacon period.
+        if sdlog.slow_step_due(ms) {
+            gw.beacon_if_older(ms, 250);
+        }
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         if let Some((st, facts)) = sdlog.take_site() {
             site.load(&st, &facts, &mut app, &mut ev, ms);
+        }
+        if let Some(bytes) = sdlog.take_site_too_big() {
+            site.too_big(bytes, &mut ev);
         }
         if let Some(home) = site.take_home() {
             gpsmem.placed(&mut gps, &mut sdlog, &mut ev, home, ms);
@@ -611,6 +667,16 @@ fn main() -> ! {
             );
             if ms / 1000 % 5 == 0 {
                 print_gps_adsb(&app, &gps, &adsbee, ms);
+                // The delivery check's numbers (docs/LINK-KEYS-DESIGN.md 7.3):
+                // what each node says it sent against what was verified.
+                app.tracker.delivery_snapshot(ms, |node, claimed, received, window_ms, reports, age_ms, lossy| {
+                    println!(
+                        "hub-p4: delivery node {node}: claimed={claimed} received={received} over {} s ({reports} report(s), last {} s ago){}",
+                        window_ms / 1000,
+                        age_ms / 1000,
+                        if lossy { " LOSSY" } else { "" }
+                    );
+                });
                 if let Some(f) = gw.feed.as_ref() {
                     println!(
                         "hub-p4: webhead tx={} frames={} dropped={} refused={} queued={} csbee_err={} encode_err={}",
@@ -637,10 +703,11 @@ fn caveats(ev: &evlog::Evidence, gw: &links::GatewayLink<'_>, sd: &sd::Logger) -
         key: match ev.key_class() {
             evidence::KeyClass::PublicTest => screen::EvidenceKey::Test,
             evidence::KeyClass::DevelopmentSoftware => screen::EvidenceKey::Development,
-            evidence::KeyClass::HardwareEfuse => screen::EvidenceKey::NotShown,
+            evidence::KeyClass::HardwareEfuse | evidence::KeyClass::SecureElement => screen::EvidenceKey::NotShown,
         },
         bench: !evlog::BENCH.is_empty(),
-        link_open: gw.stats.gw_open(),
+        link_open: gw.link_open(),
+        link: gw.link_caveats(app::now_ms()),
         evidence: sd.evidence_stop(ev),
         // Silenced alarms and the site switches: filled by `App::fill_state`
         // from the tracker and the control flags.
@@ -879,16 +946,16 @@ fn command(
             ev.event(evidence::EventCode::Setting, t.as_bytes(), &[]);
             println!("hub-p4: cmd {t}");
         }
-        b'm' => lines.gm.forget_home(gps, sdlog, ev, "console", now),
-        b'H' => lines.gm.confirm_home(gps, sdlog, ev, "console", now),
+        b'm' => drop(lines.gm.forget_home(gps, sdlog, ev, "console", now)),
+        b'H' => drop(lines.gm.confirm_home(gps, sdlog, ev, "console", now)),
         b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | area <name> circle <lat> <lon> <m> | area <name> poly <lat> <lon> ... | area <name> ceiling <m> | area <name> clear | area here <m> | bubble <m> | bubble off | friend <serial> [label] | friend <serial> clear | crowd <n>|on|off|auto | visits on|off | profile default|home|facility|event|patrol");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | area <name> circle <lat> <lon> <m> | area <name> poly <lat> <lon> ... | area <name> ceiling <m> | area <name> clear | area here <m> | bubble <m> | bubble off | friend <serial> [label] | friend <serial> clear | crowd <n>|on|off|auto | visits on|off | profile default|home|facility|event|patrol | theme auto|glass-cockpit|field-day|red-night | theme-day <theme> | theme-night <theme> | theme-switch twilight|sunrise | brightness 1..5");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
-        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off / area / bubble / friend / crowd / visits / profile), W=wipe the repeat-visitor history (press twice), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off / area / bubble / friend / crowd / visits / profile / screen theme), W=wipe the repeat-visitor history (press twice), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }
@@ -1033,5 +1100,31 @@ fn place_tracker(psram: Option<(*mut u32, usize)>) -> &'static mut app::HubTrack
     }
 }
 static mut FAA: core::mem::MaybeUninit<faa::Faa> = core::mem::MaybeUninit::uninit();
-static mut BAND: [embedded_graphics::pixelcolor::Rgb565; screen::WIDTH as usize * screen::BAND_ROWS] =
-    [embedded_graphics::pixelcolor::Rgb565::new(0, 0, 0); screen::WIDTH as usize * screen::BAND_ROWS];
+
+/// Where the screen's band buffer (800 x 48 RGB565, 75 KB) lives in PSRAM:
+/// after the framebuffer, below the tracker. Until 2026-11-18 a 15 KB band
+/// was a static in internal RAM, which on this chip comes out of the main
+/// stack (see [`TRACKER_OFFSET`]); a full-width band there would have cost
+/// the stack 38 KB more. Drawing into PSRAM goes through the cache, which
+/// holds a whole band.
+pub const BAND_OFFSET: usize = 1 << 20;
+const _: () = assert!(rgb::H_RES * rgb::V_RES * 2 <= BAND_OFFSET, "framebuffer overlaps the band");
+const _: () = assert!(BAND_OFFSET + display::BAND_PX * 2 <= TRACKER_OFFSET, "band overlaps the tracker");
+
+/// The band buffer in PSRAM at [`BAND_OFFSET`] (the hub cannot run without
+/// PSRAM; `place_tracker` stops first).
+#[inline(never)]
+fn place_band(psram: Option<(*mut u32, usize)>) -> &'static mut [u16] {
+    let Some((base, size)) = psram else {
+        panic!("hub-p4: no PSRAM: the screen band lives there; cannot start");
+    };
+    assert!(size >= BAND_OFFSET + display::BAND_PX * 2, "PSRAM too small for the screen band");
+    // SAFETY: [BAND_OFFSET, + BAND_PX * 2) is inside PSRAM (checked above)
+    // and used by nothing else (the asserts above: after the framebuffer,
+    // before the tracker); 1 MB is aligned for u16. Called once.
+    unsafe {
+        let p = base.cast::<u8>().add(BAND_OFFSET).cast::<u16>();
+        p.write_bytes(0, display::BAND_PX);
+        core::slice::from_raw_parts_mut(p, display::BAND_PX)
+    }
+}

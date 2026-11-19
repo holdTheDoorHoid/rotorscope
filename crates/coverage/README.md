@@ -15,7 +15,7 @@ node that is a gateway never gets one.
 | 1 | Wi-Fi 2.4 GHz Remote ID | Channel 6 most of the time (150 ms of every 200), short visits to 1 and 11 |
 | 2 | Bluetooth Remote ID | Its own built-in plan |
 | 3 | Wi-Fi 5 GHz | Channel 149 most of the time, short visits to 153, 157, 161, 165 and 36, 40, 44, 48 |
-| 4 | DJI DroneID | 5756.5, 5776.5, 5796.5 MHz, then 2414.5, 2429.5, 2444.5, 2459.5, 2399.5 MHz, 700 ms on each (a DroneID burst comes every ~640 ms, so one dwell always catches one) |
+| 4 | DJI DroneID | 5746.5 to 5816.5 MHz every 10 MHz (eight centres, `DRONEID_58`), then 2414.5, 2429.5, 2444.5, 2459.5, 2399.5 MHz, 700 ms on each (a DroneID burst comes every ~640 ms, so one dwell always catches one) |
 | 5 | Analog FPV / RF scan | Its own built-in sweep (2.4 GHz analog video channels, then every 5.8 GHz channel it reaches) |
 | 6 | Second DroneID | Splits the bands: the first keeps 5.8 GHz, the second takes the 2.4 GHz list |
 | 7 | Second Wi-Fi 5 GHz | Splits: the first parks on 149, the second sweeps 36-48, 153-165 and 169-177 (100 ms each) |
@@ -69,7 +69,8 @@ once a second; node-wifi switches band per hop for that (branch `node-roles`).
 The raw-capture jobs (DroneID, FPV) do not get that visit in their plan:
 their plan is radio frequencies, not channels. A relayed DroneID or FPV node
 must itself retune briefly to channel 6 when it has something to send. That
-is also node-side work, not built yet.
+is also node-side work, not built yet. *Update 2026-11-18: node-sdr does this (built and tested
+2026-11-14; docs/ESPNOW.md).*
 
 ## What it does not do (yet)
 

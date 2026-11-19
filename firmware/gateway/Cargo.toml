@@ -1,7 +1,7 @@
 # ESP-NOW gateway: one XIAO ESP32-C5 that receives every ESP-NOW node and
-# relays their frames to the hub over one UART, as if it were one wired node
-# (with a `link::Frame::Via` marker before each relayed frame). See
-# docs/ESPNOW.md. Build here with `cargo fw`.
+# relays their packets, still sealed, to the hub over one UART (`link::gw`,
+# protocol 14), and transmits what the hub sealed. It holds no key. See
+# docs/LINK-KEYS-DESIGN.md. Build here with `cargo fw`.
 [package]
 name         = "gateway"
 version      = "0.1.0"
@@ -23,6 +23,11 @@ bench = false
 # on USB to prove the reboot after a panic and the hang watchdog. Never in a
 # normal build.
 faulttest = ["node-common/faulttest"]
+# Bench only (docs/LINK-KEYS-DESIGN.md section 9): `gwforge ...` typed on USB
+# makes this gateway behave as a captured one (made-up and replayed packets
+# to the hub, a flipped byte, a held time sync, dropped packets). Fenced by
+# build.rs like every bench feature. Not with `faulttest` (one USB console).
+gwforge = []
 
 [dependencies]
 link    = { path = "../../crates/link" }
@@ -44,8 +49,10 @@ embassy-executor = { version = "0.10.0" }
 embassy-time     = { version = "0.5.0" }
 embassy-sync     = { version = "0.7" }
 critical-section = "1.2.0"
+# The async USB writer (src/usb.rs); already in the lockfile through esp-hal.
+embedded-io-async = "0.7"
 log              = "0.4.27"
-heapless         = { version = "0.8" }
+heapless         = { version = "0.9.4" }
 
 [profile.dev]
 opt-level = "s"
@@ -55,3 +62,12 @@ debug         = true
 opt-level     = "s"
 lto           = "fat"
 codegen-units = 1
+
+# Patched esp-radio 1.0.0-beta.1, carried by every radio firmware (see
+# ../patches/README.md): its ESP-NOW receive callback drops and counts a
+# received length that is zero, negative or above the ESP-NOW v2 maximum
+# (CVE-2025-52471 defence in depth), and on the ESP32-C5 it keeps the shared RF
+# front-end clocks on while BLE is up. tools/check-wifi-blobs.sh checks both
+# the patched copy and the radio library blobs.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }

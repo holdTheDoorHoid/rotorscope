@@ -1,0 +1,18 @@
+# P4 hub (Elecrow CrowPanel Advanced 5", ESP32-P4, 16 MB flash).
+# The first four rows are Elecrow's own table (elecrow-partitions.bin,
+# decoded 2026-11-18), unchanged, so the application stays where it is.
+# rskit holds the kit master and roster (crates/kitkeys/src/hub.rs), rsboot
+# the boot counter (crates/kitkeys/src/bootlog.rs); both are written by
+# tools/link-key, and the hub firmware appends one rsboot entry per boot
+# (crates/hublink). Their offsets are fixed for good: link-key and the
+# firmware find them by name, and a reflash with this table leaves them.
+# Subtype `undefined` (0x06), as the nodes' rskey: espflash (4.7.0, esp-idf-part 0.6.0)
+# panics on a data partition whose subtype it has no name for, so a custom
+# number here would make the table unflashable. The label is what marks them.
+# Name,   Type, SubType,   Offset,   Size
+nvs,      data, nvs,       0x9000,   0x4000
+otadata,  data, ota,       0xd000,   0x2000
+phy_init, data, phy,       0xf000,   0x1000
+factory,  app,  factory,   0x10000,  0xC00000
+rskit,    data, undefined, 0xC10000, 0x2000
+rsboot,   data, undefined, 0xC12000, 0x2000

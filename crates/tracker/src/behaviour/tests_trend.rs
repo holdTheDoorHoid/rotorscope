@@ -608,6 +608,8 @@ fn signal_threats_reach_json_and_the_tracker_stays_small() {
         recording: false,
         nodes: &[],
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let signals = crate::json::Signals { emitters: sim.tr.emitters(), wifi_drones: &[], threats: sim.tr.signal_threats(), places: Some(sim.tr.places()) };
     let len = crate::json::state_full_max_len(0, 0, 0, 0, sim.tr.emitters().len(), 0) + crate::json::MAX_SIGNAL_THREAT_LINE + 1;

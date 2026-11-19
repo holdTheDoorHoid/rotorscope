@@ -141,6 +141,33 @@ pub fn stack_free() -> usize {
     p - lo
 }
 
+/// Untouched stack below which the node says so on USB, once per boot.
+pub const STACK_LOW: usize = 2048;
+
+/// Call after the deepest work (a decode). The decoder's large frame steps
+/// over esp-hal's guard word, and below the stack is the capture memory, so
+/// an overflow would otherwise damage captures with nothing said.
+///
+/// - The lowest painted word written: the stack reached its end. Memory
+///   below it can no longer be trusted, so the node panics, which prints
+///   and restarts it (`custom_halt`).
+/// - Less than [`STACK_LOW`] never touched: one `fault` line on USB. The
+///   node carries on; a build that gets here needs its frames looked at.
+///
+/// It sees what was written, not what was only reserved: a frame that
+/// reaches past the end without writing there is not caught. The bench
+/// floor in the README stays the first line of defence.
+pub fn stack_check() {
+    static SAID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    let free = stack_free();
+    if free == 0 {
+        panic!("main stack used to its end: the capture memory below it may be damaged");
+    }
+    if free < STACK_LOW && !SAID.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        println!(r#"{{"t":"fault","why":"stack_low","stack_free":{free},"floor":{STACK_LOW}}}"#);
+    }
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger(LOG_LEVEL);
@@ -185,6 +212,10 @@ async fn main(spawner: Spawner) -> ! {
             env!("ROTORSCOPE_BENCH_TAG")
         );
     }
+
+    // The link key: from the board's rskey partition, never from this image.
+    #[cfg(feature = "espnow")]
+    let keystore = node_common::keystore::read(peripherals.FLASH);
 
     // On the heap, not in main's future: the main stack also carries the
     // DroneID decoder (~30 KiB) and sits right above SRAM block 1, so every
@@ -309,7 +340,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let hub = new_hub(radio.role);
     #[cfg(feature = "espnow")]
-    let up = wifi.as_ref().map(|w| new_uplink(w.esp_now()));
+    let up = wifi.as_ref().map(move |w| new_uplink(w.esp_now(), keystore));
     #[cfg(not(feature = "espnow"))]
     let up: Option<()> = None;
     println!(
@@ -464,6 +495,12 @@ async fn capture_loop(mut radio: alloc::boxed::Box<radio::Radio>, mut hub: alloc
             radio.stats_paced();
             radio.poll();
             link_line(&mut radio, &hub);
+            // The deaf fall-back: a hub plan whose dwells keep the windows
+            // away from the gateway for a minute is dropped (uplink.rs).
+            #[cfg(feature = "espnow")]
+            if let Some(u) = up.as_mut() {
+                u.deaf_tick(&mut radio, &mut hub);
+            }
             #[cfg(feature = "wirebus")]
             out::paced(node_common::bus::json_line().as_str(), 128, || radio.probe());
         }
@@ -494,8 +531,8 @@ fn new_hub(role: link::NodeRole) -> alloc::boxed::Box<hub::Hub> {
 
 #[cfg(feature = "espnow")]
 #[inline(never)]
-fn new_uplink(now: esp_radio::esp_now::EspNow) -> alloc::boxed::Box<uplink::Uplink> {
-    alloc::boxed::Box::new(uplink::Uplink::new(now))
+fn new_uplink(now: esp_radio::esp_now::EspNow, ks: node_common::keystore::Keystore) -> alloc::boxed::Box<uplink::Uplink> {
+    alloc::boxed::Box::new(uplink::Uplink::new(now, ks))
 }
 
 #[inline(never)]

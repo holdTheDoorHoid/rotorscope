@@ -2,14 +2,14 @@
 //!
 //! ```text
 //! droneid-file <file> --rate <samples/s> [--format cf32|ci8|ci16]
-//!              [--redact] [--no-turbo] [--failures] [--llr-dump <file>]
+//!              [--redact] [--no-turbo] [--failures]
 //! ```
 //!
 //! Prints one JSON line per burst found: where it is, frequency offset,
 //! SNR, which decode path worked (`systematic` or `turbo`), CRC status and
 //! the decoded fields. `--redact` masks the serial number and UUID (use it
 //! when sharing output: they identify a real aircraft and its owner).
-//! `--failures` also prints spans that failed synchronisation.
+//! `--failures` also prints each span that failed to decode, with its error.
 
 use std::io::Write;
 use std::process::ExitCode;

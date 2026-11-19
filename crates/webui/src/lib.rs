@@ -266,6 +266,37 @@ mod tests {
         assert!(src.contains("${u ? ' unc' : ''}"));
     }
 
+    /// The body of `function name(...) { ... }` in the page.
+    fn function<'a>(src: &'a str, name: &str) -> &'a str {
+        let f = &src[src.find(&std::format!("function {name}(")).unwrap_or_else(|| panic!("no function {name}"))..];
+        &f[..f.find("\n}\n").unwrap()]
+    }
+
+    /// Protocol 14 (docs/LINK-KEYS-DESIGN.md 6.4): when the hub's GPS checks
+    /// stop trusting the receiver, the hub holds its last trusted position
+    /// and runs its clock on (`/api/state` `own.held`, `utc_held`). The page
+    /// must never show a held position or time as live: no GPS tick, no
+    /// "GPS time", and it says "held" wherever it would have said them.
+    #[test]
+    fn held_fix_not_shown_as_live() {
+        let src = page();
+        assert!(src.contains("const isHeld = o => !!(o && o.source === 'gps' && o.held);"));
+        // The status strip: a held fix gets its own chip, checked before the
+        // live one, and the live GPS tick is only for a fix that is not held.
+        let strip = function(&src, "renderStrip");
+        let (held, live) = (strip.find("if (isHeld(st.own))").unwrap(), strip.find("GPS &#10003;").unwrap());
+        assert!(held < live, "{strip}");
+        assert!(strip.contains("GPS HELD"), "{strip}");
+        // Settings: the position in use says it is held.
+        let settings = function(&src, "renderSettings");
+        assert!(settings.contains("isHeld(own) ? 'hub GPS, held (last trusted position, not live)'"), "{settings}");
+        // The hub clock: held time is not called GPS time.
+        let hub = function(&src, "renderHub");
+        let (h, g) = (hub.find("st.utc_held ?").unwrap(), hub.find("'GPS time'").unwrap());
+        assert!(h < g, "{hub}");
+        assert!(hub.contains("GPS time held (running on the hub clock)"), "{hub}");
+    }
+
     /// The `/api/state` reference for WP-10's per-track `claims` object
     /// (crates/tracker/README.md): missing on older hubs, so only an
     /// explicit `claims.disputed` counts; disputed rows are tagged (a

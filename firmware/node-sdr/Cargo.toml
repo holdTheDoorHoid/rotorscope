@@ -33,7 +33,7 @@ decode = []
 # re-locks the receiver. This is the ONLY way this firmware transmits; the
 # capture path stays receive-only (see README.md "Hub link"). Off by default.
 # Build with `cargo fw-now` from c5/.
-espnow = ["esp-radio/esp-now", "dep:airlink"]
+espnow = ["esp-radio/esp-now", "dep:airlink", "node-common/espnow"]
 # Report on the wired bus (crates/wirebus, docs/WIREBUS.md): many nodes on one
 # hub UART, polled by the hub; TX open-drain on XIAO D9 (GPIO9), RX on D7
 # (GPIO12). Nothing is transmitted on the air and the capture never pauses
@@ -62,7 +62,7 @@ airlink = { path = "../../crates/airlink", optional = true }
 # reason), and the wired-bus node glue (feature `wirebus`), shared with
 # node-wifi and node-ble.
 node-common = { path = "../node-common", features = ["esp32c5"] }
-heapless = "0.8"
+heapless = "0.9.4"
 
 esp-hal                = { version = "~1.2.2", features = ["esp32c5", "unstable"] }
 esp-rtos               = { version = "0.4.0", features = ["esp32c5", "embassy", "esp-alloc", "esp-radio"] }
@@ -99,3 +99,12 @@ lto           = "fat"
 # Speed over size: the per-sample loops (trigger probes, decimation) and the
 # decoder run here. Flash is not the constraint on a 4/8 MB part.
 opt-level     = 3
+
+# Patched esp-radio 1.0.0-beta.1, carried by every radio firmware (see
+# ../patches/README.md): its ESP-NOW receive callback drops and counts a
+# received length that is zero, negative or above the ESP-NOW v2 maximum
+# (CVE-2025-52471 defence in depth), and on the ESP32-C5 it keeps the shared RF
+# front-end clocks on while BLE is up. tools/check-wifi-blobs.sh checks both
+# the patched copy and the radio library blobs.
+[patch.crates-io]
+esp-radio = { path = "../patches/esp-radio" }

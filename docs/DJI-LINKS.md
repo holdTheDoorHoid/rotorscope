@@ -1,8 +1,9 @@
 # DJI radio links: what the public record says, and what Rotorscope fingerprints
 
 PLAN.md Phase 11b. Written 2026-11-15 on branch `dji-fingerprint`. **Receive-only, presence
-only**: nothing here demodulates video or control data, handles a key, or transmits. O4 stays
-detect-only permanently (PLAN.md Phase 10 decision).
+only**: nothing here demodulates video or control data, handles a key, or transmits. O4 DroneID
+stays detect-only unless the owner supplies a key at run time (PLAN.md Phase 10, owner decision
+2026-11-16; docs/DRONEID-O4.md "Decryption").
 
 Code: `crates/djilink` (host-tested, `no_std`, fixed-point), wired into `firmware/node-sdr`
 (`src/radio/dji.rs`), `crates/link` (protocol 7 `RfKind`s), `crates/tracker`, `crates/screen`.
@@ -16,7 +17,7 @@ subcarriers** (not 15 kHz), and **Autel uses DJI's 15 kHz numerology**.
 ## How to read the evidence labels
 
 - **measured**: someone captured the real signal and reported the number (paper, reverse
-  engineering notes). **measured (RFUAV <file>)**: measured here, by `tools/rfuav-check`, on that
+  engineering notes). **measured (RFUAV &lt;file&gt;)**: measured here, by `tools/rfuav-check`, on that
   RFUAV recording (section "Validation against RFUAV recordings").
 - **filed**: from an FCC test report or a DJI spec page / manual. Test-lab numbers are measured
   too, but in the manufacturer's engineering mode, not in normal flight.

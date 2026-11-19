@@ -70,10 +70,10 @@ fn wire_time() {
 
 /// A queue of encoded frames for unit tests.
 #[derive(Default)]
-struct Q(std::collections::VecDeque<Vec<u8>>);
+pub(crate) struct Q(pub(crate) std::collections::VecDeque<Vec<u8>>);
 
 impl Q {
-    fn frame(&mut self, f: &Frame) {
+    pub(crate) fn frame(&mut self, f: &Frame) {
         let mut b = [0u8; link::MAX_FRAME];
         self.0.push_back(link::encode(f, &mut b).unwrap().to_vec());
     }
@@ -103,7 +103,7 @@ fn rare_joins() -> MasterConfig {
 }
 
 /// Join one node to a master by hand; returns (master, node).
-fn joined_pair() -> (Master<4>, Node) {
+pub(crate) fn joined_pair() -> (Master<4>, Node) {
     let mut m: Master<4> = Master::new(rare_joins(), 0x1234);
     let mut n = Node::new(NodeConfig::new(), mac_of(0), 7, 0);
     let mut q = Q::default();
@@ -755,7 +755,7 @@ fn a_registered_gateway_still_can() {
 fn bus_nodes_cannot_send_hub_or_gateway_frames() {
     let mut b = [0u8; 400];
     let me = [1; 6];
-    let fix = Frame::HubFix(link::HubFix { state: link::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true });
+    let fix = Frame::HubFix(link::HubFix { state: link::GnssState::Fix3d, sats: Some(9), position: None, utc_ms: Some(1), utc_pps: true, held: false, utc_held: false });
     let csbee = Frame::Csbee(b"#A:x".iter().copied().collect());
     let flags = Frame::Flags(link::FlagReport { who: "x".try_into().unwrap(), level: 3, items: heapless::Vec::new(), pack_date: 0 });
     let join = Frame::BusJoin { mac: [5; 6], want: 0, check: 0 };

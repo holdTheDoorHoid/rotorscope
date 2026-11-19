@@ -1,0 +1,16 @@
+# Single-image ESP-NOW node (ESP32-S3 node-wifi, ESP32-C3 node-lr, a C5 with
+# one image): espflash's default layout for a 4 MB flash, with the app
+# shortened by one 64 KB block to make room for rskey, the node's
+# provisioning record (docs/LINK-KEYS-DESIGN.md 4.4). Written only by
+# tools/link-key (--table tools/partitions-single.csv), never by firmware.
+# Flash these boards with this table (tools/dev-board.sh --pt
+# tools/partitions-single.csv <elf>): espflash's default table has no rskey,
+# and the node then reports `missing`. The rskey offset is fixed for good.
+# Name,   Type, SubType,   Offset,   Size
+nvs,      data, nvs,       0x9000,   0x6000
+phy_init, data, phy,       0xf000,   0x1000
+factory,  app,  factory,   0x10000,  0x3e0000
+# Subtype `undefined` (0x06), as rsjob: espflash (4.7.0, esp-idf-part 0.6.0)
+# panics on a data partition whose subtype it has no name for, so a custom
+# number here would make the table unflashable. The label is what marks it.
+rskey,    data, undefined, 0x3f0000, 0x1000

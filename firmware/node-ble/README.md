@@ -78,7 +78,7 @@ reading, lines are dropped and counted in `usb_drops`. The radio and the hub lin
 are never blocked.
 
 **UART to the hub** carries `link::Frame`, as postcard + COBS via `link::encode`,
-at 921 600 baud, 8N1, TX only for now.
+at 921 600 baud, 8N1. The node also reads hub commands (`link::Command::Assign`) on its RX pin.
 
 | Chip | Node TX (to hub RX) | Node RX (hub commands) |
 |---|---|---|

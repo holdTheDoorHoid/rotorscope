@@ -286,6 +286,29 @@ pub fn screen_text(fl: &Flag) -> heapless::String<24> {
     s
 }
 
+/// Plain words for the wide screen's FLAGS page (at most 48 chars):
+/// metres first, feet in brackets where the rule is set in feet ("260 m
+/// (853 ft) above ground, limit 400 ft").
+pub fn screen_words(fl: &Flag) -> heapless::String<48> {
+    let mut s = heapless::String::new();
+    let ft = |m: f32| m * airspace::FT_PER_M as f32;
+    let e = fl.ev;
+    let _ = match fl.rule {
+        Rule::Height => write!(s, "{:.0} m ({:.0} ft) above ground, limit {:.0} ft", e[0], ft(e[0]), ft(e[2])),
+        Rule::FacilityMap => write!(s, "{:.0} m ({:.0} ft) up, LAANC map limit {:.0} ft", e[0], ft(e[0]), e[1]),
+        Rule::Controlled => write!(s, "inside {} (often allowed by LAANC)", fl.area.map_or("controlled airspace", |a| a.name())),
+        Rule::Area => write!(s, "inside {}", fl.area.map_or("a restricted area", |a| a.name())),
+        Rule::NoRemoteId => write!(s, "DJI DroneID heard, no Remote ID"),
+        Rule::NoOperator => write!(s, "Remote ID sends no pilot position"),
+        Rule::SerialChanged => write!(s, "serial number changed {} times in flight", e[0] as u32),
+        Rule::LowAircraft => write!(s, "{:.0} m ({:.0} ft) above ground, minimum {:.0} ft", e[0], ft(e[0]), e[1]),
+        Rule::Vlos => write!(s, "{:.0} m from its pilot", e[0]),
+        Rule::VlosTerrain => write!(s, "a hill blocks the pilot's view"),
+        Rule::Night => write!(s, "{}", if e[1] > 0.5 { "flying at night" } else { "flying in twilight" }),
+    };
+    s
+}
+
 /// The one number a compact report carries for a flag (`link::FlagItem`):
 /// height above ground or distance in metres, terrain over the sight line,
 /// sun elevation, number of serial changes; 0 for the rest.

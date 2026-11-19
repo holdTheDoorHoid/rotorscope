@@ -198,6 +198,8 @@ fn identifiers_hidden_by_default() {
         recording: false,
         nodes: &[],
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let mut big = std::vec![0u8; json::state_max_len(0, 3, 0, 0)];
     let n = json::state(
@@ -364,6 +366,8 @@ fn state_lists_links_before_tracks() {
         recording: false,
         nodes: &[],
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let mut buf = std::vec![0u8; json::state_max_len(0, 2, 0, 0)];
     let n = json::state(

@@ -251,6 +251,18 @@ pub enum EventCode {
     /// Text: the ID, how far apart, and that neither is verified.
     /// (Codes 23 and 24 are taken by the acoustic work: `sound`, `sound_clip`.)
     IdDisputed = 25,
+    /// An announced threat episode ended (WP-14a): quiet long enough, or
+    /// its alarm entry removed while it may still be going on. Closes the
+    /// `threat` record that raised it. Data: [`threat_ended`] layout. Text:
+    /// what it totalled.
+    ThreatEnded = 26,
+    /// Where this boot stands among the unit's boots (WP-14a): the boot
+    /// counter and how far the previous boot's chain had reached durable
+    /// storage. Written once a boot as soon as the counter store answers
+    /// (the SD card's state file: at the first card mount; a secure
+    /// element: right after the boot event), and again when a card with
+    /// another counter is mounted. Data: [`crate::continuity::Continuity`].
+    Continuity = 27,
     /// A drone's threat level rose (tracker `behaviour`, docs/THREAT-PROFILES.md),
     /// once per rise to caution or above. Data: level (1: 1 notice, 2 caution,
     /// 3 warning, 4 critical), drone track id (u32 LE), the rule numbers of up
@@ -261,9 +273,173 @@ pub enum EventCode {
     /// or a sound's threat entry, not a drone track; slice 16c, rules 12 and
     /// 13). Text: the drone (or the signal) and the reasons with their
     /// numbers.
-    /// (Codes 26 and 27 are taken on other branches: `threat_ended`,
-    /// `continuity`.)
     ThreatLevel = 28,
+}
+
+/// Data of the `boot` event (1). Format version 1 started with 68 bytes;
+/// firmware from WP-14a appends what identifies the build and how this boot
+/// is placed among the unit's others. A reader takes what is there.
+pub mod boot {
+    use super::PUBKEY_LEN;
+
+    /// key class (1), public key (65), chip revision major (1), minor (1).
+    pub const V1_LEN: usize = 1 + PUBKEY_LEN + 2;
+    /// Then: build date (u64, Unix s: when the build script ran, never later
+    /// than the build), source commit (20, SHA-1; zero unknown), source tree
+    /// (1: [`GIT_CLEAN`], [`GIT_DIRTY`], [`GIT_UNKNOWN`]), boot counter
+    /// source (1: [`COUNTER_NONE`], [`COUNTER_SD_FILE`],
+    /// [`COUNTER_SECURE_ELEMENT`], [`COUNTER_HUB_FLASH`]), how the boot id was made (1:
+    /// [`BOOT_ID_RNG`], [`BOOT_ID_MIXED`]).
+    pub const LEN: usize = V1_LEN + 8 + 20 + 1 + 1 + 1;
+
+    pub const GIT_CLEAN: u8 = 0;
+    /// Built from that commit with changes to tracked files.
+    pub const GIT_DIRTY: u8 = 1;
+    /// No git at build time, or it could not say.
+    pub const GIT_UNKNOWN: u8 = 2;
+
+    /// No boot counter: continuity across boots cannot be shown.
+    pub const COUNTER_NONE: u8 = 0;
+    /// A state file on the SD card (`ROTORSCP/EVIDENCE/CHAIN.STA`): read
+    /// and advanced at the first card mount, so the `continuity` event comes
+    /// then, not at boot. The card's owner can rewrite it.
+    pub const COUNTER_SD_FILE: u8 = 1;
+    /// A monotonic counter in a secure element (planned).
+    pub const COUNTER_SECURE_ELEMENT: u8 = 2;
+    /// The hub's own flash (`rsboot`, `kitkeys::bootlog`), the same counter
+    /// that numbers the ESP-NOW link's epochs (docs/LINK-KEYS-DESIGN.md 12,
+    /// item 2): it survives a wiped or swapped card. The card's state files
+    /// still carry how far the previous boot's chain had reached it. Seeded
+    /// with a random value at provisioning, so it does not start at 1.
+    pub const COUNTER_HUB_FLASH: u8 = 3;
+
+    /// The hardware random number generator alone (firmware before WP-14a).
+    pub const BOOT_ID_RNG: u8 = 0;
+    /// SHA-256 over the hardware RNG, CPU-cycle timing jitter and the chip's
+    /// unique ID (`evidence::bootid`).
+    pub const BOOT_ID_MIXED: u8 = 1;
+
+    /// The appended fields (absent in logs from before WP-14a).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Ext {
+        pub built_unix_s: u64,
+        pub git: [u8; 20],
+        pub git_state: u8,
+        pub counter_source: u8,
+        pub boot_id_method: u8,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Boot {
+        pub key_class: u8,
+        pub pubkey: [u8; PUBKEY_LEN],
+        pub chip: (u8, u8),
+        pub ext: Option<Ext>,
+    }
+
+    impl Boot {
+        /// The data bytes, [`LEN`] long with `ext`, else [`V1_LEN`].
+        pub fn encode(&self, out: &mut [u8; LEN]) -> usize {
+            out[0] = self.key_class;
+            out[1..66].copy_from_slice(&self.pubkey);
+            out[66] = self.chip.0;
+            out[67] = self.chip.1;
+            let Some(e) = self.ext else { return V1_LEN };
+            out[68..76].copy_from_slice(&e.built_unix_s.to_le_bytes());
+            out[76..96].copy_from_slice(&e.git);
+            out[96] = e.git_state;
+            out[97] = e.counter_source;
+            out[98] = e.boot_id_method;
+            LEN
+        }
+
+        /// `None` if too short to hold the key. Chip revision 0.0 when a
+        /// (very early) boot event has no room for it.
+        pub fn decode(d: &[u8]) -> Option<Self> {
+            if d.len() < 1 + PUBKEY_LEN {
+                return None;
+            }
+            let chip = (d.get(66).copied().unwrap_or(0), d.get(67).copied().unwrap_or(0));
+            let ext = (d.len() >= LEN).then(|| Ext {
+                built_unix_s: u64::from_le_bytes(d[68..76].try_into().unwrap()),
+                git: d[76..96].try_into().unwrap(),
+                git_state: d[96],
+                counter_source: d[97],
+                boot_id_method: d[98],
+            });
+            Some(Self { key_class: d[0], pubkey: d[1..66].try_into().unwrap(), chip, ext })
+        }
+    }
+
+    /// `ROTORSCOPE_GIT` as the build script writes it (`<40 hex>`,
+    /// `<40 hex>-dirty`, `<40 hex>-unknown` or `unknown`): the commit and
+    /// the tree state.
+    pub fn parse_git(s: &str) -> ([u8; 20], u8) {
+        let b = s.as_bytes();
+        let mut out = [0u8; 20];
+        if b.len() < 40 {
+            return (out, GIT_UNKNOWN);
+        }
+        let hex = |c: u8| (c as char).to_digit(16);
+        for i in 0..20 {
+            match (hex(b[2 * i]), hex(b[2 * i + 1])) {
+                (Some(h), Some(l)) => out[i] = (h * 16 + l) as u8,
+                _ => return ([0; 20], GIT_UNKNOWN),
+            }
+        }
+        let state = match &b[40..] {
+            b"" => GIT_CLEAN,
+            b"-dirty" => GIT_DIRTY,
+            _ => GIT_UNKNOWN,
+        };
+        (out, state)
+    }
+}
+
+/// Data of a `pack` event (11). Format version 1: build date (u32, Unix s),
+/// length (u32), pack format version (u16); from WP-14a also the pack's
+/// SHA-256 (32), so the log names exactly which airspace data the hub used.
+pub mod pack {
+    pub const V1_LEN: usize = 10;
+    pub const LEN: usize = V1_LEN + 32;
+}
+
+/// Data of a `threat` event (17). The first 7 bytes are the original
+/// layout; firmware from WP-14a on appends the episode fields.
+pub mod threat {
+    /// kind (1), node station address (6)
+    pub const BASE: usize = 7;
+    /// Then: episode number for this alarm entry (u32, 1 = first), how it was
+    /// raised (1: [`RAISE_FIRST`], [`RAISE_AGAIN`], [`RAISE_AFTER_SILENCE`]),
+    /// raises within the last minute (1).
+    pub const WITH_EPISODE: usize = BASE + 4 + 1 + 1;
+    pub const RAISE_FIRST: u8 = 0;
+    pub const RAISE_AGAIN: u8 = 1;
+    pub const RAISE_AFTER_SILENCE: u8 = 2;
+    /// Then: whether a mute rule covered it, so no alert was given (1:
+    /// [`ALERTED`], [`SNOOZED`], [`MUTED`], [`MUTED_FOR_GOOD`]). Absent from
+    /// records written before it was added: those were all alerted.
+    pub const WITH_SILENCE: usize = WITH_EPISODE + 1;
+    pub const ALERTED: u8 = 0;
+    /// Snoozed (a safety-critical kind, minutes).
+    pub const SNOOZED: u8 = 1;
+    /// An operator's timed mute.
+    pub const MUTED: u8 = 2;
+    /// A site-file mute, for good.
+    pub const MUTED_FOR_GOOD: u8 = 3;
+}
+
+/// Data of a `threat_ended` event (26).
+pub mod threat_ended {
+    /// kind (1), node station address (6), episode (u32), active ms (u64),
+    /// frames (u64), reports (u32), peak level (i8), raises in the episode
+    /// (u32), flags (1: [`HELD`], [`REMOVED`]), end records lost before
+    /// this one (u32).
+    pub const LEN: usize = 1 + 6 + 4 + 8 + 8 + 4 + 1 + 4 + 1 + 4;
+    /// Held as flapping: several raises reported as this one episode.
+    pub const HELD: u8 = 1;
+    /// Its alarm entry was removed before it went quiet.
+    pub const REMOVED: u8 = 2;
 }
 
 impl EventCode {
@@ -293,6 +469,8 @@ impl EventCode {
             21 => LinkForgery,
             22 => AircraftConflict,
             25 => IdDisputed,
+            26 => ThreatEnded,
+            27 => Continuity,
             28 => ThreatLevel,
             _ => return None,
         })
@@ -323,6 +501,8 @@ impl EventCode {
             LinkForgery => "link_forgery",
             AircraftConflict => "aircraft_conflict",
             IdDisputed => "id_disputed",
+            ThreatEnded => "threat_ended",
+            Continuity => "continuity",
             ThreatLevel => "threat_level",
         }
     }
@@ -728,4 +908,26 @@ pub fn last_complete(tail: &[u8]) -> Option<(usize, bool)> {
         i += 1;
     }
     best
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::boot::*;
+
+    #[test]
+    fn boot_data_round_trips_and_old_data_still_reads() {
+        let ext = Ext { built_unix_s: 1_763_400_000, git: [0xAB; 20], git_state: GIT_DIRTY, counter_source: COUNTER_SD_FILE, boot_id_method: BOOT_ID_MIXED };
+        let b = Boot { key_class: 1, pubkey: [4; 65], chip: (1, 3), ext: Some(ext) };
+        let mut out = [0u8; LEN];
+        let n = b.encode(&mut out);
+        assert_eq!(n, LEN);
+        assert_eq!(Boot::decode(&out[..n]), Some(b));
+        // The layout before WP-14a: 68 bytes, no extension.
+        let old = Boot { ext: None, ..b };
+        let n = old.encode(&mut out);
+        assert_eq!(n, V1_LEN);
+        assert_eq!(Boot::decode(&out[..n]), Some(old));
+        // Too short for the key.
+        assert_eq!(Boot::decode(&out[..65]), None);
+    }
 }

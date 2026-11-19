@@ -899,6 +899,8 @@ fn state_full_adds_the_new_tables_and_state_is_unchanged() {
         recording: false,
         nodes: &[],
         adsb: None,
+        fix_held: false,
+        utc_held: false,
     };
     let signals = json::Signals {
         emitters: tr.emitters(),

@@ -448,7 +448,8 @@ Keep the manual position across reboots if you can; the page shows it as
 | `v` | int | Schema version (`json::STATE_VERSION`), bumped on incompatible change |
 | `now_ms` | int | Hub uptime. The page treats a decrease as a hub restart |
 | `utc_ms` | int \| null | Unix ms from GPS time, `null` without it |
-| `own` | object \| null | The position in use: `lat`, `lon`, `alt` (m HAE \| null), `source` (`"gps"` \| `"manual"`), `age_ms`. **`null` means own position unknown** (P4): then every track's `own` is null too |
+| `utc_held` | bool, optional | Present (`true`) only while `utc_ms` is **held**: the hub's GPS checks do not trust GPS time just now, and its clock runs on from the last trusted time. Never call it GPS time then. Added with link protocol 14 |
+| `own` | object \| null | The position in use: `lat`, `lon`, `alt` (m HAE \| null), `source` (`"gps"` \| `"manual"`), `age_ms`, and `held` (present, `true`, only for a **held** GPS fix: the last trusted position, kept while the hub's GPS checks do not trust the receiver; never show it as live; added with link protocol 14). **`null` means own position unknown** (P4): then every track's `own` is null too |
 | `manual` | object \| null | The typed position on file, `{lat, lon, alt}`, even when GPS is in use |
 | `gps` | object | The GPS receiver: `state` (`"absent"` \| `"searching"` \| `"2d"` \| `"3d"`) and `sats` (int \| null) |
 | `rec` | bool | The SD-card log is being written |
