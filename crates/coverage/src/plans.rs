@@ -175,6 +175,11 @@ pub const ESPNOW_MAX_AWAY_MS: u32 = 1000;
 /// How long that visit lasts: long enough to send a batch (a send takes
 /// ~2-10 ms, batches wait up to 50 ms) after the retune.
 pub const ESPNOW_VISIT_MS: u16 = 40;
+/// The gateway's channel, `airlink::GATEWAY_CHANNEL`. Not imported: a
+/// dependency on airlink would bring its key-baking build script into the
+/// hub firmware, which holds no link key. A test
+/// (`espnow_channel_is_the_gateway_channel`) keeps the two equal; once the
+/// compiled key is gone (WP-13i) this can become a plain re-export.
 pub const ESPNOW_CHANNEL: u32 = 6;
 
 /// Contiguous part `idx` of `parts` near-equal parts of `list`. More parts
@@ -438,32 +443,123 @@ pub const fn is_wifi(role: NodeRole) -> bool {
     matches!(role, NodeRole::Wifi24 | NodeRole::Wifi5)
 }
 
+/// The plan (with its visits) did not fit the room it was given: a visit
+/// would have been lost. Nothing is ever dropped silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanFull;
+
 /// Add channel-6 visits so the node is never away from 6 for more than
-/// [`ESPNOW_MAX_AWAY_MS`], counting around the end of the cycle.
-pub fn with_espnow_visits(plan: &Plan) -> Plan {
+/// [`ESPNOW_MAX_AWAY_MS`], counting around the end of the cycle (as long as
+/// no single hop is longer than that). `Err` if the result would not fit in
+/// a [`Plan`]: the coordinator then shortens the plan first
+/// ([`espnow_plan`]).
+pub fn with_espnow_visits(plan: &[(u32, u16)]) -> Result<Plan, PlanFull> {
+    with_espnow_visits_in(plan)
+}
+
+/// [`with_espnow_visits`] into a plan of any capacity (a node's working
+/// plan holds [`NODE_MAX_HOPS`], so a 24-hop plan from the wire always
+/// fits with its visits).
+pub fn with_espnow_visits_in<const N: usize>(plan: &[(u32, u16)]) -> Result<heapless::Vec<(u32, u16), N>, PlanFull> {
     let visit = (ESPNOW_CHANNEL, ESPNOW_VISIT_MS);
-    let mut out = Plan::new();
+    let mut out = heapless::Vec::new();
     let mut away: u32 = 0;
     for &(ch, ms) in plan {
         if ch == ESPNOW_CHANNEL {
-            let _ = out.push((ch, ms));
+            out.push((ch, ms)).map_err(|_| PlanFull)?;
             away = 0;
             continue;
         }
         if away > 0 && away + u32::from(ms) > ESPNOW_MAX_AWAY_MS {
-            let _ = out.push(visit);
+            out.push(visit).map_err(|_| PlanFull)?;
             away = 0;
         }
-        let _ = out.push((ch, ms));
+        out.push((ch, ms)).map_err(|_| PlanFull)?;
         away += u32::from(ms);
     }
     // Around the end: time away before the first 6 plus after the last.
     let lead: u32 = out.iter().take_while(|h| h.0 != ESPNOW_CHANNEL).map(|h| u32::from(h.1)).sum();
     let has6 = out.iter().any(|h| h.0 == ESPNOW_CHANNEL);
     if !has6 || lead + away > ESPNOW_MAX_AWAY_MS {
-        let _ = out.push(visit);
+        out.push(visit).map_err(|_| PlanFull)?;
     }
-    out
+    Ok(out)
+}
+
+/// The coordinator's plan for a node relayed through the gateway: `base`
+/// with its channel-6 visits, in at most `room` hops (24, less one when the
+/// hub adds its `ControlFlags` entry after). If the visits do not fit, the
+/// plan is shortened first: its lowest-weight hop (shortest dwell; the
+/// later one on a tie) is dropped, never a channel-6 hop, until they do.
+/// The result never stays away from 6 longer than [`ESPNOW_MAX_AWAY_MS`]
+/// (tested for every built-in plan and for full plans).
+pub fn espnow_plan(base: &Plan, room: usize) -> Plan {
+    let mut p = base.clone();
+    loop {
+        if let Ok(v) = with_espnow_visits(&p)
+            && v.len() <= room
+        {
+            debug_assert!(longest_away_from_6(&v).is_some_and(|w| w <= ESPNOW_MAX_AWAY_MS) || p.iter().any(|h| u32::from(h.1) > ESPNOW_MAX_AWAY_MS));
+            return v;
+        }
+        let drop = p
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.0 != ESPNOW_CHANNEL)
+            .min_by_key(|&(i, h)| (h.1, core::cmp::Reverse(i)))
+            .map(|(i, _)| i);
+        match drop {
+            Some(i) => {
+                p.remove(i);
+            }
+            // Only channel-6 hops left and still too long: keep the first
+            // `room` of them (already on 6, nothing to visit).
+            None => {
+                p.truncate(room.max(1));
+                return p;
+            }
+        }
+    }
+}
+
+/// Most hops in a node's working plan: the 24 a [`Plan`] carries plus
+/// room for the visits a node inserts (at most one before every hop and
+/// one at the end), so the insertion can never overflow.
+pub const NODE_MAX_HOPS: usize = 24 + 25;
+
+/// Why a node refuses a plan under the ESP-NOW rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodePlanError {
+    /// More hops than a [`Plan`] carries.
+    TooLong,
+    /// Even with the visits added it stays away from channel 6 longer than
+    /// [`ESPNOW_MAX_AWAY_MS`] (one hop longer than that): the node would be
+    /// deaf to the gateway.
+    Deaf,
+}
+
+impl NodePlanError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            NodePlanError::TooLong => "plan too long",
+            NodePlanError::Deaf => "plan leaves the gateway channel too long",
+        }
+    }
+}
+
+/// What a node relayed through the gateway runs for `plan` (from the hub,
+/// or read back from its stored job): the plan with its channel-6 visits,
+/// checked against the same rule as the coordinator's. `Err` means refuse
+/// it and keep the previous plan.
+pub fn node_espnow_plan(plan: &[(u32, u16)]) -> Result<heapless::Vec<(u32, u16), NODE_MAX_HOPS>, NodePlanError> {
+    if plan.len() > 24 {
+        return Err(NodePlanError::TooLong);
+    }
+    let out = with_espnow_visits_in::<NODE_MAX_HOPS>(plan).map_err(|_| NodePlanError::TooLong)?;
+    match longest_away_from_6(&out) {
+        Some(w) if w <= ESPNOW_MAX_AWAY_MS => Ok(out),
+        _ => Err(NodePlanError::Deaf),
+    }
 }
 
 /// Longest time a plan stays away from channel 6, going round the cycle

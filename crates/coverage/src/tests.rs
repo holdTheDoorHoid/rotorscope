@@ -178,8 +178,10 @@ fn every_plan_fits() {
                 let p = base_plan(r, k, i);
                 // `push_all` silently stops at 24: make sure nothing was cut.
                 assert!(p.len() < 24 || r == Fpv && k == 2, "{r:?} k={k} i={i}: {}", p.len());
-                let e = with_espnow_visits(&p);
-                assert!(e.len() < 24 || !is_wifi(r), "{r:?} k={k} i={i} espnow: {}", e.len());
+                if is_wifi(r) {
+                    let e = with_espnow_visits(&p).unwrap();
+                    assert!(e.len() < 24, "{r:?} k={k} i={i} espnow: {}", e.len());
+                }
             }
         }
     }
@@ -426,15 +428,15 @@ fn espnow_nodes_visit_channel_6() {
     for r in [Wifi24, Wifi5] {
         for k in 1..=8 {
             for i in 0..k {
-                let p = with_espnow_visits(&base_plan(r, k, i));
+                let p = with_espnow_visits(&base_plan(r, k, i)).unwrap();
                 let away = longest_away_from_6(&p).unwrap_or_else(|| panic!("{r:?} {k}/{i} never on 6: {p:?}"));
                 assert!(away <= ESPNOW_MAX_AWAY_MS, "{r:?} {k}/{i}: {away} ms away: {p:?}");
             }
         }
     }
     // Plans that already visit 6 often enough are unchanged.
-    assert_eq!(&with_espnow_visits(&base_plan(Wifi24, 1, 0))[..], WIFI24_ALONE);
-    assert_eq!(&with_espnow_visits(&base_plan(Wifi24, 2, 0))[..], WIFI24_PARK);
+    assert_eq!(&with_espnow_visits(&base_plan(Wifi24, 1, 0)).unwrap()[..], WIFI24_ALONE);
+    assert_eq!(&with_espnow_visits(&base_plan(Wifi24, 2, 0)).unwrap()[..], WIFI24_PARK);
     // End to end: relayed Wi-Fi nodes get the visits, wired ones do not.
     let nodes: std::vec::Vec<_> = (0..8).map(|k| if k % 2 == 0 { relayed(node(k, ALL, Wifi24)) } else { node(k, ALL, Wifi24) }).collect();
     let d = Coordinator::new().run(&nodes, 0);
@@ -780,9 +782,112 @@ fn wifi_plans_leave_room_for_flags() {
     for role in [Wifi24, Wifi5] {
         for k in 1..=8 {
             for idx in 0..k {
-                let p = plans::with_espnow_visits(&base_plan(role, k, idx));
+                let p = plans::with_espnow_visits(&base_plan(role, k, idx)).unwrap();
                 assert!(p.len() < 24, "{role:?} {k}/{idx}: {} hops", p.len());
             }
         }
     }
+}
+
+/// A full 24-hop 5 GHz plan: no room left for a channel-6 visit.
+fn full_5ghz_plan() -> Plan {
+    let mut p = Plan::new();
+    for i in 0..24 {
+        let _ = p.push((WIFI5_SWEEP[i % WIFI5_SWEEP.len()], 100 + i as u16));
+    }
+    p
+}
+
+#[test]
+fn full_24_hop_5ghz_plan_keeps_channel_6() {
+    let full = full_5ghz_plan();
+    assert!(full.is_full());
+    // The visits do not fit: an error, never a silently shorter list.
+    assert_eq!(with_espnow_visits(&full), Err(PlanFull));
+    for room in [24, 23] {
+        let p = espnow_plan(&full, room);
+        assert!(p.len() <= room, "{room}: {} hops", p.len());
+        let away = longest_away_from_6(&p);
+        assert!(away.is_some_and(|w| w <= ESPNOW_MAX_AWAY_MS), "visits lost: {away:?} {p:?}");
+        // Only the lowest-weight hops went: every hop kept dwells at least
+        // as long as every hop dropped.
+        let kept: std::vec::Vec<_> = p.iter().filter(|h| h.0 != ESPNOW_CHANNEL).copied().collect();
+        let shortest_kept = kept.iter().map(|h| h.1).min().unwrap();
+        for h in full.iter().filter(|h| !kept.contains(h)) {
+            assert!(h.1 <= shortest_kept, "{h:?} dropped before a shorter hop: {p:?}");
+        }
+        // In the original order.
+        let order: std::vec::Vec<_> = full.iter().filter(|h| kept.contains(h)).copied().collect();
+        assert_eq!(kept, order);
+    }
+    // A plan that fits is not touched.
+    let base = base_plan(Wifi5, 1, 0);
+    assert_eq!(espnow_plan(&base, 23), with_espnow_visits(&base).unwrap());
+}
+
+/// End to end: a relayed 5 GHz node whose plan is full still gets its
+/// visits, and the flags entry still fits after them.
+#[test]
+fn coordinator_full_plan_relayed_keeps_channel_6_and_flags() {
+    for flags_on in [false, true] {
+        for p in [full_5ghz_plan(), {
+            let mut p = Plan::new();
+            for _ in 0..24 {
+                let _ = p.push((149, 1000));
+            }
+            p
+        }] {
+            for room in [24, 23] {
+                let e = espnow_plan(&p, room);
+                assert!(e.len() <= room);
+                assert!(longest_away_from_6(&e).is_some_and(|w| w <= ESPNOW_MAX_AWAY_MS), "{e:?}");
+            }
+        }
+        let mut c = Coordinator::new();
+        c.aero.control.decode_content = flags_on;
+        let d = c.run(&[relayed(node(1, ALL, Wifi5))], 0);
+        let a = &d[0].assignment;
+        assert_eq!(link::plan_control_flags(&a.plan).is_some(), flags_on);
+        let hops: std::vec::Vec<_> = a.plan.iter().filter(|e| !link::is_control_flags_code(e.0)).copied().collect();
+        assert!(longest_away_from_6(&hops).is_some_and(|w| w <= ESPNOW_MAX_AWAY_MS));
+    }
+}
+
+/// The node's own check (role.rs): its working plan holds a full wire plan
+/// with every visit; a plan the visits cannot fix is refused.
+#[test]
+fn node_plan_rule() {
+    let full = full_5ghz_plan();
+    let p = node_espnow_plan(&full).unwrap();
+    assert!(p.len() > 24 && p.len() <= NODE_MAX_HOPS);
+    assert!(longest_away_from_6(&p).is_some_and(|w| w <= ESPNOW_MAX_AWAY_MS));
+    // Every hop kept, in order.
+    let hops: std::vec::Vec<_> = p.iter().filter(|h| h.0 != ESPNOW_CHANNEL).copied().collect();
+    assert_eq!(&hops[..], &full[..]);
+    // Worst case for the insertion: every hop needs a visit before it.
+    let worst: std::vec::Vec<_> = (0..24).map(|i| (if i % 2 == 0 { 36 } else { 40 }, 1000u16)).collect();
+    let p = node_espnow_plan(&worst).unwrap();
+    assert_eq!(p.len(), 48);
+    assert!(p.len() <= NODE_MAX_HOPS);
+    // One hop longer than the limit: no visit can fix it.
+    assert_eq!(node_espnow_plan(&[(149, 1500)]), Err(NodePlanError::Deaf));
+    assert_eq!(node_espnow_plan(&[(6, 150), (36, 1001)]), Err(NodePlanError::Deaf));
+    let long: std::vec::Vec<_> = (0..25).map(|_| (36u32, 100u16)).collect();
+    assert_eq!(node_espnow_plan(&long), Err(NodePlanError::TooLong));
+    // The built-in plans pass.
+    for r in [Wifi24, Wifi5] {
+        for k in 1..=8 {
+            for i in 0..k {
+                assert!(node_espnow_plan(&base_plan(r, k, i)).is_ok(), "{r:?} {k}/{i}");
+            }
+        }
+    }
+}
+
+/// The coordinator's ESP-NOW channel is the gateway's (one constant,
+/// `airlink::GATEWAY_CHANNEL`; see `plans::ESPNOW_CHANNEL` for why it is
+/// checked here rather than imported).
+#[test]
+fn espnow_channel_is_the_gateway_channel() {
+    assert_eq!(ESPNOW_CHANNEL, u32::from(airlink::GATEWAY_CHANNEL));
 }

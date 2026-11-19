@@ -51,6 +51,11 @@ pub const MAX_PACKET: usize = 1024;
 pub const MAX_PAYLOAD: usize = MAX_PACKET - HEADER - auth::TRAILER;
 /// A beacon before sealing: header plus the channel.
 pub const BEACON_LEN: usize = HEADER + 1;
+/// The 2.4 GHz channel the gateway listens and beacons on. Nodes relayed
+/// through it can only send while tuned here, so every channel plan for
+/// such a node visits it (`coverage::plans`). One constant for the gateway,
+/// the nodes and the coordinator, so they cannot drift apart.
+pub const GATEWAY_CHANNEL: u8 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
