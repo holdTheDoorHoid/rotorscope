@@ -885,8 +885,7 @@ fn node_plan_rule() {
 }
 
 /// The coordinator's ESP-NOW channel is the gateway's (one constant,
-/// `airlink::GATEWAY_CHANNEL`; see `plans::ESPNOW_CHANNEL` for why it is
-/// checked here rather than imported).
+/// `airlink::GATEWAY_CHANNEL`).
 #[test]
 fn espnow_channel_is_the_gateway_channel() {
     assert_eq!(ESPNOW_CHANNEL, u32::from(airlink::GATEWAY_CHANNEL));

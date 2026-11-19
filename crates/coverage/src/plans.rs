@@ -175,12 +175,9 @@ pub const ESPNOW_MAX_AWAY_MS: u32 = 1000;
 /// How long that visit lasts: long enough to send a batch (a send takes
 /// ~2-10 ms, batches wait up to 50 ms) after the retune.
 pub const ESPNOW_VISIT_MS: u16 = 40;
-/// The gateway's channel, `airlink::GATEWAY_CHANNEL`. Not imported: a
-/// dependency on airlink would bring its key-baking build script into the
-/// hub firmware, which holds no link key. A test
-/// (`espnow_channel_is_the_gateway_channel`) keeps the two equal; once the
-/// compiled key is gone (WP-13i) this can become a plain re-export.
-pub const ESPNOW_CHANNEL: u32 = 6;
+/// The gateway's channel: `airlink::GATEWAY_CHANNEL`, the one constant the
+/// gateway, the nodes and the coordinator share, so they cannot drift apart.
+pub const ESPNOW_CHANNEL: u32 = airlink::GATEWAY_CHANNEL as u32;
 
 /// Contiguous part `idx` of `parts` near-equal parts of `list`. More parts
 /// than items: the extra parts repeat items (a duplicate is better than idle).

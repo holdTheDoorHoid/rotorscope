@@ -9,9 +9,6 @@ license.workspace = true
 link.workspace = true
 ctrlwatch = { path = "../ctrlwatch" }
 heapless.workspace = true
-
-[dev-dependencies]
-# Only for the test that `plans::ESPNOW_CHANNEL` is `airlink::GATEWAY_CHANNEL`
-# (a normal dependency would pull airlink's key-baking build script into the
-# hub firmware, which holds no link key).
+# `airlink::GATEWAY_CHANNEL`, the gateway channel every ESP-NOW plan visits.
+# airlink holds no key and has no build script.
 airlink = { path = "../airlink" }
