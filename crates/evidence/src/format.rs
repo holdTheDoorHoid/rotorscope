@@ -273,7 +273,7 @@ pub mod boot {
 
     /// key class (1), public key (65), chip revision major (1), minor (1).
     pub const V1_LEN: usize = 1 + PUBKEY_LEN + 2;
-    /// + build date (u64, Unix s: when the build script ran, never later
+    /// Then: build date (u64, Unix s: when the build script ran, never later
     /// than the build), source commit (20, SHA-1; zero unknown), source tree
     /// (1: [`GIT_CLEAN`], [`GIT_DIRTY`], [`GIT_UNKNOWN`]), boot counter
     /// source (1: [`COUNTER_NONE`], [`COUNTER_SD_FILE`],
@@ -392,7 +392,7 @@ pub mod pack {
 pub mod threat {
     /// kind (1), node station address (6)
     pub const BASE: usize = 7;
-    /// + episode number for this alarm entry (u32, 1 = first), how it was
+    /// Then: episode number for this alarm entry (u32, 1 = first), how it was
     /// raised (1: [`RAISE_FIRST`], [`RAISE_AGAIN`], [`RAISE_AFTER_SILENCE`]),
     /// raises within the last minute (1).
     pub const WITH_EPISODE: usize = BASE + 4 + 1 + 1;
