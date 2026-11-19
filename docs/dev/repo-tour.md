@@ -26,7 +26,7 @@ documents. Facts on this page are as of 2026-11-18 (commit `6651ecd`).
 
 ### `crates/`: shared logic
 
-The root `Cargo.toml` lists 32 crates as workspace members. Every one except `odid-ref` declares
+The root `Cargo.toml` lists 34 crates as workspace members. Every one except `odid-ref` declares
 itself `no_std` (most of them only outside their own tests, and `droneid`, `evidence` and
 `rawcap` also have a `std` feature for the laptop tools). A few examples, to show the range:
 
@@ -34,7 +34,7 @@ itself `no_std` (most of them only outside their own tests, and `droneid`, `evid
 |---|---|
 | `rid` | Remote ID decoding and encoding (Wi-Fi beacon, Wi-Fi NAN, Bluetooth) |
 | `link` | The node-to-hub wire protocol: postcard + COBS frames over a serial line |
-| `airlink` | ESP-NOW packets between nodes and the gateway, with per-packet authentication |
+| `airlink` | ESP-NOW packets between nodes and the gateway, sealed with each node's own key (from `kitkeys`) |
 | `tracker` | The hub's logic: merging detections into tracks, range and bearing, JSON / TAK CoT / CSV output |
 | `droneid` | DJI OcuSync DroneID receiver, fixed point, for the ESP32-C5 |
 | `screen` | The on-device screen: view model, buttons, drawing |
@@ -50,8 +50,8 @@ The full list, crate by crate, is the [crate reference](crates.md).
 | `node-ble` | Bluetooth listener node | ESP32-S3, ESP32-C5 |
 | `node-sdr` | Raw-radio node: DJI DroneID, FPV video scan, jamming | ESP32-C5 |
 | `node-lr` | Receive-only LR2021 "aero" node | ESP32-C3 |
-| `node-common` | Code shared by the node images (image switching, fault handling) | |
-| `gateway` | Relays ESP-NOW nodes onto one wire to the hub | ESP32-C5 |
+| `node-common` | Code shared by the node images (image switching, fault handling, the node's key record) | |
+| `gateway` | Relays ESP-NOW nodes onto one wire to the hub, holding no key | ESP32-C5 |
 | `hub-p4` | The current hub, on a 5-inch touch screen board | ESP32-P4 |
 | `hub` | The first hub; now also the P4's "web head" that serves the phone page | ESP32-S3 (also builds for the C5) |
 | `rid-beacon` | The bench test transmitter, with an obviously fake identity | ESP32-S3, ESP32-C5 |
@@ -129,7 +129,7 @@ differently, and anything that only describes one person's bench. Grouped:
 
 | Kept out | Patterns in `.gitignore` | Why |
 |---|---|---|
-| **Keys** | `tools/link.key`, `*.linkkey`, `*.evkey`, `O4KEY.TXT`, `*.o4key`, `*o4key*.txt`, `tools/flarm.keys`, `FLARMKEY.TXT`, `*.flarmkeys` | The ESP-NOW link key, evidence signing keys, DJI O4 keys and FLARM keys belong to whoever runs a kit. Anyone holding them could forge traffic or decrypt what they protect. |
+| **Keys** | `tools/kit.key`, `tools/kit.roster` (and their `.new` files), `tools/link.key`, `*.linkkey`, `*.evkey`, `O4KEY.TXT`, `*.o4key`, `*o4key*.txt`, `tools/flarm.keys`, `FLARMKEY.TXT`, `*.flarmkeys` | The ESP-NOW kit master (and the kit's roster, which holds no secret but is per kit), the retired one-per-kit link key of the pre-2026-11-18 firmware, evidence signing keys, DJI O4 keys and FLARM keys belong to whoever runs a kit. Anyone holding them could forge traffic or decrypt what they protect. |
 | **Credentials** | `firmware/hub/wifi.local.toml` | The S3 hub's station-mode Wi-Fi password. |
 | **Recordings and their products** | `testdata/`, `rfuav-results/`, `rfuav-data/` | Third-party recordings carry their own licences (the DroneID recordings are AGPL-3.0) and real identities; they are downloaded on demand and checked by checksum. |
 | **Bench logs and local boards** | `bench-logs/`, `tools/boards.local` | Logs and board lists name one machine's boards (by MAC address) and runs; they mean nothing elsewhere. |

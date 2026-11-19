@@ -16,7 +16,7 @@ at the end.
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | `cargo` refuses the project or its `Cargo.toml` | Your Rust is too old for the project's Rust edition (2024) | Update Rust with `rustup`, then try again. [Step 1](#step-1-the-demo) |
-| A firmware build stops with `airlink: no ESP-NOW link key` | No kit key yet | Make one: `cargo run -p link-key -- new`. [Link key](#the-link-key) |
+| `link-key new` or `link-key id` is unknown, or a note asks for `tools/link.key` | Those belong to the firmware before 2026-11-18; no build needs a key now | Seal the kit with `link-key kit new` and the steps that follow. [Link key](#the-link-key) |
 | `tools/dev-board.sh --register` says no Espressif boards are attached | Charge-only cable, or the board is not plugged in | Use a USB-C **data** cable. [Boards and USB](#boards-and-usb) |
 | `unknown board c5a` | The name is not in `tools/boards.local` | `tools/dev-board.sh --register`. [Boards and USB](#boards-and-usb) |
 | A C5 vanishes from USB for a moment as it starts | Normal: it re-connects as its program starts | Nothing; the tools wait up to 10 s. [Boards and USB](#boards-and-usb) |
@@ -24,12 +24,13 @@ at the end.
 | `busy` or a long wait before flashing | Another program holds that board's lock | `tools/dev-board.sh --list` shows who. [Boards and USB](#boards-and-usb) |
 | `rid-view` shows an empty table | No drone nearby (normal), or the test signal is on another band or channel | [Nothing in rid-view](#nothing-shows-in-rid-view) |
 | Laptop Bluetooth (`--ble`) hears nothing | BlueZ not running, adapter off, or a Bluetooth 5 signal | [Laptop Bluetooth](#laptop-bluetooth-hears-nothing) |
-| `flash-node.sh` refuses to flash | No key, images with different keys, or a bench image | [Flashing nodes](#flashing-nodes) |
+| `flash-node.sh` refuses to flash, or says the flash is not good | An image that does not fit the node, a bench image, or a node with no key record yet | [Flashing nodes](#flashing-nodes) |
 | The P4 hub will not build | `tools/p4-prepare.sh` not run, or its folder is not clean | [The P4 hub](#the-p4-hub) |
 | P4 flashing fails with "Corrupt data" | 921600 baud is too fast for the P4's USB chip | Flash at 460800 (`-B 460800`). [The P4 hub](#the-p4-hub) |
-| The hub's Health page says `no radio nodes reported` | Gateway wiring, DIP switch, or a key mismatch | [Hub shows no nodes](#the-hub-shows-no-nodes) |
+| The hub's Health page says `no radio nodes reported` | Gateway wiring, DIP switch, or nodes not provisioned for this kit | [Hub shows no nodes](#the-hub-shows-no-nodes) |
 | A node's job stays `sent`, never `running` | The node lacks the image for that job | [A node misbehaves](#a-node-is-there-but-misbehaves) |
-| `OPEN LINK` on the hub's screen | The gateway was built without a link key | [Link key](#the-link-key) |
+| `OPEN LINK` on the hub's screen | The kit is not sealed yet (it ships open) | [Link key](#the-link-key) |
+| `OLD FIRMWARE`, `NO KIT KEYS` or another link line on the hub's screen | A board on the old firmware, or the hub not provisioned | [Link key](#the-link-key) |
 | `NO GPS` or `NO FIX` stays on | GPS wiring or power, or no fix yet | [No GPS fix](#no-gps-fix) |
 | `no SD` in the top bar | No card, or a card not formatted FAT32 | [SD card](#sd-card-not-seen) |
 | No aircraft from the ADSBee | ADSBee not set to send on its serial header | [ADSBee](#no-aircraft-from-the-adsbee) |
@@ -114,21 +115,27 @@ baud` means the dongle still runs Zigbee, or you flashed Sniffle's `_1M` build. 
 
 ## The link key
 
-- **Build stops with `airlink: no ESP-NOW link key, and this is a firmware build`.** Every
-  ESP-NOW firmware (gateway and nodes) needs the kit key. Make it once with
-  `cargo run -p link-key -- new`, then rebuild and reflash the gateway and every node. Building
-  in a second copy of the repository needs the file there too, or
-  `ROTORSCOPE_LINK_KEY_FILE=/path/to/link.key` in front of the command.
-- **`not a link key (expected exactly 64 hex digits)`**: the key file was edited or damaged.
-  Restore your backup. If you have none, make a new key with `new --force` and reflash
-  everything.
-- **`ROTORSCOPE_LINK_KEY_FILE=...: no such file`**: the path you gave is wrong.
-- **`link-key new` says the file already exists.** Keep it: every board of the kit uses it.
-  Replace it only on purpose (`new --force`), for example after losing a board.
-- **`dev-board: WARNING: ... built WITHOUT a link key` or `has link key 'x' but the kit key is
-  'y'`**: that image will not talk to the rest of the kit. Rebuild it.
-- **`OPEN LINK` on the hub's screen**: the gateway's last hello says it has no key. Anyone
-  nearby could inject fake nodes. Rebuild the gateway with the key.
+No firmware build needs a key any more: since 2026-11-18 each ESP-NOW node keeps its own key in
+its flash, and the hub keeps the kit's master. A kit works **open** until you seal it with
+`link-key`. The steps, and what each line on the hub's screen means, are in
+[ESP-NOW in depth](../ESPNOW.md#securing-the-link) ("Kits ship open; sealing yours" and "When
+something is wrong: what the hub's screen says").
+
+- **`OPEN LINK` on the hub's screen**: the hub's own key record is open, as a kit ships. Anyone
+  nearby could inject fake nodes. Seal the kit, or leave it open on purpose.
+- **`OLD FIRMWARE: gateway` or `OLD FIRMWARE: <n> nodes`**: a board still runs the firmware from
+  before 2026-11-18, which used one key for the whole kit. Reflash it, then provision it.
+- **`NO KIT KEYS: link closed`**: the hub was never provisioned, or was flashed with a partition
+  table that has no `rskit`. Flash it with `tools/partitions-hub.csv`, then
+  `cargo run -p link-key -- hub p4`.
+- **`UNPROVISIONED NODE <n>`**: boards that have no key record are announcing themselves.
+  Provision them (`cargo run -p link-key -- node <board>`), or find out whose they are.
+- **`kit.key already exists. Keep it`**: `link-key kit new` will not overwrite your kit. Keep the
+  file: the hub and every sealed node depend on it. Replace it only on purpose (`kit new --force`),
+  and then provision the hub and every node again.
+- **`link-key new` or `link-key id` is unknown**, or an old note mentions `tools/link.key` or
+  `ROTORSCOPE_LINK_KEY_FILE`: those were the firmware before 2026-11-18. Nothing reads them now;
+  keep an old `tools/link.key` only until every board is reflashed, then delete it.
 
 ## Flashing nodes
 
@@ -136,9 +143,11 @@ baud` means the dongle still runs Zigbee, or you flashed Sniffle's `_1M` build. 
 
 | Message | Meaning | Fix |
 |---|---|---|
-| `no link key (...): refusing to build an unauthenticated node` | No `tools/link.key` | Make the key, or pass `--open` for an open kit on purpose |
-| `ROTORSCOPE_LINK_KEY_FILE=none asks for an open kit: pass --open to confirm` | You asked for no key without saying so twice | Add `--open`, or unset the variable |
-| `the images carry different link keys` | Usually a node-sdr image built before you made the key | Rebuild node-sdr (`cargo fw-now` in `firmware/node-sdr/c5`) and pass it in `NODE_SDR_ELF` |
+| `... is not an ESP-NOW (version 3 link) build: refusing it for an ESP-NOW node` | Usually a node-sdr image built before 2026-11-18, or a wired one | Rebuild node-sdr (`cargo fw-now` in `firmware/node-sdr/c5`) and pass it in `NODE_SDR_ELF` |
+| `... is an ESP-NOW build: refusing it for a wired node` | An ESP-NOW image for a wired or bus node (it would transmit) | Build the wired or bus image |
+| `the node sends NO reports: its link key record is 'missing'` (or `damaged`, `wrong_board`) | The node has no usable key record yet: expected before you seal the kit | `cargo run -p link-key -- node <board>` (or `link-key open <board>` for an open kit). The script prints the exact command |
+| `the board has an OPEN provisioning record` | The node is open, and you did not pass `--open` | Seal it with `link-key node <board>`, or pass `--open` if an open kit is meant |
+| `no link boot line seen` | The node's boot line was not read in time | Read longer: `tools/flash-node.sh <board> 40` |
 | `... is a BENCH build (...); refusing without ROTORSCOPE_BENCH=1` | A test-only image | Rebuild without the bench feature, or set `ROTORSCOPE_BENCH=1` if you really mean to test |
 | `... is esp32s3; multi-image nodes are ESP32-C5 only` | Wrong board name | Use a C5's name |
 | `NODE_BUS and NODE_WIRED are two different wirings; set one` | Both set | Pick one |
@@ -173,19 +182,24 @@ Work through these in order:
    older notes and older hub firmware use the other header.
 3. **TX to RX, RX to TX, and a ground wire.** Gateway D6 to the header's RX (GPIO48), gateway D7
    to its TX (GPIO47) ([Wiring](kit-wiring.md#1-gateway-to-hub-required)).
-4. **Is the gateway running?** On its own USB it prints a `"t":"gw"` line every second and a
-   `"t":"node"` line per node. No node lines means the nodes are not reaching it.
-5. **Same key everywhere?** The gateway's `hello` line and each node's `uplink` line show a key
-   ID; they must match. A node built without the key, or with an old one, shows up at the
-   gateway only as rejected packets (`unauth`, `bad_tag`). A few `stale` right after the
-   gateway restarts are normal.
+4. **Is the gateway running?** On its own USB it prints a `"t":"gw"` line every second, with
+   counts of what it heard and relayed, and a `"t":"roster"` line once the hub's first roster
+   arrives (before it, no node packet is passed on). Nothing heard means the nodes are not reaching
+   it.
+5. **Is every node provisioned for this kit?** Each node's `uplink` boot line shows the kit id,
+   its slot and a key check; they must match what `cargo run -p link-key -- show` lists. The
+   gateway passes on only packets from addresses in the hub's roster (its `"t":"gw"` line counts
+   `not_in_roster`), and the hub's screen and console name the rest (`OLD FIRMWARE`,
+   `UNPROVISIONED NODE`, `forged_link` threats with `bad_tag` or `unauthenticated`). A few
+   `stale` or `unproven` right after the hub restarts are normal.
 6. **Gateway and wired-bus nodes on the same wires do not work.** The gateway talks whenever it
    likes and garbles the bus. Use one or the other.
-7. **More than 16 nodes.** The hub's node table holds 16; a 17th is refused (`table_full`)
-   until a silent node's slot frees up after a minute.
+7. **More than 16 nodes.** A sealed kit has 16 node slots, so `link-key` cannot provision a 17th.
+   On a wired link or an open kit the hub's node table holds 16; a 17th is refused
+   (`table_full`) until a silent node's slot frees up after a minute.
 
 The hub's console `hub` line has a `link` object with counts of corrupt and refused frames, and
-`"gw":"gw key <ID>"` when the gateway's hello arrived. When a gateway is attached, the hub
+`"gw":"gw nokey <version>"` when a current gateway's hello arrived. When a gateway is attached, the hub
 also prints `node link carries an unpolled stream`: that is normal, it means the hub
 recognised a gateway rather than the wired bus.
 
@@ -256,8 +270,8 @@ Open an issue on the project's GitHub page:
 - the exact command you ran, and its last lines of output;
 - what you expected, and what happened instead.
 
-You may include the link key's **ID** (eight hex digits). Never paste `tools/link.key` itself,
-or anything that identifies your home.
+You may include the **kit id** and a node's **key check** (eight hex digits each). Never paste
+`tools/kit.key` itself (or an old `tools/link.key`), or anything that identifies your home.
 
 **Security problems go privately, not in an issue:** a way to forge traffic between boards,
 crash a board by radio, or alter the logs unnoticed. Use the repository's **Security** tab,
@@ -266,7 +280,8 @@ crash a board by radio, or alter the logs unnoticed. Use the repository's **Secu
 ## Where this lives in the code
 
 - `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`: the messages quoted above
-- `crates/airlink/build.rs`, `crates/airlink/src/keysrc.rs`: the link-key messages
+- `tools/link-key/src/lib.rs`: the link-key messages; `firmware/hub-p4/src/linkauth.rs` and
+  `crates/screen/src/model.rs`: the screen's link lines
 - `tools/rid-view/src/bluez.rs`: the laptop Bluetooth messages
 - `firmware/hub-p4/src/sd.rs`, `src/gps.rs`: the SD card and GPS
 - `docs/BENCH.md` "When something fails", `firmware/hub-p4/BRINGUP.md`,

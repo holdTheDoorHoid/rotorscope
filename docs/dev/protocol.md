@@ -6,7 +6,8 @@
 
 This page is the implementer's view. For the plain-language story of how the boards talk, read
 [The link between boards](../how/link.md) first. Where this page and an older document disagree,
-this page follows the code at commit `6651ecd` (2026-11-18).
+this page follows the code at commit `6651ecd` (2026-11-18), and for the ESP-NOW link and
+protocol 14 the link-key cut-over later that day.
 
 > [!IMPORTANT]
 > Nothing here is secret, and nothing here transmits at anything outside the kit. The only radio
@@ -19,7 +20,8 @@ this page follows the code at commit `6651ecd` (2026-11-18).
 flowchart LR
     node[Radio node] -->|link frames over UART| hub[Hub]
     node -->|"airlink packet: batch of link frames"| gw[ESP-NOW gateway]
-    gw -->|Via + link frame over UART| hub
+    gw -->|"link::gw: each node packet, still sealed"| hub
+    hub -->|"link::gw: roster, sealed beacons and commands"| gw
     nodes[Wired-bus nodes] -->|polled answers + BusDone| hub
     hub -->|Command frames| node
     hub -->|same stream + HubFix, Csbee, Flags| head[Web head]
@@ -29,7 +31,8 @@ flowchart LR
 | Layer | Crate | Carries | Integrity check |
 |---|---|---|---|
 | Link frame | `crates/link` | One `Frame` (node to hub) or `Command` (hub to node), postcard + COBS | None of its own: a chunk that does not decode is dropped as corrupt |
-| ESP-NOW packet | `crates/airlink` | A batch of whole link frames, a beacon or commands | The radio's own frame check; with a kit key, a 12-byte HMAC-SHA256 tag and a freshness stamp |
+| ESP-NOW packet | `crates/airlink` | A batch of whole link frames, a beacon or commands | The radio's own frame check; on a sealed kit (version 3) a 12-byte HMAC-SHA256 tag under that node's own key and a freshness stamp, checked by the hub and the node |
+| Gateway wire | `crates/link` (`gw`) | `GwUp` / `GwDown` messages: node packets passed on whole, sealed beacons and commands, the gateway's reports | None of its own; the packets inside carry their tags |
 | Wired bus | `crates/wirebus` | Polled answers made of whole link frames | CRC-16/CCITT-FALSE over each answer (`BusDone`) |
 | USB JSON | node firmware, `tools/rid-view` | One JSON object per line | None (a line that does not parse is counted as bad) |
 
@@ -50,7 +53,7 @@ byte (`postcard::to_slice_cobs`). So:
   the bytes if more than 320 arrive without a delimiter.
 - **No CRC.** A link frame carries no checksum of its own. A damaged chunk almost always fails to
   decode and is reported as `LinkError::Corrupt`; the wired bus adds a CRC per answer and ESP-NOW
-  relies on the radio's frame check (plus the tag on a keyed kit).
+  relies on the radio's frame check (plus the tag on a sealed kit).
 - **Encoders.** `link::encode(&Frame, &mut buf)` and `link::encode_command(&Command, &mut buf)`
   return the used part of `buf`, delimiter included, ready to write.
 - **Decoders.** `link::Decoder` (= `StreamDecoder<Frame>`) and `link::CommandDecoder`
@@ -79,7 +82,7 @@ enum in this page lists its index in the first column. New variants are only eve
 
 ## Protocol version and history
 
-`link::PROTOCOL_VERSION = 13`. A node puts it in its `Hello`. It is bumped "when a change would
+`link::PROTOCOL_VERSION = 14`. A node puts it in its `Hello`. It is bumped "when a change would
 make an old hub misread a new node" (the constant's doc comment). The history below comes from that
 doc comment, with dates from `git log -- crates/link/src/lib.rs`.
 
@@ -98,9 +101,10 @@ doc comment, with dates from `git log -- crates/link/src/lib.rs`.
 | 11 | 2026-11-17 (`6ce307e`) | Aero node: `Frame::Air`, `Frame::AeroStatus`, `Command::TimeSync`, `NodeRole::Aero`, `AeroMode` plan codes |
 | 12 | 2026-11-17 (`73e3e2e`) | Control links: `Frame::Control`, `Frame::ControlEnergy`; `AeroMode::Control` and `AeroMode::ControlFlags` |
 | 13 | 2026-11-17 (`a087392`, `d86c3b1`, `cf1a090`) | Six `ThreatKind`s (`DroneDeauth`, `DroneTakeover`, `DroneNetClone`, `ControlContested`, `MavlinkAttack`, `AreaGnss`); `Frame::MavlinkEvidence`; a Wi-Fi plan may carry an `AeroMode::ControlFlags` entry |
+| 14 | 2026-11-18 (`587de38`) | Per-node link keys: the ESP-NOW gateway's UART speaks [`link::gw`](#the-gateway-wire-linkgw) instead of frames, so `Via` no longer appears on it; `Frame::NodeHealth`; `ThreatKind::LinkLoss`; `ForgedLink` detail codes 8-16. **Not append-only:** `HubFix` gains `held` and `utc_held` at its end, so the hub and its web head are reflashed together |
 
-Changes made since version 13 that needed **no** bump, because every existing frame still encodes
-the same way:
+Changes made between versions 13 and 14 that needed **no** bump, because every existing frame still
+encoded the same way:
 
 - `ForgedLink` detail codes 5 (origin) and 6 (table full), 2026-11-18 (`92910fc`, `1bfc1ac`).
 - `ThreatKind::IdFlood`, raised by the hub only and never sent on the node link, 2026-11-18
@@ -111,8 +115,9 @@ the same way:
 
 Source: `crates/link/src/lib.rs` (`enum Frame`); origin rules from `crates/link/src/origin.rs`
 (`Head::origin`). "Origin" says who may write a frame: **Node** (a radio node, relayed or wired),
-**Gateway** (the node link's own end: an ESP-NOW gateway, or the hub's bus attributor standing in
-for one), **Hub** (only the hub, on its feed to the web head) or **Bus** (wired-bus control, never
+**Gateway** (the node link's own end: the hub's bus attributor; before protocol 14 also the ESP-NOW
+gateway, which now sends `link::gw` messages and no frames; the hub's own `forged_link` reports are
+filed under this role so no node may send one), **Hub** (only the hub, on its feed to the web head) or **Bus** (wired-bus control, never
 inside a relayed stream).
 
 | # | Variant | Since | Origin | Meaning |
@@ -121,7 +126,7 @@ inside a relayed stream).
 | 1 | `Detection(Detection)` | 1 | Node | One Remote ID reception: everything one frame or advert carried |
 | 2 | `Stats { .. }` | 1 | Node | Once a second: running totals for the health screen |
 | 3 | `OpenLink(OpenLinkSighting)` | 2 | Node | One stream of an open FPV link, at most about once a second per stream |
-| 4 | `Via { node, rssi }` | 3 | Gateway | Marker: the **next** frame was relayed from `node`, heard at `rssi` |
+| 4 | `Via { node, rssi }` | 3 | Gateway | Marker: the **next** frame came from `node`, heard at `rssi`. Since protocol 14 written only by the hub: its wired-bus attributor, and its feed to the web head |
 | 5 | `Status { role, can, plan }` | 4 | Node; Gateway if `role` is `Gateway` | What the node can do and is doing; with every `Hello` and on change |
 | 6 | `DroneId(DroneIdSighting)` | 4 | Node | One DJI OcuSync DroneID burst, decoded on the node |
 | 7 | `Rf(RfSighting)` | 4 | Node | What a raw-capture scanner recognised on one frequency |
@@ -138,6 +143,7 @@ inside a relayed stream).
 | 18 | `Control(ControlReport)` | 12 | Node | One drone control link heard by an LR2021 node |
 | 19 | `ControlEnergy(ControlEnergy)` | 12 | Node | An LR2021 node's energy map of one band |
 | 20 | `MavlinkEvidence(MavlinkEvidence)` | 13 | Node | The MAVLink frame behind a `MavlinkAttack` threat |
+| 21 | `NodeHealth(NodeHealth)` | 14 | Node | A node's own health counters, every 5 s |
 
 The wired bus relies on three of these indices without decoding: `TAG_VIA = 4`,
 `TAG_BUS_JOIN = 14`, `TAG_BUS_DONE = 15` (`crates/wirebus/src/lib.rs`, checked by a test against
@@ -195,9 +201,12 @@ A full 9-message pack is about 245 bytes on the wire (`docs/WIREBUS.md`).
 `openlink::Direction`: 0 `AirToGround`, 1 `GroundToAir`, 2 `Unknown`. Source:
 `crates/openlink/src/lib.rs`.
 
-**`Via`** (4): `node: [u8; 6]` (the relayed node's station address), `rssi: i8` (dBm at the
-gateway; 0 on the wired bus). A marker, not a wrapper, so the relayed frame keeps its full
-320-byte budget.
+**`Via`** (4): `node: [u8; 6]` (the node's station address), `rssi: i8` (0 on the wired bus; up to
+protocol 13 the ESP-NOW gateway wrote it with the dBm it heard). A marker, not a wrapper, so the
+frame after it keeps its full 320-byte budget. Since protocol 14 only the hub writes it: its
+`wirebus::Attributor` before each bus node's frame (`rssi` 0), and its web-head feed before each
+verified ESP-NOW node's frame (with the RSSI the gateway reported). A `Via` inside a node's ESP-NOW
+packet is refused as origin (detail 5).
 
 **`Status`** (5): `role: NodeRole`, `can: u8` (mask of `NodeRole::bit`, one bit per role the
 node's images can take), `plan: u16` (the `Assignment::id` applied; 0 = built-in plan).
@@ -240,6 +249,8 @@ node's images can take), `plan: u16` (the `Assignment::id` applied; 0 = built-in
 | `position` | `Option<HubPosition>` | The latest usable fix, if still fresh; never a typed-in position |
 | `utc_ms` | `Option<u64>` | UTC (Unix ms) when the frame was built |
 | `utc_pps` | `bool` | The hub's UTC is anchored to a GPS PPS edge |
+| `held` | `bool` | Protocol 14. `position` is a held value, not live (GPS not trusted just now) |
+| `utc_held` | `bool` | Protocol 14. `utc_ms` is held, not live |
 
 `HubPosition`: `lat_e7: i32`, `lon_e7: i32` (degrees x 1e7), `alt_hae_mm: Option<i32>` (height
 above the WGS-84 ellipsoid, mm; `None` for a 2D fix), `age_ms: u32` (age of the fix when the frame
@@ -345,6 +356,16 @@ control content decoding on (the frame is content).
 | `truncated` | `bool` | The frame was longer than 255 bytes and was cut |
 | `uptime_us` | `u64` | Node uptime |
 | `frame` | `Vec<u8, 255>` | The frame as received: header, payload, CRC, signature (`MAX_MAVLINK_EVIDENCE = 255`) |
+
+**`NodeHealth`** (21), struct `NodeHealth`, every 5 s; running totals since the node booted, wrapping
+at `u32::MAX` (the hub takes differences); a node without one of these sends 0. Fields in wire order:
+`uptime_s: u32`; `shed: [u32; 8]` (frames turned away by the node's queue budget, per kind in
+`SHED_KIND_NAMES` order); `alternations: [u32; 2]` (DJI Wi-Fi DroneID, Wi-Fi drone networks);
+`frames_sent`, `batches_sent`, `batches_given_up`, `send_attempts: u32` (uplink accounting, which
+the hub compares with what it verified to raise `link_loss`); `rejects: [u32; 10]` (hub packets the
+node refused, per `NODE_REJECT_CODES`, see [Reject reasons](#reject-reasons)); `duplicates`,
+`plans_refused`, `deaf_fallbacks`, `deaf_blamed`, `deaf_outages`, `deaf_refused`,
+`switches_refused`, `switch_wait_s: u32`. At most 168 bytes encoded.
 
 ## Supporting enums
 
@@ -499,7 +520,7 @@ and target while it lasts:
 | 12 | `JamSweep` | `jam_sweep` | 9 | Node | Sweep rate, MHz per second |
 | 13 | `JamPulsed` | `jam_pulsed` | 9 | Node | Median percent of probes loud (duty cycle); for a flooded DroneID decoder, the decoder's busy percent |
 | 14 | `Blinded` | `blinded` | 9 | Node | Raw-capture nodes: estimated percent of free-space detection range left, `100 x 10^(-level / 20)`; sent when the median floor rise reaches 12 dB |
-| 15 | `ForgedLink` | `forged_link` | 9 | Gateway | Reject reason: 1 bad tag, 2 replay, 3 unauthenticated, 4 stale, 5 origin, 6 table full (see [ESP-NOW](#reject-reasons)) |
+| 15 | `ForgedLink` | `forged_link` | 9 | Gateway (raised by the hub since protocol 14) | Reject reason, 1-16: 1 bad tag, 2 replay, 3 unauthenticated, 4 stale, 5 origin, 6 table full (retired), 8 old firmware, 9 not in roster, 10 over budget, 11 late uplink, 12 future uplink, 15 malformed, ... (see [Reject reasons](#reject-reasons)) |
 | 16 | `DroneDeauth` | `drone_deauth` | 13 | Node | bits 24-31 `wifidrone` maker index; bits 0-15 most common reason code, plus flag bits (`wifiwatch::drones`) |
 | 17 | `DroneTakeover` | `drone_takeover` | 13 | Node | bits 24-31 maker; low bits `TAKE_*` flags (`wifiwatch::drones`) |
 | 18 | `DroneNetClone` | `drone_net_clone` | 13 | Node | bits 24-31 maker; low bits `CLONE_*` flags (`wifiwatch::drones`) |
@@ -507,6 +528,7 @@ and target while it lasts:
 | 20 | `MavlinkAttack` | `mavlink_attack` | 13 | Node | low byte `mavwatch::Kind` (1-19); bit 24 `MAVLINK_SUSPECT` while it is one uncorroborated frame |
 | 21 | `AreaGnss` | `area_gnss` | 13 | Hub | Raised by the hub from aircraft and drone tracks (`tracker::area_gnss`) |
 | 22 | `IdFlood` | `id_flood` | after 13, no bump | Hub | bits 24-31 table (0 drones, 1 aircraft, 2 control links, 3 one node shedding); bits 16-23 rule (0 rate, 1 minute, 2 active) or, for table 3, new IDs a second; bits 0-15 the figure (`tracker::probation`) |
+| 23 | `LinkLoss` | `link_loss` | 14 | Hub | Percent of the frames the node says it sent that the hub never verified; `count` = frames missing over `window_ms` (`tracker::delivery`) |
 
 Per-kind field conventions not covered by `detail`:
 
@@ -516,10 +538,11 @@ Per-kind field conventions not covered by `detail`:
 - `MavlinkAttack`: `source` and `target` hold the claimed sender and target system/component in
   their last two bytes; `ssid` an excerpt. From an LR2021 node `channel` is 0; from a Wi-Fi node
   (MAVLink over open Wi-Fi) `channel` is the Wi-Fi channel and `freq` its centre.
-- `ForgedLink` from a gateway: no `Via` before it (it is the gateway's own frame); `source` the
-  claimed node (all zero when the gateway's table overflowed); `target` the gateway's own address;
-  `channel` 6, `freq` 24370; `level` the strongest RSSI. From the hub (detail 5): `target`,
-  `channel` and `freq` 0.
+- `ForgedLink`: since protocol 14 always the hub's own frame (node 0, the link). `source` the
+  claimed node (all zero when the refusal table overflowed, or for the gateway's shared reports);
+  `target`, `channel` and `freq` 0; `level` the strongest RSSI of the refused packets; `count`
+  refused packets or frames over `window_ms`. Before protocol 14 the gateway raised it for details
+  1-4 and 6, with its own address in `target`, `channel` 6 and `freq` 24370.
 - `mavwatch::Kind` codes 1-19 are listed in [Crate reference](crates.md#mavwatch).
 
 ## Hub to node: `Command`
@@ -568,23 +591,25 @@ check, checks:
 
 | Where | How | What happens to a refused frame |
 |---|---|---|
-| ESP-NOW gateway | `origin::node_batch` splits each node batch and relays only frames a node may originate; never a node's own `Via` | Dropped; reported as `ForgedLink` detail 5 naming the node |
-| P4 hub | `origin::Sorter::new()` on each node link: a `Via` names exactly the next frame, which must be a node's; a frame with no `Via` must be a node's or the gateway's; a `Via` straight after a `Via` is refused with the one it follows | Dropped and counted; hub raises its own `ForgedLink` detail 5 (source all zero for the link's own stream) |
+| ESP-NOW gateway | Holds no key and writes no link frames: it passes each node packet on whole (`GwUp::Packet`) after keyless filters (`airlink::relay`); its own messages are `link::gw` reports (`origin::gw_up_origin`) | Packets it refused are reported in `GwUp::Refused`; the hub raises `ForgedLink` 8, 9, 10 or 15 |
+| P4 hub, gateway link | Verifies each node packet with that node's key (`hublink::link`), then `origin::node_batch` takes only frames a node may originate: a `Via`, a hub-only frame, a gateway report or bus control inside a node packet is refused | Dropped and counted; the hub raises `ForgedLink` detail 5 naming the node |
+| P4 hub, wired link | `origin::Sorter::new()`: a `Via` names exactly the next frame, which must be a node's; a frame with no `Via` must be a node's or the link's own; a `Via` straight after a `Via` is refused with the one it follows | Dropped and counted; hub raises its own `ForgedLink` detail 5 (source all zero for the link's own stream) |
 | Web-head feed | `forward::Forwarder` runs the same sort; only `Forwarder::send` queues the hub's own `HubFix`, `Csbee`, `Flags` | Not passed on (`refused` counter) |
 | Web head | `Sorter::hub_link()` on the link from the P4: also takes hub-origin frames when no `Via` came before them | Dropped |
 | Wired bus | `wirebus::Attributor` in the hub's UART interrupt, from each frame's first bytes (`origin::origin_of_encoded`) | Dropped; `ForgedLink` detail 5 |
 
 `origin::RefusalLog<N>` keeps refusals per claimed sender and reason with a fixed table (overflow
 shares one all-zero entry) and drains one report per window; `origin::forged_link` turns a
-`Refusal` into the `ThreatSighting`. The plain-language version, and what someone holding the kit
-key can and cannot do, is in [ESP-NOW in depth](../ESPNOW.md#who-may-send-what).
+`Refusal` into the `ThreatSighting`. The plain-language version, and what a captured node can and
+cannot do, is in [ESP-NOW in depth](../ESPNOW.md#who-may-send-what).
 
 ## Compatibility rules
 
 The protocol is **append-only**. Every change so far added a variant at the end of an enum, so a
 frame an older peer knows encodes byte for byte as before. Tests in `crates/link/src/lib.rs` pin
-this down for versions 1, 4-5 and 7-13 (`protocol_1_frames_unchanged`,
-`protocol_4_and_5_append_only` ... `protocol_13_wifi_plan_flags`). What happens on a mismatch:
+this down for versions 1, 4-5 and 7-14 (`protocol_1_frames_unchanged`,
+`protocol_4_and_5_append_only` ... `protocol_14_hub_fix_and_link_loss`). Protocol 14 broke the rule
+once, on purpose: `HubFix` gained two fields at its end (see the history above). What happens on a mismatch:
 
 | Situation | Result |
 |---|---|
@@ -595,10 +620,14 @@ this down for versions 1, 4-5 and 7-13 (`protocol_1_frames_unchanged`,
 | Wi-Fi node built before 13, plan carrying a `ControlFlags` entry | Rejected as a bad channel; the node keeps its previous plan |
 | New `detail` codes (for example `ForgedLink` 5 and 6) | No change on the wire; an older hub shows an unknown reason |
 | Older hub, `Via` (protocol 3) from a gateway | Counted as corrupt; the relayed frame after it is still read |
+| Protocol 14 hub, gateway on protocol 13 or older | The gateway's frames are read as link frames; a sealed (or closed) hub drops what it relays, sends it nothing, and shows `OLD FIRMWARE: gateway` |
+| Protocol 14 hub or gateway, node still sending version 2 packets | Refused as `old_firmware` (`ForgedLink` 8); the screen counts such nodes |
+| v14 web head, v13 hub's `HubFix` | Counted as corrupt (a v13 web head reading a v14 `HubFix` ignores the two new bytes) |
 
 `Hello.protocol` carries the sender's version. In the P4 hub's link reader
-(`firmware/hub-p4/src/links.rs`) the `Hello` sets the node's role; the code read for this page does
-not refuse or treat a node differently because of its `protocol` number. Rule for anyone adding a
+(`firmware/hub-p4/src/links.rs`) the `Hello` sets the node's role; the hub does not refuse a node
+because of its `protocol` number. The gateway is the exception: its protocol 14 `Hello` (a
+`link::gw` message) switches the link to the gateway wire, and an older gateway is refused. Rule for anyone adding a
 variant: append it last, never reorder or remove one, add an `append_only` test, add its line to
 `Head::origin`, and bump `PROTOCOL_VERSION` with a line in its doc comment.
 
@@ -631,7 +660,7 @@ Bench features and switches each firmware declares (from each `firmware/*/build.
 |---|---|---|
 | hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` | none |
 | hub (S3) | `demo`, `open-hotspot` | none |
-| gateway | `faulttest` | none |
+| gateway | `faulttest`, `gwforge` | none |
 | node-wifi | `faulttest`, `forgetest`, `floodtest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-ble | `faulttest` | `ROTORSCOPE_BENCH_CAN`, `ROTORSCOPE_BENCH_FLIP` |
 | node-sdr | `faulttest`, `bringup` | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
@@ -641,10 +670,14 @@ How to make a bench build on purpose is in [Bench tests](../BENCH.md).
 
 ## ESP-NOW air packet
 
-Source: `crates/airlink/src/lib.rs`, `crates/airlink/src/auth.rs`, `crates/airlink/build.rs`. The
-plain-language guide, setup steps and bench results are in [ESP-NOW in depth](../ESPNOW.md). Since
-2026-11-17 the hub's default build listens for the wired bus (simulated only, never wired) and
-ESP-NOW is an opt-in node build; the bench kit still runs on ESP-NOW.
+Source: `crates/airlink/src/lib.rs` (version 1), `crates/airlink/src/v3/` (version 3: `mod.rs`,
+`hub.rs`, `node.rs`), `crates/airlink/src/relay.rs` (the gateway), keys from `crates/kitkeys`. The
+plain-language guide, how to seal a kit and the bench results are in
+[ESP-NOW in depth](../ESPNOW.md); the design is docs/LINK-KEYS-DESIGN.md. Since 2026-11-17 the
+hub's default build listens for the wired bus (simulated only, never wired) and ESP-NOW is an
+opt-in node build. This section describes the link as it is after the 2026-11-18 cut-over (link
+protocol 14, packet version 3); the bench kit ran the version 2 link described in the bench results
+before that.
 
 ### Header
 
@@ -653,109 +686,189 @@ Every packet starts with `HEADER = 6` bytes:
 | Offset | Size | Field | Values |
 |---|---|---|---|
 | 0 | 2 | magic | `RS` (`MAGIC`) |
-| 2 | 1 | version | `1` (`VERSION`) unauthenticated; `2` (`auth::VERSION_AUTH`) sealed |
-| 3 | 1 | kind | `1` Beacon, `2` Frames, `3` Command |
+| 2 | 1 | version | `3` (`v3::VERSION_V3`) sealed; `1` (`VERSION`) open; `2` (`VERSION_KIT_KEY`) retired, refused |
+| 3 | 1 | kind | per version (tables below) |
 | 4 | 2 | seq | `u16`, little-endian |
 
-`parse()` returns `None` for anything else: wrong magic, an unknown version or kind, fewer than 6
-bytes, or a sealed packet too short to hold a trailer. Other ESP-NOW users share the air, and are
-ignored that way.
-
-| Kind | Direction | Payload |
+| Version | Who uses it | What happens to it |
 |---|---|---|
-| 1 Beacon | gateway to broadcast, about twice a second | One byte: the gateway's channel (`BEACON_LEN = 7` before sealing) |
-| 2 Frames | node to gateway, unicast (MAC-layer ACK and retries) | Whole COBS link frames, back to back; the gateway splits them with `origin::node_batch` and writes each frame a node may send to the hub behind a `Via` |
-| 3 Command | gateway to one node, unicast | Whole COBS `Command` frames exactly as the hub wrote them, minus the `To` that named the node |
+| 3 | a sealed kit | read with `v3::inspect` (version, kind, exact size, no key) and checked with the receiver's key |
+| 1 | an open kit (open key records) | read with `airlink::parse`; nothing is authenticated. A sealed hub refuses it as `unauthenticated` |
+| 2 | nothing since the cut-over (the one-key-per-kit packet) | recognised by its header alone and refused as `old_firmware`: that is how a board still on the old firmware shows up. Nothing can make or check one |
 
-Sizes: `MAX_PACKET = 1024` (ESP-NOW v2 allows 1470; both ends run Espressif blobs that support v2),
-and `MAX_PAYLOAD = MAX_PACKET - HEADER - auth::TRAILER = 990`. Room for the trailer is always kept,
-so a batch can be sealed or not without repacking. `Batch::push` accepts only one whole,
-delimited frame at a time.
+Packets without the `RS` magic belong to other ESP-NOW users and are counted as foreign, not as an
+attack. Sizes: `MAX_PACKET = 1024` (ESP-NOW v2 allows 1470; both ends run Espressif blobs that
+support v2), and `MAX_PAYLOAD = MAX_PACKET - HEADER - v3::TRAILER = 990`. Room for the trailer is
+always kept, so a batch can be sealed or not without repacking. `Batch::push` accepts only one
+whole, delimited frame at a time.
 
-**Sequence numbers.** Frames packets count per node; `SeqTracker` on the gateway counts `received`,
-`lost` (gaps) and `duplicates` (same number again: a retry whose ACK was lost, dropped). A backward
-jump of 0x8000 or more is taken as a node reboot and not counted as loss. Command packets count per
-node, so a node can drop a retry it already has.
+### Version 3 kinds and sizes
 
-Timings stated in `docs/ESPNOW.md`: the gateway beacons every 500 ms on 2.4 GHz channel 6; a node
-batches for up to 50 ms, retries a failed batch for 2 s then drops it, and forgets a gateway not
-heard for 5 s; the gateway tries a command 4 times.
+Sizes are exact; `v3::inspect` refuses any other size as `malformed`.
 
-### Sealing (kit key)
+| Kind | Direction | After the header | Size |
+|---|---|---|---|
+| 1 Sync | hub to one node | channel (1), stamp (16), tag (12, node's down key) | `SYNC_LEN` = 35 |
+| 2 Frames | node to hub | whole COBS link frames (1-990 bytes), stamp, tag (12, node's up key) | up to 1024 |
+| 3 Command | hub to one node | whole COBS `Command` frames, stamp, tag (12, down key) | up to 1024 |
+| 4 Beacon | hub to all, broadcast by the gateway | channel (1), `n` (1, 1-16), stamp (16, session 0), `n` tags of 8 | `24 + 8n`: 152 for 16 |
+| 5 Unprovisioned | node, unsealed | MAC (6), image (1), firmware name (16) | `UNPROVISIONED_LEN` = 29 |
 
-With a kit key, every packet is sealed: version byte `2` and a 28-byte trailer
-(`auth::TRAILER = STAMP_LEN + TAG_LEN`):
+A Frames or Command packet is `header (6) | payload | stamp (16) | tag (12)`: 28 bytes of trailer
+(`v3::TRAILER`). Version 1 numbers its kinds differently: 1 Beacon (header plus the channel,
+`BEACON_LEN = 7`), 2 Frames, 3 Command, no trailer.
 
-```text
-header (6) | payload | stamp (16: four u32 LE) | tag (12)
-```
+**Tag.** HMAC-SHA256 truncated to `TAG_LEN = 12` bytes (96 bits), over the radio source address of
+the sender followed by everything before the tag (header, payload, stamp). The sender is the node's
+MAC for Frames and the gateway's MAC for everything the hub makes (the gateway's `Hello` tells the
+hub its address). Covering the address stops a genuine packet passing as another node's; covering
+the kind stops one kind passing as another. Up and down keys differ, so a packet can never be
+reflected back the other way. Beacon tag `i` is 8 bytes under slot `i`'s down key over
+`gateway MAC | header | channel | n | stamp`; empty and revoked slots get eight zero bytes, and a
+node checks only its own slot. Checked in constant time. The keys: `kitkeys` (per node:
+`K_node = HMAC(master, "rotorscope/node-key/v1" | slot | generation | MAC)`, then
+`K_up` and `K_down` from it).
 
-- **Tag**: HMAC-SHA256 under the 32-byte kit key, truncated to `TAG_LEN = 12` bytes (96 bits),
-  over the sender's MAC address followed by everything before the tag (header, payload, stamp).
-  Covering the sender's address stops a genuine packet being replayed under another node's address;
-  covering the kind stops a batch passing as a command or beacon. Checked in constant time.
-- **Stamp**, four `u32` little-endian:
+**Stamp**, four `u32` little-endian:
 
-| Field | Node to gateway | Gateway to node |
+| Field | Node to hub (Frames) | Hub to node (Sync, Command, Beacon) |
 |---|---|---|
-| `epoch` | The gateway epoch the node last learned | The gateway's epoch: random, new at every gateway boot |
-| `clock` | The highest gateway `clock` the node has heard | The gateway's packet counter, +1 per packet it sends |
-| `session` | The node's session: random, new at every node boot | Echo of the node's `session`, or 0 (broadcast beacon) |
-| `counter` | The node's packet counter, +1 per transmission | Echo of the node's newest accepted `counter` |
+| `epoch` | The hub epoch the node holds | The hub's boot counter (`rsboot`), one higher at every hub boot |
+| `clock` | The node's estimate of the hub clock: the highest it accepted plus one tick per 10 ms since | The hub's clock: `max(previous + 1, uptime_ms / 10)`, one tick per 10 ms, strictly increasing |
+| `session` | The node's session: random from the TRNG, new at every boot and every relink | Echo of the node's `session` (Sync, Command); 0 in a beacon |
+| `counter` | The node's packet counter, +1 per transmission (every retry is sealed afresh) | Echo of the node's newest accepted `counter` |
 
-Freshness rules (`Peer::check` on the gateway, `Node::on_gateway` on a node):
+### Freshness
 
-- **Gateway** takes a node packet only if `epoch` is its current one and `(clock, counter)` is
-  greater than the last pair accepted from that address. Equal is a harmless duplicate; smaller is
-  a replay.
-- **Node** takes a command (or a sync, a beacon sent to one node) only if it echoes the node's own
-  `session` and `(echoed counter, clock)` is greater than the last one taken. A broadcast beacon
-  (`session` 0) only teaches a node with no gateway where to send, or moves its clock forward
-  within the epoch it already has; a beacon from another epoch is not believed.
-- **Age.** A node keeps a floor under the gateway clock: the highest gateway clock it has accepted,
-  plus `MIN_RATE_PER_S = 1` for every second of its own uptime since. A gateway packet of the
-  node's current epoch whose clock is more than `LATE_SLACK = 16` below the floor is rejected as
-  late. `docs/ESPNOW.md` states the bound this gives.
-- **Resync.** A node packet with a good tag but a stale epoch or an old pair is answered with a sync
-  (a unicast beacon echoing that packet's session and counter), at most once a second per node.
-- **Wrap.** A node counter that reaches `u32::MAX` starts a new session and sends nothing until it
-  hears a newer gateway clock; a gateway whose clock runs out refuses to stamp and restarts for a
-  new epoch.
+Constants from `crates/airlink/src/v3/mod.rs` (one tick = 10 ms):
+
+| Packet | Refused if | As |
+|---|---|---|
+| Sync, Command, Beacon at the node | `clock + 300 < floor` (`DOWN_SLACK`) | `late` |
+| A Command carrying a `TimeSync` at the node | `clock + 50 < floor` (`TIMESYNC_SLACK`) | `late` |
+| Frames at the hub | `now - clock > 200` (`UPLINK_MAX_AGE`: 2 s) | `late_uplink` |
+| Frames at the hub | `clock > now + 50` (`UPLINK_MAX_AHEAD`: 0.5 s) | `future_uplink` |
+
+- **Floor.** A node keeps a floor under the hub clock: the highest clock it accepted plus
+  `FLOOR_TICKS_PER_S = 90` per second of its own uptime since (the real clock grows 100 a second;
+  the margin covers crystal error). A recording is refused about 3.3 s after the node last heard
+  the hub (3 s while it keeps hearing beacons), plus about 0.11 s per second it was jammed before;
+  a `TimeSync` after 0.55 s plus the same.
+- **Order.** At the hub, per slot, `(clock, counter)` must be above the last accepted pair (equal is
+  a radio retry, dropped quietly; below is `replay`). At the node, an echoed packet's
+  `(echoed counter, clock)` must be above the last one taken in the current epoch, and it must echo
+  the node's current session (else `replay`).
+- **Epochs.** The node holds one epoch, tentative (learned from a beacon) or proven (an echoed
+  packet of that epoch was taken). After boot a genuine beacon of any epoch is taken tentatively;
+  a Sync moves the node to a higher epoch and proves it; a beacon of a higher epoch moves only a
+  tentative node, and a proven one refuses it as `unproven`; a Command never moves the node; a
+  lower epoch is `stale` (a Sync may still move a tentative node down). A `TimeSync` needs a proven
+  epoch equal to the packet's.
+- **Relink.** A node that has taken nothing for `RELINK_MS` (60 s) starts a new session, exactly
+  as after a boot. This is how a kit follows a hub that came back with a lower boot counter; every
+  command recorded for the old session is then dead.
+- **Syncs.** The hub answers a node's first verified batch of a new session with a Sync echoing it,
+  and a genuine batch refused as `stale`, `late_uplink` or `future_uplink` with a Sync, at most one
+  per slot per second (`hublink::link::SYNC_ANSWER_MS`).
+- **Wrap.** At `u32::MAX` (about 497 days) the hub refuses to seal and must restart for a new
+  epoch.
+
+Timings: the hub seals a beacon every 500 ms; the gateway beacons on 2.4 GHz channel 6
+(`GATEWAY_CHANNEL`). A node batches for up to 50 ms, retries a failed batch for 2 s (sealed afresh
+each time) then drops it, and forgets a gateway it has neither heard nor reached for 30 s. The
+gateway retries a command for up to 2 s and a `TimeSync` for up to 300 ms
+(`hublink::link::COMMAND_GIVE_UP_MS`, `TIMESYNC_GIVE_UP_MS`), both inside the node's slack.
+
+**Sequence numbers.** `seq` counts packets per sender. `SeqTracker` counts `received`, `lost` (gaps)
+and `duplicates` (same number again: a retry whose ACK was lost). A backward jump of 0x8000 or more
+is taken as a reboot and not counted as loss. The gateway drops a packet byte-identical to the
+previous one from the same address.
+
+### The gateway wire (`link::gw`)
+
+Source: `crates/link/src/gw.rs`. Since protocol 14 the gateway's UART to the hub (XIAO D6 = GPIO11
+to the hub, D7 = GPIO12 from it, 921600 baud) carries `link::gw` messages, never link frames.
+Framing as for frames (postcard, COBS, a zero byte after each), but the limit is
+`MAX_GW_FRAME = 1100` bytes (a full 1024-byte packet plus its fields), not `MAX_FRAME`. A message
+that breaks a limit is never encoded and never handed out; one with bytes left over is corrupt. The
+hub recognises a gateway by its protocol 14 `Hello` and from then on reads the link this way; until
+then it reads link frames (a wired node or the wired bus).
+
+`GwUp`, gateway to hub (variants by index, append-only):
+
+| # | Variant | Meaning |
+|---|---|---|
+| 0 | `Hello { protocol, firmware: String<16>, mac, channel }` | At boot and every 5 s. `protocol` must be 14 (`hublink::link::MIN_GATEWAY_PROTOCOL`); a sealed hub refuses an older gateway (`OLD FIRMWARE: gateway`). `mac` is the gateway's address, which every hub-sealed tag covers |
+| 1 | `Packet { src, rssi: i8, held_us: u32, data }` | One ESP-NOW packet as heard, still sealed: radio source address, dBm, time it waited in the gateway, at most 1024 bytes |
+| 2 | `TxDone { id: u16, to, radio_acked: bool, attempts: u8, held_ms: u16 }` | A `Transmit` is finished: acknowledged by the radio (which proves only that something answered) or given up |
+| 3 | `Refused { src, reason, count: u32, rssi: i8, window_ms: u32 }` | Packets from `src` dropped for `reason`, at most once a second per address and reason; `src` all zero = many addresses, shared |
+| 4 | `Stats(GwStats)` | Once a second: `uptime_s`, `beacons_sent`, `foreign`, `uart_drops`, `refused[4]`, running totals |
+
+`RefuseReason` (index, name, the `ForgedLink` detail the hub reports it under): 0 `not_in_roster`
+(9), 1 `over_budget` (10), 2 `old_firmware` (8), 3 `malformed` (15).
+
+`GwDown`, hub to gateway:
+
+| # | Variant | Meaning |
+|---|---|---|
+| 0 | `Roster(Vec<[u8; 6], 16>)` | The kit's node addresses, on every `Hello` and every 5 s. Before the first one the gateway relays no sealed node packet |
+| 1 | `Beacon(data)` | A hub-sealed beacon (at most `MAX_BEACON = 160` bytes): broadcast once as it is; a newer one replaces one not yet sent, none is repeated |
+| 2 | `Transmit { id: u16, to, urgent: bool, give_up_ms: u16, data }` | A hub-sealed packet for one node: sent unicast at once, again whenever that node is heard (at most every 20 ms) and blind every 50 ms, until the radio acknowledges it or `give_up_ms` runs out; `urgent` (time syncs) goes first and is dropped 300 ms after arrival. Ends in one `TxDone` |
+| 3 | `Cancel { to }` | Drop whatever is queued for `to`: a newer command replaces it |
+
+**What the gateway does** (`airlink::relay`, holding no key): a packet that is not ours, or a
+hub-to-node kind heard back, is counted as foreign; version 2 is refused `old_firmware`; a wrong
+size is `malformed`; an Unprovisioned announcement is passed on at most once a second in total;
+version 3 Frames pass only from a roster address (`not_in_roster` otherwise); version 1 Frames pass
+in their own lane from a roster address, or in one shared lane from anyone (an open kit's hub
+pushes the addresses it heard). Then a byte-identical retry is dropped, and each address gets at
+most 40 packets and 16 KB a second (`over_budget`). Lanes are served round-robin under a total cap
+of 50 KB a second, and a packet queued for more than 1 s is dropped. The gateway cannot verify or
+make a tag: a packet it alters is refused at the hub or the node.
 
 ### Reject reasons
 
-`auth::Reject` (the number is what the gateway reports as `ForgedLink` `detail`), plus the two
-origin codes from `crates/link/src/origin.rs`:
+`airlink::v3::Reject` (the number is the `ForgedLink` `detail`), plus the codes from
+`crates/link/src/origin.rs`. Words for each: `link::origin::forged_reason`.
 
-| Code | Name | Meaning | Reported by |
+| Code | Name | Meaning | Seen by |
 |---|---|---|---|
-| 1 | `bad_tag` | The tag does not match: forged, corrupted, or another key | Gateway (`ForgedLink`); counted on nodes |
-| 2 | `replay` | A genuine packet older than one already taken | Gateway; counted on nodes |
-| 3 | `unauthenticated` | No tag (a version-1 packet) where a key is configured | Gateway; counted on nodes |
-| 4 | `stale` | Genuine, but from before the receiver's last boot (another epoch) | Gateway (only counted, not reported, during the gateway's first 60 s of uptime while nodes resync: `STALE_GRACE_MS`); counted on nodes |
-| 5 | origin | A frame type the sender may not originate (`origin::FORGED_ORIGIN`) | Gateway and hub |
-| 6 | table full | A genuine node packet dropped because a keyed gateway's 16-node table was full (`origin::FORGED_TABLE_FULL`) | Gateway |
-| 7 | `late` | Genuine, in order, but older than the gateway clock the node knows has passed | Node only (`"late"` on its `link_auth` line); never reported |
+| 1 | `bad_tag` | The tag does not match: forged, corrupted, a captured node speaking as another, or a board keyed for another kit or generation | Hub (`ForgedLink`); counted on nodes |
+| 2 | `replay` | Genuine but not newer than one already taken, or echoing another session | Hub; counted on nodes |
+| 3 | `unauthenticated` | A version 1 (open) packet at a sealed receiver | Hub; counted on nodes |
+| 4 | `stale` | Genuine, from an epoch the receiver is past (before the hub's last restart) | Hub; counted on nodes |
+| 5 | origin | A frame type the sender may not originate (`origin::FORGED_ORIGIN`) | Hub (also on the wired bus) |
+| 6 | table full | Raised only by the retired version 2 gateway; kept so old logs read (`FORGED_TABLE_FULL`) | Nothing any more |
+| 7 | `late` | Genuine, in order, but older than the node's floor allows | Node only (`NodeHealth.rejects`, `link_auth` line) |
+| 8 | `old_firmware` | A version 2 packet: a board that was not reflashed | Hub, from its own check and the gateway's `Refused`; counted on nodes |
+| 9 | `not_in_roster` | The sender's address is not one of the kit's nodes | Hub and gateway |
+| 10 | over budget | A roster address over the gateway's per-address budget (`FORGED_OVER_BUDGET`) | Gateway's `Refused`, reported by the hub |
+| 11 | `late_uplink` | A genuine node batch more than 2 s behind the hub's clock | Hub |
+| 12 | `future_uplink` | A genuine node batch more than 0.5 s ahead of the hub's clock | Hub |
+| 13 | `not_for_this_slot` | A beacon with no (or a zero) tag for this node's slot | Node only |
+| 14 | `unproven` | Genuine, but from an epoch the node has not been moved to, or a `TimeSync` before its epoch is proven | Node only |
+| 15 | `malformed` | Ours (magic `RS`) but the wrong size, kind or direction | Hub, gateway; counted on nodes |
+| 16 | `foreign` | Not ours at all: other ESP-NOW users. Not an attack | Counted only |
 
-The gateway reports each claimed address and reason at most once a second (`auth::RejectLog`); when
-its table is full, further addresses share one all-zero entry.
+The hub reports each claimed address and reason at most once a second (`origin::RefusalLog`); when
+its table is full, further addresses share one all-zero entry. A node counts its refusals by reason
+in `NodeHealth.rejects` (`link::NODE_REJECT_CODES`: 1, 2, 3, 4, 7, 8, 13, 14, 15, 16).
 
-### The key
+### The keys
 
-The key is never in the repository. `crates/airlink/build.rs` reads it at **build** time and bakes
-it into the image:
+No key is in the repository or in any firmware image, and no build reads a key file or a key
+variable: every image is the same for every kit. `cargo run -p link-key -- kit new` makes the kit
+master (`tools/kit.key`, git-ignored) and an empty roster (`tools/kit.roster`); link-key then
+writes each node's own key record to its `rskey` partition and the master and roster to the hub's
+`rskit` partition, with the hub's boot counter in `rsboot` ([Tools reference](tools.md#link-key),
+[ESP-NOW in depth](../ESPNOW.md#securing-the-link)). Each board reads its record at boot; the
+gateway gets only the roster's MAC addresses from the hub, in RAM.
 
-| `ROTORSCOPE_LINK_KEY_FILE` | Result |
-|---|---|
-| a path | That file (it must exist and hold exactly 64 hex digits; whitespace allowed) |
-| `none` | No key, on purpose: an open kit. Firmware builds print a warning |
-| unset or empty | `tools/link.key` if it exists; otherwise a firmware build (target OS `none`) **stops** with instructions, and a host build builds without a key |
-
-Make the key once per kit with `cargo run -p link-key -- new` (the message in
-`crates/airlink/src/keysrc.rs`). The build exposes `KEY_ID`, 8 hex digits of
-HMAC(key, `"rotorscope link key id"`), which identifies the key without revealing it, and
-`KEY_TAG` (`link-key:<id>` or `link-key:none`), which firmware prints at boot. The key itself is
-never printed, and `auth::Key`'s `Debug` shows only `Key(..)`.
+The **kit id** (`HMAC(master, "rotorscope/kit-id/v1")`, first 4 bytes) and each node's **key check**
+(`HMAC(K_node, "rotorscope/check/v1")`, first 4 bytes) are printed as eight hex digits; they name a
+key without revealing it. A node's boot line says
+`{"t":"uplink","auth":"kit:<id> slot:<n> gen:<g> check:<c>",...}`. Key types (`MasterKey`, `NodeKey`,
+`LinkKey`) print as `..` in `Debug`, have no `Display`, and overwrite themselves when dropped.
 
 ## The wired bus
 
@@ -812,7 +925,8 @@ The budget per answer is `cycle_bytes / present_nodes - 64`, clamped to 256..102
 `BusDone` / `BusJoin`.
 
 **Attribution.** The hub's `wirebus::Attributor` puts a `Via { node: mac, rssi: 0 }` before each bus
-node's frame, so the rest of the hub treats wired nodes exactly as ESP-NOW nodes. A node-supplied
+node's frame, so the rest of the hub knows which node sent each frame (an ESP-NOW node is named by
+the roster slot whose key verified its packet instead). A node-supplied
 `Via` is honoured only from a node registered as a gateway (`register_gateway`, at most
 `MAX_GATEWAYS = 4`); `docs/WIREBUS.md` notes that no firmware registers one today.
 
@@ -896,7 +1010,7 @@ prints them: `uplink`, `link_auth` (node uplinks), `warn` (for example `"what":"
 `"link_key"`); `assign`, `switch`, `err`
 (roles and errors); `dji`, `wifidrone`, `mavlink_attack`, `flood`, `forge` (node-wifi); `air`,
 `mode`, `ctrl`, `contested`, `energy`, `follow` (node-lr); `jam`, `jamhop`, `jam_state`, `plan`,
-`link` (node-sdr); `gw`, `down`, `node`, `threat` (gateway). The hub's own USB stream is different:
+`link` (node-sdr); `gw`, `roster`, `refused`, and `gwforge` in a bench build (gateway). The hub's own USB stream is different:
 track lines (`{"t":"track",...}`) and the other tracker lines, whose schemas are in
 [`crates/tracker/README.md`](https://github.com/holdTheDoorHoid/rotorscope/blob/main/crates/tracker/README.md),
 plus the P4 hub's own `{"t":"hub"}` status line (`firmware/hub-p4/src/report.rs`).
@@ -906,16 +1020,19 @@ plus the P4 hub's own `{"t":"hub"}` status line (`firmware/hub-p4/src/report.rs`
 - `crates/link/src/lib.rs`: `Frame`, `Command`, every struct and enum above, `PROTOCOL_VERSION`,
   `MAX_FRAME`, `encode`, `Decoder`, and the append-only tests.
 - `crates/link/src/origin.rs`: who may originate each frame, `Sorter`, `node_batch`,
-  `RefusalLog`, `FORGED_ORIGIN`, `FORGED_TABLE_FULL`.
+  `RefusalLog`, the `FORGED_*` detail codes and `forged_reason`.
 - `crates/link/src/forward.rs`: the web-head forwarder.
 - `crates/link/src/printable.rs`: cleaning over-the-air text.
 - `crates/link/src/benchfence.rs`: the bench fence, included by every `firmware/*/build.rs` except
   `rid-beacon`'s.
-- `crates/airlink/src/lib.rs`, `src/auth.rs`, `src/keysrc.rs`, `build.rs`: the ESP-NOW packet,
-  sealing, freshness and the build-time key.
+- `crates/link/src/gw.rs`: the gateway's UART messages (protocol 14).
+- `crates/airlink/src/lib.rs` (version 1), `src/v3/` (version 3: sealing, freshness, epochs),
+  `src/relay.rs` (the keyless gateway): the ESP-NOW packet.
+- `crates/kitkeys`: kit master, per-node keys, key records, roster, boot counter;
+  `crates/hublink`: the hub's side of the gateway wire.
 - `crates/wirebus/src/lib.rs`, `master.rs`, `node.rs`, `crc.rs`, `sim.rs`: the wired bus.
-- `firmware/hub-p4/src/links.rs`, `firmware/gateway/src/main.rs`: the two main readers of the
-  stream.
+- `firmware/hub-p4/src/links.rs`, `firmware/gateway/src/main.rs`: the two ends of the gateway
+  wire; `links.rs` also reads wired links.
 - `tools/rid-view/src/parse.rs`, `firmware/node-wifi/src/report.rs`,
   `firmware/node-ble/src/out.rs`: USB JSON lines.
 - Related reference pages: [Crate reference](crates.md), [Firmware reference](firmware.md),

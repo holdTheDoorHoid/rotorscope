@@ -88,8 +88,8 @@ The bar along the top shows, from the left, the GPS state, a mark for each kind 
 
 **A strip along the bottom edge** should read `TEST KEY: log not evidence` on every page until
 the hub signs its evidence with a key of its own (`DEV KEY: not evidence-grade` with a
-development key); a bench build adds `BENCH BUILD`, and a gateway built without a link key adds
-`OPEN LINK`. These strip messages are built but have not yet been checked by eye on the P4.
+development key); a bench build adds `BENCH BUILD`, and a kit that is not sealed yet (the hub's
+own key record is open, as a kit ships) adds `OPEN LINK`. These strip messages are built but have not yet been checked by eye on the P4.
 
 ### 2. Nodes appear on the Health page
 

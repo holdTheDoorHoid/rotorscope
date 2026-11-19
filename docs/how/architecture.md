@@ -84,11 +84,13 @@ flowchart TD
 3. **Frame.** The node wraps its report in a small binary **frame** from the shared `link`
    crate. Every board speaks the same frame format (see [The link between boards](link.md)).
 4. **Relay.** Today the node sends its frames over ESP-NOW (a short-range Wi-Fi radio message
-   between ESP32 chips) to the gateway, which writes them onto a wire into the hub, each one
-   preceded by a marker naming the node. The wired bus will do the same over two shared wires.
-5. **Verify.** The hub checks that the sender is allowed to send that kind of frame. A node can
-   report a drone; only the hub may state the kit's own GPS position. With a kit key, the
-   gateway has already checked that every radio packet really came from a board of this kit.
+   between ESP32 chips) to the gateway, which passes each packet unchanged over a wire into the
+   hub; the gateway holds no key. The wired bus will do the same over two shared wires, with the
+   hub putting a marker naming the node in front of each frame.
+5. **Verify.** On a sealed kit the hub first checks, with that node's own key, that every radio
+   packet really came from that node of this kit. Then it checks that the sender is allowed to
+   send that kind of frame. A node can report a drone; only the hub may state the kit's own GPS
+   position.
 6. **Track.** The tracker joins every report about the same drone into one **track**, across
    radios and nodes, and works out the distance and direction from you (see
    [The tracker](tracker.md)).
@@ -154,7 +156,7 @@ why:
 
 ### Shared `no_std` crates, tested on a computer
 
-31 of the 32 crates in `crates/` are written `no_std`: they need no operating system, so the
+33 of the 34 crates in `crates/` are written `no_std`: they need no operating system, so the
 same code runs on an ESP32 and on a laptop. That has two big benefits:
 
 - The logic is tested on a computer with thousands of made-up and recorded cases before it
@@ -175,7 +177,7 @@ the system *thinks* is in `crates/`.
 | Fingerprint and watch | `fpvscan`, `djilink`, `jamwatch`, `wifiwatch`, `ctrlwatch`, `mavwatch` | `node-wifi`, `node-sdr`, `node-lr` |
 | Frame | `link` | every board |
 | Relay | `airlink` (ESP-NOW), `wirebus` (wired bus) | `gateway`, `node-common`, `hub-p4` |
-| Verify | `link::origin`, `airlink` (signing) | `gateway`, `hub-p4`, `hub` |
+| Verify | `link::origin`, `airlink` and `kitkeys` (per-node keys), `hublink` | `hub-p4`, `hub` (nodes check what the hub sends them) |
 | Track and check | `tracker`, `faarules`, `airspace`, `gnss` | `hub-p4` (and `tools/rid-view`) |
 | Plan the listening | `coverage`, `nodeimage` | `hub-p4`, `node-common` |
 | Show | `screen`, `webui`, `tracker` (JSON, CoT) | `hub-p4`, `hub` (web head) |
@@ -197,7 +199,7 @@ through each one.
 - `firmware/hub-p4/src/main.rs`, `app.rs`: the hub's main loop and track table.
 - `crates/link/src/lib.rs`: the frame format every board speaks.
 - `crates/tracker/src/lib.rs`: merging, distances and outputs.
-- `firmware/gateway/src/main.rs`: the ESP-NOW relay.
+- `firmware/gateway/src/main.rs`: the ESP-NOW relay, which holds no key.
 - `PLAN.md`, "Architecture" and "Node chip": the recorded decisions,
   <https://github.com/holdTheDoorHoid/rotorscope/blob/main/PLAN.md>.
 

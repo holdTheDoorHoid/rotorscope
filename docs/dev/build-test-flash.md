@@ -12,7 +12,7 @@ first ([Set up your machine](setup.md)).
 cargo test
 ```
 
-This builds and tests every member of the root workspace: the 32 crates under `crates/` and the 13
+This builds and tests every member of the root workspace: the 34 crates under `crates/` and the 13
 Rust programs under `tools/`. It never builds firmware (each firmware folder is its own project).
 As of commit `6651ecd` (2026-11-18) the source holds 1,467 `#[test]` markers in files under
 `crates/` and `tools/` (counted with `git grep`, not by running the tests). Four are marked
@@ -105,28 +105,23 @@ the [firmware reference](firmware.md); the common builds are:
 
 ### The link key
 
-Every firmware that talks over ESP-NOW (the gateway always; the nodes when built with `espnow`)
-signs its packets with the kit's own **link key**: one random 32-byte key shared by the gateway and
-every ESP-NOW node of one kit ([ESP-NOW in depth](../ESPNOW.md#securing-the-link)). Make it once
-per kit:
+No firmware build needs or reads a key. Since the cut-over of 2026-11-18 every ESP-NOW node has a
+key of its own, kept in a small flash partition (`rskey`) that firmware updates never touch, and
+the P4 hub holds the kit master and roster in its `rskit` partition; the gateway holds no key at
+all. Images are the same for every kit. The keys are written to the boards with `link-key`, after
+flashing or before, as described in
+[ESP-NOW in depth, "Kits ship open; sealing yours"](../ESPNOW.md#kits-ship-open-sealing-yours) and
+the [Tools reference](tools.md#link-key).
 
-```bash
-cargo run -p link-key -- new
-```
+Two things to keep the keys in place when you flash: flash the hub with
+`tools/partitions-hub.csv` and single-image ESP-NOW nodes with `tools/partitions-single.csv`
+(`tools/dev-board.sh --pt <csv> <elf>`); multi-image nodes get `tools/partitions-node.csv` from
+`tools/flash-node.sh`. `dev-board.sh` never erases a key partition.
 
-That writes `tools/link.key` (owner-only permissions, ignored by Git) and prints the key's ID, 8
-hex digits that name the key without revealing it. The build reads the key by itself
-(`crates/airlink/build.rs`):
-
-| `ROTORSCOPE_LINK_KEY_FILE` | What the build does |
-|---|---|
-| not set | uses `tools/link.key`; if there is none, a firmware build **stops** and says how to make one |
-| a path | uses that file, which must exist |
-| `none` | builds an **open** kit on purpose, with no authentication, and warns |
-
-Host builds (`cargo test`, the tools) never need a key. Wired builds (no `espnow` feature) carry
-no key at all. A build in another checkout needs the file there too, or
-`ROTORSCOPE_LINK_KEY_FILE` pointing at it. Never commit, paste or print the key file.
+Before 2026-11-18 one kit key was compiled into every ESP-NOW image from `tools/link.key`
+(`ROTORSCOPE_LINK_KEY_FILE`, `link-key new`). That is gone: nothing reads the file or the variable
+any more, and a board still on that firmware is refused by the hub as `old_firmware`. Never commit,
+paste or print `tools/kit.key` (or an old `tools/link.key`).
 
 ### Bench builds and `ROTORSCOPE_BENCH=1`
 
@@ -186,9 +181,8 @@ tools/dev-board.sh firmware/gateway/target/riscv32imac-unknown-none-elf/release/
 The arguments are the ELF, how many seconds to read the console afterwards (default 15) and the
 board name (default `s3`). The script:
 
-1. checks the image: an image built for ESP-NOW has its link-key ID printed, with a **WARNING** if
-   it has no key or a different key from `tools/link.key` (or `ROTORSCOPE_LINK_KEY_FILE`); a bench
-   image is refused without `ROTORSCOPE_BENCH=1`;
+1. checks the image: a bench image is refused without `ROTORSCOPE_BENCH=1` (images carry no link
+   key, so there is none to check);
 2. waits up to 10 minutes for the board's lock (`~/.local/state/rotorscope/locks/`, or
    `ROTORSCOPE_LOCK_DIR`), and also takes the old `/tmp` lock so an older copy of the script still
    excludes it;
@@ -211,12 +205,13 @@ them when the hub assigns it a job. `tools/flash-node.sh` builds and flashes the
 tools/flash-node.sh c5a
 ```
 
-It builds `node-wifi` into slot `ota_0` and `node-ble` into `ota_1` (with ESP-NOW and the link
-key), adds `node-sdr` to `ota_2` only if its ELF already exists (it never builds node-sdr; point
-`NODE_SDR_ELF` at another one), erases the boot choice so the node starts `node-wifi`, and reads
-the console for 20 seconds. It refuses to go on if there is no link key (pass `--open` to build an
-open kit on purpose), if the images carry different link keys, or if any image is a bench build
-without `ROTORSCOPE_BENCH=1`. `NODE_WIRED=1` builds wired images instead, and `NODE_BUS=1` builds
+It builds `node-wifi` into slot `ota_0` and `node-ble` into `ota_1` (with ESP-NOW), adds
+`node-sdr` to `ota_2` only if its ELF already exists (it never builds node-sdr; point
+`NODE_SDR_ELF` at another one), erases the boot choice so the node starts `node-wifi`, leaves the
+node's key record (`rskey`) alone, and reads the console for 20 seconds. It calls the flash good
+only if the node's boot line says it is keyed (`"auth":"kit:..."`), or with `--open` has an open
+record. It refuses to go on if an image does not fit the node or is a bench build without
+`ROTORSCOPE_BENCH=1`. `NODE_WIRED=1` builds wired images instead, and `NODE_BUS=1` builds
 for the wired bus (where every image must be a bus build). The slot layout is
 `tools/partitions-node.csv`.
 
@@ -263,7 +258,7 @@ Groups: `s3`, `c5`, `cross`, `wifi`, `ble`, `openlink`, `hub`; or name single te
 `--min-hits` and `--min-frames` change the capture length and pass marks; `--tx-board` and
 `--rx-board` swap boards. Logs go to `bench-logs/<date-time>/<test>/`. The exit code is 0 only if
 every test passed, 1 if any failed and 2 if any could not run. The runner sets
-`ROTORSCOPE_BENCH=1` for its own builds and builds only wired images, so it needs no link key.
+`ROTORSCOPE_BENCH=1` for its own builds and builds only wired images, which never use a link key.
 
 The `hub` group builds the S3 hub, which does not link as of 2026-11-18 (see the warning above).
 How to read results and what each group needs: [Bench tests](../BENCH.md).
@@ -303,7 +298,7 @@ path; it has not been heard from a real drone.
 
 - `Cargo.toml`: workspace members and the optimised test profiles
 - `firmware/*/.cargo/config.toml`: the `cargo fw` aliases
-- `crates/airlink/build.rs`: the link-key rules
+- `tools/link-key/src/main.rs`, `tools/partitions-*.csv`: the link keys and where they live on a board
 - `crates/link/src/benchfence.rs`: the bench fence every firmware build uses
 - `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/partitions-node.csv`: flashing
 - `tools/bench/run.py`, `tools/bench/judge.py`: the bench runner

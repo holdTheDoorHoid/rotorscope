@@ -1,6 +1,6 @@
 # Crate reference
 
-**Level: 🔴 Expert** · All 32 library crates under `crates/`: what each does, its main types,
+**Level: 🔴 Expert** · All 34 library crates under `crates/`: what each does, its main types,
 features, limits, tests, licences and how far it has been proven, as of commit `6651ecd`
 (2026-11-18).
 
@@ -27,7 +27,7 @@ noted).
 |---|---|---|---|
 | `adsb` | Parser for the ADSBee 1090's CSBee text lines; the shared aircraft record | yes | hub-p4, hub (S3), rid-view, modes-live; `modes`, `uat`, `flarm`, `faarules`, `tracker` |
 | `aerohop` | FLARM / OGN frequency-hop plans and a hub-synced UTC clock | yes | node-lr; `lr2021cfg` |
-| `airlink` | ESP-NOW packets: batches, beacons, commands, per-packet authentication | yes | gateway, node-wifi, node-ble, node-sdr, node-lr; link-key |
+| `airlink` | ESP-NOW packets: batches, beacons, commands; version 3 sealing and checking with per-node keys; the gateway's keyless relay | yes | gateway, hub-p4, nodes via node-common; `coverage`, `hublink`, `nodeimage` |
 | `airspace` | Offline airspace and terrain pack: format, lookups, sun elevation, line of sight | yes (writer needs `alloc`) | hub-p4; airspace-pack; `faarules` |
 | `coverage` | Coverage coordinator: which node listens to what | yes | hub-p4, node-wifi |
 | `ctrlwatch` | Drone and RC control-link recognition (ExpressLRS, mLRS, SiK, OpenLRSng, energy) | yes | node-lr, hub-p4; `link`, `tracker`, `coverage`, `lr2021cfg`, `screen` |
@@ -39,7 +39,9 @@ noted).
 | `flarm` | Receive-only OGN tracker and (feature `legacy`) FLARM legacy decoders | yes | hub-p4; flarm-keys |
 | `fpvscan` | Analog FPV and RF scanner DSP for the raw-capture C5 | yes | node-sdr; rfuav-check; `jamwatch`, `djilink` tests |
 | `gnss` | GNSS driver core (u-blox MAX-M10S, Quectel LC29H) and receiver integrity monitor | yes | hub-p4, hub (S3) |
+| `hublink` | The P4 hub's side of the keyed ESP-NOW link: kit records, boot counter, the gateway wire | yes | hub-p4 |
 | `jamwatch` | Jamming detection for the raw-capture C5 | yes | node-sdr |
+| `kitkeys` | Kit master, per-node keys, key records, roster and boot counter for the ESP-NOW link | yes | hub-p4, nodes via node-common; link-key; `airlink`, `hublink`, `nodeimage` |
 | `link` | Node-to-hub wire protocol: postcard + COBS frames | yes | every firmware except rid-beacon; rid-view, evidence-server; most crates |
 | `lr2021cfg` | The Semtech LR2021 as a receive-only radio, described as data | yes | node-lr |
 | `mavwatch` | Hostile MAVLink detection and the MAVLink frame scanner | yes | node-lr; `ctrlwatch`, `wifiwatch` |
@@ -80,9 +82,10 @@ The exact edges, from the `[dependencies]` of each `Cargo.toml`: `link` uses `ri
 `ctrlwatch` (which uses `mavwatch`); `tracker` uses `rid`, `link`, `ctrlwatch`, `openlink`, `adsb`,
 `wifidrone` and `droneid`; `wifiwatch` uses `link`, `wifidrone` and `mavwatch`; `jamwatch` uses
 `fpvscan` and `link`; `djilink`, `fpvscan`, `rawcap` and `djicrypt` use `droneid`; `coverage` uses
-`link` and `ctrlwatch`; `lr2021cfg` uses `link`, `modes`, `aerohop` and `ctrlwatch`; `faarules`
+`link`, `ctrlwatch` and `airlink` (for `GATEWAY_CHANNEL`); `lr2021cfg` uses `link`, `modes`, `aerohop` and `ctrlwatch`; `faarules`
 uses `airspace`, `tracker`, `rid` and `adsb`; `screen` (feature `tracker`) and `evidence` (feature
-`decode`) use `link` and `rid`. `airlink` depends only on `sha2`.
+`decode`) use `link` and `rid`. `airlink` uses `kitkeys`, which depends only on `sha2`; `hublink`
+uses `airlink`, `kitkeys`, `link` and `evidence`.
 
 ## Keys and secrets
 
@@ -91,12 +94,13 @@ that is published on purpose and labelled as such.
 
 | Crate | Key | Where it comes from | When |
 |---|---|---|---|
-| `airlink` | The kit's 32-byte ESP-NOW link key | `tools/link.key` (git-ignored, made by `cargo run -p link-key -- new`) or `ROTORSCOPE_LINK_KEY_FILE` | **Build time**: baked into each image by `crates/airlink/build.rs`; a firmware build with no key and no explicit `ROTORSCOPE_LINK_KEY_FILE=none` stops |
+| `kitkeys` (used by `airlink`, `hublink`, link-key) | The kit master and each ESP-NOW node's own key | `tools/kit.key` (git-ignored, made by `cargo run -p link-key -- kit new`); link-key writes each node's key to its `rskey` partition and the master and roster to the hub's `rskit` partition | **Run time**: each board reads its key record from flash at boot. No firmware build reads a key file or variable, and every image is the same for every kit ([ESP-NOW in depth](../ESPNOW.md#securing-the-link)) |
 | `djicrypt` | The receiver's SM2 private scalar for DJI O4 DroneID | `ROTORSCP/O4KEY.TXT` on the hub's SD card, provided by the owner | **Run time**; without it O4 stays detect-only |
 | `flarm` (feature `legacy`) | The FLARM legacy key constants | `ROTORSCP/FLARMKEY.TXT` on the hub's SD card; `tools/flarm.keys` on a laptop (both in `.gitignore`) | **Run time** |
 | `evidence` | The ECDSA P-256 signing key for checkpoints | `ROTORSCOPE_DEV_KEY` at hub-p4 build time (64 hex digits, checked by `crates/evidence/src/devkey.rs`); unset = the published test key, which the screen and every checkpoint say | **Build time** (a hardware key in eFuse is planned, not built) |
 
-The crates never print a key: `airlink::auth::Key`'s `Debug` prints `Key(..)`; `djicrypt`'s
+The crates never print a key: `kitkeys`' `MasterKey`, `NodeKey` and `LinkKey` print as `..` in
+`Debug`, have no `Display` and overwrite themselves when dropped; `djicrypt`'s
 `PrivateKey` and `SessionKey` have no `Debug` or `Display` and are wiped on drop; `flarm::Keys`
 has no `Display` and its `Debug` prints nothing of the values; the build scripts never echo a key
 file's contents, even a malformed one.
@@ -707,9 +711,9 @@ never yet applied to a real drone ([FAA rule flags](../use/faa-flags.md)).
 ### link
 
 **What it does.** The node-to-hub wire protocol: `Frame` (node to hub, and hub to web head) and
-`Command` (hub to node), serialised with postcard and COBS-delimited. `PROTOCOL_VERSION = 13`,
+`Command` (hub to node), serialised with postcard and COBS-delimited. `PROTOCOL_VERSION = 14`,
 `MAX_FRAME = 320`. Modules: `origin` (who may originate each frame, `Sorter`, `node_batch`,
-`RefusalLog`), `forward` (the web-head forwarder), `printable` (cleaning over-the-air text).
+`RefusalLog`), `gw` (the ESP-NOW gateway's UART messages, protocol 14), `forward` (the web-head forwarder), `printable` (cleaning over-the-air text).
 `benchfence.rs` is not part of the library: every `firmware/*/build.rs` except `rid-beacon`'s
 includes it by path. Full
 detail: [Wire protocol reference](protocol.md).
@@ -727,25 +731,62 @@ C5 nodes and the gateway into the P4 hub with 0 corrupt frames ([ESP-NOW in dept
 
 ### airlink
 
-**What it does.** The ESP-NOW packets between radio nodes and a gateway (protocol "RS" v1, sealed
-v2): node batches of whole link frames, gateway beacons and commands, and per-packet authentication
-in `auth` (HMAC-SHA256 tag truncated to 12 bytes, a 16-byte freshness stamp, replay and age
-checks). Full detail: [Wire protocol reference](protocol.md#esp-now-air-packet) and
-[ESP-NOW in depth](../ESPNOW.md).
+**What it does.** The ESP-NOW packets between radio nodes and a gateway (protocol "RS"). Version 1
+(the crate root) is the unauthenticated packet an open kit uses: node batches of whole link frames,
+beacons and commands. Version 3 (`v3`, since the 2026-11-18 cut-over) is the sealed packet: every
+packet but the unprovisioned announcement ends in a 16-byte freshness stamp and an HMAC-SHA256 tag
+truncated to 12 bytes (8 per node in a beacon) under that node's own key, with the hub's 10 ms tick
+clock, ordered epochs and per-boot node sessions. The retired version 2 (one kit key) is recognised
+by its header only and refused as `old_firmware`; nothing here can make or check one. `relay` is
+the gateway's logic, which holds and names no key: roster filter, per-address and total budgets,
+duplicate drop, round-robin lanes, and the transmit queue for what the hub sealed. Full detail:
+[Wire protocol reference](protocol.md#esp-now-air-packet) and [ESP-NOW in depth](../ESPNOW.md).
 
-**Main API.** `parse`, `Packet`, `Kind`, `Batch`, `beacon`, `beacon_channel`, `command`, `frames`,
-`SeqTracker`; `auth::{Key, Stamp, seal, verify, Gateway, Peer, Node, node_accept, proves_gateway,
-Reject, Verdict, RejectLog, NodeRejects}`. Constants `HEADER = 6`, `MAX_PACKET = 1024`,
-`MAX_PAYLOAD = 990`, `auth::TRAILER = 28`, `TAG_LEN = 12`, `LATE_SLACK = 16`.
+**Main API.** `parse` (version 1 only), `Packet`, `Kind`, `Batch` (`sealed_v3` for a sealed
+batch), `beacon`, `command`, `frames`, `SeqTracker`; `v3::{Hub, Node, inspect, Stamp, Reject,
+Verdict, Shape, Unprovisioned}`; `relay::{Uplink, TxQueue, BeaconSlot, Refusals}`. Constants
+`HEADER = 6`, `MAX_PACKET = 1024`, `MAX_PAYLOAD = 990`, `GATEWAY_CHANNEL = 6`, `v3::TRAILER = 28`,
+`v3::TAG_LEN = 12`, `v3::SYNC_LEN = 35`, `v3::DOWN_SLACK = 300`, `v3::UPLINK_MAX_AGE = 200` (ticks).
 
-**Build-time key.** `build.rs` bakes in the kit key ([Keys and secrets](#keys-and-secrets));
-`src/keysrc.rs` holds the decision and is unit-tested. **Dependencies.** `sha2` 0.11 only (HMAC is
-implemented in `src/hmac.rs` with the key pads absorbed once).
+**Keys.** None in the crate and none in any build: it has no build script, and boards read their
+keys from flash at run time through `kitkeys` ([Keys and secrets](#keys-and-secrets)).
+**Dependencies.** `kitkeys` only.
 
-**Tests.** 37. **Proof level.** **Proven on the air**: the ESP-NOW link carried Remote ID from the test transmitter on the
-bench (2026-11-14). The keyed link ran on the bench on 2026-11-18 with honest traffic and with the
-seven forbidden frame kinds refused at the gateway ([Bench tests](../BENCH.md)); the replay, stale
-and late paths are host-tested only.
+**Tests.** 66. **Proof level.** **Proven on the air** before the cut-over: the version 1 and version
+2 link carried Remote ID from the test transmitter on the bench (2026-11-14), and the version 2
+keyed link ran on 2026-11-18 ([Bench tests](../BENCH.md)). Version 3 is **simulated only**
+(tested on a computer, built for the boards); its bench pass is the "Link keys: bench checklist" in
+[Bench tests](../BENCH.md).
+
+### kitkeys
+
+**What it does.** The kit's keys for the version 3 ESP-NOW link (docs/LINK-KEYS-DESIGN.md
+section 4). One random **kit master** per kit; per node a key derived from the master and the
+node's roster slot, generation and MAC address, and from it separate up and down keys. The **kit
+id** and each node's **key check** (eight hex digits each) name them without giving them away.
+Modules: `record` (a node's `rskey` partition), `hub` (the hub's `rskit` partition: master and
+roster), `roster` (slots 0-15, generations, revocation; no secrets), `bootlog` (the hub's `rsboot`
+boot counter: the link's epoch and the evidence log's boot number). The HMAC is `src/hmac.rs`, over
+`sha2`, with the key's pads absorbed once.
+
+**Main API.** `KeySource` (the only thing that can use the master; `SoftKeySource` in software, a
+secure element can implement it later), `MasterKey`, `NodeKey`, `LinkKey`, `KitId`, `KeyCheck`,
+`ct_eq`. Constants `KEY_LEN = 32`, `SLOTS = 16`.
+
+**Dependencies.** `sha2` 0.11 only. **Tests.** 38. **Proof level.** **Simulated only** (tested on a computer).
+
+### hublink
+
+**What it does.** The P4 hub's side of the keyed ESP-NOW link, as host-testable logic; the firmware
+(`firmware/hub-p4/src/linkauth.rs`, `links.rs`) only moves bytes. Modules: `flash` and `parttable`
+(finding and writing `rskit` and `rsboot`), `kit` (reading the kit records, deriving each slot's
+keys once, appending this boot's counter value), `link` (the gateway wire, protocol 14: verify each
+node packet, seal beacons, syncs, commands and time syncs, push the roster, turn refusals into
+`forged_link` threats, counts for the screen), `continuity` (the boot counter as the evidence
+log's).
+
+**Dependencies.** `airlink`, `kitkeys`, `link`, `evidence` (no signer, no decode), `heapless`,
+`postcard`. **Tests.** 35. **Proof level.** **Simulated only** (tested on a computer; built in hub-p4).
 
 ### wirebus
 

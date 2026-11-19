@@ -105,9 +105,11 @@ once a minute. The node's address is the same in every image, so the hub keeps r
 A board flashed with a single image still works; it only offers its own roles and refuses to
 switch.
 
-`tools/flash-node.sh <board>` builds node-wifi and node-ble and flashes every slot. For an
-ESP-NOW node it stops without a kit link key ([The link between boards](link.md)) unless you
-pass `--open`, and it refuses bench-only images unless `ROTORSCOPE_BENCH=1` is set.
+`tools/flash-node.sh <board>` builds node-wifi and node-ble and flashes every slot. The images
+carry no key: an ESP-NOW node keeps its own key record in a separate part of its flash, which
+reflashing leaves alone and `link-key` writes ([The link between boards](link.md)). After an
+ESP-NOW flash the script calls the flash good only if the node reports a key (or an open record,
+with `--open`), and it refuses bench-only images unless `ROTORSCOPE_BENCH=1` is set.
 
 Image switching is **proven on the air**: on 2026-11-15 the hub moved a node between Bluetooth
 and Wi-Fi 5 seven times in five and a half minutes, each switch on a hub command
@@ -115,24 +117,26 @@ and Wi-Fi 5 seven times in five and a half minutes, each switch on a hub command
 
 ## The gateway
 
-`firmware/gateway`, one XIAO ESP32-C5 wired to the hub. It sits on 2.4 GHz channel 6, sends a
-short beacon twice a second so nodes can find it, receives the nodes' ESP-NOW packets and writes
-each frame onto the hub's wire with a marker naming the node it came from. It passes the hub's
-commands back to the nodes. It listens to no drones itself.
+`firmware/gateway`, one XIAO ESP32-C5 wired to the hub. It sits on 2.4 GHz channel 6, puts the
+hub's beacon on the air twice a second so nodes can find it, receives the nodes' ESP-NOW packets
+and passes each one to the hub unchanged. It puts the hub's commands on the air for the nodes. It
+listens to no drones itself. Since 2026-11-18 it **holds no key**: it cannot check a packet's
+signature, or make one, so a stolen gateway gives nothing away. The hub checks every packet.
 
-What it **refuses** to relay:
+What it **refuses** to pass on, with checks that need no key: packets from addresses that are not
+in the kit's roster (the hub sends it the list), more than its share of packets from one address
+(a flood), packets from boards still on the old firmware, and packets of the wrong shape. It
+reports each to the hub, which raises a "forged node traffic" alarm. Everything else is the hub's
+job: a bad signature, an old or replayed packet, and any frame a node has no business sending,
+such as the kit's own GPS position, the hub's aircraft lines, FAA flags, or a marker naming
+another node.
 
-- With a kit key: any packet without a valid signature, an old or replayed packet, and packets
-  from a 17th node (its table holds 16). Each refusal is reported to the hub as a "forged node
-  traffic" alarm.
-- Always: any frame a node has no business sending, such as the kit's own GPS position, the
-  hub's aircraft lines, FAA flags, or a marker naming another node. These are dropped, counted
-  and reported too.
-
-Relaying is **proven on the air**: on the bench it relayed two nodes to the P4 with 0 corrupt
-frames (firmware/hub-p4/BRINGUP.md, steps 11 and 13), and the forbidden-frame refusals were
-tested on hardware with a deliberately forging test build on 2026-11-18. Details:
-[The link between boards](link.md) and [ESPNOW.md](../ESPNOW.md).
+Relaying was **proven on the air** before the 2026-11-18 cut-over, when the gateway still held
+the kit's one key and checked packets itself: on the bench it relayed two nodes to the P4 with 0
+corrupt frames (firmware/hub-p4/BRINGUP.md, steps 11 and 13), and the forbidden-frame refusals
+were tested on hardware with a deliberately forging test build on 2026-11-18. The keyless gateway
+is **simulated only** (tested on a computer and built for the board). Details: [The link between boards](link.md) and
+[ESPNOW.md](../ESPNOW.md).
 
 ## The hub: hub-p4
 

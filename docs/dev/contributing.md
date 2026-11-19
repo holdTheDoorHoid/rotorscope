@@ -92,7 +92,7 @@ Rotorscope is **GPL-3.0-or-later**. From `PLAN.md` (decided 2026-11-09) and `RES
 
 ### Never commit secrets, recordings or bench logs
 
-Keys (`tools/link.key`, `*.evkey`, FLARM and O4 key files), Wi-Fi credentials, downloaded recordings
+Keys (`tools/kit.key` and `tools/kit.roster`, an old `tools/link.key`, `*.evkey`, FLARM and O4 key files), Wi-Fi credentials, downloaded recordings
 (`testdata/`, `rfuav-results/`), `bench-logs/` and `tools/boards.local` are all in `.gitignore`.
 Keep it that way. The repository is public: a key once pushed cannot be taken back, and the DroneID
 recordings are AGPL-3.0 content the project only downloads. Test fixtures use obviously made-up

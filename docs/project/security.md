@@ -50,25 +50,35 @@ SECURITY.md lists these as properties of the signals and hardware rather than th
   encryption are not enabled.
 - Jamming a receiver stops it receiving.
 
+The link between boards has limits of its own, recorded in
+[ESP-NOW in depth](../ESPNOW.md#what-a-capture-gives-away): a captured node gives away that node's
+key (revoke its slot); the hub holds the kit master, so **a captured hub is a captured kit** until a
+secure element is fitted; the wired bus is not authenticated; and the fix for CVE-2025-52471 in
+Espressif's radio libraries is established by where the libraries come from
+(`tools/check-wifi-blobs.sh` checks their hashes), with a patched esp-radio in every radio firmware
+as a second line (`firmware/patches/README.md`).
+
 ## How Rotorscope protects itself
 
 Each of these is described in full on the page it links to, and each says how far it has been
 proven, in the words of [Status](status.md).
 
-- **A signed link between boards.** Every ESP-NOW packet between a node and the gateway carries a
-  tag made with the kit's own key, and forged or replayed packets are dropped and reported.
-  **Proven on the air**: the bench kit runs keyed builds (2026-11-18). See
-  [ESP-NOW in depth](../ESPNOW.md).
-- **Forged frames refused at the gateway.** Each kind of report may only come from the kind of
-  board allowed to send it; the gateway refuses the rest and counts them, and the hub checks again.
-  **Proven on the air**: on 2026-11-18 seven kinds of forbidden frame sent by a test node were all
-  refused at the gateway. See [ESP-NOW in depth](../ESPNOW.md) and
-  [Wire protocol reference](../dev/protocol.md).
-- **The kit's keys never in the repository.** The kit's link key lives in `tools/link.key` on the
-  builder's computer and never goes into git; firmware builds without a key are refused unless
-  deliberately made open (the flashing tools' refusal was checked on 2026-11-18). Owner-supplied
-  keys for DJI O4 and FLARM stay on the SD card. See [ESP-NOW in depth](../ESPNOW.md) and
-  [Credits and licences](credits.md).
+- **A signed link between boards.** On a sealed kit every ESP-NOW packet between a node and the
+  hub carries a tag made with that node's own key, and forged, replayed or late packets are
+  dropped and reported; the gateway in between holds no key. Kits ship open and are sealed with
+  `link-key`. Before the 2026-11-18 cut-over, with one key for the whole kit, this was **proven on
+  the air** (the bench kit ran keyed builds); the per-node design is **simulated only**
+  (tested on a computer and built for the boards). See [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
+- **Forged frames refused.** Each kind of report may only come from the kind of board allowed to
+  send it; the hub refuses the rest, counts them and raises an alarm, and the web head checks
+  again. **Proven on the air** before the cut-over: on 2026-11-18 seven kinds of forbidden frame
+  sent by a test node were all refused at the gateway, which did this check then. See
+  [ESP-NOW in depth](../ESPNOW.md) and [Wire protocol reference](../dev/protocol.md).
+- **The kit's keys never in the repository or in a firmware image.** The kit master lives in
+  `tools/kit.key` on the owner's computer and never goes into git; each node's key is written to
+  its own flash by `link-key`, and no firmware build reads a key, so every image is the same for
+  every kit (`tools/check-image-identity.sh` checks this). Owner-supplied keys for DJI O4 and FLARM
+  stay on the SD card. See [ESP-NOW in depth](../ESPNOW.md) and [Credits and licences](credits.md).
 - **Bench features cannot slip into a real build.** Builds that fake drones, floods, crashes or GPS
   are refused unless `ROTORSCOPE_BENCH=1` is set (checked 2026-11-18). A bench build names itself
   in the evidence log (seen on 2026-11-18) and on screen (not yet checked by eye). See

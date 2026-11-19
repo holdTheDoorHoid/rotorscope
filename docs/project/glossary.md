@@ -172,8 +172,8 @@ on secure boot. Burning them is permanent, so it is never done on bench boards. 
 2.4 GHz. See [Control links](../CONTROL-LINKS.md).
 
 **ESP-NOW.** Espressif's short-message radio protocol. Rotorscope nodes that are not wired send
-their reports to the gateway with it, signed with the kit's key unless the kit was deliberately
-built open. See [ESP-NOW in depth](../ESPNOW.md).
+their reports to the gateway with it, each node signing with its own key once the kit is sealed
+(a kit ships open). See [ESP-NOW in depth](../ESPNOW.md).
 
 **ESP32.** A family of cheap microcontrollers (small computers on one chip) with built-in radios, made by Espressif. Rotorscope
 is built from several of them. See [Boards and chips](../hardware/boards.md).
@@ -248,7 +248,8 @@ in postcard and COBS form; on Wi-Fi, a frame is one packet on the air. See
 ## G
 
 **Gateway.** A C5 board wired to the hub that relays the reports of every wireless node, so the
-hub sees one wired link that speaks for many nodes. See [Nodes, gateway and hub](../how/nodes-gateway-hub.md).
+hub sees one wired link that speaks for many nodes. It holds no key: it passes each packet on
+unchanged, and the hub checks it. See [Nodes, gateway and hub](../how/nodes-gateway-hub.md).
 
 **GB 46750.** China's drone broadcast standard (GB 46750-2025). Rotorscope's decoder reads it. See
 [Remote ID](../detect/remote-id.md).
@@ -308,11 +309,17 @@ its raw-capture node watches for jamming. See [Jamming](../JAMMING.md).
 Rotorscope's Wi-Fi nodes watch for one transmitter using many names. See
 [Wi-Fi and Bluetooth attacks](../WIFI-ATTACKS.md).
 
+**Kit master.** The one secret key a kit's owner makes with `link-key kit new` (`tools/kit.key`,
+never in git). Every node's link key is worked out from it; the hub holds it too, so a captured
+hub is a captured kit. See [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
+
 ## L
 
-**Link key.** The kit's own secret key, in `tools/link.key` on the builder's computer, that signs
-every ESP-NOW packet between boards. It never goes into git, and builds without one are refused
-unless deliberately made open. See [ESP-NOW in depth](../ESPNOW.md).
+**Link key.** A node's own secret key, which signs every ESP-NOW packet between that node and
+the hub. It is worked out from the kit master and kept in a small part of the node's flash
+(`rskey`), never in a firmware image or in git. Until 2026-11-18 one link key served the whole
+kit, in `tools/link.key`, compiled into every image; that is gone. See
+[ESP-NOW in depth](../ESPNOW.md#securing-the-link).
 
 **Long Range.** Bluetooth 5's longer-reaching mode (coded PHY). Remote ID can use it, and
 Rotorscope's Bluetooth node hears it. See [Remote ID](../detect/remote-id.md).
@@ -410,7 +417,7 @@ slower than its built-in memory. The hub's P4 board has 32 MB of it. See
 position, speed and the operator's position, over Wi-Fi or Bluetooth. It is Rotorscope's main
 signal. See [Remote ID](../detect/remote-id.md).
 
-**Replay.** Recording a genuine message and sending it again later. The signed ESP-NOW link drops
+**Replay.** Recording a genuine message and sending it again later. A sealed ESP-NOW link drops
 replayed packets. See [ESP-NOW in depth](../ESPNOW.md).
 
 **`rid-beacon`.** Rotorscope's bench test transmitter: firmware that broadcasts Remote ID for a

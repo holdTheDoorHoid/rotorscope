@@ -57,13 +57,14 @@ tools/dev-board.sh firmware/hub/target/xtensa-esp32s3-none-elf/release/hub 60
 
 As the P4 hub's **web head** (hotspot, phone page, CoT and station mode for the P4, which has no
 radio): `cargo fw --features webhead`, with P4 GPIO31 wired to node A RX (GPIO4) plus ground. See
-`firmware/hub-p4/WEBHEAD.md`. Every build understands a relayed link (an ESP-NOW gateway or a P4
-hub): `Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone node list), the
+`firmware/hub-p4/WEBHEAD.md`. Every build understands a relayed link (a P4 hub; an ESP-NOW gateway
+only up to link protocol 13: a protocol 14 gateway speaks `link::gw`, which only the P4 reads):
+`Via` markers keep up to 8 nodes apart (`{"t":"relayed"}` USB lines, phone node list), the
 P4's GPS (`HubFix`) becomes the own position and UTC when this board has no GPS of its own, and
 protocol 4 frames reach the tracker; `webhead` adds the aircraft table for forwarded ADS-B lines.
 
 **Web head trust.** Each link reader sorts its frames by the one table of who may send what
-(`link::origin`, docs/ESPNOW.md "Who may send what"), as the P4 and the gateway do. `HubFix` (the
+(`link::origin`, docs/ESPNOW.md "Who may send what"), as the P4 does. `HubFix` (the
 kit's own position and clock), `Csbee` (aircraft) and `Flags` (FAA flags) describe the P4 itself,
 so they are applied only when they come from the relay itself, never when a `Via` marker says the
 relay passed them on for one of its nodes. A relayed frame must be one a node may send (a relayed

@@ -135,16 +135,20 @@ the two settings are explained in [Control links](../CONTROL-LINKS.md).
 **The attack.** Pretending to be one of the kit's own nodes over the air, to inject fake drones or
 commands, or replaying recorded packets.
 
-**How Rotorscope notices.** With a kit link key, every packet between nodes and gateway is signed;
-the gateway drops forged, replayed or unsigned packets and reports **forged node traffic**
-(`forged_link`) with the reason. Whatever the key, the gateway and hub also refuse any frame of a
-type its sender may never originate.
+**How Rotorscope notices.** On a sealed kit every packet between a node and the hub is signed with
+that node's own key. The hub drops forged, replayed, late or unsigned packets, and packets from
+boards still on the old firmware, and raises **forged node traffic** (`forged_link`) naming the
+claimed node, with the reason; the gateway, which holds no key, reports the packets it refused
+(not in the kit's roster, over its share) for the hub to raise too. Sealed or not, the hub also
+refuses any frame of a type its sender may never originate. If a node says it sent far more than
+the hub received, the hub raises **node reports going missing** (`link_loss`).
 
-**Needs:** a link key file built into every board (`tools/link.key`, made by `tools/link-key`).
-**Proof:** the origin check is **proven on the air** (2026-11-18: a bench-only forging node's seven
-forbidden frame kinds were each refused at the gateway within about a second); rejecting bad
-signatures and replays is **simulated only**. **Deep dive:** [ESP-NOW in depth](../ESPNOW.md),
-"Securing the link".
+**Needs:** a sealed kit: the kit master made with `link-key kit new` and each board provisioned
+with `link-key` (kits ship open). **Proof:** before the 2026-11-18 cut-over the origin check was
+**proven on the air** (a bench-only forging node's seven forbidden frame kinds were each refused at
+the gateway, which held the kit's one key then, within about a second); the per-node keys, the
+hub's checks and `link_loss` are **simulated only** (tested on a computer, built for the boards). **Deep dive:**
+[ESP-NOW in depth](../ESPNOW.md), "Securing the link".
 
 ## 🟡 Every alarm type
 
@@ -176,6 +180,7 @@ the evidence log and site-file mute lines.
 | `mavlink_attack` | Hostile content on a drone's MAVLink telemetry | Attacks on drones | [DRONE-ATTACKS](../DRONE-ATTACKS.md) |
 | `area_gnss` | GPS jamming or spoofing in the area, seen through other receivers | GPS trouble | [DRONE-ATTACKS](../DRONE-ATTACKS.md) |
 | `id_flood` | Far more new identities a second than a real sky produces | Floods | [SPOOFING](../SPOOFING.md) |
+| `link_loss` | A node says it sent far more reports than the hub received: something is swallowing them | Own link | [ESPNOW](../ESPNOW.md) |
 
 Two families are not threat kinds:
 

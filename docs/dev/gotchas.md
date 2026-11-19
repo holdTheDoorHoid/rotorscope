@@ -291,11 +291,18 @@ a hard rule. Read more: `BRINGUP-RESULTS.md`, `BRINGUP.md`.
 
 - **A malformed `ROTORSCOPE_DEV_KEY` used to fall back to the published test key without a word.**
   Now the P4 build stops (`firmware/hub-p4/build.rs`).
-- **A firmware build without a link key used to build an open kit.** Now it stops; open kits need
-  `ROTORSCOPE_LINK_KEY_FILE=none` (commit `da58633`).
-- **A mixed kit does not half-work.** A node without the key is ignored by a keyed gateway and
-  reported as an attack; a keyed node never finds an unkeyed gateway. Reflash every ESP-NOW board
-  when the key changes. Read more: [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
+- **A firmware build without a link key used to build an open kit.** It was made to stop (commit
+  `da58633`); since the 2026-11-18 cut-over no build reads a key at all, so the question is gone.
+  Whether a board is sealed or open now depends only on the key record `link-key` wrote to its
+  flash, and the hub's strip says `OPEN LINK` while the hub's own record is open.
+- **A mixed kit does not half-work.** A board still on the pre-cut-over firmware is refused as
+  `old_firmware` (the strip says `OLD FIRMWARE`); a node left open in a sealed kit is refused as
+  `unauthenticated`; a node keyed for another kit or generation is refused as `bad_tag`. Each shows
+  as a `forged_link` threat naming the node. Reflash and provision every ESP-NOW board. Read more:
+  [ESP-NOW in depth](../ESPNOW.md#securing-the-link).
+- **A key partition must survive a reflash.** Flash the hub with `tools/partitions-hub.csv` and
+  single-image ESP-NOW nodes with `tools/partitions-single.csv`; espflash's default table has no
+  `rskey` and the node then reports its record `missing` (`NO KIT KEYS` on the hub).
 - **A per-checkout symlink was committed twice** (`firmware/patches/esp-hal-p4-pre-v3/upstream`;
   commits `def319b`, `19efa54`): the ignore rule matched only a directory, and merging the link
   replaced the main checkout's with one pointing at itself. `.gitignore` now ignores it as a file

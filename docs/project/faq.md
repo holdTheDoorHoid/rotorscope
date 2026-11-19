@@ -173,9 +173,11 @@ More: [Spoofed drones](../SPOOFING.md)
 
 ### Can someone inject fake reports between the boards?
 
-The ESP-NOW link is signed with the kit's own key, so forged or replayed packets are dropped and
-reported, and the gateway refuses frames a node is not allowed to send. Someone who has the kit's
-key file can do more; the link documents spell out exactly what.
+Once a kit is sealed, every ESP-NOW packet is signed with that node's own key, so forged or
+replayed packets are dropped and reported, and the hub refuses frames a node is not allowed to
+send. Kits ship open, and stay open until the owner seals them. Someone who takes a node can
+speak as that node until its slot is revoked; someone who takes the hub has the whole kit. The
+link documents spell out exactly what.
 More: [ESP-NOW in depth](../ESPNOW.md)
 
 ### Can it decode DJI?

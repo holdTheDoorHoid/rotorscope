@@ -46,8 +46,8 @@ the hub build. Nobody has wired it yet. The bench checklist is at the end.
   the MAC: the same node always gets the same address back (after a reboot,
   an image switch, or a hub restart, when it asks for its old address).
 * **Who sent what.** The hub writes each node's frames into the same stream
-  an ESP-NOW gateway produces, with a `Via { node: MAC }` marker in front of
-  each. The node table, tracker, evidence log, coverage coordinator, web-head
+  an ESP-NOW gateway produced before protocol 14 (and the hub's web-head feed
+  still carries), with a `Via { node: MAC }` marker in front of each. The node table, tracker, evidence log, coverage coordinator, web-head
   feed and screen therefore see every wired node under its own MAC, exactly as
   they saw ESP-NOW nodes. The hub's node table still keys on the station MAC.
 * **Orders to nodes.** `To { node: MAC }` then `Assign`, as on the gateway
@@ -76,7 +76,8 @@ interrupt; it reads only each frame's first bytes):
   has no bus mode), so every node-supplied `Via` is refused.
 * A registered gateway's `Via` is held and passed on together with its
   frame, which must itself be a node's; its own frames (`Hello`,
-  `forged_link`) pass with no `Via`, as on a point-to-point gateway link.
+  `forged_link`) pass with no `Via`, as on a gateway link before protocol 14
+  (a protocol 14 gateway sends `link::gw` messages, not frames).
 * What reaches the hub's stream is sorted again in `links.rs` like a
   gateway's stream (docs/ESPNOW.md), and the web-head feed sorts it too.
 

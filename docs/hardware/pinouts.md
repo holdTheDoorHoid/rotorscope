@@ -103,9 +103,9 @@ Source: `firmware/gateway/src/main.rs`.
 
 | Function | Pin | Baud | Direction | Proven |
 |---|---|---|---|---|
-| Hub link TX (UART1) | **GPIO11** (XIAO D6) | 921600 | out: relayed frames, each after a `Via` marker | Proven on the air, with the P4 |
-| Hub link RX (UART1) | **GPIO12** (XIAO D7) | 921600 | in: the hub's `To` + `Assign` and `TimeSync` commands | Proven on the air, with the P4 |
-| Console | USB-Serial-JTAG (USB-C) | | JSON lines out; `fault ...` in with `faulttest` | |
+| Hub link TX (UART1) | **GPIO11** (XIAO D6) | 921600 | out: `link::gw` messages: each node packet as heard, still sealed, and the gateway's reports (before 2026-11-18: relayed frames, each after a `Via` marker) | Proven on the air with the P4 before 2026-11-18; the protocol 14 messages are simulated only (built, not yet run) |
+| Hub link RX (UART1) | **GPIO12** (XIAO D7) | 921600 | in: `link::gw` messages: the roster, and beacons, commands and time syncs the hub sealed (before 2026-11-18: `To` + `Assign` and `TimeSync` commands) | As above |
+| Console | USB-Serial-JTAG (USB-C) | | JSON lines out; `fault ...` in with `faulttest`, `gwforge ...` with `gwforge` | |
 
 The gateway transmits ESP-NOW on 2.4 GHz channel 6. It has no wired-bus mode.
 

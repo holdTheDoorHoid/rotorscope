@@ -56,8 +56,9 @@ flowchart LR
   links. The hub tells each node which job to do.
 - **Gateway.** One more ESP32-C5 that collects the nodes' reports over a short-range radio
   link (ESP-NOW, Espressif's board-to-board messaging) and passes them to the hub down a wire.
-  Every packet on that link is signed with the kit's own key, so a stranger cannot inject fake
-  reports ([ESP-NOW in depth](../ESPNOW.md)).
+  Once the owner seals the kit, every packet on that link is signed with that node's own key and
+  checked by the hub, so a stranger cannot inject fake reports; the gateway holds no key
+  ([ESP-NOW in depth](../ESPNOW.md)).
 - **Hub.** An ESP32-P4 board with a 5-inch touch screen (the Elecrow CrowPanel Advanced 5").
   It merges what every node heard into one list of drones, works out distance and direction,
   writes the memory-card log, and runs the alarms. A GPS receiver is meant to tell it where it

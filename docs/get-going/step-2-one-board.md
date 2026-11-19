@@ -96,15 +96,15 @@ the serial module is a separate package (on Debian and Ubuntu, `python3-serial`)
 
 **No, not for this step.**
 
-Rotorscope's kit boards talk to each other by radio (a link called **ESP-NOW**), and every
-such message is signed with the kit's own secret **link key**. A firmware build that includes
-that radio link refuses to build until you make a key or say on purpose that you want none.
+Rotorscope's kit boards talk to each other by radio (a link called **ESP-NOW**). Once a kit is
+sealed, every such message is signed with that node's own secret **link key**, which `link-key`
+writes into the board's flash. No firmware build needs or asks for a key (since 2026-11-18).
 
 The builds on this page send their results down the USB cable only. They contain no ESP-NOW
-code, so they need no key and the build does not ask for one.
+code, so a key would make no difference to them.
 
-If a build ever stops with `airlink: no ESP-NOW link key`, you have built an ESP-NOW version
-(for example with `cargo fw24-now`). Go back to the commands on this page. Making a key is
+If a board prints a `"what":"link_key"` warning, you have flashed an ESP-NOW version (for
+example one built with `cargo fw24-now`). Go back to the commands on this page. Sealing a kit is
 part of [Step 3](step-3-full-kit.md), and explained in
 [Securing the link](../ESPNOW.md#securing-the-link).
 
@@ -398,7 +398,7 @@ How far this is proven: laptop to laptop with two adapters, **proven on the air*
 | rid-view's node line says the input ended | The board restarted or was unplugged. Start rid-view again. |
 | Garbled or missing lines | Two programs are reading the same board. Close one. |
 | `chip feature does not match target` or `no chip selected` | node-wifi was built from the wrong folder. Build from `firmware/node-wifi/c5`. |
-| `airlink: no ESP-NOW link key` | You built an ESP-NOW version. See [Do I need a link key?](#do-i-need-a-link-key) |
+| A `"what":"link_key"` warning line on the board's console | You flashed an ESP-NOW version. See [Do I need a link key?](#do-i-need-a-link-key) |
 | `is a BENCH build ... refusing` | The firmware was built with a test-only feature. Rebuild with the commands on this page. |
 | `board c5a busy for 10 min; giving up` | Another `dev-board.sh` run held the board for 10 minutes. Check `tools/dev-board.sh --list`, which shows `BUSY` and who holds it. |
 

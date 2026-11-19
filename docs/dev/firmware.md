@@ -18,7 +18,9 @@ are defined in [Writing these docs](docs-style.md#say-what-is-proven-every-time)
 Every firmware except `hub-p4` uses the crates.io Espressif stack: `esp-hal ~1.2.2`,
 `esp-rtos 0.4.0` (with embassy), `esp-bootloader-esp-idf 0.6.0`, `esp-alloc 0.11.0`,
 `esp-backtrace 0.20.0`, `esp-println 0.18.0`, and **`esp-radio =1.0.0-beta.1`**, pinned exactly
-because beta.2 was yanked (`node-lr` takes esp-radio only in its `espnow` build). `hub-p4` takes
+because beta.2 was yanked and replaced in every radio firmware by the patched copy in
+`firmware/patches/esp-radio` (see [patches](#patches); `node-lr` takes esp-radio only in its
+`espnow` build). `hub-p4` takes
 `esp-hal`, `esp-backtrace`, `esp-bootloader-esp-idf` and `esp-println` from a patched esp-hal
 checkout (see [patches](#patches)) and uses no esp-rtos, esp-alloc or esp-radio. Release profiles are `opt-level = "s"`, `lto = "fat"`,
 `codegen-units = 1` with debug info, except `node-sdr`, which uses `opt-level = 3` for its
@@ -37,25 +39,24 @@ list into the evidence boot event instead. Details: [Bench tests](../BENCH.md), 
 
 ### The link key (`tools/link.key`)
 
-Only builds that compile `crates/airlink` need a key: the `gateway` always, and the `espnow` builds
-of `node-wifi`, `node-ble`, `node-sdr` and `node-lr`. Wired, wired-bus and hub builds do not use
-it. `crates/airlink/build.rs` picks the key file:
+The heading names the file the old firmware used. Since the cut-over of 2026-11-18 (link protocol
+14) **no firmware build reads a key**: not `tools/link.key`, not `ROTORSCOPE_LINK_KEY_FILE`, not
+any other file or variable, and no image carries a `link-key:` tag. Every image is the same for
+every kit. Instead:
 
-| `ROTORSCOPE_LINK_KEY_FILE` | Result |
-|---|---|
-| unset | `tools/link.key` if it exists; otherwise a firmware build **stops** and says how to make a key |
-| a path | that file (64 hex digits; it must exist) |
-| `none` | an open kit on purpose: no authentication, with a loud cargo warning |
+| Board | Key material | Where |
+|---|---|---|
+| ESP-NOW node (`espnow` builds of `node-wifi`, `node-ble`, `node-sdr`, `node-lr`) | its own key record | `rskey` partition, read at boot (`firmware/node-common/src/keystore.rs`) |
+| P4 hub | the kit master and roster; the boot counter | `rskit` and `rsboot` partitions (`firmware/hub-p4/src/linkauth.rs`) |
+| Gateway | none: the roster's MAC addresses only, from the hub, in RAM | |
 
-Make a key once with:
-
-```bash
-cargo run -p link-key -- new
-```
-
-The key is never printed. The build prints and embeds an 8-digit key ID (`link-key:<id>`) so the
-flashing tools can check that the gateway and every node carry the same key. See
-[ESP-NOW in depth](../ESPNOW.md), "Securing the link".
+`link-key` writes the partitions ([Tools reference](tools.md#link-key)); the procedure is
+[ESP-NOW in depth](../ESPNOW.md), "Kits ship open; sealing yours". A node prints its kit id, slot,
+generation and key check at boot (`{"t":"uplink","auth":"kit:<id> slot:<n> gen:<g> check:<c>",...}`),
+or `"auth":"open"` / `"auth":"none"` with the reason; `tools/flash-node.sh` judges a flash by that
+line. Wired, wired-bus and S3 hub builds use no key. A board still on the old firmware is refused
+as `old_firmware`, and the old `tools/link.key` (still git-ignored) can be deleted once every board
+is reflashed.
 
 ### Crash recovery
 
@@ -78,11 +79,14 @@ every firmware except `hub` and `rid-beacon` says why the chip last reset. Bench
 
 ## gateway
 
-**What it is.** The ESP-NOW gateway: one XIAO ESP32-C5 that receives every ESP-NOW node and
-relays their frames to the hub over one wire, each preceded by a `Frame::Via` marker naming the
-node. It forwards the hub's `To` + `Assign` commands to nodes as unicast command packets (up to
-four tries) and the hub's `TimeSync` to aero nodes. It beacons twice a second on 2.4 GHz channel 6
-so nodes can find it. It transmits. See [ESP-NOW in depth](../ESPNOW.md).
+**What it is.** The ESP-NOW gateway: one XIAO ESP32-C5 that receives every ESP-NOW node and passes
+each packet to the hub over one wire, untouched and still sealed, as `link::gw` messages (link
+protocol 14; never link frames, so no `Via`). It **holds no key**: the hub verifies every node
+packet and seals the beacons, commands and time syncs, which the gateway only puts on the air
+(beacons as the hub sends them, twice a second on 2.4 GHz channel 6; commands unicast until the
+radio acknowledges them or the hub's time limit runs out). A captured gateway can drop, delay or
+repeat traffic, never forge it. It transmits. See [ESP-NOW in depth](../ESPNOW.md) and
+[Wire protocol reference](protocol.md#the-gateway-wire-linkgw).
 
 | Item | Value |
 |---|---|
@@ -96,24 +100,31 @@ so nodes can find it. It transmits. See [ESP-NOW in depth](../ESPNOW.md).
 | Feature | Meaning |
 |---|---|
 | `faulttest` | **Bench only.** Type `fault panic` or `fault hang` on USB to prove the reboot after a panic and the hang watchdog |
+| `gwforge` | **Bench only.** `gwforge ...` typed on USB makes the gateway behave as a captured one (made-up and replayed packets, a flipped byte, a held time sync, dropped packets); the hub shows `BENCH GATEWAY`. Not with `faulttest` |
 
-**Build-time inputs.** `ROTORSCOPE_BENCH`; the link key (always needed, see above).
+**Build-time inputs.** `ROTORSCOPE_BENCH`. No key.
 
-**Tasks.** `main` sets up the hub UART (UART1, 921600: TX GPIO11, RX GPIO12), Wi-Fi in 2.4 GHz with
-country "US" and Espressif Long Range added to the station's protocols, ESP-NOW on channel 6, then
-spawns `air_tx` (beacons and sends), `hub_commands` (reads commands from the hub), `stats` (one USB
-JSON line per node per second) and, with `faulttest`, the fault console; `main` then runs the
-`relay` loop. With a link key every packet both ways is sealed; rejected packets and frames a node
-may not originate are counted and reported to the hub once a second as a `ForgedLink` threat.
+**Tasks.** `main` sets up the hub UART (UART1, 921600: TX GPIO11, RX GPIO12; received in the UART
+interrupt into a 4 KB ring), Wi-Fi in 2.4 GHz with country "US" and Espressif Long Range added to
+the station's protocols, ESP-NOW on channel 6, then spawns `air_tx` (beacons and transmits),
+`hub_in` (the hub's `GwDown` messages), `hub_out` (`GwUp` messages to the hub), `stats` (the
+once-a-second USB line) and, with `faulttest` or `gwforge`, their console; `main` then runs the
+receive loop. Every packet heard goes through `airlink::relay`'s keyless filters (roster, 40
+packets and 16 KB a second per address, 50 KB a second in total, byte-identical retries dropped,
+round-robin per address); what it refuses is reported to the hub as `GwUp::Refused`, and the hub
+raises the `forged_link` threats.
 
 **Memory.** 64 KB heap in the RAM the bootloader frees (`heap_allocator!(#[ram(reclaimed)] 65_536)`).
 
-**Console.** USB-Serial-JTAG: JSON lines out (`hello`, a `gw` summary, per-node `node` and `down`
-lines, `threat` and `warn`). No commands except `fault ...` in a `faulttest` build.
+**Console.** USB-Serial-JTAG: JSON lines out (`hello` with `"key":"none"`, `roster` when the
+hub's first roster arrives, a `gw` summary once a second, `refused`, and `warn`). No commands except
+`fault ...` in a `faulttest` build and `gwforge ...` in a `gwforge` build.
 
-**Proof.** **Proven on the air**: relayed two ESP-NOW nodes to the P4 with 0 corrupt frames, and
-delivered the hub's commands (21 of 21 acknowledged first try) on 2026-11-14; crash recovery
-proven on the air on 2026-11-18.
+**Proof.** Before the 2026-11-18 cut-over the version 2 gateway was **proven on the air**: it
+relayed two ESP-NOW nodes to the P4 with 0 corrupt frames and delivered the hub's commands (21 of
+21 acknowledged first try) on 2026-11-14, and crash recovery was proven on the air on 2026-11-18.
+The keyless protocol 14 gateway is **simulated only** (tested on a computer, built for the board); its bench pass is
+docs/BENCH.md, "Link keys: bench checklist".
 
 ## hub-p4
 
@@ -133,9 +144,11 @@ executor: one main loop.
 | esp-* crates | by path from `firmware/patches/esp-hal-p4-pre-v3/upstream/`, made once by `tools/p4-prepare.sh` |
 | Output | `firmware/hub-p4/target/rev103/riscv32imafc-unknown-none-elf/release/hub-p4` |
 
-Run `tools/p4-prepare.sh` once before the first build. Flash with Elecrow's own bootloader and
-partition table from the backup of the factory image (espflash's bundled P4 bootloader is not used);
-the command and the reason are in
+Run `tools/p4-prepare.sh` once before the first build. Flash with Elecrow's own bootloader from
+the backup of the factory image (espflash's bundled P4 bootloader is not used) and, since the
+2026-11-18 cut-over, the partition table `tools/partitions-hub.csv`: Elecrow's own four rows
+unchanged, plus `rskit` (kit master and roster) and `rsboot` (boot counter) for the keyed ESP-NOW
+link, which `link-key hub` writes. The command and the reason are in
 [BRINGUP.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/hub-p4/BRINGUP.md),
 "Build and flash". The CH340 console fails at 921600 for flashing; 460800 works.
 
@@ -145,6 +158,7 @@ the command and the reason are in
 |---|---|---|
 | `wirebus` | no (default) | Poll many nodes on the node link as a wired bus ([The wired bus in depth](../WIREBUS.md)). An ESP-NOW gateway or one point-to-point node is still recognised at run time and read as before. `--no-default-features` never polls |
 | `show-link-ids` | no | Show open FPV links' identifiers on every output (screen, console JSON, SD log). Off by default by project policy |
+| `rskit-readonly` | no | Bring-up: read the kit records and the boot counter, never write them. The keyed link then stays closed (`NO BOOT COUNTER` on the screen) |
 | `modes` | no | Decode the ADSBee's raw Beast frames with `crates/modes` instead of trusting its CSBee summary (`AT+PROTOCOL_OUT=COMMS_UART,BEAST`). CSBee lines are still accepted. Off by default until run with a real ADSBee on this hub |
 | `selftest` | yes | UART2 sends sample link frames onto the node-link RX pad inside the chip, so the link reader is tested with no wire. Leave the UART1 header unconnected |
 | `fakenode` | yes | Once a second a made-up ESP-NOW node (`02:52:53:00:00:01`) reports through the link decoder, so the coverage coordinator assigns it and real commands go to the gateway. Nothing is driven onto any pin |
@@ -343,7 +357,8 @@ sets `ESP_LOG="warn"`; log records become JSON lines.
 
 **Build-time inputs.** `ROTORSCOPE_BENCH`; bench switches `ROTORSCOPE_BENCH_CAN` (report only one
 role: `ble`, `wifi5` or `wifi24`) and `ROTORSCOPE_BENCH_FLIP` (leave Bluetooth and Wi-Fi 2.4 out of
-`can`, so the hub flips the node between images); the link key with `espnow`.
+`can`, so the hub flips the node between images). No key: with `espnow` the node reads its key
+record from `rskey` at boot.
 
 **Tasks.** The BLE host's receive loop runs the report handler, which counts every advert, checks
 cheaply for Remote ID (service data UUID 0xFFFA, app code 0x0D), reassembles chained adverts and
@@ -375,11 +390,17 @@ gateway. It builds inside each firmware's workspace, for that firmware's chip.
 - `fault.rs`: `arm` / `feed` for the RTC watchdog, `reboot_after_panic`, the reset reason as one
   word, and the bench `fault` console.
 - `bus.rs` (`wirebus` feature): the wired-bus node end, including the open-drain TX set-up.
+- `keystore.rs`, `linkauth.rs` (`espnow` feature): read the node's key record from `rskey` at
+  boot (read only; `wrong_board` if made for another board, `missing` if the table has none), and
+  the chip side of the version 3 link: the hardware random source, the boot line
+  (`{"t":"uplink","auth":...}`), the `link_auth` refusal counts and the status LED. The decisions
+  are in `crates/nodeimage` (`uplink`).
 
 | Feature | Meaning |
 |---|---|
 | `esp32s3`, `esp32c5`, `esp32c3` | The chip (`esp32c3` for the aero node, which holds a single image) |
 | `wirebus` | The wired-bus node (`src/bus.rs`), used by node-wifi, node-ble, node-sdr and node-lr through their own `wirebus` feature |
+| `espnow` | The ESP-NOW link glue (`src/keystore.rs`, `src/linkauth.rs`), used through each node's own `espnow` feature |
 | `faulttest` | Bench only, enabled only through a firmware's own `faulttest`: the `fault panic` / `fault hang` console |
 
 No toolchain file, aliases or build script of its own.
@@ -403,11 +424,11 @@ LR2021 (`crates/lr2021cfg` has no transmit command). See [The aero node](../AERO
 
 | Feature | Bench only | Meaning |
 |---|---|---|
-| `espnow` | | Report through the ESP-NOW gateway, keyed with the link key; Wi-Fi sits on channel 6 |
+| `espnow` | | Report through the ESP-NOW gateway, sealed with the node's own key from `rskey` (flash it with `tools/partitions-single.csv`); Wi-Fi sits on channel 6 |
 | `wirebus` | | The wired bus, TX open-drain on GPIO0. Not with `espnow` |
 | `faulttest` | yes | `fault panic` / `fault hang` on USB |
 
-**Build-time inputs.** `ROTORSCOPE_BENCH`; the link key with `espnow`.
+**Build-time inputs.** `ROTORSCOPE_BENCH`. No key (see [The link key](#the-link-key-toolslinkkey)).
 
 **Tasks.** `radio::run` drives the LR2021 (configurations and checks from `lr2021cfg`, hops from
 `aerohop`, control-link scans from `control.rs`); `usb_task`; the hub link (`uart_tx_task` +
@@ -463,7 +484,7 @@ Every dwell is also judged for jamming (`crates/jamwatch`). Receive-only while c
 | `NODE_SDR_ALLOW_UNVERIFIED_PHY` | Bench switch: build with another blob anyway, loudly |
 | `NODE_SDR_BOOT` | Bench switch: console commands baked in to run at boot, such as `"level;grab;dump"` |
 | `ROTORSCOPE_BENCH` | The bench fence |
-| Link key | `espnow` builds |
+| Link key | none: `espnow` builds read the node's key record from `rskey` at run time |
 
 At boot `phy::abi_ok()` checks the blob's version string again; on a mismatch the firmware refuses
 every private PHY call and says so.
@@ -543,15 +564,15 @@ is 5 GHz; one C5 image does both, the hub picks the band.
 | `espnow` | | Send hub frames over ESP-NOW to the gateway; 2.4 GHz only. A 5 GHz plan gets 40 ms visits to channel 6 at least once a second. The node then transmits |
 | `wirebus` | | The wired bus, TX open-drain D9 = GPIO9, RX D7 = GPIO12. Receive-only on the air. C5 only; not with `espnow` |
 | `faulttest` | yes | `fault panic` / `fault hang` on USB |
-| `forgetest` | yes | `forge hubfix\|csbee\|flags\|via\|hello\|threat\|join` on USB sends a frame a node must never originate, to see the gateway and hub refuse it |
+| `forgetest` | yes | `forge hubfix\|csbee\|flags\|via\|hello\|threat\|join` on USB sends a frame a node must never originate, to see the hub refuse it (before protocol 14 the gateway refused it first) |
 | `floodtest` | yes | `flood <kind> <rate>` (`rid`, `tool`, `drone`, `dji`, `wfb`, `spoof`, `retry`, `dup`, `hijack`), `flood real on\|off`, `flood crowd <n>`, `flood off`: synthetic frames pushed into the node's own receive path. Transmits nothing |
 
 `faulttest`, `forgetest` and `floodtest` all read the USB console, so the firmware allows only one
 of them at a time.
 
 **Build-time inputs.** `ROTORSCOPE_BENCH`; bench switches `ROTORSCOPE_BENCH_CAN` (as for
-node-ble) and `ROTORSCOPE_BENCH_FLIP` (here: leave Wi-Fi 2.4 out of `can`); the link key with
-`espnow`.
+node-ble) and `ROTORSCOPE_BENCH_FLIP` (here: leave Wi-Fi 2.4 out of `can`). No key: with `espnow` the
+node reads its key record from `rskey` at boot.
 
 **Tasks.** The Wi-Fi driver's promiscuous callback copies management frames into 32 static slots
 (a full queue is counted, never waited on), classifies data frames on the spot for open links and
@@ -650,13 +671,23 @@ applies the kit's patch, then every `rotorscope-*.patch`. The kit's own tool is 
 does the same two steps in the open. Rerunning it on a prepared tree applies only patches not yet
 applied. `hub-p4/Cargo.toml` takes its esp-* crates from that `upstream/` directory by path.
 
-### `esp-radio/`: the C5 RF clock fix (used by `rid-beacon` only)
+### `esp-radio/`: ESP-NOW receive length check and the C5 RF clock fix
 
-**What it is.** A verbatim copy of esp-radio 1.0.0-beta.1 from crates.io with one file changed:
-`src/radio_clocks/clocks_ll/esp32c5.rs`. Licence as upstream esp-radio (MIT or Apache-2.0).
+**What it is.** A verbatim copy of esp-radio 1.0.0-beta.1 from crates.io with two files changed:
+`src/esp_now/mod.rs` and `src/radio_clocks/clocks_ll/esp32c5.rs`. Licence as upstream esp-radio
+(MIT or Apache-2.0). Carried by every radio firmware: `gateway`, `node-wifi`, `node-ble`,
+`node-sdr`, `node-lr`, `hub` (the S3 web head) and `rid-beacon`. `hub-p4` has no radio.
 
-**Why.** On the ESP32-C5 the RF front-end clocks are shared by Wi-Fi, Bluetooth and 802.15.4.
-ESP-IDF reference-counts them; upstream esp-radio's `enable_wifi(false)` clears them
+**Why: the ESP-NOW receive length.** Upstream turns the radio library's received length into a
+slice length with no check. The underlying bug (CVE-2025-52471) is fixed in the Espressif radio
+libraries this repository pins, which `tools/check-wifi-blobs.sh` checks by their hashes; the patch
+is a second line that drops a zero, negative or oversized length (or a null pointer) before it
+becomes a slice, and counts it (`esp_radio::esp_now::bad_rx_len_drops()`, which should stay 0).
+Compile-checked on every radio firmware; not testable on the bench without sending malformed
+frames.
+
+**Why: the C5 RF clocks.** On the ESP32-C5 the RF front-end clocks are shared by Wi-Fi, Bluetooth
+and 802.15.4. ESP-IDF reference-counts them; upstream esp-radio's `enable_wifi(false)` clears them
 unconditionally, and the Wi-Fi blob calls it whenever Wi-Fi goes idle. With Wi-Fi started, the
 Bluetooth controller then accepted every command and reported advertising as running, but nothing
 was transmitted. The fix keeps a three-bit "who needs the front end" mask and turns the clocks off
@@ -664,16 +695,19 @@ only when no user is left. Evidence (2026-11-12, a XIAO ESP32-C5): the clock reg
 with the front-end bits clear while Wi-Fi ran; with the patch the bits stay set and the laptop
 decodes the beacon's Bluetooth while Wi-Fi beacons run.
 
-**How it is applied.** `[patch.crates-io] esp-radio = { path = "../patches/esp-radio" }` in
-`rid-beacon/Cargo.toml`. Remove both once upstream carries an equivalent fix. Check the copy with
-the `diff -r` command in the patches README.
+**How it is applied.** `[patch.crates-io] esp-radio = { path = "../patches/esp-radio" }` in each
+radio firmware's `Cargo.toml`. `tools/check-wifi-blobs.sh` fails if the copy differs from the
+crates.io release anywhere else, or if a lockfile does not take it. When to remove each change is
+in the patches README.
 
 ## Where this lives in the code
 
 - `firmware/*/Cargo.toml`: features, with a comment on each
 - `firmware/*/.cargo/config.toml` and `firmware/*/{s3,c5}/.cargo/config.toml`: aliases, targets, `[env]`
 - `firmware/*/rust-toolchain.toml` and `firmware/*/{s3,c5}/rust-toolchain.toml`
-- `firmware/*/build.rs`; `crates/link/src/benchfence.rs`; `crates/airlink/build.rs`
+- `firmware/*/build.rs`; `crates/link/src/benchfence.rs`
+- `firmware/node-common/src/keystore.rs`, `linkauth.rs` (a node's key record and link);
+  `firmware/hub-p4/src/linkauth.rs`, `links.rs` (the hub's); `tools/partitions-*.csv`
 - `firmware/node-common/src/fault.rs`; `firmware/hub-p4/src/fault.rs`
 - `firmware/hub-p4/src/main.rs` (the main loop and console commands), `src/console.rs`, `src/report.rs`
 - `firmware/node-sdr/README.md` "Memory"; `firmware/hub/README.md` "Design notes"

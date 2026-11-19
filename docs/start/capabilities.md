@@ -52,9 +52,10 @@ The detailed, piece-by-piece table is on the [status page](../project/status.md)
 
 - **Hub touch screen and memory-card log** work on the bench: the hub wrote and read back
   every row of its log in the 2026-11-15 run.
-- **Signed link between boards** runs on the bench (**Proven on the air**): on 2026-11-18 the
-  gateway refused every kind of frame a test board was not allowed to send. Dropping packets
-  with a bad signature or replayed ones has been tested only on a computer.
+- **Signed link between boards** ran on the bench with one key for the whole kit (**Proven on
+  the air**): on 2026-11-18 the gateway refused every kind of frame a test board was not allowed
+  to send. The current link, with a key per node checked by the hub, has been tested only on a
+  computer and built for the boards. Kits ship open until the owner seals them.
 - **Evidence log** works on the bench. The hub signs it with a published test key unless a
   development key is built in, and the screen says which. Either way it is not yet
   evidence-grade; [the evidence log page](../EVIDENCE.md) says exactly what it does and does

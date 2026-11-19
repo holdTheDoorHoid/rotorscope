@@ -34,28 +34,25 @@ You need the `esp` toolchain only for the web head. Install it once with `espup 
 
 ## 2. Make the kit's link key
 
-The gateway and every ESP-NOW node share one secret **link key**. With it, each message
-between them is signed, and forged or replayed messages are dropped and reported as an attack
-([ESP-NOW in depth](../ESPNOW.md#securing-the-link)). Make it once per kit:
+**No build needs a key.** Since 2026-11-18 every ESP-NOW node has a key of its own, kept in a
+small part of its flash that firmware updates never touch, and the P4 hub holds the kit's
+**master** key; the gateway holds nothing secret. Firmware images carry no key, so you can build
+and flash everything first. Until you seal it, the kit runs **open**: it works, but nothing on the
+radio link is checked, and the hub's screen says `OPEN LINK`.
+
+You can make the kit master now, once per kit:
 
 ```bash
-cargo run -p link-key -- new
+cargo run -p link-key -- kit new
 ```
 
-It writes `tools/link.key` (readable only by you, and kept out of git) and prints the key's
-**ID**, eight hex digits that name the key without revealing it. Write the ID down; the gateway
-and every ESP-NOW node print it at boot. Back the file up somewhere private. To see the ID again later:
+It writes `tools/kit.key` (readable only by you, and kept out of git) and an empty
+`tools/kit.roster`, and prints the **kit id**, eight hex digits that name the kit without
+revealing the key. Back `kit.key` up somewhere private and never paste it anywhere. Writing the
+keys to the boards comes after flashing: [step 9](#9-seal-the-kits-link).
 
-```bash
-cargo run -p link-key -- id
-```
-
-`new` refuses to overwrite an existing key. Replacing a key on purpose (`new --force`) means
-reflashing the gateway and every node, because boards with the old key go deaf to the kit.
-
-**A firmware build with no key stops**, with a message saying how to make one. The P4 hub and
-the test transmitter do not use ESP-NOW and need no key. Host builds, such as `cargo test`,
-never need one.
+The old commands `link-key new` and `link-key id` and the file `tools/link.key` belonged to the
+firmware before 2026-11-18, which compiled one key into every image. Nothing reads them any more.
 
 ## 3. Register your boards
 
@@ -89,15 +86,15 @@ Build it:
 (cd firmware/gateway && cargo fw)
 ```
 
-While compiling it prints `ESP-NOW link key <ID>`. Flash it and watch it for 60 seconds:
+Flash it and watch it for 60 seconds:
 
 ```bash
 tools/dev-board.sh firmware/gateway/target/riscv32imac-unknown-none-elf/release/gateway 60 c5c
 ```
 
-`dev-board.sh` prints the key ID of the image, and a **WARNING** if the image has no key or a
-different one from `tools/link.key`. The gateway's `"t":"hello"` line contains
-`"key":"link-key:<ID>"`.
+The gateway holds no key, so there is nothing to check here: its `"t":"hello"` line always says
+`"key":"none"` and "relay only". Once the hub is running it adds a `"t":"roster"` line; before
+that it passes no sealed node packet on.
 
 ## 5. The listener nodes
 
@@ -111,6 +108,7 @@ slot:
 | `ota_1` | node-ble | Bluetooth Remote ID |
 | `ota_2` | node-sdr | DroneID and FPV. **Only if you built it**: the script never builds node-sdr itself, and erases the slot when there is no image |
 | `rsjob` | (data) | The job the node switched images for; erased by the script, so the node starts fresh |
+| `rskey` | (data) | The node's own link key record, written by `link-key` (step 9). The script never erases or writes it, so reflashing keeps the key |
 
 Each image recognises the others by the name in their header, so the slot order is a
 convention, not a rule.
@@ -133,18 +131,22 @@ NODE_SDR_ELF=firmware/node-sdr/target-espnow/riscv32imac-unknown-none-elf/releas
 tools/flash-node.sh c5a
 ```
 
-Repeat for each node. The script builds node-wifi and node-ble with the link key, flashes all
-the slots and reads the board for 20 seconds (give a second number after the board name for
-longer). On the bench, flashing takes 15 to 20 seconds. It **refuses** to flash when:
+Repeat for each node. The script builds node-wifi and node-ble with ESP-NOW, flashes all the
+slots and reads the board for 20 seconds (give a second number after the board name for longer).
+On the bench, flashing takes 15 to 20 seconds. It **refuses** to flash when:
 
-- there is no `tools/link.key` (it tells you how to make one);
-- the images carry different link keys, for example a node-sdr image built before you made the
-  key: rebuild it and pass it again in `NODE_SDR_ELF`;
+- an image does not fit the node, for example a node-sdr image built before 2026-11-18 or a wired
+  one in an ESP-NOW node: rebuild it and pass it again in `NODE_SDR_ELF`;
 - an image is a bench build and `ROTORSCOPE_BENCH=1` is not set.
+
+After flashing it reads the node's boot line and calls the flash good only when the node says it
+holds a key (`"auth":"kit:..."`). A node that has not been sealed yet reports an open record or
+none: the script says so and exits with an error, which is expected before step 9. Pass `--open`
+while you are still running open.
 
 | Option | What it does |
 |---|---|
-| `--open` (before the board name) | Builds an **open** kit with no link key, on purpose. Anyone nearby could then inject fake nodes and fake jobs. The gateway must be built open too (`ROTORSCOPE_LINK_KEY_FILE=none`), and the hub then shows `OPEN LINK`. |
+| `--open` (before the board name) | Accepts a node with an **open** key record as a good flash, on purpose. Anyone nearby could then inject fake nodes and fake jobs, and the hub shows `OPEN LINK`. |
 | `NODE_WIRED=1` | Builds every image for a single point-to-point wire to the hub instead of ESP-NOW. No key needed. |
 | `NODE_BUS=1` | Builds every image for the wired bus ([The wired bus in depth](../WIREBUS.md)); simulated only, never wired. Every image on a bus node must be a bus build, and the script checks. |
 
@@ -182,7 +184,10 @@ interchangeable.
 `espflash` would supply. The two `elecrow-*.bin` files are cut from a backup of the board's
 factory flash (the bootloader at 0x2000 to 0x8000, the partition table at 0x8000 to 0x8C00).
 They are **not in the repository**, and the repository does not yet give the steps for making
-that backup or cutting those files from it.
+that backup or cutting those files from it. Since 2026-11-18 the hub is flashed with
+`tools/partitions-hub.csv` instead of `elecrow-partitions.bin`: Elecrow's own four rows,
+unchanged, plus two small areas after them for the kit's keys (`rskit`) and the hub's boot counter
+(`rsboot`). Without them the hub's screen says `NO KIT KEYS` once the kit is sealed.
 
 > [!WARNING]
 > **If you do not already have a backup of your P4's factory flash and the two files cut from
@@ -197,7 +202,7 @@ This is the bench's command. The port is the bench board's CH340 name; check you
 `ls /dev/serial/by-id/`:
 
 ```bash
-espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 -B 460800 --bootloader elecrow-bootloader.bin --partition-table elecrow-partitions.bin firmware/hub-p4/target/rev103/riscv32imafc-unknown-none-elf/release/hub-p4
+espflash flash --chip esp32p4 --port /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 -B 460800 --bootloader elecrow-bootloader.bin --partition-table tools/partitions-hub.csv firmware/hub-p4/target/rev103/riscv32imafc-unknown-none-elf/release/hub-p4
 ```
 
 On the bench the P4 started by itself straight after flashing; it may still need a press of
@@ -225,6 +230,23 @@ nothing to flash, and no phone page, until that is fixed. The build commands are
 [WEBHEAD.md](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/hub-p4/WEBHEAD.md)
 for whoever takes that work on.
 
+## 9. Seal the kit's link
+
+With the gateway, every node and the hub flashed, the kit works open. Sealing it writes the hub's
+master and roster and each node's own key to their flash, with `link-key`, the boards on USB. The
+steps, with `--dry-run` first, are in
+[ESP-NOW in depth, "Kits ship open; sealing yours"](../ESPNOW.md#kits-ship-open-sealing-yours). In
+short:
+
+```bash
+cargo run -p link-key -- hub p4
+cargo run -p link-key -- node c5a --label "roof" --hub p4
+```
+
+The P4 is not registered by `--register`, so add a `p4` line for it to `tools/boards.local` by
+hand first. A sealed node prints its kit id, slot and key check at boot, and the
+hub's strip stops saying `OPEN LINK`. Never paste `tools/kit.key` anywhere.
+
 ## Bench builds
 
 Some features exist only to test the kit on the bench (made-up drones, loop-back tests, a
@@ -235,7 +257,8 @@ build on a kit you rely on. The list is in [Bench tests](../BENCH.md#bench-build
 
 ## Where this lives in the code
 
-- `tools/link-key/src/main.rs`, `crates/airlink/build.rs`, `crates/airlink/src/keysrc.rs`: the key
+- `tools/link-key/src/main.rs`, `crates/kitkeys/`: the kit's keys and how they reach the boards
+- `tools/partitions-hub.csv`, `tools/partitions-single.csv`: where the keys live on the hub and on single-image nodes
 - `tools/dev-board.sh`: registering, locking, flashing, reading
 - `tools/flash-node.sh`, `tools/partitions-node.csv`, `crates/nodeimage/`: multi-image nodes
 - `tools/p4-prepare.sh`, `firmware/patches/esp-hal-p4-pre-v3/`: the P4's patched esp-hal
