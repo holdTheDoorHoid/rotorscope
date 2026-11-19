@@ -1354,6 +1354,11 @@ pub mod bundle {
         pub reason: String,
     }
 
+    /// Read a bundle's JSON (no checks: see [`super::verify_bundle`]).
+    pub fn parse(json: &[u8]) -> Result<Bundle, String> {
+        serde_json::from_slice(json).map_err(|e| e.to_string())
+    }
+
     pub fn audit_hash(prev: &[u8; 32], entry: &str) -> [u8; 32] {
         let mut b = Vec::with_capacity(32 + entry.len());
         b.extend_from_slice(prev);
@@ -1679,7 +1684,7 @@ fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], e
             Level::Note,
             at.clone(),
             format!(
-                "{what} existed by {when}, by {}'s clock (its signature is not checked here: run with --check-timestamps).{delays} {NOT_WHEN}",
+                "{what} existed by {when}, by {}'s clock (its signature is checked only with --check-timestamps).{delays} {NOT_WHEN}",
                 t.authority
             ),
         );

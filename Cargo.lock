@@ -831,6 +831,7 @@ name = "evidence-verify"
 version = "0.1.0"
 dependencies = [
  "evidence",
+ "serde_json",
 ]
 
 [[package]]

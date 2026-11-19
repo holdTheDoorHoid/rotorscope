@@ -266,3 +266,44 @@ fn thousands_of_mutated_tokens_never_panic() {
     }
     assert!(accepted < 5000);
 }
+
+/// A minimal unsigned TimeStampResp over `imprint` (the reader does not
+/// check signatures; this stands in for a version 1 bundle's token).
+fn unsigned_reply(imprint: &[u8]) -> Vec<u8> {
+    fn tlv(tag: u8, c: &[u8]) -> Vec<u8> {
+        let mut v = vec![tag];
+        if c.len() < 0x80 {
+            v.push(c.len() as u8);
+        } else {
+            v.extend_from_slice(&[0x82, (c.len() >> 8) as u8, c.len() as u8]);
+        }
+        v.extend_from_slice(c);
+        v
+    }
+    let alg = tlv(0x30, &[tlv(0x06, tsp::OID_SHA256), vec![5, 0]].concat());
+    let tst = tlv(0x30, &[tlv(2, &[1]), tlv(6, &[0x2A, 3]), tlv(0x30, &[alg, tlv(4, imprint)].concat()), tlv(2, &[9]), tlv(0x18, b"20251115120000Z")].concat());
+    let eci = tlv(0x30, &[tlv(6, tsp::OID_TST_INFO), tlv(0xA0, &tlv(4, &tst))].concat());
+    let sd = tlv(0x30, &[tlv(2, &[3]), tlv(0x31, &[]), eci, tlv(0x31, &[])].concat());
+    tlv(0x30, &[tlv(0x30, &tlv(2, &[0])), tlv(0x30, &[tlv(6, tsp::OID_SIGNED_DATA), tlv(0xA0, &sd)].concat())].concat())
+}
+
+#[test]
+fn a_version_1_chain_head_stamp_still_reads() {
+    let b = bundle::build();
+    let recs = evidence::b64::decode_vec(&b.bundle.batches[1].records).unwrap();
+    let last = evidence::format::records(&recs).filter_map(|(_, r)| r.ok()).last().unwrap();
+    let (boot, seq, head) = (last.header.boot_id, last.header.seq, last.hash());
+    let imprint = verify::bundle::head_imprint(&boot, seq, &head);
+    // As a version 1 server wrote it: no "covers", no audit fields.
+    let mut v: serde_json::Value = serde_json::from_slice(&b.json()).unwrap();
+    v["format"] = verify::bundle::FORMAT_V1.into();
+    v.as_object_mut().unwrap().remove("stamping");
+    v["timestamps"] = serde_json::json!([{ "kind": "rfc3161", "authority": "http://timestamp.example", "imprint": verify::hex(&imprint), "boot": verify::hex(&boot), "seq": seq, "head": verify::hex(&head), "token": evidence::b64::encode_vec(&unsigned_reply(&imprint)) }]);
+    let r = verify::verify_bundle(&serde_json::to_vec(&v).unwrap(), &opts());
+    assert!(fails(&r).is_empty(), "{:?}", fails(&r));
+    assert!(notes(&r).iter().any(|n| n.contains(&format!("records #0..#{seq} existed by 2025-11-15T12:00:00"))), "{:?}", notes(&r));
+    // Its head edited: refused.
+    v["timestamps"][0]["head"] = verify::hex(&[1; 32]).into();
+    let r = verify::verify_bundle(&serde_json::to_vec(&v).unwrap(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("does not match the chain head")), "{:?}", fails(&r));
+}
