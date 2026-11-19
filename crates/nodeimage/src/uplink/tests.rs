@@ -21,6 +21,8 @@ fn rng() -> u32 {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
+const TRNG: RngSource = RngSource { next: rng, name: "trng" };
+
 fn kit() -> SoftKeySource {
     SoftKeySource::new(MasterKey::from_bytes([0x5a; 32]).unwrap())
 }
@@ -45,7 +47,7 @@ fn state(p: &record::PartitionImage, efuse: Mac) -> State {
 }
 
 fn keyed_link() -> Link {
-    Link::new(state(&partition(3, ME), ME), ME, Some(rng))
+    Link::new(state(&partition(3, ME), ME), ME, Some(TRNG))
 }
 
 fn hub() -> Hub {
@@ -166,10 +168,10 @@ fn every_unprovisioned_state_blocks_reports() {
     for o in record::COPY_OFFSETS {
         damaged.0[o + 20] ^= 1;
     }
-    let cases: [(State, Option<fn() -> u32>, Why); 4] = [
-        (record::read(&[0xFF; record::PARTITION_LEN], &ME), Some(rng), Why::Missing),
-        (state(&damaged, ME), Some(rng), Why::Damaged),
-        (state(&good, OTHER), Some(rng), Why::WrongBoard),
+    let cases: [(State, Option<RngSource>, Why); 4] = [
+        (record::read(&[0xFF; record::PARTITION_LEN], &ME), Some(TRNG), Why::Missing),
+        (state(&damaged, ME), Some(TRNG), Why::Damaged),
+        (state(&good, OTHER), Some(TRNG), Why::WrongBoard),
         (state(&good, ME), None, Why::NoRng),
     ];
     for (st, r, why) in cases {
@@ -183,6 +185,9 @@ fn every_unprovisioned_state_blocks_reports() {
         assert!(s.starts_with(r#"{"t":"warn","what":"link_key","auth":"none","why":""#), "{s}");
         assert!(s.contains(std::format!(r#""why":"{}""#, why.name()).as_str()), "{s}");
         assert!(s.contains(r#""board_mac":"24:58:7c:00:00:0a""#), "{s}");
+        // Fits every image's line buffer (node-lr's is the smallest, 384
+        // with the newline; linkauth formats into 480).
+        assert!(s.len() < 383, "{} bytes: {s}", s.len());
         // Nothing from the hub is taken, not even a genuine beacon.
         let mut b = Bench::new();
         let bc = b.beacon();
@@ -190,7 +195,7 @@ fn every_unprovisioned_state_blocks_reports() {
         assert!(l.take_new_gateway().is_none());
     }
     // ME's record on OTHER's board.
-    let s = line(&Link::new(state(&good, OTHER), OTHER, Some(rng)));
+    let s = line(&Link::new(state(&good, OTHER), OTHER, Some(TRNG)));
     assert!(s.contains(r#""record_mac":"24:58:7c:00:00:0a","board_mac":"24:58:7c:00:00:0b""#), "{s}");
     let s = line(&Link::new(state(&good, ME), ME, None));
     assert!(s.contains(r#""rng":"none""#) && s.contains(r#""record":"kit:"#), "{s}");
@@ -199,7 +204,7 @@ fn every_unprovisioned_state_blocks_reports() {
 #[test]
 fn open_record_runs_the_open_link() {
     let p = record::partition_image(&record::encode_open());
-    let mut l = Link::new(state(&p, ME), ME, Some(rng));
+    let mut l = Link::new(state(&p, ME), ME, Some(TRNG));
     let s = line(&l);
     assert!(s.contains(r#""auth":"open""#) && s.contains(r#""link":"v1""#), "{s}");
     // Version 1 beacon and commands, unauthenticated, as an open kit was.
@@ -403,7 +408,7 @@ fn gateway_is_forgotten_unless_heard_or_reached() {
 
 #[test]
 fn blocked_node_announces_every_ten_seconds() {
-    let mut l = Link::new(State::Missing, ME, Some(rng));
+    let mut l = Link::new(State::Missing, ME, Some(TRNG));
     let mut buf = [0u8; v3::UNPROVISIONED_LEN];
     let (why, p) = l.announce(1_000, IMAGE_WIFI, "node-wifi", "0.1.0", &mut buf).unwrap();
     assert_eq!(why, Why::Missing);
@@ -466,4 +471,15 @@ fn timesync_detection() {
     assert!(has_timesync(&both));
     assert!(!has_timesync(&[]));
     assert!(!has_timesync(&[1, 2, 3]), "a truncated tail is not a command");
+}
+
+#[test]
+fn rng_health_check_and_name() {
+    assert!(rng_sane(&[1, 2, 3, 4]));
+    assert!(!rng_sane(&[7, 7, 3]), "a repeat");
+    assert!(!rng_sane(&[0, 0, 0]));
+    assert!(!rng_sane(&[5]));
+    let radio = RngSource { next: rng, name: "radio" };
+    let s = line(&Link::new(state(&partition(3, ME), ME), ME, Some(radio)));
+    assert!(s.contains(r#""rng":"radio""#), "{s}");
 }

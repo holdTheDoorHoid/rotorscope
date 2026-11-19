@@ -101,6 +101,24 @@ impl Why {
     }
 }
 
+/// The random source a keyed node's sessions come from, and its name for
+/// the boot line (`"trng"`: the HAL's TRNG, checked running; `"radio"`: the
+/// hardware RNG of a chip the HAL has no TRNG type for, read only after the
+/// radio started, which is what makes it true random).
+#[derive(Clone, Copy)]
+pub struct RngSource {
+    pub next: fn() -> u32,
+    pub name: &'static str,
+}
+
+/// A cheap health check of a random source before a keyed link trusts it:
+/// draws from a stuck or unclocked generator repeat. True when no two
+/// neighbouring draws are equal and not all are zero (a working 32-bit
+/// source fails this about once in 2^29 boots with 8 draws).
+pub fn rng_sane(draws: &[u32]) -> bool {
+    draws.len() >= 2 && draws.windows(2).all(|w| w[0] != w[1]) && draws.iter().any(|&d| d != 0)
+}
+
 /// How the link runs (module docs).
 pub enum Mode {
     Keyed(Node),
@@ -152,7 +170,7 @@ pub struct Link {
     mode: Mode,
     /// The board's eFuse station MAC (announcements).
     me: Mac,
-    rng: bool,
+    rng: Option<&'static str>,
     summary: Option<AuthSummary>,
     record_mac: Option<Mac>,
     gateway: Option<Gateway>,
@@ -168,7 +186,7 @@ impl Link {
     /// From what the board found in `rskey` (`kitkeys::record::read`, its
     /// MAC already checked against eFuse) and the hardware random source,
     /// `None` if it is not running. `me` is the eFuse station MAC.
-    pub fn new(state: State, me: Mac, rng: Option<fn() -> u32>) -> Self {
+    pub fn new(state: State, me: Mac, rng: Option<RngSource>) -> Self {
         let mut summary = None;
         let mut record_mac = None;
         let mode = match state {
@@ -177,7 +195,7 @@ impl Link {
                 match rng {
                     // The record's MAC is the eFuse MAC (checked by `read`):
                     // the address the radio sends from.
-                    Some(r) => Mode::Keyed(Node::new(NodeKeys::new(rec.ident.slot, rec.ident.mac, &rec.key), r)),
+                    Some(r) => Mode::Keyed(Node::new(NodeKeys::new(rec.ident.slot, rec.ident.mac, &rec.key), r.next)),
                     None => Mode::Blocked(Why::NoRng),
                 }
                 // `rec` (and its key) is dropped and wiped here.
@@ -193,7 +211,7 @@ impl Link {
         Link {
             mode,
             me,
-            rng: rng.is_some(),
+            rng: rng.map(|r| r.name),
             summary,
             record_mac,
             gateway: None,
@@ -238,13 +256,14 @@ impl Link {
     /// object without a newline:
     ///
     /// - keyed: `{"t":"uplink","auth":"kit:<kit_id> slot:<n> gen:<g> check:<key_check>","rng":"trng","link":"v3"}`
+///   (`"rng":"radio"` on a chip without a HAL TRNG type, [`RngSource`])
     /// - open: `{"t":"warn","what":"link_key","auth":"open",...}`
     /// - blocked: `{"t":"warn","what":"link_key","auth":"none","why":"<reason>",...}`
     ///
     /// `tools/flash-node.sh` calls a flash good only on the first (or the
     /// second with `--open`).
     pub fn boot_line(&self, out: &mut impl Write) -> core::fmt::Result {
-        let rng = if self.rng { "trng" } else { "none" };
+        let rng = self.rng.unwrap_or("none");
         match (&self.mode, self.summary) {
             (Mode::Keyed(_), Some(s)) => write!(out, r#"{{"t":"uplink","auth":"{s}","rng":"{rng}","link":"v3"}}"#),
             (Mode::Open, _) => write!(
@@ -291,6 +310,11 @@ impl Link {
             self.gateway = None;
         }
         self.gateway.map(|g| (g.mac, g.channel))
+    }
+
+    /// Whether a gateway is known (without forgetting a stale one).
+    pub fn gateway_known(&self) -> bool {
+        self.gateway.is_some()
     }
 
     /// A gateway learned (or changed) since the last call: add it as a
