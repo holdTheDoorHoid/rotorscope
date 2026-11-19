@@ -743,6 +743,16 @@ board. Details: docs/AERO-NODE.md "Hub side".
 Outputs for all of 14: aircraft on the screen, SD log, USB JSON, phone page and CoT, with the source
 (ADS-B, Mode S, UAT, FLARM, OGN, FANET, ADS-L); Phase 12's low-flying check uses them too.
 
+### Phase 16: Threat profiles - alerting on drone behaviour (added 2026-11-18, branch `threat-profiles`)
+Owner asked for a layer above presence alerts: protected areas (fixed, or a bubble moving with a
+handheld unit), beelines and fast FPV-style approaches, circling and loitering (reconnaissance), and
+detection of other hostile tactics found by research. Each drone gets one threat level (Notice,
+Caution, Warning, Critical) with plain reasons; combinations of behaviours raise it. Hub-side only,
+no link protocol change. Design: docs/THREAT-PROFILES.md; research: docs/THREAT-TACTICS.md.
+Slices 16a (areas, bubble, approach, levels) -> 16b (lingering, circling, drops, following) ->
+16c (signal and sound trends, radio-silent drones) -> 16d (across drones and days) -> 16e (profiles,
+tuning, map drawing).
+
 ### Later ideas
 - DJI legacy beacons (D10, decoder already in `rid::dji`) and drone Wi-Fi fingerprinting (D11) can be added to Nodes A and C at any time.
   - This also catches Wi-Fi toy drones (Tello and similar) by network name and maker address, with no new hardware. Try this before buying an nRF24.
