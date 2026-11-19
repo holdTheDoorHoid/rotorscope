@@ -257,8 +257,10 @@ pub enum EventCode {
     /// to four reasons (4, most serious first, 0 none; 1-19 as the design
     /// numbers them, 20 last seen inbound, 21 spotter for a striker), flags
     /// (1: bit 0 snoozed, bit 1 friend, bit 2 two caution rules at once, bit 3
-    /// held after the drone was lost). Text: the drone and the reasons with
-    /// their numbers.
+    /// held after the drone was lost, bit 4 no position: the id is a signal's
+    /// or a sound's threat entry, not a drone track; slice 16c, rules 12 and
+    /// 13). Text: the drone (or the signal) and the reasons with their
+    /// numbers.
     /// (Codes 26 and 27 are taken on other branches: `threat_ended`,
     /// `continuity`.)
     ThreatLevel = 28,
