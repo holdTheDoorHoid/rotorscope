@@ -56,21 +56,31 @@ repro_args() {
     [[ $dir == "$root" || $dir == / ]] && break
     dir=$(dirname "$dir")
   done
-  # The last prefix that matches wins, so the most specific come last.
-  flags="\"--remap-path-prefix=$HOME=/home\""
-  flags+=", \"--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup\""
-  # With the rust-src component installed, rustc names the standard library's sources by their
-  # real place in the toolchain folder (so the toolchain's name, "stable-..." or "1.99.1-...",
-  # ends up in panic messages), and without it by the virtual /rustc/<commit>/. Map the real
-  # place back to the virtual one, so both builds agree.
-  local rc=(rustc) sysroot hash
-  [[ -n ${REPRO_TOOLCHAIN:-} ]] && rc+=("+$REPRO_TOOLCHAIN")
-  sysroot=$("${rc[@]}" --print sysroot 2>/dev/null || true)
-  hash=$("${rc[@]}" -vV 2>/dev/null | awk '$1 == "commit-hash:" { print $2 }' || true)
-  if [[ -n $sysroot && -n $hash ]]; then
-    flags+=", \"--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$hash\""
-  fi
-  flags+=", \"--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo\""
+  # The last prefix that matches wins, so the most specific come last. Each home is remapped as
+  # given and as the real folder it resolves to (cargo and rustup resolve symbolic links).
+  flags=""
+  local from to real from_to
+  for from_to in "$HOME=/home" "${RUSTUP_HOME:-$HOME/.rustup}=/rustup" "${CARGO_HOME:-$HOME/.cargo}=/cargo"; do
+    from=${from_to%=*} to=${from_to##*=}
+    flags+="${flags:+, }\"--remap-path-prefix=$from=$to\""
+    real=$(cd -P "$from" 2>/dev/null && pwd || true)
+    [[ -n $real && $real != "$from" ]] && flags+=", \"--remap-path-prefix=$real=$to\""
+    if [[ $to == /rustup ]]; then
+      # With the rust-src component installed, rustc names the standard library's sources by
+      # their real place in the toolchain folder (so the toolchain's name, "stable-..." or
+      # "1.99.1-...", ends up in panic messages), and without it by the virtual
+      # /rustc/<commit>/. Map the real place back to the virtual one, so both builds agree.
+      local rc=(rustc) sysroot hash
+      [[ -n ${REPRO_TOOLCHAIN:-} ]] && rc+=("+$REPRO_TOOLCHAIN")
+      sysroot=$("${rc[@]}" --print sysroot 2>/dev/null || true)
+      hash=$("${rc[@]}" -vV 2>/dev/null | awk '$1 == "commit-hash:" { print $2 }' || true)
+      if [[ -n $sysroot && -n $hash ]]; then
+        flags+=", \"--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$hash\""
+        real=$(cd -P "$sysroot" 2>/dev/null && pwd || true)
+        [[ -n $real && $real != "$sysroot" ]] && flags+=", \"--remap-path-prefix=$real/lib/rustlib/src/rust=/rustc/$hash\""
+      fi
+    fi
+  done
   flags+=", \"--remap-path-prefix=$root=/rotorscope\""
   [[ -n ${REPRO_LINK:-} ]] && flags+=", \"--remap-path-prefix=$REPRO_LINK=/rotorscope\""
   REPRO_CARGO_ARGS=(--config "$key=[$flags]")
