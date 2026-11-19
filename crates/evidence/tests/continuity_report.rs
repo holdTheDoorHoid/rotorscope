@@ -33,3 +33,28 @@ fn logs_without_continuity_keep_the_plain_not_proven_line() {
     let r = verify::verify(&[], &Options::default());
     assert_eq!(r.not_proven(), verify::NOT_PROVEN);
 }
+
+/// A boot whose own continuity record is still unsigned (it stopped before
+/// its first checkpoint) is covered by the boot after it; that coverage
+/// must reach the boot before it too, whatever the boot ids' order.
+#[test]
+fn coverage_passes_down_a_chain_of_three_boots() {
+    for ids in [[1u8, 2, 3], [9, 5, 1], [4, 8, 2]] {
+        let mut u = Unit::new();
+        let a = u.boot(ids[0], 6, 2, "first");
+        // No checkpoint at all: its continuity record (naming the first
+        // boot's head) is signed only through the third boot.
+        let b = u.boot(ids[1], 0, 2, "second");
+        let c = u.boot(ids[2], 6, 0, "third");
+        let opts = Options { allow_test_key: true, ..Options::default() };
+        let r = verify::verify(&[Input::new("boot1.bin", a.bytes), Input::new("boot2.bin", b.bytes), Input::new("boot3.bin", c.bytes)], &opts);
+        // No gap and no failure. (Not exit 0: the second boot holds no
+        // checkpoint, so no signature of its own names its signer.)
+        let bad: Vec<_> = r.findings.iter().filter(|f| f.level != verify::Level::Note).collect();
+        assert!(bad.is_empty(), "ids {ids:?}: {bad:?}");
+        for id in &ids[..2] {
+            let ch = r.chains.iter().find(|c| c.boot == [*id; 8]).unwrap();
+            assert_eq!(ch.signed_through, ch.last_seq, "ids {ids:?}, boot {id}");
+        }
+    }
+}

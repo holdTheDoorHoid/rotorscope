@@ -852,7 +852,7 @@ fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options
     } else {
         (Level::Fail, " (fails unless --allow-gaps)")
     };
-    for ci in 0..chains.len() {
+    for ci in chain_order(chains, &by_boot) {
         let boot = chains[ci].sum.boot;
         if chains[ci].continuity.is_empty() {
             if chains[ci].sum.build.is_some_and(|b| b.counter_source != format::boot::COUNTER_NONE) {
@@ -954,6 +954,51 @@ fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options
             }
         }
     }
+}
+
+/// The order in which [`continuity_checks`] takes the chains: newest boot
+/// first, following the continuity records back. A boot vouches for the
+/// one before it only once its own continuity record is signed, and that
+/// signature may itself come from the boot after it; so a boot is taken
+/// only after every boot that names it. Boot ids are random and say
+/// nothing about order. Chains in a loop (only a forged log has one) and
+/// any left over follow in input order.
+fn chain_order(chains: &[ChainState], by_boot: &HashMap<[u8; 8], usize>) -> Vec<usize> {
+    let n = chains.len();
+    // names[j]: the chains j's continuity records name as the boot before.
+    let names: Vec<Vec<usize>> = chains
+        .iter()
+        .enumerate()
+        .map(|(j, c)| {
+            let mut v: Vec<usize> = c.continuity.iter().filter(|(_, k)| k.has_prev()).filter_map(|(_, k)| by_boot.get(&k.prev_boot).copied()).filter(|&i| i != j).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        })
+        .collect();
+    let mut named_by = vec![0usize; n];
+    for v in &names {
+        for &i in v {
+            named_by[i] += 1;
+        }
+    }
+    let mut order = Vec::with_capacity(n);
+    let mut done = vec![false; n];
+    let mut ready: std::collections::VecDeque<usize> = (0..n).filter(|&i| named_by[i] == 0).collect();
+    while let Some(j) = ready.pop_front() {
+        if std::mem::replace(&mut done[j], true) {
+            continue;
+        }
+        order.push(j);
+        for &i in &names[j] {
+            named_by[i] -= 1;
+            if named_by[i] == 0 {
+                ready.push_back(i);
+            }
+        }
+    }
+    order.extend((0..n).filter(|&i| !done[i]));
+    order
 }
 
 /// What the boot event says about the build, as notes.
