@@ -219,9 +219,11 @@ pub struct LinkStats {
 }
 
 impl LinkStats {
-    /// The gateway's last Hello says its ESP-NOW link is open (built
-    /// without a link key): anyone nearby can inject node reports and
-    /// commands. Shown on the screen for as long as it holds.
+    /// A gateway from before protocol 14 (an open hub still reads one)
+    /// said in its last Hello that it was built without a link key: anyone
+    /// nearby can inject node reports and commands. Shown on the screen as
+    /// `OPEN LINK` for as long as it holds. A protocol 14 gateway's Hello
+    /// says `gw nokey` (it never holds a key; the hub's record decides).
     pub fn gw_open(&self) -> bool {
         self.gw_hello.starts_with("gw OPEN")
     }

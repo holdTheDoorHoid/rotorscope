@@ -4,8 +4,8 @@
 //! re-sends the stream to its web head together with frames of its own. A
 //! frame type that only the hub (or only the link layer) ever writes must
 //! never be taken from a node: a node, or anyone who can forge node traffic
-//! (on an open kit anyone in radio range, on a keyed kit anyone who has read
-//! the kit key out of one board), could otherwise move the kit's own position
+//! (on an open kit anyone in radio range, on a sealed kit anyone who has
+//! read one node's own key out of it), could otherwise move the kit's own position
 //! and clock (`HubFix`), show made-up aircraft (`Csbee`) or flags (`Flags`),
 //! or name another node as the sender of its frames (`Via`).
 //!
@@ -15,8 +15,9 @@
 //! a new variant does not compile until someone decides who may send it.
 //! Every hop that can check, checks:
 //!
-//! - the ESP-NOW gateway relays only frames a node may originate
-//!   ([`node_batch`]), and never a node's own `Via`;
+//! - the hub takes from a verified ESP-NOW node packet only frames a node
+//!   may originate ([`node_batch`]), and never a node's own `Via` (since
+//!   protocol 14 the gateway holds no key and does not read frames);
 //! - the hub sorts its node-link stream with a [`Sorter`]: a `Via` names the
 //!   sender of exactly the one frame after it, that frame must be one a node
 //!   may originate, and a frame with no `Via` (the link's own: the gateway,
