@@ -254,5 +254,9 @@ fn mute_does_not_follow_number_to_new_node() {
     // Node 4 is still muted.
     let o = tr.ingest_threat(4, &sighting(ThreatKind::Deauth, 1, 0xff, 0), 71_000).unwrap();
     assert!(tr.get_threat(o).unwrap().muted);
-    assert!(!announced(&mut tr, 71_000).contains(&o));
+    // Its new episode is handed out for the record (muting stops the alert,
+    // never the record), marked as silenced, and it does not alert.
+    let _ = announced(&mut tr, 71_000);
+    assert!(tr.get_threat(o).unwrap().silence().is_some());
+    assert!(!tr.active_threats(71_000).any(|t| t.id == o), "no alert from the muted node");
 }
