@@ -127,6 +127,22 @@ fn a_striker_three_minutes_after_a_spotter_is_critical() {
 }
 
 #[test]
+fn a_slow_striker_at_the_bubble_is_a_warning_not_critical() {
+    // The same two flights in a park: no fixed area, only a 300 m bubble
+    // round a unit standing at the site. Two hobbyists is the likely story,
+    // so the 8 m/s beeline after a spotter stays a Warning; rule 14 is
+    // still given as a reason.
+    let strike = striker(240.0);
+    let drones = [Drone::new("SPOT-B", &spotter), Drone { from_s: 240, ..Drone::new("STRK-B", &strike) }];
+    let mut sim = Sim::new(&["bubble 300"]);
+    let seen = Seen::run(&mut sim, &drones, 520, &["SPOT-B", "STRK-B"]);
+    assert!(seen.first("SPOT-B", Rule::Circling).is_some(), "the spotter circled");
+    assert!(seen.first("STRK-B", Rule::SpotterStriker).is_some(), "rule 14 still named");
+    assert_eq!(seen.first("STRK-B", Rule::FastInbound), None);
+    assert_eq!(seen.worst("STRK-B"), Some(Level::Warning));
+}
+
+#[test]
 fn a_striker_fifteen_minutes_later_is_only_a_beeline() {
     let strike = striker(1140.0);
     let drones = [Drone::new("SPOT-2", &spotter), Drone { from_s: 1140, ..Drone::new("STRK-2", &strike) }];

@@ -400,7 +400,9 @@ Where it differs from the design, or needs a word:
   numbers 14-19 and 21 ("spotter for a striker"); [EVIDENCE-FORMAT.md](EVIDENCE-FORMAT.md).
 - **Expected false alarms** (THREAT-TACTICS.md §6):
   - 14: a second hobbyist heading for the place within 10 min of another's hover (two friends in
-    a park; with the bubble on, drones playing near you). Critical. `friend` lines for your own.
+    a park; with the bubble on, drones playing near you). `friend` lines for your own. Tuned after
+    review: at the moving bubble a *slow* striker (a beeline under the fast-inbound speeds) makes
+    rule 14 a Warning, not Critical; a fast striker, or any striker at a fixed area, is Critical.
   - 15: events, light shows, racing meets (`crowd off`); a jamming alarm that is itself false
     makes every drone near a place a Warning; a big bubble in a busy park.
   - 16: hobbyists who do not know the boundary; a survey drone whose passes cross the fence and go

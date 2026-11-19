@@ -423,7 +423,11 @@ pub(crate) fn judge<const H: usize, const P: usize>(
     if let Some(r) = inbound
         && let Some((spotter, ago)) = a.striker(t.id, f.key, t.continuity.previous, r.place(), now_ms)
     {
-        let s = Reason::new(Rule::SpotterStriker, Level::Critical, &Name::new(), r.range_m()).with_secs(ago).with_other(spotter);
+        // A slow beeline at the moving bubble after another drone hovered
+        // near the unit is common in a park (two hobbyists): Warning. At a
+        // fixed area, or when the striker is fast, Critical.
+        let level = if r.rule == Rule::Beeline && r.is_bubble() { Level::Warning } else { Level::Critical };
+        let s = Reason::new(Rule::SpotterStriker, level, &Name::new(), r.range_m()).with_secs(ago).with_other(spotter);
         let _ = hits.push(Reason { place: r.place, ..s });
     }
     if let Some((striker, place)) = a.marked(t.id, now_ms) {
