@@ -34,6 +34,12 @@ O4KEY.TXT
 # ESP-NOW link key (per kit, made by `cargo run -p link-key -- new`): never commit.
 tools/link.key
 *.linkkey
+# Kit master and roster (per-node link keys, `cargo run -p link-key -- kit new`):
+# never commit. The roster holds no secrets but is per kit.
+tools/kit.key
+tools/kit.roster
+tools/kit.roster.new
+tools/kit.key.new
 
 # FLARM legacy keys: the owner may use them (2026-11-17) but they are never
 # published. Made by `cargo run -p flarm-keys` from a SoftRF checkout; on the
