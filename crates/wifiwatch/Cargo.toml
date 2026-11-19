@@ -13,4 +13,5 @@ wifidrone.workspace = true
 mavwatch.workspace = true
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 mavwatch = { workspace = true, features = ["encode"] }
