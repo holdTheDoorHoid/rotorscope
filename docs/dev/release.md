@@ -142,7 +142,7 @@ It refuses to ship:
 
 **🔴 Expert from here on.** If you only want to check or reproduce a release, you can stop here.
 
-Three things made two builds of one commit differ. Each is now taken out, and
+Four things made two builds of one commit differ. Each is now taken out, and
 `tools/check-image-identity.sh` builds the gateway and node-wifi from two checkouts in different
 folders and compares them:
 
@@ -150,6 +150,7 @@ folders and compares them:
 |---|---|---|
 | The build time in the app descriptor | `esp-bootloader-esp-idf` stamps it | `SOURCE_DATE_EPOCH` = the commit's time |
 | Paths in panic messages and debug info | rustc writes absolute paths for crates outside each firmware's own workspace (`crates/*`, the registry), and the folder it ran in | `--remap-path-prefix` for the home folder, rustup home, cargo home and checkout (`tools/repro-env.sh`) |
+| The toolchain's folder name (`stable-...`, `1.99.1-...`) in panic messages | with the `rust-src` component installed, rustc names the standard library's sources by their place in the toolchain folder | that folder mapped back to `/rustc/<commit>`, the name rustc uses without `rust-src` |
 | The layout of the whole image | cargo mixes each `crates/*` crate's absolute location into its symbol names (`-C metadata`), and the linker then orders code differently | build through **one fixed path**, `/tmp/rotorscope-repro`, a link to the checkout (`repro_link` in `tools/repro-env.sh`); cargo is given the manifest through it and keeps that path |
 
 Measured 2026-11-19 with Rust 1.99.1 and espflash 4.7.0, building commit `bfc1352`:
@@ -183,6 +184,8 @@ both the image and the ELF. On 2026-11-19 none was found in the gateway or node-
 
 - **Exact tool versions.** The same commit gives the same bytes only with the same rustc, cargo and
   espflash versions; `BUILD-INPUTS.txt` names them. A newer Rust gives a different image.
+- **With and without `rust-src`.** A builder without that toolchain component should get the same
+  bytes (rustc then uses `/rustc/<commit>` itself); **not checked** by a build.
 - **Linux, x86-64, checked.** Two builders on other systems (macOS, an ARM computer) have not been
   compared. The script needs `flock`, which macOS lacks.
 - **One build at a time per computer.** The fixed path `/tmp/rotorscope-repro` is shared; the script

@@ -706,7 +706,10 @@ cargo build --release "${REPRO_CARGO_ARGS[@]}"
 It sets `SOURCE_DATE_EPOCH` to the commit's time unless already set (the app descriptor's build
 time and date then come from the commit), and `REPRO_CARGO_ARGS` to a `--config` that adds
 `--remap-path-prefix` for the home folder (to `/home`), the rustup home (`/rustup`), the cargo home
-(`/cargo`) and this checkout (`/rotorscope`), so panic messages and debug info name no local paths.
+(`/cargo`) and this checkout (`/rotorscope`), so panic messages and debug info name no local paths,
+and maps the toolchain's standard library sources back to `/rustc/<commit>` (otherwise the
+toolchain folder's name, such as `stable-x86_64-unknown-linux-gnu`, ends up in the image when the
+`rust-src` component is installed).
 The argument is the target triple (default `riscv32imac-unknown-none-elf`).
 
 Remapping alone does not make the image independent of the checkout's folder: cargo puts the
