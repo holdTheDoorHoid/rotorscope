@@ -189,22 +189,26 @@ kind=espnow
 chip=$("$here/dev-board.sh" --resolve "$board" | awk '{print $2}')
 [[ $chip == esp32c5 ]] || { echo "$board is $chip; multi-image nodes are ESP32-C5 only" >&2; exit 1; }
 
+# Images that do not depend on where or when they were built (the commit's
+# time, checkout paths remapped): tools/repro-env.sh, tools/check-image-identity.sh.
+repro() { (cd "$1" && . "$here/repro-env.sh" riscv32imac-unknown-none-elf && shift && "$@" "${REPRO_CARGO_ARGS[@]}"); }
+
 case $kind in
   bus)
-    (cd "$root/firmware/node-wifi/c5" && cargo fw24-bus)
+    repro "$root/firmware/node-wifi/c5" cargo fw24-bus
     wifi=$root/firmware/node-wifi/target-bus/riscv32imac-unknown-none-elf/release/node-wifi
     ble_features=esp32c5,wirebus ;;
   wired)
-    (cd "$root/firmware/node-wifi/c5" && cargo fw24)
+    repro "$root/firmware/node-wifi/c5" cargo fw24
     wifi=$root/firmware/node-wifi/target-band24/riscv32imac-unknown-none-elf/release/node-wifi
     ble_features=esp32c5 ;;
   *)
-    (cd "$root/firmware/node-wifi/c5" && cargo fw24-now)
+    repro "$root/firmware/node-wifi/c5" cargo fw24-now
     wifi=$root/firmware/node-wifi/target-espnow/riscv32imac-unknown-none-elf/release/node-wifi
     ble_features=esp32c5,espnow ;;
 esac
-(cd "$root/firmware/node-ble" && cargo +stable build --release --no-default-features \
-   --features "$ble_features" --target riscv32imac-unknown-none-elf)
+repro "$root/firmware/node-ble" cargo +stable build --release --no-default-features \
+   --features "$ble_features" --target riscv32imac-unknown-none-elf
 ble=$root/firmware/node-ble/target/riscv32imac-unknown-none-elf/release/node-ble
 
 apps=(--app "ota_0=$wifi" --app "ota_1=$ble")
