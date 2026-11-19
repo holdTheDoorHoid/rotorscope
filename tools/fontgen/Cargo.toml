@@ -1,0 +1,10 @@
+[package]
+name = "fontgen"
+description = "Rasterises the screen's TTFs into the 4-bit glyph tables of crates/screen/src/wide (run by hand; output committed)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fontdue = "0.9"

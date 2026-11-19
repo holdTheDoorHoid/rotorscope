@@ -16,7 +16,7 @@ use crate::model::*;
 /// [`MAX_DRONES`] most relevant when there are more (active before stale,
 /// confirmed before unconfirmed, then nearest, then newest: a forged drone
 /// can claim to be at the hub, so standing comes before claimed distance).
-/// Also sets `now_ms`, `utc_ms`, `threats.flood_per_s` and
+/// Also sets `now_ms`, `utc_ms`, `position`, `threats.flood_per_s` and
 /// `total_drones`, and downgrades a 2D/3D/manual `gps.fix` to `None` when
 /// the tracker considers the own position too old, so the layout and the
 /// numbers agree. (`Fix::Absent` is left alone: it says more.)
@@ -27,6 +27,7 @@ pub fn fill_from_tracker<const N: usize, const A: usize>(
 ) {
     state.now_ms = ctx.now_ms;
     state.utc_ms = ctx.utc_ms;
+    state.position = ctx.own.map(|o| (o.lat as f32, o.lon as f32));
     if ctx.own.is_none() && state.gps.has_position() {
         state.gps.fix = Fix::None;
     }
@@ -512,4 +513,71 @@ pub fn area_gnss_view(status: &tracker::area_gnss::AreaStatus) -> Option<AreaGns
         aircraft_moved: if status.spoofing { detail::byte(sd, 1) } else { 0 },
         own_agrees: (status.jamming && own(status.jam_detail)) || (status.spoofing && own(sd)),
     })
+}
+
+// ------------------------------------------------- theme in the site file --
+
+use crate::ui::{Settings, SwitchAt, Theme, ThemeMode};
+use tracker::site::{ThemeName, ThemeSetting, ThemeSite};
+
+/// A site file's theme name as a screen theme.
+pub fn theme_from_site(t: ThemeName) -> Theme {
+    match t {
+        ThemeName::GlassCockpit => Theme::GlassCockpit,
+        ThemeName::FieldDay => Theme::FieldDay,
+        ThemeName::RedNight => Theme::RedNight,
+    }
+}
+
+/// A screen theme as the site file names it.
+pub fn theme_to_site(t: Theme) -> ThemeName {
+    match t {
+        Theme::GlassCockpit => ThemeName::GlassCockpit,
+        Theme::FieldDay => ThemeName::FieldDay,
+        Theme::RedNight => ThemeName::RedNight,
+    }
+}
+
+/// The settings with what a site file's theme lines say applied (what they
+/// do not mention is left as it is).
+pub fn apply_site_theme(site: &ThemeSite, mut s: Settings) -> Settings {
+    if let Some(t) = site.theme {
+        s.theme = t.map_or(ThemeMode::Auto, |t| ThemeMode::Fixed(theme_from_site(t)));
+    }
+    if let Some(t) = site.day {
+        s.day_theme = theme_from_site(t);
+    }
+    if let Some(t) = site.night {
+        s.night_theme = theme_from_site(t);
+    }
+    if let Some(tw) = site.switch_twilight {
+        s.switch_at = if tw { SwitchAt::Twilight } else { SwitchAt::Sunrise };
+    }
+    if let Some(b) = site.brightness {
+        s.brightness = b.clamp(1, 5);
+    }
+    s
+}
+
+/// One site line per screen setting that differs between `before` and
+/// `after`, in file order (Theme, day, night, switch, brightness).
+pub fn theme_changes(before: &Settings, after: &Settings, mut f: impl FnMut(ThemeSetting)) {
+    if before.theme != after.theme {
+        f(ThemeSetting::Theme(match after.theme {
+            ThemeMode::Auto => None,
+            ThemeMode::Fixed(t) => Some(theme_to_site(t)),
+        }));
+    }
+    if before.day_theme != after.day_theme {
+        f(ThemeSetting::Day(theme_to_site(after.day_theme)));
+    }
+    if before.night_theme != after.night_theme {
+        f(ThemeSetting::Night(theme_to_site(after.night_theme)));
+    }
+    if before.switch_at != after.switch_at {
+        f(ThemeSetting::SwitchTwilight(after.switch_at == SwitchAt::Twilight));
+    }
+    if before.brightness != after.brightness {
+        f(ThemeSetting::Brightness(after.brightness.clamp(1, 5)));
+    }
 }

@@ -1358,6 +1358,17 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         (m, s)
     }
 
+    /// What [`Tracker::alarm_counts`] counts, named: the label of the first
+    /// nuisance alarm the "Mute" action would silence and of the first
+    /// safety-critical one "Snooze" would (empty when none), so the screen
+    /// can say what a press acts on.
+    pub fn alarm_names(&self, seen_ms: u64, now_ms: u64) -> (&'static str, &'static str) {
+        let mut seen = self.threats.all().iter().filter(|t| seen_alarm(t, seen_ms, now_ms));
+        let mute = seen.clone().find(|t| !is_safety_kind(t.kind)).map_or("", |t| t.label());
+        let snooze = seen.find(|t| is_safety_kind(t.kind)).map_or("", |t| t.label());
+        (mute, snooze)
+    }
+
     /// Settings "Mute": mute every nuisance alarm the operator has seen
     /// ([`Tracker::alarm_counts`]), each on its own rule, for
     /// [`OPERATOR_MUTE_MS`]. Never a safety-critical one, never one raised

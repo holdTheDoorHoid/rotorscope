@@ -108,6 +108,7 @@ fn mute_all_never_silences_jamming_or_unseen_alarms() {
     // out for an alert, are not in "Mute N".
     tr.ingest_threat(3, &sighting(ThreatKind::BeaconFlood, 4, 0xff, 0), 1_500);
     assert_eq!(tr.alarm_counts(1_000, 1_500), (2, 1), "two nuisance alarms to mute, one to snooze");
+    assert_eq!(tr.alarm_names(1_000, 1_500), ("Wi-Fi deauth attack", "Jamming (wideband)"), "the screen names what it acts on");
     let rules = tr.mute_seen(1_000, 1_500);
     assert_eq!(rules.len(), 2);
     assert!(rules.iter().all(|m| !threats::is_safety_kind(m.kind)));

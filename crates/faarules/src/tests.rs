@@ -595,3 +595,18 @@ fn engine_sizes() {
         core::mem::size_of::<Engine<96>>()
     );
 }
+
+/// The wide screen's words: metres first, feet where the rule is in feet,
+/// and every rule fits its 48 characters.
+#[test]
+fn screen_words_lead_with_metres() {
+    let f = |rule, ev| Flag { rule, area: None, level: 2, ev, src: 0, name: heapless::String::new(), secs: 1.0, no_clock: false };
+    let h = crate::text::screen_words(&f(Rule::Height, [260.0, 5.0, 121.92]));
+    assert_eq!(h.as_str(), "260 m (853 ft) above ground, limit 400 ft");
+    let v = crate::text::screen_words(&f(Rule::Vlos, [640.0, 1.0, 10.0]));
+    assert_eq!(v.as_str(), "640 m from its pilot");
+    for rule in (0..=20).filter_map(Rule::from_u8) {
+        let t = crate::text::screen_words(&f(rule, [9_999.0, 9_999.0, 9_999.0]));
+        assert!(!t.is_empty(), "{rule:?}");
+    }
+}

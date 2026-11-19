@@ -398,10 +398,12 @@ pub fn distance(m: f32) -> (Buf, &'static str) {
     (s, unit)
 }
 
-/// "320m", "1.4km": the compact form for lists.
+/// "320 m", "1.4 km": number and unit with one space (the one spacing
+/// rule for every number and its unit).
 pub fn distance_short(m: f32) -> Buf {
     let (n, u) = distance(m);
     let mut s = n;
+    let _ = s.push(' ');
     let _ = s.push_str(u);
     s
 }
@@ -426,42 +428,59 @@ pub fn degrees(deg: f32) -> Buf {
     s
 }
 
-/// Time since something, compact: "now", "12s", "4m", "2h".
+/// Time since something: "now", "12 s", "4 min", "2 h" (never "m" for
+/// minutes).
 pub fn age(ms: u64) -> Buf {
     let s = ms / 1000;
     let mut b = Buf::new();
     let _ = if s < 2 {
         b.push_str("now").map_err(|_| core::fmt::Error)
     } else if s < 60 {
-        write!(b, "{s}s")
+        write!(b, "{s} s")
     } else if s < 3600 {
-        write!(b, "{}m", s / 60)
+        write!(b, "{} min", s / 60)
     } else {
-        write!(b, "{}h", s / 3600)
+        write!(b, "{} h", s / 3600)
     };
     b
 }
 
-/// Duration for uptimes: "45s", "12m", "3h05m", "2d04h".
+/// Duration for uptimes: "45 s", "12 min", "3 h 05 min", "2 d 04 h".
 pub fn uptime(s: u32) -> Buf {
     let mut b = Buf::new();
     let _ = if s < 60 {
-        write!(b, "{s}s")
+        write!(b, "{s} s")
     } else if s < 3600 {
-        write!(b, "{}m", s / 60)
+        write!(b, "{} min", s / 60)
     } else if s < 86_400 {
-        write!(b, "{}h{:02}m", s / 3600, s % 3600 / 60)
+        write!(b, "{} h {:02} min", s / 3600, s % 3600 / 60)
     } else {
-        write!(b, "{}d{:02}h", s / 86_400, s % 86_400 / 3600)
+        write!(b, "{} d {:02} h", s / 86_400, s % 86_400 / 3600)
     };
     b
 }
 
-/// Metres as a whole number with a unit: "120m". `None` gives "--".
+/// A shorter uptime for narrow columns: "45 s", "12 min", "3 h 05",
+/// "2 d 04" (minutes and hours implied by the unit before them).
+pub fn uptime_short(s: u32) -> Buf {
+    let mut b = Buf::new();
+    let _ = if s < 60 {
+        write!(b, "{s} s")
+    } else if s < 3600 {
+        write!(b, "{} min", s / 60)
+    } else if s < 86_400 {
+        write!(b, "{} h {:02}", s / 3600, s % 3600 / 60)
+    } else {
+        write!(b, "{} d {:02}", s / 86_400, s % 86_400 / 3600)
+    };
+    b
+}
+
+/// Metres as a whole number with a unit: "120 m". `None` gives "--".
 pub fn metres(v: Option<f32>) -> Buf {
     let mut b = Buf::new();
     let _ = match v {
-        Some(v) => write!(b, "{}m", libm::roundf(v) as i32),
+        Some(v) => write!(b, "{} m", libm::roundf(v) as i32),
         None => write!(b, "--"),
     };
     b

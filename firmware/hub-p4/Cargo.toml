@@ -115,7 +115,8 @@ coverage = { path = "../../crates/coverage" }
 rid = { path = "../../crates/rid" }
 heapless = "0.8"
 critical-section = "1.2"
-screen = { path = "../../crates/screen", features = ["tracker"] }
+# `wide`: the native 800x480 layout with anti-aliased lettering.
+screen = { path = "../../crates/screen", features = ["tracker", "wide"] }
 tracker = { path = "../../crates/tracker" }
 ctrlwatch = { path = "../../crates/ctrlwatch" }
 # Phase 12: airspace pack lookups and the possible-violation rule engine.

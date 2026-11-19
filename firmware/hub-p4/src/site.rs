@@ -1,4 +1,4 @@
-//! Node positions and muted alarms (`tracker::site`): from the SD card's
+//! Node positions, muted alarms and the screen theme (`tracker::site`): from the SD card's
 //! `ROTORSCP/SITE.TXT` at mount, from the console (`L`, one line), and from
 //! the settings page. A change typed on the console or made on the screen
 //! ("Nodes at hub") is appended to the file and logged as an evidence
@@ -10,6 +10,12 @@
 //! file's SHA-256 and what it sets, then one per mute rule and node
 //! position that differs from what the hub was using (at most
 //! `tracker::site::MAX_CHANGE_EVENTS`, then one event counting the rest).
+//!
+//! **The screen theme and brightness** (`theme`, `theme-day`,
+//! `theme-night`, `theme-switch`, `brightness` lines) are kept here too, so
+//! the operator's choice survives a reboot: applied at mount, set by a
+//! console line, and appended (one line per changed setting, each logged as
+//! a Setting event) when an edit on the Settings page ends.
 //!
 //! **The screen's Mute / Snooze** silences specific alarms for a time
 //! (`tracker::threats`): logged, never written to the file, gone at reboot.
@@ -129,6 +135,30 @@ impl Site {
         self.st.nodes = st.nodes.clone();
         self.st.control_ids = st.control_ids;
         self.st.control_content = st.control_content;
+        // The screen theme: logged only when it changes what is shown.
+        let now_set = app.settings();
+        let want = screen::from_tracker::apply_site_theme(&st.theme, now_set);
+        if want != now_set {
+            let mut t: heapless::String<128> = heapless::String::new();
+            let _ = write!(t, "site file changed: screen {}", st.theme);
+            ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+            crate::println!("hub-p4: {t}");
+            app.set_settings(want);
+        }
+        self.st.theme = st.theme;
+    }
+
+    /// A settings edit on the screen ended with the theme changed: one
+    /// line per changed theme setting to the card, each logged.
+    pub fn settings_changed(&mut self, before: &screen::Settings, after: &screen::Settings, sd: &mut Logger, ev: &mut Evidence) {
+        let mut text: heapless::String<160> = heapless::String::new();
+        screen::from_tracker::theme_changes(before, after, |t| {
+            self.st.theme.apply(t);
+            let _ = site::write_theme(&mut text, t);
+        });
+        if !text.is_empty() {
+            self.save(&text, From::Screen, sd, ev);
+        }
     }
 
     fn apply_line(&mut self, l: SiteLine, app: &mut App, now: u64) {
@@ -145,6 +175,12 @@ impl Site {
             l @ (SiteLine::Home { .. } | SiteLine::HomeClear) => {
                 self.st.apply(l);
                 self.home_changed = Some(self.st.home);
+            }
+            SiteLine::Theme(t) => {
+                self.st.theme.apply(t);
+                let mut one = site::ThemeSite::default();
+                one.apply(t);
+                app.set_settings(screen::from_tracker::apply_site_theme(&one, app.settings()));
             }
             SiteLine::AllNodesHere | SiteLine::Nothing => {}
         }
@@ -170,7 +206,8 @@ impl Site {
             }
         };
         if parsed == SiteLine::AllNodesHere {
-            return self.all_nodes_here(app, gw, own, sd, ev, From::Console);
+            let _ = self.all_nodes_here(app, gw, own, sd, ev, From::Console);
+            return;
         }
         let mut text: heapless::String<128> = heapless::String::new();
         let _ = writeln!(text, "{}", line.trim());
@@ -179,7 +216,8 @@ impl Site {
     }
 
     /// Settings "Nodes at hub": every node the hub knows stands where the
-    /// hub is (a wired or bench kit).
+    /// hub is (a wired or bench kit). `Err` (words for the screen) when
+    /// nothing was placed.
     pub fn all_nodes_here(
         &mut self,
         app: &mut App,
@@ -188,10 +226,10 @@ impl Site {
         sd: &mut Logger,
         ev: &mut Evidence,
         from: From,
-    ) {
+    ) -> Result<(), &'static str> {
         let Some((lat, lon)) = own else {
             crate::println!("hub-p4: nodes at hub: the hub has no position yet (GPS fix or manual)");
-            return;
+            return Err("No GPS position: not placed");
         };
         let mut text: heapless::String<1024> = heapless::String::new();
         for n in gw.nodes.iter() {
@@ -200,17 +238,18 @@ impl Site {
         }
         if text.is_empty() {
             crate::println!("hub-p4: nodes at hub: no nodes heard yet");
-            return;
+            return Err("No nodes heard: none placed");
         }
         self.apply(app, gw);
         self.save(&text, from, sd, ev);
+        Ok(())
     }
 
     /// Settings "Alarms": mute (nuisance kinds, 2 h) or snooze (safety
     /// kinds, 5 min) the alarms on the screen the operator was looking at
     /// (`seen_ms`). One Setting event per rule; nothing goes to the card.
     #[inline(never)]
-    pub fn silence_seen(&mut self, app: &mut App, seen_ms: u64, snooze: bool, now: u64, ev: &mut Evidence) {
+    pub fn silence_seen(&mut self, app: &mut App, seen_ms: u64, snooze: bool, now: u64, ev: &mut Evidence) -> Result<(), &'static str> {
         let added = if snooze { app.tracker.snooze_seen(seen_ms, now) } else { app.tracker.mute_seen(seen_ms, now) };
         for m in &added {
             let mut t: heapless::String<256> = heapless::String::new();
@@ -219,18 +258,24 @@ impl Site {
             ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3, m.kind as u8]);
             crate::println!("hub-p4: {t}");
         }
+        match (added.is_empty(), snooze) {
+            (false, _) => Ok(()),
+            (true, false) => Err("Nothing left to mute"),
+            (true, true) => Err("Nothing left to snooze"),
+        }
     }
 
     /// Settings "Alarms" when nothing sounds: drop the operator's mutes and
     /// snoozes (the site file's stay; `unmute all` on the console drops
     /// those too).
-    pub fn unmute_operator(&mut self, app: &mut App, now: u64, ev: &mut Evidence) {
+    pub fn unmute_operator(&mut self, app: &mut App, now: u64, ev: &mut Evidence) -> Result<(), &'static str> {
         app.tracker.unmute_operator(now);
         let site = app.tracker.mutes().len();
         let mut t: heapless::String<96> = heapless::String::new();
         let _ = write!(t, "screen: unmute: the operator's mutes and snoozes dropped; {site} site-file mutes stay");
         ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
         crate::println!("hub-p4: {t}");
+        Ok(())
     }
 
     /// Append to the card and log each line as a Setting event.

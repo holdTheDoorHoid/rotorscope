@@ -113,24 +113,31 @@ impl GpsMem {
     }
 
     /// Hub moved (screen "Hub moved", console `m`): forget home, relearn.
-    pub fn forget_home(&mut self, gps: &mut Gps, sd: &mut Logger, ev: &mut Evidence, from: &str, now: u64) {
+    /// `Err` (words for the screen) when nothing was forgotten.
+    pub fn forget_home(&mut self, gps: &mut Gps, sd: &mut Logger, ev: &mut Evidence, from: &str, now: u64) -> Result<(), &'static str> {
         if gps.home_origin() == Some(gnss::HomeOrigin::Placed) {
             setting(ev, format_args!("hub moved ({from}): home is placed in the site file; edit its home line (or 'home clear') instead"));
-            return;
+            return Err("Home set in site file: not changed");
         }
         gps.integrity_forget_home();
         setting(ev, format_args!("hub moved: GPS home forgotten, relearning (from {from})"));
         self.save(gps, sd, now);
+        Ok(())
     }
 
     /// The operator confirms the place waiting since a "NOT adopted" event.
-    pub fn confirm_home(&mut self, gps: &mut Gps, sd: &mut Logger, ev: &mut Evidence, from: &str, now: u64) {
+    /// `Err` (words for the screen) when nothing was waiting.
+    pub fn confirm_home(&mut self, gps: &mut Gps, sd: &mut Logger, ev: &mut Evidence, from: &str, now: u64) -> Result<(), &'static str> {
         match gps.confirm_home() {
             Some((lat, lon, _)) => {
                 setting(ev, format_args!("GPS home confirmed by the operator ({from}): {lat:.7} {lon:.7}; remembered on the card"));
                 self.save(gps, sd, now);
+                Ok(())
             }
-            None => setting(ev, format_args!("GPS new home ({from}): nothing waiting to confirm{}", if gps.home_origin() == Some(gnss::HomeOrigin::Placed) { " (home is placed in the site file)" } else { "" })),
+            None => {
+                setting(ev, format_args!("GPS new home ({from}): nothing waiting to confirm{}", if gps.home_origin() == Some(gnss::HomeOrigin::Placed) { " (home is placed in the site file)" } else { "" }));
+                Err("Nothing waiting to confirm")
+            }
         }
     }
 
