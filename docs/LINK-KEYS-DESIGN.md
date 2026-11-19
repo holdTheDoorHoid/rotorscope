@@ -410,7 +410,11 @@ counting what it believes it delivered (`NodeHealth`, cumulative), and the hub c
 it verified per slot. Every `NodeHealth` the hub compares the two over a sliding 60 s. If the
 node claims at least 50 frames more than arrived and more than 20 % of what it sent, the hub
 raises `LinkLoss` naming the node: an evidence event and a screen entry. Cumulative counters
-make a lost `NodeHealth` harmless. If forged ACKs swallow everything, `NodeHealth` stops
+make a lost `NodeHealth` harmless. The same two thresholds are also applied over the last
+5 minutes, for a node that sends too little for one minute to hold 50 frames; that finding
+counts only while the last minute still shows loss, and its `detail` is 1000 plus the
+percentage. Once raised, the finding holds until the loss is under half of both thresholds
+(25 frames, 10 %), so a loss that dips does not end the alarm and raise it again. If forged ACKs swallow everything, `NodeHealth` stops
 arriving too, and the existing deaf-node alarm fires.
 
 **Reports swallowed, the rest let through.** The comparison runs when a `NodeHealth` arrives.

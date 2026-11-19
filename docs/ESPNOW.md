@@ -328,7 +328,8 @@ Threats on the screen and in the evidence log: **Forged node traffic**
 (`forged_link`: packets refused, the reason in its `detail`; the codes are in
 `link::ThreatKind::ForgedLink`'s documentation) and **Node reports going
 missing** (`link_loss`: a node says it sent at least 50 frames more in the
-last minute than the hub received, and more than a fifth of what it sent;
+last minute, or the last five, than the hub received, and more than a fifth
+of what it sent;
 something is swallowing its packets after the radio acknowledged them). An
 unprovisioned node's LED blinks where it has one.
 

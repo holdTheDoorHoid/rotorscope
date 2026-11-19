@@ -330,13 +330,9 @@ impl App {
                 let _ = text.push_str(&tracker::area_gnss::describe(t));
             } else if t.kind == link::ThreatKind::LinkLoss {
                 // Raised by the hub's delivery accounting (tracker
-                // `delivery`): the node says it sent far more than arrived.
-                let m = mac;
-                let _ = write!(
-                    text,
-                    "LINK LOSS: node {} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) says it delivered frames the hub never verified: {} % of what it sent over the last minute is missing (forged acknowledgements, a gateway dropping its packets, or heavy loss)",
-                    t.node, m[0], m[1], m[2], m[3], m[4], m[5], t.detail
-                );
+                // `delivery`): the node says it sent far more than arrived,
+                // or its reports stopped arriving.
+                let _ = text.push_str(&tracker::delivery::describe(t, mac));
             } else if t.kind == link::ThreatKind::IdFlood {
                 // Raised by the tracker itself (WP-09, `tracker::probation`):
                 // a flood of forged drone IDs, aircraft addresses or

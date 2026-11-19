@@ -126,8 +126,8 @@ Once you have **sealed** the kit:
   on.
 - The gateway holds no key, so taking it gives nothing to forge with. It can still drop or
   delay traffic. The hub counts what each node says it sent against what arrived and raises
-  "Node reports going missing" when at least 50 frames and more than 20 % are lost in a minute,
-  or when a node's reports stop arriving. Lighter loss than that is not flagged.
+  "Node reports going missing" when at least 50 frames and more than 20 % are lost in a minute
+  or in five, or when a node's reports stop arriving. Lighter loss than that is not flagged.
 
 What it does not do:
 

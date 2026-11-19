@@ -48,6 +48,19 @@
 //! report is [`REPORTS_OVERDUE_MS`] old is raised as the same `LinkLoss`,
 //! with detail [`LOSS_DETAIL_NO_REPORTS`] (bench, 2026-11-19).
 //!
+//! **A quiet node.** A node that sends a hundred frames a minute could lose
+//! almost half of them and stay under [`LOSS_MIN_FRAMES`] in every minute.
+//! So the same two thresholds are also applied over [`SLOW_WINDOW_MS`]: a
+//! loss that lasts shows there even when no single minute holds enough
+//! frames (bench follow-up, 2026-11-19). The long window's finding counts
+//! only while the last minute still shows loss, so it ends with the loss.
+//!
+//! **Holding.** Once raised, the finding holds until the loss is under half
+//! of both thresholds ([`LOSS_HOLD_FRAMES`], [`LOSS_HOLD_PCT`]). When reports
+//! are themselves being lost the window shrinks to a few reports and the
+//! count in it dips under the raise threshold while the loss goes on; on the
+//! bench that ended the alarm and raised it again. One loss is one alarm.
+//!
 //! **Ending.** The verdict is taken at each report and raised once a second
 //! from [`Tracker::expire`] while it holds, so one lost report does not end
 //! the alarm. It ends by itself: when a report finds the window clean, or
@@ -66,6 +79,15 @@ pub const LOSS_WINDOW_MS: u64 = 60_000;
 pub const LOSS_MIN_FRAMES: u32 = 50;
 /// ...and more than this percent of the frames claimed.
 pub const LOSS_MIN_PCT: u32 = 20;
+/// Once raised, the finding holds while at least this many are missing...
+pub const LOSS_HOLD_FRAMES: u32 = LOSS_MIN_FRAMES / 2;
+/// ...and more than this percent of the frames claimed.
+pub const LOSS_HOLD_PCT: u32 = LOSS_MIN_PCT / 2;
+/// The long window the same thresholds are applied over, for a node that
+/// sends too little for the short one to hold [`LOSS_MIN_FRAMES`].
+pub const SLOW_WINDOW_MS: u64 = 300_000;
+/// One report in this long is kept for the long window.
+pub const SLOW_STEP_MS: u64 = 30_000;
 /// A verdict counts for this long after the report that made it (four
 /// report periods): one or two lost reports do not end the alarm.
 pub const LOSS_STALE_MS: u64 = 20_000;
@@ -81,11 +103,16 @@ pub const OVERDUE_MIN_FRAMES: u32 = 10;
 /// `detail` of a `LinkLoss` raised because the reports themselves stopped
 /// arriving. The ordinary finding's detail is a percentage of at least 20.
 pub const LOSS_DETAIL_NO_REPORTS: u32 = 0;
+/// Added to the percentage in `detail` when the finding is the long
+/// window's ([`SLOW_WINDOW_MS`]), so the text can say which time it covers.
+pub const LOSS_DETAIL_SLOW: u32 = 1_000;
 /// More frames a second than any node sends (the radio's ceiling with
 /// small frames): bounds what a counter wrap can claim.
 pub const MAX_FRAMES_PER_S: u64 = 4_000;
 /// Reports kept per node: more than the window at one report every 5 s.
 const SAMPLES: usize = 16;
+/// Reports kept per node for the long window: one per step, and one more.
+const SLOW_SAMPLES: usize = (SLOW_WINDOW_MS / SLOW_STEP_MS) as usize + 2;
 
 /// The running totals at one report, in the hub's own accounting (both
 /// wrap at 2^32; differences are taken modulo, and a window never holds
@@ -107,9 +134,13 @@ struct NodeDelivery {
     /// The node's latest report: uptime (s) and `frames_sent`.
     last: Option<(u32, u32)>,
     samples: Vec<Sample, SAMPLES>,
+    /// One report per [`SLOW_STEP_MS`], over [`SLOW_WINDOW_MS`].
+    slow: Vec<Sample, SLOW_SAMPLES>,
     /// The latest report's finding: (frames missing, frames claimed,
     /// window ms), or `None` when the window was clean.
     loss: Option<(u32, u32, u32)>,
+    /// That finding is the long window's, not the short one's.
+    slow_found: bool,
     /// When that report arrived.
     verdict_ms: u64,
     /// Hub second of the last raise (at most one a second).
@@ -122,7 +153,7 @@ struct NodeDelivery {
 
 impl NodeDelivery {
     const fn new(node: u8) -> Self {
-        Self { node, received: 0, claimed: 0, last: None, samples: Vec::new(), loss: None, verdict_ms: 0, raised_s: None, heard_total: 0, heard_ms: None }
+        Self { node, received: 0, claimed: 0, last: None, samples: Vec::new(), slow: Vec::new(), loss: None, slow_found: false, verdict_ms: 0, raised_s: None, heard_total: 0, heard_ms: None }
     }
 }
 
@@ -193,13 +224,35 @@ impl DeliveryWatch {
         }
         let now = Sample { at_ms: now_ms, claimed: e.claimed, received: e.received };
         let _ = e.samples.push(now);
+        // The long window: one report per step, the oldest dropped.
+        let cut = now_ms.saturating_sub(SLOW_WINDOW_MS);
+        while e.slow.first().is_some_and(|s| s.at_ms < cut) || e.slow.is_full() {
+            e.slow.remove(0);
+        }
+        if e.slow.last().is_none_or(|s| now_ms.saturating_sub(s.at_ms) >= SLOW_STEP_MS) {
+            let _ = e.slow.push(now);
+        }
+        // A finding already raised holds down to half the thresholds.
+        let (min_frames, min_pct) = if e.loss.is_some() { (LOSS_HOLD_FRAMES, LOSS_HOLD_PCT) } else { (LOSS_MIN_FRAMES, LOSS_MIN_PCT) };
+        let over = |base: Sample| {
+            let claimed = now.claimed.wrapping_sub(base.claimed);
+            let received = now.received.wrapping_sub(base.received);
+            let missing = claimed.saturating_sub(received);
+            let lossy = missing >= min_frames && u64::from(missing) * 100 > u64::from(claimed) * u64::from(min_pct);
+            let window = now_ms.saturating_sub(base.at_ms).min(u64::from(u32::MAX)) as u32;
+            lossy.then_some((missing, claimed, window))
+        };
+        // The short window's finding first: it is the sharper statement.
+        // The long window's counts only while the loss is still going on
+        // (the last minute is over the hold percentage, whatever its
+        // count), so the alarm ends within a minute of the loss ending and
+        // not five minutes later.
+        let short = over(e.samples[0]);
         let base = e.samples[0];
-        let claimed = now.claimed.wrapping_sub(base.claimed);
-        let received = now.received.wrapping_sub(base.received);
-        let missing = claimed.saturating_sub(received);
-        let lossy = missing >= LOSS_MIN_FRAMES && u64::from(missing) * 100 > u64::from(claimed) * u64::from(LOSS_MIN_PCT);
-        let window = now_ms.saturating_sub(base.at_ms).min(u64::from(u32::MAX)) as u32;
-        e.loss = lossy.then_some((missing, claimed, window));
+        let (claimed, received) = (now.claimed.wrapping_sub(base.claimed), now.received.wrapping_sub(base.received));
+        let going_on = u64::from(claimed.saturating_sub(received)) * 100 > u64::from(claimed) * u64::from(LOSS_HOLD_PCT);
+        e.slow_found = short.is_none();
+        e.loss = short.or_else(|| e.slow.first().and_then(|&b| over(b)).filter(|_| going_on));
         e.verdict_ms = now_ms;
     }
 
@@ -258,7 +311,10 @@ impl DeliveryWatch {
             // still heard whose reports have stopped arriving.
             let (count, window, detail) = match (Self::current(e, now_ms), Self::overdue(e, now_ms)) {
                 // Percent of what it sent (claimed >= missing >= 50).
-                (Some((missing, claimed, window)), _) => (missing, window, (u64::from(missing) * 100 / u64::from(claimed.max(1))) as u32),
+                (Some((missing, claimed, window)), _) => {
+                    let pct = (u64::from(missing) * 100 / u64::from(claimed.max(1))) as u32;
+                    (missing, window, if e.slow_found { LOSS_DETAIL_SLOW + pct } else { pct })
+                }
                 (None, Some((since, age))) => (since, age, LOSS_DETAIL_NO_REPORTS),
                 (None, None) => continue,
             };
@@ -285,6 +341,27 @@ impl DeliveryWatch {
             );
         }
     }
+}
+
+/// Plain text for the evidence log and console: which node (`mac` is its
+/// address), and what is missing over which time.
+pub fn describe(t: &crate::threats::Threat, mac: [u8; 6]) -> heapless::String<320> {
+    use core::fmt::Write;
+    let mut s = heapless::String::new();
+    let m = mac;
+    let _ = write!(s, "LINK LOSS: node {} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) ", t.node, m[0], m[1], m[2], m[3], m[4], m[5]);
+    let why = "(forged acknowledgements, a gateway dropping its packets, or heavy loss)";
+    let _ = if t.detail == LOSS_DETAIL_NO_REPORTS {
+        write!(
+            s,
+            "is still heard, but its delivery reports stopped arriving {} s ago or more, so what it sends cannot be checked {why}",
+            REPORTS_OVERDUE_MS / 1000
+        )
+    } else {
+        let (pct, over) = if t.detail >= LOSS_DETAIL_SLOW { (t.detail - LOSS_DETAIL_SLOW, "five minutes") } else { (t.detail, "minute") };
+        write!(s, "says it delivered frames the hub never verified: {pct} % of what it sent over the last {over} is missing {why}")
+    };
+    s
 }
 
 impl<const N: usize, const A: usize> Tracker<N, A> {
@@ -348,6 +425,7 @@ mod tests {
         let l = link_loss(&tr, 2, t).expect("link loss raised");
         assert!(l.by_hub);
         assert_eq!(l.detail, 50, "percent missing");
+        assert!(describe(l, [0; 6]).contains("50 % of what it sent over the last minute is missing"));
         assert!(l.count >= 50, "{}", l.count);
         assert_eq!(l.label(), "Node reports going missing");
         assert_eq!(tr.take_new_threat(t).map(|id| tr.get_threat(id).unwrap().kind), Some(ThreatKind::LinkLoss));
@@ -387,6 +465,96 @@ mod tests {
         assert!(link_loss(&tr, 2, later).is_none());
     }
 
+    /// A quiet node (20 frames a report, 240 a minute at most in a window)
+    /// losing 30 % of them: 6 a report, at most 72 in a minute's window...
+    /// over the raise threshold there. So take a quieter one: 10 frames a
+    /// report, 30 % lost is 3 a report, 36 in any minute: never 50. The long
+    /// window sees 180 missing of 600.
+    #[test]
+    fn a_quiet_node_losing_steadily_is_found_by_the_long_window() {
+        let mut tr: Tracker = Tracker::default();
+        let mut st = (100, 5_000);
+        let t = run(&mut tr, 2, &mut st, 0, 13, 10, 100);
+        assert!(link_loss(&tr, 2, t).is_none());
+        // One minute of it: under 50 frames, nothing yet.
+        let t = run(&mut tr, 2, &mut st, t, 12, 10, 70);
+        assert!(link_loss(&tr, 2, t).is_none(), "36 missing in a minute is under the threshold");
+        // It goes on: found within the long window.
+        let mut t = t;
+        let mut found = None;
+        for i in 0..48 {
+            t = run(&mut tr, 2, &mut st, t, 1, 10, 70);
+            if let (None, Some(l)) = (found, link_loss(&tr, 2, t)) {
+                found = Some(i);
+                assert_eq!(l.detail, LOSS_DETAIL_SLOW + 20, "just over 20 %, marked as the long window's");
+                let text = describe(l, [2, 0, 0, 0, 0, 0x1a]);
+                assert!(text.starts_with("LINK LOSS: node 2 (02:00:00:00:00:1a) says it delivered"), "{text}");
+                assert!(text.contains("20 % of what it sent over the last five minutes is missing"), "{text}");
+            }
+        }
+        let l = link_loss(&tr, 2, t).expect("a lasting loss on a quiet node is raised");
+        // 120 frames arrived whole after the long window's first report and
+        // before the loss began, so "more than 20 % of what it sent" takes
+        // 25 lossy reports (3k * 100 > 20 * (120 + 10k)): about two minutes.
+        assert_eq!(found, Some(25 - 12 - 1), "raised 25 reports (125 s) after the loss began");
+        // Once raised it holds on the last minute alone (36 missing is over
+        // the hold threshold), so the figure is the minute's again.
+        assert_eq!(l.detail, 30, "percent missing over the last minute");
+        // A quiet node that loses nothing, or a frame now and then, never is.
+        let mut ok: Tracker = Tracker::default();
+        let t = run(&mut ok, 3, &mut (1, 0), 0, 150, 10, 90);
+        assert!(link_loss(&ok, 3, t).is_none(), "10 % of a trickle for 12 minutes");
+        // The loss stops: the alarm ends once the long window has moved on.
+        let t = run(&mut tr, 2, &mut st, t, 70, 10, 100);
+        tr.expire(t + crate::threats::THREAT_ACTIVE_MS);
+        assert!(link_loss(&tr, 2, t + crate::threats::THREAT_ACTIVE_MS).is_none());
+    }
+
+    /// Bench, 2026-11-19: with the loss scattered and reports themselves
+    /// lost, the window shrank to a few reports, the count in it dipped
+    /// under 50 while 60 % was still being lost, and the alarm ended and
+    /// was raised again. Once raised it now holds down to half the
+    /// thresholds: one loss, one alarm.
+    #[test]
+    fn a_raised_loss_holds_through_a_dip_under_the_raise_threshold() {
+        let mut w = DeliveryWatch::new();
+        let (mut up, mut sent, mut t) = (100u32, 0u32, 0u64);
+        let mut report = |w: &mut DeliveryWatch, t: &mut u64, gap_s: u32, frames: u32, seen: u32| {
+            *t += u64::from(gap_s) * 1_000;
+            up += gap_s;
+            sent += frames;
+            w.received(2, seen);
+            w.health(2, up, sent, *t);
+        };
+        for _ in 0..4 {
+            report(&mut w, &mut t, 5, 40, 40);
+        }
+        // Heavy loss: raised.
+        for _ in 0..4 {
+            report(&mut w, &mut t, 5, 40, 16);
+        }
+        assert!(w.loss(2, t).is_some());
+        // Reports go missing too: after a long gap the short window holds
+        // two reports and 30 frames missing of 50. Under the raise
+        // threshold of 50 frames, over the hold threshold of 25.
+        report(&mut w, &mut t, 70, 50, 20);
+        report(&mut w, &mut t, 5, 50, 20);
+        let (missing, claimed) = w.loss(2, t).expect("still held");
+        assert!(missing >= LOSS_HOLD_FRAMES && missing * 100 > claimed * LOSS_HOLD_PCT, "{missing} of {claimed}");
+        // The same two reports on a node with nothing raised raise nothing
+        // (the long window is kept out of it: these are its first reports).
+        let mut fresh = DeliveryWatch::new();
+        fresh.health(3, 10, 0, 1_000);
+        fresh.received(3, 20);
+        fresh.health(3, 15, 49, 6_000);
+        assert!(fresh.loss(3, 6_000).is_none(), "29 missing does not raise");
+        // And the hold ends when the loss does.
+        for _ in 0..70 {
+            report(&mut w, &mut t, 5, 40, 40);
+        }
+        assert!(w.loss(2, t).is_none());
+    }
+
     /// A gateway that drops the packets carrying `NodeHealth` (it can tell
     /// them by size or content: frames are authenticated, not hidden) while
     /// passing some of the rest. Found on the bench, 2026-11-19: for 110 s
@@ -418,6 +586,9 @@ mod tests {
         let l = link_loss(&tr, 2, t).unwrap();
         assert!(l.by_hub);
         assert_eq!(l.detail, LOSS_DETAIL_NO_REPORTS, "not a percentage: the reports themselves are missing");
+        let text = describe(l, [0; 6]);
+        assert!(text.contains("its delivery reports stopped arriving 30 s ago or more") && !text.contains('%'), "{text}");
+        assert!(text.len() < 300, "{}", text.len());
         // A report gets through at last. It is cumulative, so the ordinary
         // comparison now sees what went missing: still raised, as a percent.
         let t = t + 1_000;
