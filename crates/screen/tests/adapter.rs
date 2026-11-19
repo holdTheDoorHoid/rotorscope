@@ -431,3 +431,36 @@ fn flood_of_fakes_at_the_hub_never_hides_a_real_drone() {
     assert!(st.threats.flood_per_s >= 150, "{}", st.threats.flood_per_s);
     assert_eq!(st.drones.len(), MAX_DRONES);
 }
+
+/// Slice 16c: a signal without a position with a threat level reaches the
+/// strip, worded as a trend; rotor sound with no radio heard too.
+#[test]
+fn a_signal_getting_louder_reaches_the_strip() {
+    let mut tr: Tracker<8, { tracker::aircraft::MAX_AIRCRAFT }, 8> = Tracker::default();
+    let mut st = UiState::default();
+    for s in 0..45u64 {
+        let now = 100_000 + s * 1000;
+        tr.set_own_fix(CITY_HALL.0, CITY_HALL.1, None, now, Some((0.0, None)));
+        let snr = 8 + s.saturating_sub(30).min(12) as i8;
+        let r = link::RfSighting { kind: link::RfKind::AnalogVideo, freq: 57_400, width_khz: 0, snr_db: snr, duty_pct: 90, line_hz: 0, uptime_us: 0 };
+        tr.ingest_rf(0, &r, now);
+        tr.tick_behaviour(now);
+    }
+    let now = 100_000 + 44 * 1000;
+    fill_from_tracker(&tr, &tr.context(now, None), &mut st);
+    let strip = st.threat_strip.as_ref().expect("strip");
+    // No areas and no bubble: no place to name.
+    assert_eq!((strip.level, strip.text.as_str()), (2, "CAUTION FPV video louder fast"));
+    // Rotor sound with no radio heard, on a tracker that heard no radio.
+    let mut tr: Tracker<8, { tracker::aircraft::MAX_AIRCRAFT }, 8> = Tracker::default();
+    for s in 0..15u64 {
+        let now = 100_000 + s * 1000;
+        tr.set_own_fix(CITY_HALL.0, CITY_HALL.1, None, now, Some((0.0, None)));
+        let c = tracker::behaviour::RotorSound { id: 1, first_ms: 100_000, last_ms: now, level_db: -40, low_hum: false, aircraft: false };
+        tr.hear_sound(&c, now);
+        tr.tick_behaviour(now);
+    }
+    fill_from_tracker(&tr, &tr.context(114_000, None), &mut st);
+    let strip = st.threat_strip.as_ref().expect("strip");
+    assert_eq!((strip.level, strip.text.as_str()), (3, "WARNING rotor sound, no radio heard"));
+}

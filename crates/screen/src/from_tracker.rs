@@ -36,10 +36,20 @@ pub fn fill_from_tracker<const N: usize, const A: usize, const P: usize>(
     // IDs, IDs active at once) can hold under one new ID a second.
     state.threats.flood_per_s = ctx.flood.map_or(0, |f| f.new_per_s.clamp(1, u32::from(u16::MAX)) as u16);
     state.total_unconfirmed = tracks.iter().filter(|t| !t.confirmed()).count().min(usize::from(u16::MAX)) as u16;
-    // The most serious drone's threat level, for the strip (not snoozed).
-    state.threat_strip = tracker.top_threat(ctx.now_ms).and_then(|t| {
+    // The most serious threat level, for the strip (not snoozed): a drone's,
+    // or a signal's without a position (slice 16c) when that is higher. On
+    // a tie the drone's: a judgement from its position says more than a
+    // trend in a signal's strength.
+    let drone = tracker.top_threat(ctx.now_ms).and_then(|t| {
         Some(crate::ThreatStrip { level: t.threat.level? as u8, text: tracker::behaviour::strip_text(t)? })
     });
+    let signal = tracker.top_signal_threat(ctx.now_ms).and_then(|s| {
+        Some(crate::ThreatStrip { level: s.threat.level? as u8, text: tracker::behaviour::trend::strip_text_signal(s)? })
+    });
+    state.threat_strip = match (drone, signal) {
+        (Some(d), Some(s)) if s.level > d.level => Some(s),
+        (d, s) => d.or(s),
+    };
 
     // Sort keys computed once per track: the distance is a range solve in
     // f64, which is soft-float on the hub's cores. A sort that called it
