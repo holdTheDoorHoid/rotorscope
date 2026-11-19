@@ -27,10 +27,13 @@
 //! the board's normal ESP-NOW path, on the gateway channel; nothing beyond
 //! the kit's own ESP-NOW traffic is transmitted.
 //!
-//! - `forge claim <mac>`: sets the station MAC to `<mac>` (another node's),
-//!   sends five batches sealed with this node's own key, and sets the MAC
-//!   back. Expected: hub `bad_tag` for `<mac>`'s slot +5, nothing from this
-//!   node under `<mac>`, `<mac>` keeps reporting.
+//! - `forge claim <mac>`: sets the station MAC to `<mac>` (another node's,
+//!   `esp_wifi_set_mac` on the running driver), sends five batches sealed
+//!   with this node's own key, and sets the MAC back. If the driver refuses
+//!   the change nothing is sent (it would go out as this node's own, genuine
+//!   batch) and the line says so (untested on hardware). Expected: hub
+//!   `bad_tag` for `<mac>`'s slot +5, nothing from this node under `<mac>`,
+//!   `<mac>` keeps reporting.
 //! - `forge cmd <mac>`: a unicast Command to node `<mac>` (an `Assign` with a
 //!   plan without channel 6), sealed with this node's own key. Expected: the
 //!   victim's `link_auth` `bad_tag` +1, its plan unchanged.
@@ -311,6 +314,14 @@ mod air {
                 Op::Claim(mac) => {
                     let me = node_common::keystore::efuse_mac();
                     let e_set = set_station_mac(&mac);
+                    if e_set != 0 {
+                        // Sent from our own MAC it would be a genuine batch
+                        // of ours: nothing is sent.
+                        crate::usb::usb_line!(
+                            r#"{{"t":"forge","err":"claim","set_mac":{e_set},"note":"the driver refused the station MAC change while running: nothing sent"}}"#
+                        );
+                        return;
+                    }
                     let mut acked = 0;
                     let mut made = 0;
                     for _ in 0..5 {
