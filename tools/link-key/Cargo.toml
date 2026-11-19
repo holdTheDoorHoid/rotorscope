@@ -1,9 +1,10 @@
 [package]
 name = "link-key"
-description = "Make or identify the kit's ESP-NOW link key (tools/link.key; never committed)"
+description = "Kit keys for the ESP-NOW link: the kit master, the roster, and provisioning records for nodes and the hub (tools/kit.key; never committed)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
 airlink = { path = "../../crates/airlink" }
+kitkeys = { path = "../../crates/kitkeys" }
