@@ -25,9 +25,11 @@ bench = false
 [features]
 default = []
 # Report to the hub over ESP-NOW through the gateway (crates/airlink,
-# docs/ESPNOW.md), keyed with tools/link.key when it exists (else open, and
-# the node says so at boot). Wi-Fi sits on the gateway's channel 6.
-espnow = ["dep:esp-radio", "esp-radio/wifi", "esp-radio/esp-now", "esp-rtos/esp-radio", "dep:airlink"]
+# docs/ESPNOW.md), keyed by the board's rskey provisioning record
+# (docs/LINK-KEYS-DESIGN.md; flash with tools/partitions-single.csv), open
+# with an open record, silent but announcing itself without one. Wi-Fi sits
+# on the gateway's channel 6.
+espnow = ["dep:esp-radio", "esp-radio/wifi", "esp-radio/esp-now", "esp-rtos/esp-radio", "dep:airlink", "node-common/espnow"]
 # The wired bus (crates/wirebus, docs/WIREBUS.md): TX open-drain, see
 # src/board.rs. Not with `espnow`.
 wirebus = ["node-common/wirebus"]
