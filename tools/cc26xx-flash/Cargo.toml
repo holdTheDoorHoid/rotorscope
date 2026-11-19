@@ -10,3 +10,6 @@ publish = false
 # No default features: `libudev` would need the system libudev headers, and
 # we only open a port by path.
 serialport = { version = "4", default-features = false }
+
+[dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }

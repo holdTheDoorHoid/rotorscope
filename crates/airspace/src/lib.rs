@@ -61,4 +61,6 @@ pub use geom::{FT_PER_M, M_PER_FT, distance_m, point_in_rings};
 pub use pack::{Airport, Area, AreaRef, Grid, Los, Pack, PackError, Source, crc32};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod fuzz_tests;

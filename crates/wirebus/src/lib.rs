@@ -38,7 +38,9 @@ pub mod node;
 #[cfg(test)]
 mod sim;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod fuzz_tests;
 
 pub use master::{BusStats, Event, Master, MasterConfig, NodeStats};
 pub use node::{Node, NodeConfig, NodeCounters, Outbox, TimeSyncRx};

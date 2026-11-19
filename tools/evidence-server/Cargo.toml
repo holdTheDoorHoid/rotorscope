@@ -34,5 +34,6 @@ ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 serialport = { version = "4", default-features = false }
 
 [dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }
 http-body-util = "0.1"
 heapless = { workspace = true }

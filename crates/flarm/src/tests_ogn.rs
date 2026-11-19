@@ -62,7 +62,7 @@ fn encode_sr2v6(v: i32) -> u32 {
 }
 
 #[derive(Clone, Copy)]
-struct Pos {
+pub(crate) struct Pos {
     address: u32,
     addr_type: u8,
     lat_deg: f64,
@@ -80,7 +80,7 @@ struct Pos {
     encrypted: bool,
 }
 
-fn glider() -> Pos {
+pub(crate) fn glider() -> Pos {
     Pos {
         address: 0xDD1234,
         addr_type: 2,
@@ -101,7 +101,7 @@ fn glider() -> Pos {
 }
 
 /// Header + data words, whitened, LDPC-encoded: 26 bytes on air.
-fn encode(p: &Pos) -> [u8; PACKET_BYTES] {
+pub(crate) fn encode(p: &Pos) -> [u8; PACKET_BYTES] {
     let mut header = (p.address & 0xff_ffff)
         | (u32::from(p.addr_type & 3) << 24)
         | (u32::from(p.other) << 26)

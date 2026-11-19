@@ -36,3 +36,6 @@ tokio = { version = "1.54.1", features = ["rt", "time", "sync", "macros"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", optional = true, default-features = false, features = ["blocking-api", "async-io"] }
+
+[dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }

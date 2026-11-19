@@ -17,6 +17,7 @@ adsb.workspace = true
 libm = "0.2"
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 # Tests always see the optional decoder, and the CSBee encoder.
 flarm = { path = ".", features = ["legacy"] }
 adsb = { workspace = true, features = ["encode"] }

@@ -13,6 +13,7 @@ name = "adsb"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -43,6 +44,7 @@ dependencies = [
 name = "airlink"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "heapless 0.8.0",
  "kitkeys",
  "link",
@@ -52,6 +54,7 @@ dependencies = [
 name = "airspace"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "libm",
 ]
 
@@ -61,6 +64,7 @@ version = "0.1.0"
 dependencies = [
  "airspace",
  "faarules",
+ "fuzzkit",
  "heapless 0.8.0",
  "rid",
  "serde_json",
@@ -383,6 +387,7 @@ dependencies = [
 name = "cc26xx-flash"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "serialport",
 ]
 
@@ -571,6 +576,7 @@ name = "ctrlwatch"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
+ "fuzzkit",
  "heapless 0.8.0",
  "mavwatch",
  "serde",
@@ -628,6 +634,7 @@ dependencies = [
  "aes",
  "ctr",
  "droneid",
+ "fuzzkit",
  "rand_core 0.6.4",
  "sha2 0.10.9",
  "sm2",
@@ -650,6 +657,7 @@ name = "droneid"
 version = "0.1.0"
 dependencies = [
  "droneid",
+ "fuzzkit",
  "sha2 0.10.9",
 ]
 
@@ -809,6 +817,7 @@ name = "evidence"
 version = "0.1.0"
 dependencies = [
  "evidence",
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "p256",
@@ -825,6 +834,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "evidence",
+ "fuzzkit",
  "getrandom 0.2.17",
  "heapless 0.8.0",
  "http-body-util",
@@ -847,6 +857,7 @@ name = "evidence-verify"
 version = "0.1.0"
 dependencies = [
  "evidence",
+ "fuzzkit",
  "serde_json",
 ]
 
@@ -856,6 +867,7 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "airspace",
+ "fuzzkit",
  "heapless 0.8.0",
  "libm",
  "link",
@@ -900,6 +912,7 @@ version = "0.1.0"
 dependencies = [
  "adsb",
  "flarm",
+ "fuzzkit",
  "libm",
 ]
 
@@ -908,6 +921,7 @@ name = "flarm-keys"
 version = "0.1.0"
 dependencies = [
  "flarm",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -1060,6 +1074,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzkit"
+version = "0.1.0"
+
+[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1096,6 +1114,9 @@ dependencies = [
 [[package]]
 name = "gnss"
 version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+]
 
 [[package]]
 name = "group"
@@ -1250,6 +1271,7 @@ version = "0.1.0"
 dependencies = [
  "airlink",
  "evidence",
+ "fuzzkit",
  "heapless 0.8.0",
  "kitkeys",
  "link",
@@ -1470,6 +1492,7 @@ dependencies = [
 name = "kitkeys"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "sha2 0.11.1",
 ]
 
@@ -1490,6 +1513,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
+ "fuzzkit",
  "heapless 0.8.0",
  "openlink",
  "postcard",
@@ -1501,6 +1525,7 @@ dependencies = [
 name = "link-key"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "kitkeys",
 ]
 
@@ -1537,6 +1562,7 @@ version = "0.1.0"
 dependencies = [
  "aerohop",
  "ctrlwatch",
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "modes",
@@ -1561,6 +1587,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mavwatch"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "heapless 0.8.0",
  "mavwatch",
 ]
@@ -1628,6 +1655,7 @@ name = "modes"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "libm",
 ]
 
@@ -1656,6 +1684,7 @@ name = "nodeimage"
 version = "0.1.0"
 dependencies = [
  "airlink",
+ "fuzzkit",
  "heapless 0.8.0",
  "kitkeys",
  "link",
@@ -1709,6 +1738,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "openlink"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "openlink",
  "serde",
  "serde_json",
@@ -1908,6 +1938,7 @@ name = "rawcap"
 version = "0.1.0"
 dependencies = [
  "droneid",
+ "fuzzkit",
 ]
 
 [[package]]
@@ -1981,6 +2012,7 @@ dependencies = [
 name = "rid"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "odid-ref",
  "rid",
  "serde",
@@ -2002,6 +2034,7 @@ name = "rid-view"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "heapless 0.8.0",
  "libc",
  "link",
@@ -2627,6 +2660,7 @@ dependencies = [
  "adsb",
  "ctrlwatch",
  "droneid",
+ "fuzzkit",
  "heapless 0.8.0",
  "libm",
  "link",
@@ -2658,6 +2692,7 @@ name = "uat"
 version = "0.1.0"
 dependencies = [
  "adsb",
+ "fuzzkit",
  "libm",
 ]
 
@@ -2830,6 +2865,7 @@ version = "0.1.0"
 dependencies = [
  "edge-dhcp",
  "flate2",
+ "fuzzkit",
  "sha2 0.11.1",
 ]
 
@@ -2842,11 +2878,15 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 [[package]]
 name = "wifidrone"
 version = "0.1.0"
+dependencies = [
+ "fuzzkit",
+]
 
 [[package]]
 name = "wifiwatch"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "mavwatch",
@@ -2954,6 +2994,7 @@ dependencies = [
 name = "wirebus"
 version = "0.1.0"
 dependencies = [
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "postcard",

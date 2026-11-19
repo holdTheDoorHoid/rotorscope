@@ -23,6 +23,8 @@ mod parse;
 #[cfg(target_os = "linux")]
 mod sniffle;
 mod view;
+#[cfg(test)]
+mod fuzz_tests;
 
 use std::collections::HashMap;
 use std::fs::File;

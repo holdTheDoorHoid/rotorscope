@@ -70,10 +70,10 @@ fn wire_time() {
 
 /// A queue of encoded frames for unit tests.
 #[derive(Default)]
-struct Q(std::collections::VecDeque<Vec<u8>>);
+pub(crate) struct Q(pub(crate) std::collections::VecDeque<Vec<u8>>);
 
 impl Q {
-    fn frame(&mut self, f: &Frame) {
+    pub(crate) fn frame(&mut self, f: &Frame) {
         let mut b = [0u8; link::MAX_FRAME];
         self.0.push_back(link::encode(f, &mut b).unwrap().to_vec());
     }
@@ -103,7 +103,7 @@ fn rare_joins() -> MasterConfig {
 }
 
 /// Join one node to a master by hand; returns (master, node).
-fn joined_pair() -> (Master<4>, Node) {
+pub(crate) fn joined_pair() -> (Master<4>, Node) {
     let mut m: Master<4> = Master::new(rare_joins(), 0x1234);
     let mut n = Node::new(NodeConfig::new(), mac_of(0), 7, 0);
     let mut q = Q::default();

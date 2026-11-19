@@ -9,6 +9,7 @@ publish = false
 evidence = { workspace = true, features = ["verify"] }
 
 [dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }
 evidence = { workspace = true, features = ["verify", "soft-signer"] }
 # Already in the lock file (through evidence); the time-stamp tests build bundles.
 serde_json = "1"

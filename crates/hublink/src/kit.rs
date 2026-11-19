@@ -248,7 +248,7 @@ pub fn advance_boot_counter<F: Flash>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::flash::fake::MemFlash;
     use crate::parttable::tests::hub_table;

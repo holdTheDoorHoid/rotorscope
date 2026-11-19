@@ -8,3 +8,6 @@ license.workspace = true
 [dependencies]
 # Only to check the file it writes parses.
 flarm = { path = "../../crates/flarm", features = ["legacy"] }
+
+[dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }

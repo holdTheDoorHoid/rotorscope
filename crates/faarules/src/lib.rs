@@ -640,4 +640,6 @@ impl<const N: usize> Engine<N> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+#[cfg(test)]
+mod fuzz_tests;

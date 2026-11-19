@@ -18,7 +18,7 @@ use super::*;
 const C: (f64, f64) = (39.90, -75.20);
 const GROUND_HAE: f32 = -23.0;
 /// 2026-07-01 03:00 UTC (23:00 EDT): night in Philadelphia.
-const NIGHT_MS: u64 = 1_782_874_800_000;
+pub(crate) const NIGHT_MS: u64 = 1_782_874_800_000;
 /// 2026-07-01 17:00 UTC: midday.
 const DAY_MS: u64 = 1_782_925_200_000;
 
@@ -47,7 +47,7 @@ fn area(kind: AreaKind, name: &str, ring: Vec<(f64, f64)>, ceil_ft: i32) -> Area
     }
 }
 
-fn pack_bytes() -> Vec<u8> {
+pub(crate) fn pack_bytes() -> Vec<u8> {
     let mut b = PackBuilder {
         created: 1_794_700_000,
         center: C,
@@ -508,7 +508,7 @@ fn compact_item_text() {
 }
 
 /// One frame from drone `mac`/`sn` with a fresh location at `agl` m.
-fn heard<const T: usize, const A: usize>(tr: &mut Tracker<T, A>, mac: u32, sn: &str, agl: f32, now: u64) {
+pub(crate) fn heard<const T: usize, const A: usize>(tr: &mut Tracker<T, A>, mac: u32, sn: &str, agl: f32, now: u64) {
     let mut o = obs(Transport::WifiBeacon, now);
     o.mac = [0x02, 0, (mac >> 24) as u8, (mac >> 16) as u8, (mac >> 8) as u8, mac as u8];
     let msgs = [basic(sn), Message::Location(loc(C.0 + 0.001, C.1, agl))];

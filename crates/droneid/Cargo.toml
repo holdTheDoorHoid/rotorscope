@@ -13,6 +13,7 @@ default = ["std"]
 std = []
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 droneid = { path = ".", features = ["std"] }
 # Only for the published O4 PHY test vectors (SHA-256 of each stage).
 sha2 = "0.10"

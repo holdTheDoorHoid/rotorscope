@@ -12,3 +12,6 @@ alloc = []
 [dependencies]
 # Pure-Rust maths without std.
 libm = "0.2"
+
+[dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }

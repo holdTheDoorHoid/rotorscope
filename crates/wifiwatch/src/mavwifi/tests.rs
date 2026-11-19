@@ -19,7 +19,7 @@ const GCS_IP: [u8; 4] = [192, 168, 4, 2];
 
 /// How to build one data frame.
 #[derive(Clone, Copy)]
-struct Opts {
+pub(crate) struct Opts {
     to_ds: bool,
     from_ds: bool,
     qos: bool,
@@ -43,7 +43,7 @@ struct Opts {
 
 impl Opts {
     /// The drone's access point sending to the ground station (FromDS).
-    fn down() -> Self {
+    pub(crate) fn down() -> Self {
         Opts {
             to_ds: false,
             from_ds: true,
@@ -68,12 +68,12 @@ impl Opts {
     }
 
     /// A station (phone, or anyone on the open network) to the drone (ToDS).
-    fn up(from: [u8; 6], src_ip: [u8; 4]) -> Self {
+    pub(crate) fn up(from: [u8; 6], src_ip: [u8; 4]) -> Self {
         Opts { to_ds: true, from_ds: false, sport: 14550, dport: 14555, src_ip, dst_ip: DRONE_IP, a: [AP, from, AP, [0; 6]], ..Self::down() }
     }
 }
 
-fn frame(o: &Opts, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn frame(o: &Opts, payload: &[u8]) -> Vec<u8> {
     let mut f = Vec::new();
     let subtype: u8 = if o.null { 0x4 } else { 0 } | if o.qos { 0x8 } else { 0 };
     f.push(0x08 | (subtype << 4));
@@ -121,19 +121,19 @@ fn frame(o: &Opts, payload: &[u8]) -> Vec<u8> {
     f
 }
 
-fn mav(seq: u8, sys: u8, comp: u8, msgid: u32, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn mav(seq: u8, sys: u8, comp: u8, msgid: u32, payload: &[u8]) -> Vec<u8> {
     let mut b = [0u8; 300];
     let n = v2(&mut b, seq, sys, comp, msgid, payload, None);
     b[..n].to_vec()
 }
 
-fn heartbeat(seq: u8, sys: u8, comp: u8) -> Vec<u8> {
+pub(crate) fn heartbeat(seq: u8, sys: u8, comp: u8) -> Vec<u8> {
     let mut p = [0u8; 9];
     p[4..].copy_from_slice(&[2, 3, 0x81, 4, 3]);
     mav(seq, sys, comp, msg::HEARTBEAT, &p)
 }
 
-fn camera_info(vendor: &[u8], model: &[u8], uri: &[u8]) -> [u8; 237] {
+pub(crate) fn camera_info(vendor: &[u8], model: &[u8], uri: &[u8]) -> [u8; 237] {
     use msg::camera_information as c;
     let mut p = [0u8; 237];
     p[c::VENDOR..c::VENDOR + vendor.len()].copy_from_slice(vendor);

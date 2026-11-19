@@ -173,6 +173,9 @@ pub fn crc32(data: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
+mod fuzz_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

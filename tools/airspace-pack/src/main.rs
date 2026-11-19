@@ -53,6 +53,9 @@ struct Args {
     offline: bool,
 }
 
+#[cfg(test)]
+mod fuzz_tests;
+
 fn parse_args() -> Res<Args> {
     let mut a = Args {
         lat: f64::NAN,

@@ -108,7 +108,7 @@ fn put(buf: &mut [u8], start: usize, n: usize, value: u32) {
 }
 
 #[derive(Clone, Copy)]
-struct Sv {
+pub(crate) struct Sv {
     aq: u8,
     address: u32,
     lat: f64,
@@ -176,7 +176,7 @@ fn put_ms(buf: &mut [u8], cat: u8, call: &str, csid: bool, emergency: u8, versio
     put(buf, 214, 1, u32::from(csid));
 }
 
-fn philly() -> Sv {
+pub(crate) fn philly() -> Sv {
     Sv {
         aq: 0,
         address: 0xA1B2C3,
@@ -193,13 +193,13 @@ fn philly() -> Sv {
     }
 }
 
-fn basic_frame(s: &Sv) -> Vec<u8> {
+pub(crate) fn basic_frame(s: &Sv) -> Vec<u8> {
     let mut d = [0u8; 18];
     put_sv(&mut d, 0, s);
     encode(rs::BASIC, &d)
 }
 
-fn long_frame(mdb_type: u8, s: &Sv, call: &str) -> Vec<u8> {
+pub(crate) fn long_frame(mdb_type: u8, s: &Sv, call: &str) -> Vec<u8> {
     let mut d = [0u8; 34];
     put_sv(&mut d, mdb_type, s);
     if mdb_type == 1 || mdb_type == 3 {

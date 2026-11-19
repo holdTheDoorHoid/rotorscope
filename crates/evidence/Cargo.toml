@@ -33,3 +33,4 @@ link = { workspace = true }
 heapless = { workspace = true }
 # Already a dependency (feature "verify"); the time-stamp tests build bundles.
 serde_json = "1"
+fuzzkit = { path = "../fuzzkit" }

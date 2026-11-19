@@ -120,7 +120,7 @@ pub fn spawn(listener: TcpListener, shared: Arc<Shared>) {
 }
 
 #[derive(Debug, Default)]
-struct Request {
+pub(crate) struct Request {
     method: String,
     path: String,
     if_none_match: Option<String>,
@@ -131,7 +131,7 @@ struct Request {
 }
 
 /// The request line and headers (no body). Also returns Content-Length.
-fn parse_head(head: &str) -> (Request, usize) {
+pub(crate) fn parse_head(head: &str) -> (Request, usize) {
     let mut lines = head.split("\r\n");
     let mut first = lines.next().unwrap_or("").split(' ');
     let mut r = Request {
@@ -164,7 +164,7 @@ fn parse_head(head: &str) -> (Request, usize) {
 
 /// Why a request is turned away before any route sees it.
 #[derive(Debug, PartialEq, Eq)]
-enum Refusal {
+pub(crate) enum Refusal {
     /// `Host` (or `Origin`) is not this server.
     Origin,
     /// A POST that is not `application/json`.
@@ -175,7 +175,7 @@ enum Refusal {
 /// must be `localhost` or an IP literal, never another name: a name is how
 /// DNS rebinding reaches a loopback server. A server bound to one address
 /// answers to that address; one bound to a wildcard answers to any literal.
-fn authority_is(authority: &str, bound: SocketAddr) -> bool {
+pub(crate) fn authority_is(authority: &str, bound: SocketAddr) -> bool {
     let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
         let Some((h, after)) = rest.split_once(']') else {
             return false;
@@ -210,7 +210,7 @@ fn authority_is(authority: &str, bound: SocketAddr) -> bool {
 
 /// The checks every request passes: `Host` names this server, `Origin` (when
 /// sent) is this server's own page, and a POST is JSON.
-fn check(req: &Request, bound: SocketAddr) -> Result<(), Refusal> {
+pub(crate) fn check(req: &Request, bound: SocketAddr) -> Result<(), Refusal> {
     if !req.host.as_deref().is_some_and(|h| authority_is(h, bound)) {
         return Err(Refusal::Origin);
     }

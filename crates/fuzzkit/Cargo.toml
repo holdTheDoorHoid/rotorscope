@@ -1,0 +1,9 @@
+[package]
+name = "fuzzkit"
+description = "Deterministic, dependency-free fuzz-style test runner for the parser tests (dev-dependency only)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

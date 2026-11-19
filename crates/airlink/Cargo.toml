@@ -13,3 +13,4 @@ kitkeys = { path = "../kitkeys" }
 [dev-dependencies]
 link.workspace = true
 heapless.workspace = true
+fuzzkit = { path = "../fuzzkit" }

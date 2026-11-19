@@ -265,6 +265,9 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+mod fuzz_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

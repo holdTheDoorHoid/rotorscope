@@ -26,3 +26,4 @@ serde-json-core = { version = "0.6", default-features = false }
 rid = { workspace = true, features = ["serde", "encode"] }
 # Checks the no_std JSON output with a full parser.
 serde_json = "1"
+fuzzkit = { path = "../fuzzkit" }

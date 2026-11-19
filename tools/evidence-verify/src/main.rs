@@ -71,6 +71,9 @@ use std::process::ExitCode;
 use evidence::format;
 use evidence::verify::{self, hex, Input, Level, Options, Report};
 
+#[cfg(test)]
+mod fuzz_tests;
+
 fn usage() -> ExitCode {
     eprintln!("usage: evidence-verify [--list] [--key HEX | --keys FILE] [--allow-gaps] [--allow-test-key] [--quiet] <EVIDENCE-dir | EVnnnnnn.EVL... | records.bin | bundle.json>");
     eprintln!("  --key HEX    the unit's public key (130 hex digits), confirmed outside the log:");

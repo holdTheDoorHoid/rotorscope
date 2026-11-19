@@ -7,3 +7,6 @@ license.workspace = true
 
 [dependencies]
 kitkeys = { path = "../../crates/kitkeys" }
+
+[dev-dependencies]
+fuzzkit = { path = "../../crates/fuzzkit" }
