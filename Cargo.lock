@@ -810,6 +810,7 @@ name = "evidence"
 version = "0.1.0"
 dependencies = [
  "evidence",
+ "fuzzkit",
  "heapless 0.8.0",
  "link",
  "p256",
