@@ -31,3 +31,5 @@ evidence = { path = ".", features = ["verify", "soft-signer"] }
 rid = { workspace = true, features = ["encode"] }
 link = { workspace = true }
 heapless = { workspace = true }
+# Already a dependency (feature "verify"); the time-stamp tests build bundles.
+serde_json = "1"

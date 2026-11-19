@@ -559,6 +559,7 @@ impl Device {
             audit: self.audit.clone(),
             firmware_hashes: self.firmware.clone(),
             timestamps: self.timestamps.clone(),
+            stamping: None,
         }
     }
 

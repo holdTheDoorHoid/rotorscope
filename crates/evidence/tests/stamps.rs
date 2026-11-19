@@ -1,0 +1,268 @@
+//! Outside time-stamps in export bundles (WP-14c): the access-log imprint,
+//! recomputed from the bundle; canned RFC 3161 tokens from a throwaway test
+//! authority (tests/fixtures/tsa); the minimal DER reader against hostile
+//! input. Nothing here touches the network.
+
+mod common;
+
+use common::bundle::{self, STAMPED_N};
+use evidence::verify::{self, Level, Options};
+
+fn opts() -> Options {
+    Options { allow_test_key: true, ..Options::default() }
+}
+
+#[test]
+#[ignore = "prints the imprint the fixture tokens must stamp (see tests/fixtures/tsa/README.md)"]
+fn print_fixture_imprint() {
+    println!("IMPRINT {}", verify::hex(&bundle::build().imprint(STAMPED_N)));
+}
+
+const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tsa");
+
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{FIX}/{name}")).unwrap()
+}
+
+const NONCE_A: &str = "1122334455667788";
+const NONCE_B: &str = "0102030405060708";
+
+fn fails(r: &verify::Report) -> Vec<String> {
+    r.findings.iter().filter(|f| f.level == Level::Fail).map(|f| format!("{}: {}", f.at, f.what)).collect()
+}
+
+fn notes(r: &verify::Report) -> Vec<String> {
+    r.findings.iter().filter(|f| f.level == Level::Note).map(|f| f.what.clone()).collect()
+}
+
+/// The fixed bundle with both canned stamps (and their audit entries).
+fn stamped() -> bundle::Built {
+    let mut b = bundle::build();
+    let imprint = std::fs::read_to_string(format!("{FIX}/imprint.hex")).unwrap();
+    assert_eq!(
+        verify::hex(&b.imprint(STAMPED_N)),
+        imprint.trim(),
+        "the fixed test bundle no longer yields the imprint the canned tokens stamp: remake them (tests/fixtures/tsa/README.md)"
+    );
+    let ta = b.stamp(STAMPED_N, "https://tsa-a.test/tsr", &fixture("tsa-a/bundle.tsr"), NONCE_A);
+    let tb = b.stamp(STAMPED_N, "https://tsa-b.test/tsr", &fixture("tsa-b/bundle.tsr"), NONCE_B);
+    b.add_stamp(ta);
+    b.add_stamp(tb);
+    b
+}
+
+#[test]
+fn the_imprint_is_stable() {
+    // Changing how the imprint is formed breaks every stored stamp.
+    let h = [0x11u8; 32];
+    assert_eq!(
+        verify::hex(&verify::bundle::audit_imprint("abcd-ef01-2345-6789", 7, &h)),
+        verify::hex(&evidence::sha256(&[b"rotorscope audit head v1".as_slice(), &[19], b"abcd-ef01-2345-6789", &7u64.to_le_bytes(), &h].concat()))
+    );
+    assert_ne!(verify::bundle::audit_imprint("a", 7, &h), verify::bundle::audit_imprint("a", 8, &h));
+    assert_ne!(verify::bundle::audit_imprint("a", 7, &h), verify::bundle::audit_imprint("b", 7, &h));
+}
+
+#[test]
+fn a_stamped_bundle_verifies_and_says_what_the_stamp_shows() {
+    let b = stamped();
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).is_empty(), "{:?}", fails(&r));
+    assert_eq!(r.exit_code(), 0, "{:?}", r.findings);
+    let n = notes(&r);
+    let stamps: Vec<&String> = n.iter().filter(|n| n.contains("existed by")).collect();
+    assert_eq!(stamps.len(), 2, "{n:?}");
+    for s in stamps {
+        assert!(s.contains("the access log through entry #2"), "{s}");
+        assert!(s.contains("2 uploaded batches"), "{s}");
+        assert!(s.contains("after the newest upload it covers was stored"), "{s}");
+        assert!(s.contains("the newest GPS time"), "{s}");
+        assert!(s.contains("does not show when the records in it were written"), "{s}");
+        assert!(s.contains("--check-timestamps"), "{s}");
+    }
+    assert!(!n.iter().any(|n| n.contains("independent service")), "{n:?}");
+}
+
+#[test]
+fn a_stamp_naming_a_missing_or_edited_audit_entry_fails() {
+    // The access log cut back to before the stamped entry.
+    let mut b = stamped();
+    b.bundle.audit.truncate(2);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("audit entry #2, which is not in the bundle")), "{:?}", fails(&r));
+    // A stamp claiming another entry than the one it was made for.
+    let mut b = stamped();
+    b.bundle.timestamps[0].audit_n = Some(1);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("is not the one that was time-stamped")), "{:?}", fails(&r));
+    // The stamped entry rewritten (and the chain re-hashed from there on, so
+    // only the stamp can tell).
+    let mut b = bundle::build();
+    let ta = b.stamp(STAMPED_N, "https://tsa-a.test/tsr", &fixture("tsa-a/bundle.tsr"), NONCE_A);
+    b.bundle.audit.truncate(2);
+    b.hashes.truncate(2);
+    let batch = &b.bundle.batches[1];
+    let detail = serde_json::json!({ "batch": batch.n, "sha256": batch.sha256, "bytes": 1 });
+    b.push("someone else", "upload", detail, bundle::UPLOAD_MS[1]);
+    b.add_stamp(ta);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("is not the one that was time-stamped")), "{:?}", fails(&r));
+    // The imprint field edited to match nothing.
+    let mut b = stamped();
+    b.bundle.timestamps[1].imprint = verify::hex(&[7; 32]);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("imprint does not match audit entry #2")), "{:?}", fails(&r));
+}
+
+#[test]
+fn a_token_over_another_hash_fails() {
+    let mut b = bundle::build();
+    let t = b.stamp(STAMPED_N, "https://tsa-a.test/tsr", &fixture("tsa-a/other.tsr"), NONCE_A);
+    b.add_stamp(t);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("not over the imprint stored with it")), "{:?}", fails(&r));
+    // A token edited where it holds the imprint.
+    let mut tok = fixture("tsa-a/bundle.tsr");
+    let imprint = evidence::verify::unhex(std::fs::read_to_string(format!("{FIX}/imprint.hex")).unwrap().trim()).unwrap();
+    let at = tok.windows(32).position(|w| w == imprint).unwrap();
+    tok[at] ^= 1;
+    let mut b = bundle::build();
+    let t = b.stamp(STAMPED_N, "https://tsa-a.test/tsr", &tok, NONCE_A);
+    b.add_stamp(t);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("not over the imprint stored with it")), "{:?}", fails(&r));
+}
+
+#[test]
+fn a_removed_stamp_shows() {
+    let mut b = stamped();
+    b.bundle.timestamps.remove(1);
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("tsa-b.test") && f.contains("not in the bundle (removed)")), "{:?}", fails(&r));
+}
+
+#[test]
+fn outstanding_failed_and_single_service_are_reported() {
+    let mut b = bundle::build();
+    let t = b.stamp(STAMPED_N, "https://tsa-a.test/tsr", &fixture("tsa-a/bundle.tsr"), NONCE_A);
+    b.add_stamp(t);
+    let st = b.bundle.stamping.as_mut().unwrap();
+    st.authorities = vec!["https://tsa-a.test/tsr".into(), "http://TSA-A.test:80/other".into()];
+    st.outstanding.push(verify::bundle::Outstanding { authority: "https://tsa-b.test/tsr".into(), audit_n: 2, queued_utc_ms: bundle::UPLOAD_MS[1] });
+    for i in 0..3 {
+        st.failures.push(verify::bundle::StampFailure { authority: "https://tsa-b.test/tsr".into(), audit_n: 2, utc_ms: bundle::UPLOAD_MS[1] + i * 60_000, reason: format!("timed out {i}") });
+    }
+    let r = verify::verify_bundle(&b.json(), &opts());
+    assert!(fails(&r).is_empty(), "{:?}", fails(&r));
+    let n = notes(&r);
+    assert!(n.iter().any(|n| n.contains("1 independent service(s)")), "{n:?}");
+    assert!(n.iter().any(|n| n.contains("outstanding since")), "{n:?}");
+    assert!(n.iter().any(|n| n.contains("3 attempt(s)") && n.contains("timed out 2")), "{n:?}");
+}
+
+#[test]
+fn version_1_bundles_still_verify() {
+    let mut b = bundle::build();
+    b.bundle.format = verify::bundle::FORMAT_V1.into();
+    b.bundle.stamping = None;
+    let mut v: serde_json::Value = serde_json::from_slice(&b.json()).unwrap();
+    v.as_object_mut().unwrap().remove("stamping");
+    let r = verify::verify_bundle(&serde_json::to_vec(&v).unwrap(), &opts());
+    assert!(fails(&r).is_empty(), "{:?}", fails(&r));
+    assert_eq!(r.exit_code(), 0);
+    // An unknown version is refused, not read as if it were a known one.
+    v["format"] = "rotorscope-evidence-bundle/3".into();
+    let r = verify::verify_bundle(&serde_json::to_vec(&v).unwrap(), &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("unknown bundle format")), "{:?}", fails(&r));
+}
+
+// ---- the minimal DER reader --------------------------------------------
+
+use evidence::tsp;
+
+fn imprint() -> [u8; 32] {
+    evidence::verify::unhex(std::fs::read_to_string(format!("{FIX}/imprint.hex")).unwrap().trim()).unwrap().try_into().unwrap()
+}
+
+#[test]
+fn canned_replies_read_and_check() {
+    let a = fixture("tsa-a/bundle.tsr");
+    let i = tsp::check_reply(&a, &imprint(), &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]).unwrap();
+    assert_eq!(i.hash_alg, tsp::OID_SHA256);
+    assert_eq!(i.gen_time.len(), 15, "{:?}", std::str::from_utf8(i.gen_time));
+    assert!(i.gen_time_ms > 1_795_000_000_000);
+    // Another nonce: a replayed or someone else's token.
+    assert_eq!(tsp::check_reply(&a, &imprint(), &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap_err(), tsp::Refused::WrongNonce);
+    // Another imprint.
+    assert_eq!(tsp::check_reply(&fixture("tsa-a/other.tsr"), &imprint(), &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]).unwrap_err(), tsp::Refused::WrongImprint);
+    // A refusal (PKIStatus 2, no token).
+    assert_eq!(tsp::check_reply(&[0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x02], &imprint(), &[1]).unwrap_err(), tsp::Refused::Status(2));
+    // The bare token reads too (what openssl calls -token_out).
+    let t = tsp::parse_response(&a).unwrap().token.unwrap();
+    assert_eq!(tsp::tst_info(t).unwrap().imprint, imprint());
+}
+
+#[test]
+fn malformed_input_is_refused_without_panicking() {
+    let cases: &[(&str, &[u8])] = &[
+        ("empty", &[]),
+        ("one byte", &[0x30]),
+        ("indefinite length", &[0x30, 0x80, 0x30, 0x03, 0x02, 0x01, 0x00, 0x00, 0x00]),
+        ("length past the end", &[0x30, 0x7F, 0x30]),
+        ("huge long-form length", &[0x30, 0x84, 0xFF, 0xFF, 0xFF, 0xFF, 0x30]),
+        ("five-byte length", &[0x30, 0x85, 0, 0, 0, 0, 5]),
+        ("multi-byte tag", &[0x3F, 0x81, 0x01, 0x00]),
+        ("not a sequence", &[0x04, 0x01, 0x00]),
+        ("status not an integer", &[0x30, 0x05, 0x30, 0x03, 0x04, 0x01, 0x00]),
+        ("status out of range", &[0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x09]),
+        ("status two bytes", &[0x30, 0x06, 0x30, 0x04, 0x02, 0x02, 0x00, 0x00]),
+        ("granted without token", &[0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x00]),
+        ("trailing bytes", &[0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x00, 0xFF]),
+        ("token not a ContentInfo", &[0x30, 0x08, 0x30, 0x03, 0x02, 0x01, 0x00, 0x04, 0x01, 0x00]),
+        ("ContentInfo of another type", &[0x30, 0x0F, 0x30, 0x03, 0x02, 0x01, 0x00, 0x30, 0x08, 0x06, 0x03, 0x2A, 0x03, 0x04, 0xA0, 0x01, 0x00]),
+        ("empty ContentInfo", &[0x30, 0x07, 0x30, 0x03, 0x02, 0x01, 0x00, 0x30, 0x00]),
+    ];
+    for (what, bytes) in cases {
+        assert!(tsp::check_reply(bytes, &imprint(), &[1]).is_err(), "{what}");
+        let _ = tsp::tst_info(bytes);
+        let _ = tsp::parse_tst_info(bytes);
+    }
+    // Every truncation of a valid reply.
+    let a = fixture("tsa-a/bundle.tsr");
+    for n in 0..a.len() {
+        assert!(tsp::check_reply(&a[..n], &imprint(), &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]).is_err(), "cut at {n}");
+        let _ = tsp::tst_info(&a[..n]);
+    }
+}
+
+#[test]
+fn thousands_of_mutated_tokens_never_panic() {
+    let a = fixture("tsa-a/bundle.tsr");
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let mut accepted = 0;
+    for _ in 0..5000 {
+        let mut m = a.clone();
+        for _ in 0..(next() % 4 + 1) {
+            let i = (next() as usize) % m.len();
+            match next() % 4 {
+                0 => m[i] ^= 1 << (next() % 8),
+                1 => m[i] = next() as u8,
+                2 => m.truncate(i.max(1)),
+                _ => m.insert(i, next() as u8),
+            }
+        }
+        if tsp::check_reply(&m, &imprint(), &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]).is_ok() {
+            // Only a change outside what is read (the signature, the
+            // certificates) can still pass this reader: openssl catches it.
+            accepted += 1;
+        }
+        let _ = tsp::tst_info(&m);
+    }
+    assert!(accepted < 5000);
+}

@@ -1197,7 +1197,13 @@ pub mod bundle {
 
     use serde::{Deserialize, Serialize};
 
-    pub const FORMAT: &str = "rotorscope-evidence-bundle/1";
+    /// Written by servers now. Version 2 added the audit-head time-stamp
+    /// fields and [`Stamping`] (docs/EVIDENCE-FORMAT.md "Export bundle").
+    pub const FORMAT: &str = "rotorscope-evidence-bundle/2";
+    /// The first version (chain-head time-stamps only); still accepted.
+    pub const FORMAT_V1: &str = "rotorscope-evidence-bundle/1";
+    /// Every version this checker reads.
+    pub const FORMATS: &[&str] = &[FORMAT_V1, FORMAT];
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Bundle {
@@ -1211,8 +1217,12 @@ pub mod bundle {
         pub audit: Vec<AuditLine>,
         /// Firmware hashes seen in the records (SHA-256 of the ELF), hex.
         pub firmware_hashes: Vec<String>,
-        /// Outside time-stamps over chain heads, if any.
+        /// Outside time-stamps, if any.
         pub timestamps: Vec<Timestamp>,
+        /// Version 2: how the server was set up to stamp, and what it says
+        /// is still outstanding or failed (the server's word, not proof).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub stamping: Option<Stamping>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1254,24 +1264,116 @@ pub mod bundle {
         pub detail: serde_json::Value,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// What a time-stamp covers: one boot's chain head (version 1, the
+    /// manual `--tsa` stamp) or the access log's head (version 2).
+    pub const COVERS_CHAIN_HEAD: &str = "chain-head";
+    pub const COVERS_AUDIT_HEAD: &str = "audit-head";
+
+    fn chain_head() -> String {
+        COVERS_CHAIN_HEAD.into()
+    }
+
+    /// One outside time-stamp. Version 1 bundles carry only `kind`,
+    /// `authority`, `imprint`, `boot`, `seq`, `head` and `token`.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     pub struct Timestamp {
-        /// "rfc3161" or "opentimestamps".
+        /// "rfc3161" (others, e.g. "ots", are planned).
         pub kind: String,
+        /// The service's URL.
         pub authority: String,
-        /// What was stamped: SHA-256 over boot id || seq (LE u64) || head.
+        /// What was sent, hex: [`head_imprint`] or [`audit_imprint`].
         pub imprint: String,
+        /// [`COVERS_CHAIN_HEAD`] (the default) or [`COVERS_AUDIT_HEAD`].
+        #[serde(default = "chain_head")]
+        pub covers: String,
+        /// Chain head: the boot, record number and record hash.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         pub boot: String,
+        #[serde(default)]
         pub seq: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         pub head: String,
-        /// The authority's reply, base64.
+        /// Audit head: the entry number and its hash, hex.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub audit_n: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub audit_hash: Option<String>,
+        /// When the server queued the request (= when the upload it follows
+        /// was stored), and when it sent it; server clock, ms since 1970.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub queued_utc_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub requested_utc_ms: Option<u64>,
+        /// The request's nonce (INTEGER contents), hex.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub nonce: Option<String>,
+        /// The authority's reply (TimeStampResp) exactly as received, base64.
         pub token: String,
+        /// The authority's published certificate chain as fetched when the
+        /// stamp was taken (base64 of the bytes received) and from where.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub certs: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub certs_from: Option<String>,
+        /// A revocation list (CRL) as fetched then (base64) and from where.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub revocation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub revocation_from: Option<String>,
+        /// Why `certs` or `revocation` is missing, if it is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub evidence_note: Option<String>,
+    }
+
+    /// The server's stamping set-up and backlog for this device, as it says.
+    #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+    pub struct Stamping {
+        /// Automatic stamping was switched on by the server's operator.
+        pub enabled: bool,
+        /// The services it stamps with.
+        pub authorities: Vec<String>,
+        /// Stamps asked for and not (yet) received.
+        pub outstanding: Vec<Outstanding>,
+        /// Every failed attempt (refused, unreachable, or a reply that did
+        /// not carry the imprint and nonce sent).
+        pub failures: Vec<StampFailure>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct Outstanding {
+        pub authority: String,
+        pub audit_n: u64,
+        pub queued_utc_ms: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct StampFailure {
+        pub authority: String,
+        pub audit_n: u64,
+        pub utc_ms: u64,
+        pub reason: String,
     }
 
     pub fn audit_hash(prev: &[u8; 32], entry: &str) -> [u8; 32] {
         let mut b = Vec::with_capacity(32 + entry.len());
         b.extend_from_slice(prev);
         b.extend_from_slice(entry.as_bytes());
+        crate::sha256(&b)
+    }
+
+    /// What an access-log time-stamp covers: SHA-256 over the ASCII
+    /// `rotorscope audit head v1`, one byte giving the key id's length, the
+    /// key id (ASCII), the entry number (u64 little-endian) and the entry's
+    /// 32-byte hash. Only this leaves the server.
+    pub fn audit_imprint(key_id: &str, n: u64, hash: &[u8; 32]) -> [u8; 32] {
+        let id = key_id.as_bytes();
+        let id = &id[..id.len().min(255)];
+        let mut b = Vec::with_capacity(24 + 1 + id.len() + 8 + 32);
+        b.extend_from_slice(b"rotorscope audit head v1");
+        b.push(id.len() as u8);
+        b.extend_from_slice(id);
+        b.extend_from_slice(&n.to_le_bytes());
+        b.extend_from_slice(hash);
         crate::sha256(&b)
     }
 
@@ -1301,7 +1403,7 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
             return rep;
         }
     };
-    if b.format != FORMAT {
+    if !FORMATS.contains(&b.format.as_str()) {
         rep.add(Level::Fail, w("bundle"), format!("unknown bundle format {:?}", b.format));
     }
     let key: Option<[u8; 65]> = unhex(&b.device.public_key).and_then(|v| v.try_into().ok());
@@ -1321,10 +1423,15 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
     }
     // Audit chain.
     let mut prev = [0u8; 32];
-    let mut uploads: Vec<(u64, String)> = Vec::new();
+    // (batch number, SHA-256, audit entry number) of each upload entry.
+    let mut uploads: Vec<(u64, String, u64)> = Vec::new();
+    // Each entry's hash as computed here, and the entry.
+    let mut hashes: Vec<[u8; 32]> = Vec::new();
+    let mut entries: Vec<Option<AuditEntry>> = Vec::new();
     for (i, line) in b.audit.iter().enumerate() {
         let at = w(&format!("audit entry {i}"));
         let h = audit_hash(&prev, &line.entry);
+        hashes.push(h);
         if hex(&h) != line.hash {
             rep.add(Level::Fail, at.clone(), "audit entry does not hash to its stored value, or does not link to the entry before it (edited, removed or reordered)");
         }
@@ -1340,15 +1447,21 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
                 if e.action == "upload" {
                     let n = e.detail.get("batch").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
                     let sha = e.detail.get("sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    uploads.push((n, sha));
+                    uploads.push((n, sha, i as u64));
                 }
                 if i == 0 && e.action != "register" {
                     rep.add(Level::Fail, at, "the audit chain must start with the device's registration");
                 }
+                entries.push(Some(e));
             }
-            Err(e) => rep.add(Level::Fail, at, format!("audit entry is not valid: {e}")),
+            Err(e) => {
+                rep.add(Level::Fail, at, format!("audit entry is not valid: {e}"));
+                entries.push(None);
+            }
         }
     }
+    // Per batch: the audit entry that logged it and its newest GPS time.
+    let mut batch_info: Vec<(u64, Option<u64>)> = Vec::new();
     // Batches are exactly the logged uploads.
     let mut inputs = Vec::new();
     for (i, batch) in b.batches.iter().enumerate() {
@@ -1361,8 +1474,12 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
         if sha != batch.sha256 {
             rep.add(Level::Fail, w(&name), "batch bytes do not hash to the batch's SHA-256 (records edited, removed or reordered)");
         }
+        let newest_utc = format::records(&bytes).filter_map(|(_, r)| r.ok()).filter_map(|r| r.header.utc_ms).max();
+        if let Some(u) = uploads.get(i) {
+            batch_info.push((u.2, newest_utc));
+        }
         match uploads.get(i) {
-            Some((n, s)) if *n == batch.n && *s == sha => {}
+            Some((n, s, _)) if *n == batch.n && *s == sha => {}
             Some(_) => rep.add(Level::Fail, w(&name), "batch does not match the audit log's upload entry at this position"),
             None => rep.add(Level::Fail, w(&name), "batch has no upload entry in the audit log"),
         }
@@ -1422,22 +1539,198 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
             });
         }
     }
-    for t in &b.timestamps {
-        let ok = unhex(&t.boot).and_then(|v| <[u8; 8]>::try_from(v).ok()).zip(unhex(&t.head).and_then(|v| <[u8; 32]>::try_from(v).ok()));
-        let Some((boot, head)) = ok else {
-            rep.add(Level::Fail, w("timestamp"), "time-stamp names a malformed chain head");
-            continue;
-        };
-        if hex(&head_imprint(&boot, t.seq, &head)) != t.imprint {
-            rep.add(Level::Fail, w("timestamp"), "time-stamp imprint does not match the chain head it names");
-        }
-        let known = rep.records.iter().any(|(_, _, r)| r.boot == boot && r.seq == t.seq && r.hash == head);
-        if !known {
-            rep.add(Level::Fail, w("timestamp"), format!("time-stamped chain head (record #{}) is not in the bundle", t.seq));
-        } else {
-            rep.add(Level::Note, w("timestamp"), format!("{} time-stamp from {} over record #{}: check the token with the authority's tools (e.g. openssl ts -verify)", t.kind, t.authority, t.seq));
-        }
-    }
+    check_timestamps(&mut rep, &b, &hashes, &entries, &batch_info);
     rep.findings.sort_by_key(|f| std::cmp::Reverse(f.level));
     rep
+}
+
+/// A duration for people: "45 s", "12 min", "3 h 12 min", "2 d 4 h".
+pub fn fmt_duration(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => format!("{} min", s / 60),
+        3600..86_400 => format!("{} h {} min", s / 3600, s / 60 % 60),
+        _ => format!("{} d {} h", s / 86_400, s / 3600 % 24),
+    }
+}
+
+/// "X after" or "X before" for `later - earlier`.
+fn fmt_delay(later: u64, earlier: u64) -> String {
+    if later >= earlier { format!("{} after", fmt_duration(later - earlier)) } else { format!("{} BEFORE", fmt_duration(earlier - later)) }
+}
+
+/// The host name in a service URL (`https://host:port/path` -> `host`),
+/// lower-cased. Two services on one host are not independent.
+pub fn url_host(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = hostport.rsplit_once('@').map_or(hostport, |(_, h)| h);
+    let host = if hostport.starts_with('[') { hostport.split(']').next().map_or(hostport, |h| h.trim_start_matches('[')) } else { hostport.split(':').next().unwrap_or("") };
+    host.to_ascii_lowercase()
+}
+
+/// Outside time-stamps in a bundle: each is recomputed from the bundle's own
+/// audit chain (or chain head), its token read (not its signature: see
+/// `evidence-verify --check-timestamps`), and what it shows said plainly.
+fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], entries: &[Option<bundle::AuditEntry>], batch_info: &[(u64, Option<u64>)]) {
+    use bundle::*;
+    let w = |s: String| Where { source: s, ..Default::default() };
+    const NOT_WHEN: &str = "A stamp shows the log existed by then; it does not show when the records in it were written";
+    let mut token_shas: Vec<String> = Vec::new();
+    let mut good = 0usize;
+    for (i, t) in b.timestamps.iter().enumerate() {
+        let at = w(format!("time-stamp {i} ({})", t.authority));
+        let token = crate::b64::decode_vec(&t.token);
+        if let Some(tok) = &token {
+            token_shas.push(hex(&crate::sha256(tok)));
+        }
+        let Some(imprint) = unhex(&t.imprint).and_then(|v| <[u8; 32]>::try_from(v).ok()) else {
+            rep.add(Level::Fail, at, "time-stamp imprint is not 32 hex bytes");
+            continue;
+        };
+        // What the stamp covers, recomputed from the bundle: a description,
+        // and the newest upload time and GPS time it covers.
+        let (what, upload_ms, newest_gps) = match t.covers.as_str() {
+            COVERS_CHAIN_HEAD => {
+                let ok = unhex(&t.boot).and_then(|v| <[u8; 8]>::try_from(v).ok()).zip(unhex(&t.head).and_then(|v| <[u8; 32]>::try_from(v).ok()));
+                let Some((boot, head)) = ok else {
+                    rep.add(Level::Fail, at, "time-stamp names a malformed chain head");
+                    continue;
+                };
+                if head_imprint(&boot, t.seq, &head) != imprint {
+                    rep.add(Level::Fail, at, "time-stamp imprint does not match the chain head it names");
+                    continue;
+                }
+                if !rep.records.iter().any(|(_, _, r)| r.boot == boot && r.seq == t.seq && r.hash == head) {
+                    rep.add(Level::Fail, at, format!("time-stamped chain head (record #{}) is not in the bundle", t.seq));
+                    continue;
+                }
+                (format!("boot {}'s records #0..#{}", hex(&boot), t.seq), None, None)
+            }
+            COVERS_AUDIT_HEAD => {
+                let Some(n) = t.audit_n else {
+                    rep.add(Level::Fail, at, "access-log time-stamp names no audit entry");
+                    continue;
+                };
+                let Some(h) = usize::try_from(n).ok().and_then(|n| hashes.get(n)) else {
+                    rep.add(Level::Fail, at, format!("time-stamp names audit entry #{n}, which is not in the bundle (the access log was cut short)"));
+                    continue;
+                };
+                if t.audit_hash.as_deref() != Some(hex(h).as_str()) {
+                    rep.add(Level::Fail, at, format!("audit entry #{n} is not the one that was time-stamped (the access log was changed at or before it)"));
+                    continue;
+                }
+                if audit_imprint(&b.device.key_id, n, h) != imprint {
+                    rep.add(Level::Fail, at, format!("time-stamp imprint does not match audit entry #{n}"));
+                    continue;
+                }
+                let covered: Vec<&(u64, Option<u64>)> = batch_info.iter().filter(|(a, _)| *a <= n).collect();
+                let upload_ms = covered.last().and_then(|(a, _)| entries.get(*a as usize)).and_then(|e| e.as_ref()).map(|e| e.utc_ms);
+                let gps = covered.iter().filter_map(|(_, g)| *g).max();
+                (format!("the access log through entry #{n} (registration, {} uploaded batches and every view, export and note logged before it)", covered.len()), upload_ms, gps)
+            }
+            other => {
+                rep.add(Level::Fail, at, format!("time-stamp covers {other:?}, which this checker does not know (newer format?)"));
+                continue;
+            }
+        };
+        let Some(tok) = token else {
+            rep.add(Level::Fail, at, "time-stamp token is not valid base64");
+            continue;
+        };
+        if t.kind != "rfc3161" {
+            rep.add(Level::Note, at, format!("{} time-stamp over {what}: this checker reads only RFC 3161 tokens", t.kind));
+            continue;
+        }
+        let info = match crate::tsp::tst_info(&tok) {
+            Ok(i) => i,
+            Err(e) => {
+                rep.add(Level::Fail, at, format!("time-stamp token cannot be read: {e}"));
+                continue;
+            }
+        };
+        if info.hash_alg != crate::tsp::OID_SHA256 || info.imprint != imprint {
+            rep.add(Level::Fail, at, "the token is not over the imprint stored with it: it does not stamp this log");
+            continue;
+        }
+        if let Some(n) = t.nonce.as_deref().and_then(unhex)
+            && !info.nonce.is_some_and(|x| crate::tsp::same_integer(x, &n))
+        {
+            rep.add(Level::Note, at.clone(), "the token does not carry the nonce the server recorded sending (it still stamps this imprint)");
+        }
+        good += 1;
+        let when = fmt_utc(info.gen_time_ms);
+        let mut delays = Vec::new();
+        if let Some(u) = upload_ms {
+            delays.push(format!("stamped {} the newest upload it covers was stored (server clock)", fmt_delay(info.gen_time_ms, u)));
+        }
+        if let Some(g) = newest_gps {
+            delays.push(format!("{} the newest GPS time in the records it covers", fmt_delay(info.gen_time_ms, g)));
+        }
+        let delays = if delays.is_empty() { String::new() } else { format!(" {}.", delays.join("; ")) };
+        rep.add(
+            Level::Note,
+            at.clone(),
+            format!(
+                "{what} existed by {when}, by {}'s clock (its signature is not checked here: run with --check-timestamps).{delays} {NOT_WHEN}",
+                t.authority
+            ),
+        );
+        if let Some(g) = newest_gps
+            && g > info.gen_time_ms.saturating_add(5 * 60_000)
+        {
+            rep.add(
+                Level::Note,
+                at.clone(),
+                format!("records it covers carry GPS times up to {} after the stamp: the hub's GPS time or the authority's clock was wrong", fmt_duration(g - info.gen_time_ms)),
+            );
+        }
+        if let Some(u) = upload_ms
+            && u > info.gen_time_ms.saturating_add(5 * 60_000)
+        {
+            rep.add(Level::Note, at, "the authority's time is before the server logged the upload: the server's clock or the authority's was wrong");
+        }
+    }
+    // Every stamp the access log records is still here.
+    for (i, e) in entries.iter().enumerate() {
+        let Some(e) = e else { continue };
+        if e.action != "timestamp" {
+            continue;
+        }
+        if let Some(sha) = e.detail.get("token_sha256").and_then(|v| v.as_str())
+            && !token_shas.iter().any(|s| s == sha)
+        {
+            rep.add(Level::Fail, w(format!("audit entry {i}")), format!("the access log records a time-stamp from {} that is not in the bundle (removed)", e.detail.get("authority").and_then(|v| v.as_str()).unwrap_or("?")));
+        }
+    }
+    if let Some(st) = &b.stamping {
+        let at = w("time-stamping".into());
+        if !st.enabled {
+            rep.add(Level::Note, at.clone(), "the server says automatic outside time-stamping was off");
+        } else {
+            let mut hosts: Vec<String> = st.authorities.iter().map(|a| url_host(a)).collect();
+            hosts.sort();
+            hosts.dedup();
+            if hosts.len() < 2 {
+                rep.add(Level::Note, at.clone(), format!("the server stamped with {} independent service(s); two are needed so that one failing or misbehaving is not the only witness", hosts.len()));
+            }
+        }
+        for o in &st.outstanding {
+            rep.add(Level::Note, at.clone(), format!("the server says a stamp from {} for audit entry #{} has been outstanding since {}", o.authority, o.audit_n, fmt_utc(o.queued_utc_ms)));
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for f in &st.failures {
+            if seen.contains(&f.authority.as_str()) {
+                continue;
+            }
+            seen.push(&f.authority);
+            let all: Vec<&StampFailure> = st.failures.iter().filter(|g| g.authority == f.authority).collect();
+            let last = all.iter().max_by_key(|g| g.utc_ms).unwrap();
+            rep.add(Level::Note, at.clone(), format!("the server says {} attempt(s) to stamp with {} failed; the latest at {}: {}", all.len(), f.authority, fmt_utc(last.utc_ms), last.reason));
+        }
+    }
+    if good == 0 && (b.stamping.as_ref().is_some_and(|s| s.enabled) || !b.timestamps.is_empty()) {
+        rep.add(Level::Note, w("time-stamping".into()), "no readable outside time-stamp: nothing but the server's own word shows when this log existed");
+    }
 }

@@ -421,6 +421,8 @@ async fn timestamp(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h
         seq,
         head: evidence::verify::hex(&hash),
         token: evidence::b64::encode_vec(&token),
+        covers: evidence::verify::bundle::COVERS_CHAIN_HEAD.into(),
+        ..Default::default()
     };
     let mut s = app.lock();
     let d = match s.device_mut(&id) {
