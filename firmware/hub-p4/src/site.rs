@@ -1,4 +1,4 @@
-//! Node positions and muted alarms (`tracker::site`): from the SD card's
+//! Node positions, muted alarms and the screen theme (`tracker::site`): from the SD card's
 //! `ROTORSCP/SITE.TXT` at mount, from the console (`L`, one line), and from
 //! the settings page. A change typed on the console or made on the screen
 //! ("Nodes at hub") is appended to the file and logged as an evidence
@@ -10,6 +10,12 @@
 //! file's SHA-256 and what it sets, then one per mute rule and node
 //! position that differs from what the hub was using (at most
 //! `tracker::site::MAX_CHANGE_EVENTS`, then one event counting the rest).
+//!
+//! **The screen theme** (`theme`, `theme-day`, `theme-night`,
+//! `theme-switch` lines) is kept here too, so the operator's choice survives
+//! a reboot: applied at mount, set by a console line, and appended (one line
+//! per changed setting, each logged as a Setting event) when an edit on the
+//! Settings page ends.
 //!
 //! **The screen's Mute / Snooze** silences specific alarms for a time
 //! (`tracker::threats`): logged, never written to the file, gone at reboot.
@@ -129,6 +135,30 @@ impl Site {
         self.st.nodes = st.nodes.clone();
         self.st.control_ids = st.control_ids;
         self.st.control_content = st.control_content;
+        // The screen theme: logged only when it changes what is shown.
+        let now_set = app.settings();
+        let want = screen::from_tracker::apply_site_theme(&st.theme, now_set);
+        if want != now_set {
+            let mut t: heapless::String<128> = heapless::String::new();
+            let _ = write!(t, "site file changed: screen {}", st.theme);
+            ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+            crate::println!("hub-p4: {t}");
+            app.set_settings(want);
+        }
+        self.st.theme = st.theme;
+    }
+
+    /// A settings edit on the screen ended with the theme changed: one
+    /// line per changed theme setting to the card, each logged.
+    pub fn settings_changed(&mut self, before: &screen::Settings, after: &screen::Settings, sd: &mut Logger, ev: &mut Evidence) {
+        let mut text: heapless::String<160> = heapless::String::new();
+        screen::from_tracker::theme_changes(before, after, |t| {
+            self.st.theme.apply(t);
+            let _ = site::write_theme(&mut text, t);
+        });
+        if !text.is_empty() {
+            self.save(&text, From::Screen, sd, ev);
+        }
     }
 
     fn apply_line(&mut self, l: SiteLine, app: &mut App, now: u64) {
@@ -145,6 +175,12 @@ impl Site {
             l @ (SiteLine::Home { .. } | SiteLine::HomeClear) => {
                 self.st.apply(l);
                 self.home_changed = Some(self.st.home);
+            }
+            SiteLine::Theme(t) => {
+                self.st.theme.apply(t);
+                let mut one = site::ThemeSite::default();
+                one.apply(t);
+                app.set_settings(screen::from_tracker::apply_site_theme(&one, app.settings()));
             }
             SiteLine::AllNodesHere | SiteLine::Nothing => {}
         }

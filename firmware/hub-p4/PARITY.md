@@ -33,7 +33,8 @@ to be the GPS / ADSBee on its own pins), never with the real modules.
 | USB `s` (whole state JSON in one line) | not ported | The phone page's `/api/state` body; it belongs with the web page. Per-track lines carry the same data |
 | **ADS-B from an ADSBee** | **done this task** | UART4 RX on GPIO30, always built (the P4 has a spare UART; the S3 had to give up a node link). Aircraft table, screen line, ADSBee shown as a node, SD rows, JSON lines. Loop-back tested (UART4 sends CSBee onto its own pin): 0 errors. **Not tested with the real ADSBee** (not wired to the P4) |
 | ADS-B decoded in-house (Phase 14a) | **done (2026-11-15), off by default** | `--features modes`: the ADSBee sends Beast (`AT+PROTOCOL_OUT=COMMS_UART,BEAST`) and `crates/modes` decodes it; aircraft go to the same table, screen, SD, JSON and web-head `Csbee` frames (no link change, no decoder on the S3). `hub` line gains `adsb.modes`. Loop-back tested with recorded real frames; **not tested with the real ADSBee on this hub** |
-| Screen pages (Radar, List, Signals, Health, Settings) | done | Shared `screen` crate at 2x with touch keys (BRINGUP 9/10) |
+| Screen pages (Radar, List, Signals, Health, Settings) | done | Shared `screen` crate: native 800x480 layout (`screen::wide`) with a bottom strip of context touch keys since 2026-11-18 (branch `p4-themes`, not yet seen on the panel); 2x of the 320x240 screen before (BRINGUP 9/10) |
+| Screen themes (Glass Cockpit, Field Day, Red Night, Auto by the sun) | built, not yet on hardware | Settings page; saved as `theme` lines in `ROTORSCP/SITE.TXT` (BRINGUP "Screen") |
 | Screen: GPS state, SD state, aircraft line, ADSBee node, power | **done this task** | Were blank or "no GPS" before. Not yet checked by eye |
 | New-drone alert banner | done | Shared UI |
 | New-drone buzzer | not ported | The board has no buzzer, only an I2S amplifier and speaker (GPIO21-23). Needs an I2S driver on the pre-v3 chip; a separate task |

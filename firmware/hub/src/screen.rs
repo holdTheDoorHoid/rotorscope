@@ -130,6 +130,8 @@ async fn build(hub: &Hub, now: u64, st: &mut UiState) {
     let ctx = hub.context(now);
     st.now_ms = ctx.now_ms;
     st.utc_ms = ctx.utc_ms;
+    // For the automatic day / night theme (sunrise and sunset here).
+    st.position = ctx.own.map(|o| (o.lat as f32, o.lon as f32));
     if ctx.own.is_none() && st.gps.has_position() {
         st.gps.fix = Fix::None;
     }

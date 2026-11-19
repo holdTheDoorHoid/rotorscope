@@ -5,7 +5,9 @@ The on-device screen (PLAN.md O2, O6, P2, P4): a 320×240 landscape RGB565 panel
 It draws with `embedded-graphics` 0.8, so the hub can drive any panel through `mipidsi`.
 
 Every screen is rendered to PNG on the laptop by `cargo test -p screen`. The images
-are in [`snapshots/`](snapshots/). Look at them before reading the rest.
+are in [`snapshots/`](snapshots/) (320×240) and [`snapshots/wide/`](snapshots/wide/)
+(the P4 hub's native 800×480 layout, one folder per theme). Look at them before
+reading the rest.
 
 ## API
 
@@ -61,9 +63,13 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 - **Detail:** Up/Down step through drones in list order. Back returns to choosing, with the
   cursor on that drone.
 - **Settings:** Select to edit. Up/Down pick a row, Select changes it, Back finishes. The
-  settings are theme (Night/Day), brightness 1-5, and buzzer on/off. The hub applies them
-  and may save them to flash. Three more rows ask the hub to act: "Hub moved" (or "New home"
-  while the hub waits to accept one), "Alarms" (mute, snooze or unmute) and "Nodes at hub".
+  settings are the theme (Auto, Glass Cockpit, Field Day, Red Night), brightness 1-5 and
+  buzzer on/off, then the actions. While Theme is Auto, three more rows appear under it:
+  Day theme (default Field Day), Night theme (default Red Night) and Switch at (Dawn & dusk,
+  the default, or Sunrise & sunset). The 320×240 page scrolls when they make it nine rows.
+  When an edit ends (Back, or the 30 s timeout) with something changed,
+  `Ui::take_settings_change` hands the hub (before, after) once, so it can save it; the P4
+  appends `theme ...` lines to its card's `SITE.TXT`.
 - **Alert banner:** the first press goes to the banner. Select opens that drone's detail. Up,
   Down or Back only dismiss it, so a press meant for the page underneath never does
   something unexpected.
@@ -77,7 +83,7 @@ The renderer does not depend on the tracker. Only the optional adapter does.
 | `radar_0_drones` | Empty radar, "Listening for drones", count 0 (grey). |
 | `radar_1_drone` | One drone: big distance, unit word, a compass rose with an arrow, the compass point and degrees, height, ID. The pilot is a blue X joined to the drone. |
 | `radar_5_drones` | Five active drones and one stale one, one beyond 3 km, and one with no position ("+1 without position"). |
-| `radar_5_drones_day` | The same in the Day theme. |
+| `radar_5_drones_day` | The same in the Field Day theme. |
 | `radar_pick` | Choosing a drone: the readout says **DRONE 3** in an inverse box instead of NEAREST. |
 | `list_5_drones`, `list_pick` | The list sorted by distance, with a stale divider and the selected row inverted. |
 | `no_fix`, `list_no_fix` | No GPS position: the home page shows the drone list instead of the radar (the P4 layout), with a "NO POSITION - distances unavailable" bar, and signal bars instead of distance. |
@@ -117,13 +123,24 @@ The renderer does not depend on the tracker. Only the optional adapter does.
   hollow and slashed. Warnings are inverse boxes with words. Each radio is a letter (W N B L 5)
   in a fixed column, with a dot where it was not heard. Signal is bars of rising height. The
   palette could be swapped for monochrome or red-only without losing anything.
-- **Contrast.** In the Night theme, text is white on black (21:1), secondary text is grey
-  #AAA (about 9:1), stale is #787878 (about 4.6:1), and drones are amber (#FFB800).
-  Amber stays bright and distinct for all three common colour-vision deficiencies. Range rings
-  are deliberately faint so they do not compete with drones.
-- **Night by default, Day for sun.** A dark screen keeps night vision. In direct sun, dark
-  text on a light background usually reads better on a transmissive TFT, so a Day theme is one
-  setting away. Brightness is a setting (1-5) that the hub maps to backlight PWM.
+- **Contrast.** In Glass Cockpit, data is white on near-black (about 20:1), labels are
+  cyan #46C8F0 (about 10:1), stale is #6E8090 (about 4.7:1), and drones are magenta
+  (#FF4FD8). Range rings are deliberately faint so they do not compete with drones.
+- **Three themes, Glass Cockpit by default.** Glass Cockpit (dark: cyan labels, white data,
+  magenta drones and selection, amber cautions, green OK), Field Day (dark ink on light grey
+  for direct sun, safety-orange drones) and Red Night (red only and dim, for night vision;
+  alerts are boxes and inverse text). Drones and cautions have separate colours
+  (`Palette::accent` and `Palette::warn`), and every distinction is also a shape or a word.
+  Brightness is a setting (1-5) that the hub maps to backlight PWM.
+- **Auto switches by the sun.** `screen::sun` is NOAA's solar-position algorithm (pure,
+  `no_std`, f64 through `libm`), tested against US Naval Observatory times for Philadelphia,
+  Sydney and Tromsø (polar day and night) to within two minutes. Auto shows the day theme
+  while the sun is above -0.833° (sunrise and sunset) or -6° (civil dawn and dusk), from the
+  hub's position (`UiState::position`, filled by `fill_from_tracker`) and GPS time. It
+  recomputes once a UTC minute. Before position and time have ever been known it shows the
+  night theme (dark is the safer guess) and the settings page says it is waiting for GPS; a
+  lost fix keeps the last position, lost time keeps the last verdict.
+  `Ui::effective_theme` is the look to draw; both renderers use it.
 - **Log-ish range scale with fixed rings** at 100 m, 300 m, 1 km and 3 km. It does not
   auto-scale, so a position on the plot always means the same thing and people learn it.
   Nearby drones get room, and far ones still fit. Anything past 3 km is a hollow or filled
@@ -147,6 +164,26 @@ The renderer does not depend on the tracker. Only the optional adapter does.
   sent finished, so nothing flickers either. It costs one `render` pass per band; `Band`
   rejects fills and glyphs outside the band before generating their pixels. On the S3 hub
   the radar page takes ~75 ms for all 10 bands.
+
+## The wide layout (P4, feature `wide`)
+
+`screen::wide` draws the same pages at 800×480: a 38 px status bar, the page, the caveats
+strip, and three context keys along the bottom (y 436-474) whose labels say what each key does
+in the current state (`wide::key_labels`), with "hold: back" / "hold: done" / "hold: radar"
+under the middle key where holding it does something. `wide::key_at` maps a touch to a key
+(the strip split in thirds, from 12 px above it); touches on the page are ignored.
+
+- **Lettering** is anti-aliased: 4-bit glyphs rasterised from B612 and B612 Mono (Glass
+  Cockpit, Red Night) and IBM Plex Sans Condensed (Field Day) by `tools/fontgen`
+  (`cargo run -p fontgen --release`). The TTFs and their SIL OFL licences are in
+  [`fonts/`](fonts/); the generated `src/wide/glyphs.rs` and `glyphs.bin` (235 KB of
+  bitmaps, about 270 KB of flash with metrics) are committed, so building needs neither.
+  Big numerals (48/72/104 px) hold digits, `.`, `-` and space only. Arrows, diamonds and
+  the pilot's X are drawn as anti-aliased shapes.
+- **Banded:** `wide::render` draws one band (`wide::Canvas`, whole 800-pixel rows) and every
+  primitive clips to its rows first; `wide::render_banded` runs the bands. A test checks
+  bands of 48, 7 and 1 rows equal the full frame on every case, and that nothing is drawn
+  off the panel.
 
 ## Tensions (for the owner)
 

@@ -328,6 +328,34 @@ fn radar_five_day() {
 }
 
 #[test]
+fn radar_five_red_night() {
+    let ui = Ui::new(Settings { theme: ThemeMode::Fixed(Theme::RedNight), ..Settings::default() });
+    shot("radar_5_drones_red_night", &ui, &five_drones(true));
+    let mut ui = ui;
+    ui.new_drone(3, NOW);
+    shot("alert_red_night", &ui, &five_drones(true));
+}
+
+/// Theme Auto: nine rows, so the page scrolls to keep the cursor in view.
+#[test]
+fn settings_auto() {
+    let mut st = base(true);
+    st.position = Some((39.95, -75.16));
+    let mut ui = Ui::new(Settings { theme: ThemeMode::Auto, ..Settings::default() });
+    press(&mut ui, &st, &[Button::Up, Button::Select, Button::Down]);
+    shot("settings_auto", &ui, &st);
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down, Button::Down, Button::Down, Button::Down]);
+    assert_eq!(ui.settings_row_kind(), SettingsRow::Alarms);
+    shot("settings_auto_scrolled", &ui, &st);
+    // No position or time yet: Auto shows the night theme and says why.
+    let mut ui = Ui::new(Settings { theme: ThemeMode::Auto, ..Settings::default() });
+    press(&mut ui, &base(true), &[Button::Up, Button::Select]);
+    let mut waiting = base(true);
+    waiting.utc_ms = None;
+    shot("settings_auto_waiting_gps", &ui, &waiting);
+}
+
+#[test]
 fn radar_picked() {
     let st = five_drones(true);
     let mut ui = Ui::default();

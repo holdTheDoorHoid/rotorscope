@@ -66,7 +66,7 @@ the UART3-IN header (RX GPIO28, TX GPIO27); see the pin table above.*
 | - | Stack inside L2 cache | FOUND + FIXED (memory.x patch): the kit's RAM overlapped the pre-v3 L2 cache; PSRAM sweeps corrupted the stack. See "Stack and the L2 cache" |
 | 7 | Gateway link on UART3 (RX GPIO28, 921600) | PASS on-chip self-test: UART2 TX drives the same pad; 50 frames/s, 0 corrupt, `Via` attribution right. Not yet with a real wire |
 | 8 | C6 over SDIO | not started; see "C6 and ESP-NOW" |
-| 9 | Hub app (`src/app.rs`) | RUNNING: tracker (64 tracks) fed by the gateway link; the shared `screen` UI drawn at 2x (640x480) in 24-row bands, 4 redraws/s; UP / SELECT / DOWN touch keys in the right 160 px. Self-test frame became a track; 0 corrupt, 0 bytes lost while drawing |
+| 9 | Hub app (`src/app.rs`) | RUNNING: tracker (64 tracks) fed by the gateway link; the shared `screen` UI drawn at 2x (640x480) in 24-row bands, 4 redraws/s; UP / SELECT / DOWN touch keys in the right 160 px (replaced 2026-11-18 by the native layout, see "Screen"). Self-test frame became a track; 0 corrupt, 0 bytes lost while drawing |
 | 10 | Touch (GT911) | PASS 2026-11-14: 46 taps by the owner logged; coordinates match the panel (keys at x 697-759, rows at y 66-126 / 229-276 / 378-439; left-side taps at x 297-404), so no axis swap or mirror. No crash |
 | 11 | Real ESP-NOW chain: nodes -> C5 gateway (c5c) -> wire -> P4 UART3 RX GPIO28 | PASS 2026-11-14: two ESP-NOW nodes (c5a, and c5b on its own power) relayed by the gateway; P4 decoded 520 frames, 0 corrupt, 0 UART errors, 0 ring overflow, nodes=2, while drawing at ~36 fps. Gateway: 0 lost, 0 duplicates, RSSI -47 to -55 dBm on the desk. No test beacon ran (no spare board), so no detections yet |
 | 12 | Test drone end to end: c5b rid-beacon (Wi-Fi beacon, 2.4 GHz ch 6) -> node c5a -> ESP-NOW -> gateway -> wire -> P4 | PASS 2026-11-14: P4 track count went 0 -> 1 about 18 s after the beacon started and held for the rest of the run, 0 corrupt. c5b then returned to node firmware (gateway in sight, 0 failed sends) |
@@ -184,6 +184,21 @@ bench feature of this firmware (`fakedrone`, `fakenode`, `benchlog`,
 environment, or the build stops; such a build shows `BENCH BUILD` on the
 screen and lists itself in the hello line and the evidence boot event
 (docs/BENCH.md "Bench builds").
+
+## Screen: native 800x480 layout and themes (2026-11-18, branch `p4-themes`)
+
+**Not yet seen on the panel.** Built and host-tested only (snapshots in
+`crates/screen/snapshots/wide/`).
+
+| Piece | What |
+|---|---|
+| Layout | `screen::wide` (feature `wide`): status bar 0..38, page, caveats strip, and three context keys at y 436..474 whose labels say what UP / SELECT / DOWN do on the screen showing |
+| Touch | `display::key_at` = `screen::wide::key_at`: y >= 416 (12 px above the strip, generous), x in thirds edge to edge (0..266 UP, 267..532 SELECT, 533..799 DOWN). Touches on the page are ignored. SELECT held 700 ms = Back, as before |
+| Band | 800 x 48 RGB565 (75 KB) in **PSRAM** at 1 MB (`BAND_OFFSET`, between the framebuffer and the tracker), 10 bands per frame, each copied into the framebuffer, `between(gw)` after each. The old 15 KB internal-RAM band static is gone, so the stack grew |
+| Stack | `_stack_start - _stack_end` = **185,672 B** (origin/main 6651ecd: 170,688 B): `.bss` 68,584 -> 53,224 B (the band left), `.data` +376 B |
+| Fonts | Anti-aliased 4-bit glyphs (B612, B612 Mono, IBM Plex Sans Condensed; SIL OFL) in flash: 235 KB of bitmaps plus metrics. Image: `.rodata` 129 KB -> 367 KB, `.text` +12 KB (the 320x240 renderer and its mono fonts are no longer linked), about +250 KB of the 16 MB flash in all |
+| Cost | Host estimate only: a full radar frame takes 2.8 ms on the laptop (release), about 0.3 ms per band. Expect several ms per band on the P4; `max_band` on the `link` line will say. Not measured on the chip |
+| Themes | Settings: Theme Auto / Glass Cockpit / Field Day / Red Night; with Auto, Day theme, Night theme, Switch at. Saved as `theme`, `theme-day`, `theme-night`, `theme-switch` lines appended to `ROTORSCP/SITE.TXT` when an edit ends (one Setting evidence event per line); console `L theme red-night` sets one; the file is applied at mount |
 
 ## GPS, ADS-B and the console (2026-11-15, branch `p4-parity`)
 

@@ -378,8 +378,7 @@ fn main() -> ! {
     let mut whloop = webheadloop::Loop::new();
 
     let tracker = place_tracker(psram);
-    // SAFETY: the static is taken exactly once, here, before the loop.
-    let band = unsafe { &mut *(&raw mut BAND) };
+    let band = place_band(psram);
     let mut app = app::App::new(tracker, band);
     // Protocol 12: drone control links from the same nodes, in PSRAM.
     if control_table.is_none() {
@@ -477,6 +476,10 @@ fn main() -> ! {
                 site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen);
             }
             None => {}
+        }
+        // A finished settings edit that changed the theme: to the card.
+        if let Some((before, after)) = app.take_settings_change() {
+            site.settings_changed(&before, &after, &mut sdlog, &mut ev);
         }
         let utc = gps.utc_ms(ms);
         sd::set_clock(utc, ms);
@@ -872,11 +875,11 @@ fn command(
         b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | theme auto|glass-cockpit|field-day|red-night | theme-day <theme> | theme-night <theme> | theme-switch twilight|sunrise");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
-        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off / screen theme), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }
@@ -1021,5 +1024,31 @@ fn place_tracker(psram: Option<(*mut u32, usize)>) -> &'static mut app::HubTrack
     }
 }
 static mut FAA: core::mem::MaybeUninit<faa::Faa> = core::mem::MaybeUninit::uninit();
-static mut BAND: [embedded_graphics::pixelcolor::Rgb565; screen::WIDTH as usize * screen::BAND_ROWS] =
-    [embedded_graphics::pixelcolor::Rgb565::new(0, 0, 0); screen::WIDTH as usize * screen::BAND_ROWS];
+
+/// Where the screen's band buffer (800 x 48 RGB565, 75 KB) lives in PSRAM:
+/// after the framebuffer, below the tracker. Until 2026-11-18 a 15 KB band
+/// was a static in internal RAM, which on this chip comes out of the main
+/// stack (see [`TRACKER_OFFSET`]); a full-width band there would have cost
+/// the stack 38 KB more. Drawing into PSRAM goes through the cache, which
+/// holds a whole band.
+pub const BAND_OFFSET: usize = 1 << 20;
+const _: () = assert!(rgb::H_RES * rgb::V_RES * 2 <= BAND_OFFSET, "framebuffer overlaps the band");
+const _: () = assert!(BAND_OFFSET + display::BAND_PX * 2 <= TRACKER_OFFSET, "band overlaps the tracker");
+
+/// The band buffer in PSRAM at [`BAND_OFFSET`] (the hub cannot run without
+/// PSRAM; `place_tracker` stops first).
+#[inline(never)]
+fn place_band(psram: Option<(*mut u32, usize)>) -> &'static mut [u16] {
+    let Some((base, size)) = psram else {
+        panic!("hub-p4: no PSRAM: the screen band lives there; cannot start");
+    };
+    assert!(size >= BAND_OFFSET + display::BAND_PX * 2, "PSRAM too small for the screen band");
+    // SAFETY: [BAND_OFFSET, + BAND_PX * 2) is inside PSRAM (checked above)
+    // and used by nothing else (the asserts above: after the framebuffer,
+    // before the tracker); 1 MB is aligned for u16. Called once.
+    unsafe {
+        let p = base.cast::<u8>().add(BAND_OFFSET).cast::<u16>();
+        p.write_bytes(0, display::BAND_PX);
+        core::slice::from_raw_parts_mut(p, display::BAND_PX)
+    }
+}

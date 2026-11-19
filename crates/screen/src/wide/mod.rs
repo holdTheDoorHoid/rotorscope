@@ -157,17 +157,23 @@ pub fn key_labels(ui: &Ui, s: &UiState) -> [KeyLabel; 3] {
             KeyLabel::new("Next drone", true).arrow(Arrow::Right),
         ],
         Mode::Edit => {
-            let row = ui.settings_row_kind();
-            let mut v: String<40> = String::new();
-            crate::render::settings_text(ui, s, row, false, &mut v);
-            let mid = match row {
-                SettingsRow::HubMoved | SettingsRow::NodesAtHub if ui.done_row() == Some(row) => KeyLabel::new("Done", false),
-                SettingsRow::HubMoved | SettingsRow::NodesAtHub => KeyLabel::new(&v, true),
-                SettingsRow::Alarms if s.threats.mutable == 0 && s.threats.snoozable == 0 && s.caveats.silenced.operator() == 0 => {
-                    KeyLabel::new("Nothing to do", false)
-                }
-                SettingsRow::Alarms if ui.done_row() == Some(row) => KeyLabel::new("Done", false),
-                SettingsRow::Alarms => KeyLabel::new(&v, true),
+            // What Select does on this row (a "done" mark does not stop a
+            // second press from doing it again, so the key keeps saying it).
+            let t = s.threats;
+            let quiet = s.caveats.silenced.operator();
+            let alarms: String<24> = if t.mutable > 0 {
+                fmt(format_args!("Mute {} (2h)", t.mutable))
+            } else if t.snoozable > 0 {
+                fmt(format_args!("Snooze {} (5m)", t.snoozable))
+            } else {
+                fmt(format_args!("Unmute {quiet}"))
+            };
+            let mid = match ui.settings_row_kind() {
+                SettingsRow::HubMoved if s.gps.home_pending => KeyLabel::new("Accept here", true),
+                SettingsRow::HubMoved => KeyLabel::new("Reset GPS", true),
+                SettingsRow::NodesAtHub => KeyLabel::new("Place all here", true),
+                SettingsRow::Alarms if t.mutable == 0 && t.snoozable == 0 && quiet == 0 => KeyLabel::new("Nothing to do", false),
+                SettingsRow::Alarms => KeyLabel::new(&alarms, true),
                 _ => KeyLabel::new("Change", true),
             };
             [KeyLabel::new("Up", true).arrow(Arrow::Up), mid.hold("hold: done"), KeyLabel::new("Down", true).arrow(Arrow::Down)]

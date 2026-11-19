@@ -431,3 +431,38 @@ fn flood_of_fakes_at_the_hub_never_hides_a_real_drone() {
     assert!(st.threats.flood_per_s >= 150, "{}", st.threats.flood_per_s);
     assert_eq!(st.drones.len(), MAX_DRONES);
 }
+
+/// The P4 saves theme changes as site-file lines and reads them back at
+/// mount: every change survives the round trip, and only changes are
+/// written.
+#[test]
+fn theme_settings_round_trip_through_site_lines() {
+    use screen::from_tracker::{apply_site_theme, theme_changes};
+    use screen::{Settings, SwitchAt, Theme, ThemeMode};
+    use tracker::site::{SiteLine, SiteState, parse_line, write_theme};
+    let before = Settings::default();
+    let after = Settings {
+        theme: ThemeMode::Auto,
+        day_theme: Theme::GlassCockpit,
+        night_theme: Theme::RedNight,
+        switch_at: SwitchAt::Sunrise,
+        brightness: 5,
+        ..before
+    };
+    let mut text = std::string::String::new();
+    theme_changes(&before, &after, |t| {
+        let mut l: heapless::String<40> = heapless::String::new();
+        write_theme(&mut l, t).unwrap();
+        text.push_str(&l);
+    });
+    assert_eq!(text, "theme auto\ntheme-day glass-cockpit\ntheme-switch sunrise\n", "night theme unchanged: not written");
+    let mut st = SiteState::default();
+    for l in text.lines() {
+        let p = parse_line(l).unwrap();
+        assert!(matches!(p, SiteLine::Theme(_)));
+        st.apply(p);
+    }
+    let loaded = apply_site_theme(&st.theme, Settings::default());
+    assert_eq!(loaded, Settings { brightness: 3, ..after }, "brightness is not a site setting");
+    theme_changes(&after, &after, |_| panic!("no change, no line"));
+}

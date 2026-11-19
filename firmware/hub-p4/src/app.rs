@@ -2,10 +2,8 @@
 //! the ADSBee (aircraft), own position from the GPS or a manual position,
 //! the shared screen UI on the panel, touch keys.
 
-use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::RgbColor;
 use esp_hal::time::Instant;
-use screen::{Band, NodeKind, NodeStatus, Ui, UiState};
+use screen::{NodeKind, NodeStatus, Ui, UiState};
 use tracker::Tracker;
 
 use crate::bb::BbI2c;
@@ -69,7 +67,6 @@ const FRAME_MS: u64 = 250;
 const HOLD_MS: u64 = 700;
 /// No touch report for this long while SELECT is held counts as released.
 const RELEASE_GAP_MS: u64 = 250;
-const BAND_PX: usize = screen::WIDTH as usize * screen::BAND_ROWS;
 
 pub fn now_ms() -> u64 {
     Instant::now().duration_since_epoch().as_millis()
@@ -80,7 +77,8 @@ pub struct App {
     ui: Ui,
     state: UiState,
     touch: Gt911,
-    band: &'static mut [Rgb565; BAND_PX],
+    /// One band of the frame, raw RGB565 (`display::BAND_PX`, in PSRAM).
+    band: &'static mut [u16],
     last_frame: u64,
     lit: Option<(screen::Button, u64)>,
     /// SELECT is down since this time; true once it has fired Back.
@@ -112,7 +110,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(tracker: &'static mut HubTracker, band: &'static mut [Rgb565; BAND_PX]) -> Self {
+    pub fn new(tracker: &'static mut HubTracker, band: &'static mut [u16]) -> Self {
         Self {
             tracker,
             ui: Ui::new(Default::default()),
@@ -475,6 +473,23 @@ impl App {
         self.ui.take_request()
     }
 
+    /// The operator finished editing the settings and something changed:
+    /// (before, after), once (for the site file).
+    pub fn take_settings_change(&mut self) -> Option<(screen::Settings, screen::Settings)> {
+        self.ui.take_settings_change()
+    }
+
+    pub fn settings(&self) -> screen::Settings {
+        *self.ui.settings()
+    }
+
+    /// Settings from the site file (or a console line): applied at once,
+    /// not reported back as a change.
+    pub fn set_settings(&mut self, s: screen::Settings) {
+        self.ui.set_settings(s);
+        self.last_frame = 0;
+    }
+
     /// Redraw at once (e.g. the own position changed).
     pub fn redraw_now(&mut self) {
         self.last_frame = 0;
@@ -546,18 +561,21 @@ impl App {
         if self.lit.is_some_and(|(_, t)| now.saturating_sub(t) > 300) {
             self.lit = None;
         }
-        let mut band = Band::new(&mut self.band[..]);
+        // The native 800x480 layout, band by band into the PSRAM band,
+        // each finished band copied into the framebuffer (the panel only
+        // ever shows finished pixels), the link serviced in between.
+        let lit = self.lit.map(|(b, _)| b);
         let mut top = 0;
-        while top < screen::HEIGHT {
+        while top < screen::wide::H {
             let t0 = Instant::now();
-            band.set_top(top);
-            let _ = screen::render(&self.ui, &self.state, &mut band);
-            display::blit_band(panel.fb_mut(), &band);
+            let mut c = screen::wide::Canvas::new(&mut self.band[..], top);
+            let rows = c.rows();
+            screen::wide::render(&self.ui, &self.state, lit, &mut c);
+            display::blit_band(panel.fb_mut(), top, c.pixels());
             self.max_band_us = self.max_band_us.max(t0.elapsed().as_micros());
             between(gw);
-            top += screen::BAND_ROWS as i32;
+            top += rows;
         }
-        display::draw_keys(panel.fb_mut(), self.lit.map(|(b, _)| b));
         panel.flush();
         self.frames_drawn += 1;
     }
@@ -653,6 +671,6 @@ impl App {
             self.state.conflict = None;
         }
         self.state.area_gnss = self.area.as_deref().and_then(|a| screen::from_tracker::area_gnss_view(a.status()));
-        let _ = (links::BAUD, Rgb565::BLACK);
+        let _ = links::BAUD;
     }
 }
