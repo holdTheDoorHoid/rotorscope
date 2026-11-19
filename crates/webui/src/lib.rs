@@ -312,4 +312,46 @@ mod tests {
         assert!(f.contains("coordHTML(Number(r.lat), Number(r.lon))"));
         assert!(f.contains("fmtDist(Number(r.apart_m))"));
     }
+
+    /// Slice 16e: threat levels, places and drawing. Strings from the hub
+    /// (place names from the site file, a signal's `what`) reach the page
+    /// only through esc(); levels are looked up in a fixed table (never put
+    /// in as text); drawing and the profile picker send nothing.
+    #[test]
+    fn page_shows_threat_levels_and_places_safely() {
+        let src = page();
+        let f = |name: &str| {
+            let s = &src[src.find(name).unwrap_or_else(|| panic!("{name}"))..];
+            std::string::String::from(&s[..s.find("\n}\n").unwrap()])
+        };
+        let reasons = f("function reasonText(r)");
+        let bare = reasons.matches("r.place").count();
+        let ok = reasons.matches("esc(r.place)").count()
+            + reasons.matches("r.place === ''").count()
+            + reasons.matches("r.place == null").count();
+        assert_eq!(bare, ok, "a place name outside esc(): {reasons}");
+        let places = f("function placesSvg(R)");
+        assert_eq!(places.matches("a.name").count(), places.matches("esc(a.name)").count());
+        for card in ["function sigThreatCards()", "function renderThreatBanner(lost)"] {
+            let c = f(card);
+            let what = c.matches(".what").count();
+            assert!(what > 0, "{card}");
+            assert_eq!(what, c.matches("esc(g.what").count() + c.matches("esc(x.what").count(), "{card}");
+        }
+        // Levels: a fixed table; the class and the words only from it.
+        assert!(src.contains("const isLv = l => typeof l === 'string' && Object.prototype.hasOwnProperty.call(LV, l);"));
+        assert!(src.contains("const lvTag = l => isLv(l) ?"));
+        // Colour is never alone: every level has a symbol and a word.
+        for w in ["NOTICE", "CAUTION", "WARNING", "CRITICAL"] {
+            assert!(src.contains(&std::format!("'{w}']")), "{w}");
+        }
+        // Signals without a position say so, and are never drawn.
+        assert!(src.contains("judged from loudness"));
+        assert!(!f("function radarTrack(t, R)").contains("signal"));
+        assert!(!f("function placesSvg(R)").contains("signal"));
+        // Drawing and the profile only make lines to copy: no new request.
+        assert_eq!(src.matches("fetch(").count(), 3, "state, flags and own-pos only");
+        assert!(src.contains("area ${nm} circle ${draw.c[0].toFixed(7)} ${draw.c[1].toFixed(7)} ${Math.round(draw.r)}"));
+        assert!(src.contains("'profile ' + profPick"));
+    }
 }

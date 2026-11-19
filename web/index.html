@@ -22,11 +22,13 @@
 :root{
   --bg:#000;--fg:#fff;--mut:#c4c4c4;--card:#161616;--card2:#262626;--line:#4a4a4a;
   --drone:#ffc400;--op:#5ccfff;--bad:#ff9a8f;--hi-bg:#ffc400;--hi-fg:#000;
+  --cau:#ffd84d;--warn:#ff9640;--crit:#ff5c5c;--lv-fg:#000;--area:#b9a3ff;
   --nav:68px;
 }
 [data-theme=light]{
   --bg:#fff;--fg:#000;--mut:#363636;--card:#f0f0f0;--card2:#dedede;--line:#6e6e6e;
   --drone:#924a00;--op:#004fae;--bad:#a8001c;--hi-bg:#ffc400;--hi-fg:#000;
+  --cau:#6b4f00;--warn:#a84300;--crit:#b0001a;--lv-fg:#fff;--area:#5b2fb8;
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
@@ -93,6 +95,18 @@ body.lost main{opacity:.5}
 .pulse{fill:none;stroke:var(--drone);stroke-width:2;animation:pulse 1.4s ease-out infinite}
 @keyframes pulse{from{r:6;opacity:1}to{r:22;opacity:0}}
 @media (prefers-reduced-motion:reduce){.pulse{animation:none;r:12}}
+/* Places to protect (slice 16e): outlines, never filled, so drones stay readable. */
+.area{fill:none;stroke:var(--area);stroke-width:1.4}
+.bub{fill:none;stroke:var(--area);stroke-width:1.2;stroke-dasharray:4 3}
+.alab{fill:var(--area);font-size:7px;font-weight:700;text-anchor:middle}
+/* Threat ring round a drone: the shape differs by level, not only the colour. */
+.tr{fill:none;stroke-width:1.6}
+.tr.caution{stroke:var(--cau);stroke-dasharray:2.5 2}
+.tr.warning{stroke:var(--warn)}
+.tr.critical{stroke:var(--crit);stroke-width:2.4}
+.drw{fill:none;stroke:var(--fg);stroke-width:1.4;stroke-dasharray:3 2}
+.drp{fill:var(--fg)}
+#radar.drawing{cursor:crosshair}
 .rbar{display:flex;gap:8px;align-items:center;justify-content:center;margin:8px 0;flex-wrap:wrap}
 .rbar{flex-wrap:nowrap;gap:6px}
 .rbar .range{flex:1;max-width:12em;text-align:center;font-weight:700;font-size:15px}
@@ -129,6 +143,18 @@ a.btn{color:var(--fg);display:inline-flex;align-items:center;text-decoration:non
 /* Two transmitters claim one ID (hub `claims`): marked, not alarmed. */
 .tag.disp{border-style:dashed}
 .num{flex:none;font-weight:800;color:var(--drone)}
+/* Threat levels: a symbol and the word, then the colour. */
+.lv{flex:none;font-size:13px;font-weight:800;padding:1px 6px;border-radius:5px;border:2px solid currentColor;white-space:nowrap}
+.lv.notice{color:var(--mut);border-style:dotted}
+.lv.caution{color:var(--cau)}
+.lv.warning{background:var(--warn);border-color:var(--warn);color:var(--lv-fg)}
+.lv.critical{background:var(--crit);border-color:var(--fg);color:var(--lv-fg);outline:2px solid var(--crit)}
+.thr{display:flex;gap:8px;align-items:baseline;margin-top:6px;font-size:15px}
+.thr .why{min-width:0;overflow-wrap:anywhere}
+.why-list{margin:6px 0 0;padding-left:20px}
+#threat.warning{background:var(--warn);color:var(--lv-fg);border-color:var(--fg)}
+#threat.critical{background:var(--crit);color:var(--lv-fg);border-color:var(--fg);border-width:5px}
+pre.quote{margin:8px 0;font-size:14px}
 .trk .r2{display:flex;flex-wrap:wrap;gap:4px 16px;align-items:center;margin-top:4px}
 .big{font-size:26px;font-weight:800}
 .arr{width:22px;height:22px;vertical-align:-4px;fill:var(--fg)}
@@ -181,6 +207,7 @@ input[type=text]{width:100%;min-height:48px;padding:8px 10px;border-radius:8px;b
   <div id="lost" class="ban" role="alert" hidden></div>
   <div id="alert" class="ban" role="alert" hidden></div>
   <div id="flood" class="ban" role="alert" hidden></div>
+  <div id="threat" class="ban" role="alert" hidden></div>
   <div id="nopos" class="ban" hidden>
     <span aria-hidden="true">&#8982;</span>
     <span class="grow">Your position is unknown<small>No distances or directions until the hub has GPS or you enter a position.</small></span>
@@ -203,8 +230,44 @@ input[type=text]{width:100%;min-height:48px;padding:8px 10px;border-radius:8px;b
       <span><svg viewBox="-8 -8 16 16"><circle class="dr" r="5"/></svg> drone, not moving</span>
       <span><svg viewBox="-8 -8 16 16"><rect class="op" x="-4.5" y="-4.5" width="9" height="9"/></svg> its operator (dashed link)</span>
       <span><svg viewBox="-8 -8 16 16"><circle class="dr stale" r="5"/></svg> not heard for 60&nbsp;s, or unconfirmed</span>
+      <span id="lg-threat" hidden><svg viewBox="-8 -8 16 16"><circle class="tr caution" r="6"/></svg> caution, <svg viewBox="-8 -8 16 16"><circle class="tr warning" r="6"/></svg> warning, <svg viewBox="-8 -8 16 16"><circle class="tr critical" r="6"/></svg> critical (the label says which)</span>
+      <span id="lg-areas" hidden><svg viewBox="-8 -8 16 16"><rect class="area" x="-6" y="-6" width="12" height="12"/></svg> protected area</span>
+      <span id="lg-bubble" hidden><svg viewBox="-8 -8 16 16"><circle class="bub" r="6"/></svg> your bubble</span>
     </div>
     <div id="radar-note" class="note"></div>
+    <div class="row" id="draw-bar">
+      <button type="button" class="btn" id="draw-open">Draw an area</button>
+      <span id="draw-why" class="mut sm"></span>
+    </div>
+    <section id="draw" aria-labelledby="draw-h" hidden>
+      <h2 id="draw-h">Draw an area</h2>
+      <p class="mut sm">This makes the lines for the hub&#8217;s site file; it sends nothing to the hub. Zoom first: points are placed where you tap, relative to the hub&#8217;s position.</p>
+      <div class="seg" role="group" aria-label="Shape">
+        <button type="button" class="btn" data-shape="circle">Circle</button>
+        <button type="button" class="btn" data-shape="poly">Polygon</button>
+      </div>
+      <p id="draw-help" class="mt8"></p>
+      <div class="row">
+        <button type="button" class="btn" id="draw-here">Centre on the hub</button>
+        <button type="button" class="btn" id="draw-undo">Undo</button>
+        <button type="button" class="btn" id="draw-reset">Start again</button>
+      </div>
+      <label class="f" for="draw-name">Name (letters, digits, _ or -; up to 12)</label>
+      <input type="text" id="draw-name" maxlength="12" placeholder="house" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div id="draw-rbox">
+        <label class="f" for="draw-r">Radius in metres (10 to 10000)</label>
+        <input type="text" id="draw-r" inputmode="decimal" autocomplete="off" placeholder="tap the edge, or type it">
+      </div>
+      <label class="f" for="draw-ceil">Ceiling in metres above the hub (optional, 1 to 10000; 120 if empty)</label>
+      <input type="text" id="draw-ceil" inputmode="decimal" autocomplete="off" placeholder="120">
+      <div id="draw-msg" class="msg" role="status" aria-live="polite"></div>
+      <pre id="draw-out" class="quote mono" hidden></pre>
+      <div class="row">
+        <button type="button" class="btn pri" id="draw-copy" disabled>Copy the lines</button>
+        <button type="button" class="btn" id="draw-close">Done</button>
+      </div>
+      <p class="mut sm">Add the lines to the end of <span class="mono">ROTORSCP/SITE.TXT</span> on the hub&#8217;s SD card (later lines win, so the same name replaces an area), then put the card back. Or type each line on the hub&#8217;s console: press <span class="mono">L</span>, paste, Enter. A line over 120 characters fits only in the file.</p>
+    </section>
   </section>
 
   <section id="v-list" aria-label="Drone list" hidden></section>
@@ -232,6 +295,23 @@ input[type=text]{width:100%;min-height:48px;padding:8px 10px;border-radius:8px;b
       <button type="button" class="btn" id="test">Test alert</button>
     </div>
     <div id="alert-msg" class="mut sm"></div>
+
+    <h2 id="prof-h">Threat profile</h2>
+    <div id="prof-now"></div>
+    <p class="mut sm">A profile sets how the hub weighs what drones do. Choosing one here only makes the line for the hub&#8217;s site file; nothing is sent to the hub.</p>
+    <div class="row" role="group" aria-labelledby="prof-h">
+      <button type="button" class="btn" data-prof="default">Default</button>
+      <button type="button" class="btn" data-prof="home">Home</button>
+      <button type="button" class="btn" data-prof="facility">Facility</button>
+      <button type="button" class="btn" data-prof="event">Event</button>
+      <button type="button" class="btn" data-prof="patrol">Patrol</button>
+    </div>
+    <p id="prof-desc" class="mt8"></p>
+    <div id="prof-line" hidden>
+      <pre id="prof-out" class="quote mono"></pre>
+      <div class="row"><button type="button" class="btn pri" id="prof-copy">Copy the line</button></div>
+      <p class="mut sm">Add it to the end of <span class="mono">ROTORSCP/SITE.TXT</span> on the hub&#8217;s SD card, or type it on the hub&#8217;s console (<span class="mono">L</span>). A <span class="mono">crowd</span> line in the file wins over the profile&#8217;s &#8220;several at once&#8221;. No profile ever lowers: heading straight for you, fast inbound, a striker after a spotter, a new identity mid-flight, or drones during jamming.</p>
+    </div>
 
     <h2>Display</h2>
     <div class="seg" role="group" aria-label="Theme">
@@ -427,16 +507,91 @@ const isDisp = t => !!(t.claims && t.claims.disputed);
 const dist = t => t.own ? t.own.dist_m : null;
 
 // Active first; confirmed before unconfirmed (a forged drone can claim to be
-// right beside you); then nearest; then (no position) most recently heard.
+// right beside you); then the most serious threat level; then nearest; then
+// (no position) most recently heard.
 function sorted() {
   return tracks().slice().sort((a, b) =>
     (isStale(a) - isStale(b)) ||
     (isUnc(a) - isUnc(b)) ||
+    (lvRank(b) - lvRank(a)) ||
     ((dist(a) == null) - (dist(b) == null)) ||
     ((dist(a) ?? 0) - (dist(b) ?? 0)) ||
     (a.age_ms - b.age_ms));
 }
 const isNew = t => newAt.has(t.id) && Date.now() - newAt.get(t.id) < NEW_FOR_MS;
+
+/* =================================================== threat levels ===== */
+
+// Slice 16e: each drone's threat level and reasons (`threat` on a track),
+// signals judged from loudness with no position (`signal_threats`), and
+// the places they are judged against (`places`). A hub that judges no
+// levels (the S3 hub, rid-view) sends none of them; nothing extra shows.
+// Every level is a symbol and a word as well as a colour.
+const LV = {notice: ['&#9675;', 'NOTICE'], caution: ['&#9651;', 'CAUTION'], warning: ['&#9650;', 'WARNING'], critical: ['&#9670;', 'CRITICAL']};
+const LV_RANK = {notice: 1, caution: 2, warning: 3, critical: 4};
+const isLv = l => typeof l === 'string' && Object.prototype.hasOwnProperty.call(LV, l);
+const lvOf = x => x && x.threat && isLv(x.threat.level) ? x.threat.level : null;
+const lvRank = x => LV_RANK[lvOf(x)] || 0;
+const lvTag = l => isLv(l) ? `<span class="lv ${l}">${LV[l][0]} ${LV[l][1]}</span>` : '';
+const sigThreats = () => ((st && st.signal_threats) || []).filter(s => lvOf(s));
+const dur = s => s == null ? '?' : Number(s) < 120 ? Math.round(Number(s)) + ' s' : Math.floor(Number(s) / 60) + ' min';
+function ordinal(n) {
+  n = Number(n) | 0;
+  const t = n % 100, u = n % 10;
+  return n + (t >= 11 && t <= 13 ? 'th' : u === 1 ? 'st' : u === 2 ? 'nd' : u === 3 ? 'rd' : 'th');
+}
+const SIG_WORDS = {video: 'FPV video signal', control: 'control signal', wifi: 'drone Wi-Fi signal', open_link: 'FPV link signal', sound: 'rotor sound'};
+// One reason in words, as the hub's own text (behaviour::write_reason).
+// Place names come from the site file, still esc()'d; numbers through
+// Number() and the formatters.
+function reasonText(r) {
+  const bub = r.place === '', p = bub ? 'you' : esc(r.place), area = bub ? 'your bubble' : esc(r.place);
+  const at = bub ? 'near you' : 'at ' + esc(r.place);
+  const m = r.m != null ? fmtDist(Number(r.m)) : '?';
+  const up = r.h_m != null ? `, ${fmtAlt(Number(r.h_m))} up` : '';
+  const other = r.sig != null ? `a signal getting louder (S${Number(r.sig)})` : r.other != null ? `drone #${Number(r.other)}` : 'another drone';
+  switch (r.rule) {
+    case 'in_area': return bub ? `within your bubble, ${m} from you` : `over ${p}`;
+    case 'pilot_near': return Number(r.m) === 0 ? `pilot inside ${area}` : `pilot at the edge of ${area} (${m} outside)`;
+    case 'pilot_outside': return `pilot outside, ${m} beyond the edge of ${area}`;
+    case 'above_ceiling': return `${fmtAlt(Number(r.h_m))} up over ${p}, above the ceiling`;
+    case 'beeline': case 'fast_inbound':
+      return `${r.rule === 'fast_inbound' ? 'FAST, heading' : 'heading'} for ${p}, ${m} away at ${fmtSpd(Number(r.mps))}` +
+        (r.eta_s != null ? `, there in about ${Math.ceil(Number(r.eta_s))} s` : '');
+    case 'last_seen_inbound': return `last seen heading for ${p}, ${m} away, ${Number(r.ago_s) | 0} s ago`;
+    case 'loitering': return `${bub ? 'lingering near you' : 'lingering at ' + p} for ${dur(r.for_s)}${up}`;
+    case 'circling': return `circling ${p} (${m} radius), a full turn in ${dur(r.for_s)}${up}`;
+    case 'low_hover': return `${bub ? 'hovering low near you' : 'hovering low over ' + p}${up}, for ${dur(r.for_s)}`;
+    case 'drop': return `dropped ${m} ${bub ? 'near you' : 'over ' + p}${r.h_m != null ? ` (down to ${fmtAlt(Number(r.h_m))} up)` : ''} and climbed again, ${Number(r.ago_s) | 0} s ago`;
+    case 'following': return `following you for ${m} (${dur(r.for_s)})`;
+    case 'spotter_striker': return `follows spotter ${other} (lingered ${at} ${dur(r.ago_s)} ago)`;
+    case 'spotter': return `spotter: ${other} ${r.sig != null ? 'is closing on' : 'is rushing to'} ${p}`;
+    case 'several_at_once': return r.alarm ? `${at} ${r.alarm === 'gps' ? 'during GPS interference' : 'while jamming is heard'}`
+      : `one of ${Number(r.n) | 0} drones ${at} at once`;
+    case 'probing': return `back over ${p} after ${dur(r.for_s)} away (probing)`;
+    case 'repeat_visitor': return `${ordinal(r.days)} day in 2 weeks ${at} (${r.by === 'pilot_spot' ? 'same pilot spot' : 'same drone'})`;
+    case 'pilot_moving': return `pilot on the move at ${fmtSpd(Number(r.mps))} while it flies ${at}`;
+    case 'identity_changed': return r.other != null ? `new identity mid-flight ${at} (was ${other}, ${Number(r.ago_s) | 0} s ago)`
+      : `serial changed mid-flight ${at}, ${Number(r.ago_s) | 0} s ago`;
+    case 'getting_louder': {
+      const near = r.place == null ? '' : `, nearing ${p}`;
+      const nodes = r.nodes != null ? ` fast on ${Number(r.nodes) | 0} node${Number(r.nodes) === 1 ? '' : 's'}` : ' fast';
+      const too = r.agreed ? (r.kind === 'sound' ? ', a radio signal too' : ', rotor sound too') : '';
+      return `${esc(SIG_WORDS[r.kind] || 'signal')} getting louder${nodes} (+${Number(r.db) | 0} dB in ${Number(r.for_s) | 0} s)${near}${too}`;
+    }
+    case 'dark_drone': return `rotor sound, no radio heard, for ${dur(r.for_s)}${r.place == null ? '' : ', near ' + p}`;
+    default: return esc(r.rule);
+  }
+}
+// What else the hub says about a level: a friend, held, two signs, snoozed.
+function threatNotes(th) {
+  const n = [];
+  if (th.friend) n.push('a friend: its area alarms are lowered (never fast inbound)');
+  if (th.held) n.push('held: lost while heading in');
+  if (th.combined) n.push('two signs at once');
+  if (th.snoozed_s) n.push(`alert snoozed on the hub, ${Math.ceil(Number(th.snoozed_s) / 60)} min left`);
+  return n;
+}
 
 /* ========================================================= polling ===== */
 
@@ -637,7 +792,28 @@ function renderBanners(lost) {
       `<small>${why}, far more than a real sky. ` +
       `${unc} unconfirmed drone(s) listed last are probably fake; confirmed ones are unaffected.</small></span>`);
   }
+  renderThreatBanner(lost);
   $('nopos').hidden = !(st && !st.own && !lost && tab !== 'set');
+}
+
+// The most serious drone or signal at Warning or above whose alert the hub
+// has not snoozed (as the hub's own strip; on a tie the drone, judged from
+// its position, wins). Hidden while the connection is lost: it would be old.
+function renderThreatBanner(lost) {
+  const b = $('threat');
+  const live = x => lvRank(x) >= 3 && !x.threat.snoozed_s && x.state !== 'stale';
+  const d = lost ? null : tracks().filter(t => live(t) && !isUnc(t)).sort((a, c) => lvRank(c) - lvRank(a))[0];
+  const g = lost ? null : sigThreats().filter(live).sort((a, c) => lvRank(c) - lvRank(a))[0];
+  const x = g && (!d || lvRank(g) > lvRank(d)) ? g : d;
+  b.hidden = !x;
+  b.className = 'ban' + (x ? ' ' + lvOf(x) : '');
+  if (!x) return;
+  const l = lvOf(x), r = (x.threat.reasons || [])[0];
+  const why = r ? reasonText(r) : '';
+  const who = x === d ? `#${d.id} ${esc(idOf(d))}` : `${esc(x.what || 'signal')}, judged from loudness, no position`;
+  setHTML('threat', `<span aria-hidden="true" class="f22">${LV[l][0]}</span>` +
+    `<span class="grow">${LV[l][1]}<small>${who}</small><small>${why}</small></span>` +
+    (x === d ? `<button type="button" data-open="${d.id}">View</button>` : `<button type="button" data-tab="list">List</button>`));
 }
 
 /* ----- radar ----- */
@@ -669,7 +845,8 @@ function xy(brg, d, R) {
 function renderRadar() {
   const R = radarRange();
   const o = [];
-  o.push(`<svg id="radar" viewBox="-112 -112 224 224" role="img" aria-label="Radar, north up, range ${esc(fmtDist(R))}">`);
+  o.push(`<svg id="radar"${draw ? ' class="drawing"' : ''} viewBox="-112 -112 224 224" role="img" aria-label="${esc(radarLabel(R))}">`);
+  o.push(`<defs><clipPath id="rclip"><circle r="101"/></clipPath></defs>`);
   for (const k of [1, 2, 3, 4]) o.push(`<circle class="ring${k % 2 ? '' : ' major'}" r="${k * 25}"/>`);
   o.push(`<path class="axis" d="M0-100V100M-100 0H100"/>`);
   o.push(`<text class="card n" y="-103">&#9650;N</text><text class="card" x="106" y="3">E</text>` +
@@ -679,6 +856,9 @@ function renderRadar() {
       `<text class="card" y="7">so the radar can&#8217;t be drawn.</text>`);
   } else {
     o.push(`<text class="rl" x="2" y="-46">${esc(ringLabel(R / 2))}</text><text class="rl" x="2" y="-96">${esc(ringLabel(R))}</text>`);
+    // The places, under the drones; then what is being drawn.
+    o.push(placesSvg(R));
+    o.push(`<g clip-path="url(#rclip)">${drawSvg(R)}</g>`);
     // Stale first so active drones draw on top; the selected one last.
     const list = tracks().filter(t => t.own).sort((a, b) => (isStale(b) - isStale(a)) || ((a.id === sel) - (b.id === sel)));
     for (const t of list) o.push(radarTrack(t, R));
@@ -689,6 +869,11 @@ function renderRadar() {
   setHTML('radar-box', o.join(''));
 
   $('rbar').hidden = $('legend').hidden = !(st && st.own);
+  const pl = st && st.places;
+  $('lg-threat').hidden = !pl;
+  $('lg-areas').hidden = !(pl && (pl.areas || []).length);
+  $('lg-bubble').hidden = !(pl && pl.bubble_m);
+  renderDraw();
   $('range').textContent = 'Edge ' + ringLabel(R);
   $('zauto').setAttribute('aria-pressed', S.zoom < 0);
 
@@ -702,6 +887,8 @@ function renderRadar() {
     if (noPos) notes.push(`${noPos} drone(s) not sending a position yet: see List.`);
     if (far) notes.push(`${far} drone(s) beyond the edge, drawn on the rim.`);
   }
+  const sig = sigThreats().length;
+  if (sig) notes.push(`${sig} signal(s) getting louder, judged from loudness with no position (not drawn): see List.`);
   const low = lowAircraft().length;
   if (low) notes.push(`${low} low aircraft nearby (ADS-B): see List.`);
   setHTML('radar-note', notes.join('<br>'));
@@ -726,13 +913,164 @@ function radarTrack(t, R) {
     s.push(l.dir != null && (l.speed || 0) > 0.5
       ? `<path class="dr${stale}" d="M0,-7 L5.5,6 L0,3 L-5.5,6Z" transform="translate(${x} ${y}) rotate(${l.dir})"/>`
       : `<circle class="dr${stale}" cx="${x}" cy="${y}" r="5"/>`);
-    s.push(`<text class="lbl" x="${x + 8}" y="${y - 5}">#${t.id}</text>`);
+    // The threat level: a ring whose dashes and weight differ by level,
+    // and the level in the label.
+    const lv = lvOf(t);
+    if (LV_RANK[lv] >= 2 && !stale) {
+      s.push(`<circle class="tr ${lv}" cx="${x}" cy="${y}" r="9"/>`);
+      if (lv === 'critical') s.push(`<circle class="tr ${lv}" cx="${x}" cy="${y}" r="12.5"/>`);
+    }
+    s.push(`<text class="lbl" x="${x + 8}" y="${y - 5}">#${t.id}${LV_RANK[lv] >= 2 ? ' ' + LV[lv][0] + LV[lv][1] : ''}</text>`);
     s.push(`<circle cx="${x}" cy="${y}" r="13" fill="transparent" data-open="${t.id}"/>`);
   }
   return s.join('');
 }
 
-/* ----- list ----- */
+// The radar's words for a screen reader: range, places, and the levels.
+function radarLabel(R) {
+  const w = [`Radar, north up, range ${fmtDist(R)}`];
+  const pl = st && st.places;
+  if (pl && (pl.areas || []).length) w.push(`${pl.areas.length} protected area(s) drawn`);
+  if (pl && pl.bubble_m) w.push(`your bubble, ${fmtDist(Number(pl.bubble_m))}`);
+  const hi = tracks().filter(t => lvRank(t) >= 3 && !isStale(t)).length;
+  if (hi) w.push(`${hi} drone(s) at Warning or Critical`);
+  if (draw) w.push('drawing an area: tap to place points');
+  return w.join('; ');
+}
+
+/* ----- places (slice 16e) ----- */
+
+// Metres per degree of latitude, as the hub's flat maps (places.rs).
+const MPD = 111195;
+// (lat, lon) -> radar coordinates (radius 100 = R) from the hub's position.
+function pxy(lat, lon, R) {
+  const o = st.own, kx = MPD * Math.cos(o.lat * Math.PI / 180);
+  let dl = lon - o.lon;
+  if (dl > 180) dl -= 360; else if (dl < -180) dl += 360;
+  return [+(dl * kx / R * 100).toFixed(1), +(-(lat - o.lat) * MPD / R * 100).toFixed(1)];
+}
+// Radar coordinates -> (lat, lon).
+function llOf(x, y, R) {
+  const o = st.own, kx = MPD * Math.cos(o.lat * Math.PI / 180);
+  return [o.lat - y / 100 * R / MPD, o.lon + x / 100 * R / kx];
+}
+const metresBetween = (a, b) => Math.hypot((b[1] - a[1]) * MPD * Math.cos(a[0] * Math.PI / 180), (b[0] - a[0]) * MPD);
+const inView = v => Math.max(-96, Math.min(96, v));
+
+// The hub's places (`places`): each area's outline, named, with its
+// ceiling; the bubble as a dashed ring round you. Outlines only.
+function placesSvg(R) {
+  const p = st.places;
+  if (!p) return '';
+  const s = [];
+  if (p.bubble_m) s.push(`<circle class="bub" r="${+(Number(p.bubble_m) / R * 100).toFixed(1)}"/>`);
+  for (const a of p.areas || []) {
+    const name = `${esc(a.name)}, ceiling ${fmtAlt(Number(a.ceiling_m))}`;
+    let top = null;
+    if (a.circle) {
+      const [x, y] = pxy(Number(a.circle.lat), Number(a.circle.lon), R), r = +(Number(a.circle.r_m) / R * 100).toFixed(1);
+      s.push(`<circle class="area" cx="${x}" cy="${y}" r="${r}"/>`);
+      top = [x, y - r];
+    } else if (Array.isArray(a.poly) && a.poly.length) {
+      const pts = a.poly.map(v => pxy(Number(v[0]), Number(v[1]), R));
+      s.push(`<polygon class="area" points="${pts.map(q => q.join(',')).join(' ')}"/>`);
+      top = pts.reduce((m, q) => q[1] < m[1] ? q : m, pts[0]);
+    }
+    if (top) s.push(`<text class="alab" x="${inView(top[0])}" y="${inView(top[1] - 2)}">${name}</text>`);
+  }
+  return `<g clip-path="url(#rclip)">${s.join('')}</g>`;
+}
+
+/* ----- drawing an area ----- */
+
+// Points are kept as latitude and longitude, so zooming or the hub moving
+// never moves them. The page makes `area` lines to copy; it sends nothing.
+let draw = null;   // {shape, c: [lat, lon] | null, r: metres | null, pts: [[lat, lon]], auto}
+const POLY_MAX = 16, CONSOLE_MAX = 120;
+
+function drawSvg(R) {
+  if (!draw || !st || !st.own) return '';
+  const s = [];
+  if (draw.shape === 'circle' && draw.c) {
+    const [x, y] = pxy(draw.c[0], draw.c[1], R);
+    s.push(`<path class="drw" d="M${x - 5} ${y}H${x + 5}M${x} ${y - 5}V${y + 5}"/>`);
+    if (draw.r) s.push(`<circle class="drw" cx="${x}" cy="${y}" r="${+(draw.r / R * 100).toFixed(1)}"/>`);
+  }
+  if (draw.shape === 'poly' && draw.pts.length) {
+    const pts = draw.pts.map(q => pxy(q[0], q[1], R));
+    const list = pts.map(q => q.join(',')).join(' ');
+    s.push(pts.length >= 3 ? `<polygon class="drw" points="${list}"/>` : `<polyline class="drw" points="${list}"/>`);
+    pts.forEach((q, i) => s.push(`<circle class="drp" cx="${q[0]}" cy="${q[1]}" r="2.2"/><text class="lbl" x="${q[0] + 4}" y="${q[1] - 3}">${i + 1}</text>`));
+  }
+  return s.join('');
+}
+
+// The lines for the site file, or what is still missing.
+function drawLines() {
+  const name = $('draw-name').value.trim(), errs = [], lines = [];
+  if (!/^[A-Za-z0-9_-]{1,12}$/.test(name)) errs.push('Give it a name: up to 12 letters, digits, _ or -.');
+  const nm = name || 'NAME';
+  if (draw.shape === 'circle') {
+    if (!draw.c) errs.push('Tap the middle of the area, or press Centre on the hub.');
+    else if (!(draw.r >= 10 && draw.r <= 10000)) errs.push('Tap the edge, or type a radius from 10 to 10000 metres.');
+    else lines.push(`area ${nm} circle ${draw.c[0].toFixed(7)} ${draw.c[1].toFixed(7)} ${Math.round(draw.r)}`);
+  } else if (draw.pts.length < 3) {
+    errs.push(`Tap at least 3 corners, going round the area (${draw.pts.length} so far).`);
+  } else {
+    lines.push(`area ${nm} poly ` + draw.pts.map(q => `${q[0].toFixed(7)} ${q[1].toFixed(7)}`).join(' '));
+  }
+  const c = $('draw-ceil').value.trim();
+  if (c) {
+    const v = parseFloat(c.replace(',', '.'));
+    if (!(v >= 1 && v <= 10000)) errs.push('Ceiling: 1 to 10000 metres, or leave it empty.');
+    else lines.push(`area ${nm} ceiling ${Math.round(v)}`);
+  }
+  return {errs, lines};
+}
+
+const DRAW_HELP = {
+  circle: d => !d.c ? 'Tap the radar where the middle of the area is, or press Centre on the hub.'
+    : !d.r ? 'Now tap the edge, or type the radius.' : 'Tap again to change the radius, or Start again.',
+  poly: d => d.pts.length >= POLY_MAX ? `That is the most corners (${POLY_MAX}).`
+    : `Tap each corner in turn, going round the area (3 to ${POLY_MAX}). ${d.pts.length} so far.`,
+};
+
+function renderDraw() {
+  const pos = !!(st && st.own);
+  $('draw-open').hidden = !!draw || !pos;
+  $('draw-why').textContent = !draw && !pos && st ? 'Drawing an area needs the hub’s position (GPS, or a position typed in Settings).' : '';
+  $('draw').hidden = !draw;
+  if (!draw) return;
+  for (const b of document.querySelectorAll('[data-shape]')) b.setAttribute('aria-pressed', b.dataset.shape === draw.shape);
+  $('draw-rbox').hidden = $('draw-here').hidden = draw.shape !== 'circle';
+  $('draw-help').textContent = pos ? DRAW_HELP[draw.shape](draw) : 'The hub’s position is unknown: tapping is paused until it has one.';
+  $('draw-here').disabled = !pos;
+  const {errs, lines} = drawLines();
+  const msg = $('draw-msg');
+  const long = lines.find(l => l.length > CONSOLE_MAX);
+  const r = draw.shape === 'circle' && draw.r ? `Radius ${Math.round(draw.r)} m${imp() ? ' (' + fmtDist(draw.r) + ')' : ''}. ` : '';
+  const text = errs.length ? errs.join(' ') : r + (long ? `The outline line is ${long.length} characters: too long for the console, so put it in the file.` : 'Ready to copy.');
+  if (msg.textContent !== text) msg.textContent = text;
+  msg.className = 'msg' + (errs.length ? ' err' : '');
+  const out = $('draw-out');
+  out.hidden = !!errs.length;
+  const all = lines.join('\n');
+  if (out.textContent !== all) out.textContent = all;
+  $('draw-copy').disabled = !!errs.length;
+}
+
+function drawStart() {
+  // Hold the zoom while drawing (Auto would change it as drones move).
+  draw = {shape: 'circle', c: null, r: null, pts: [], auto: S.zoom < 0};
+  if (S.zoom < 0) S.zoom = Math.max(0, ranges().indexOf(autoRange()));
+  render();
+  $('draw-h').scrollIntoView({block: 'nearest'});
+}
+function drawStop() {
+  if (draw && draw.auto) { S.zoom = -1; save(); }
+  draw = null;
+  render();
+}
 
 function renderList() {
   const all = sorted();
@@ -753,9 +1091,10 @@ function renderList() {
     const g = t.own, l = t.loc || {};
     const stale = isStale(t), u = isUnc(t);
     const fl = flagList.find(f => f.who === idOf(t) && f.level >= 1);
-    const tags = (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') +
+    const lv = lvOf(t), th = t.threat || {}, why = th.reasons || [];
+    const tags = lvTag(lv) + (isNew(t) && !stale ? '<span class="tag new">NEW</span>' : '') + (stale ? '<span class="tag">STALE</span>' : '') +
       (fl ? `<span class="tag">${['', 'WATCH', 'WARNING', 'ALERT'][Math.min(fl.level, 3)]}</span>` : '') +
-      (isDisp(t) ? '<span class="tag disp">DISPUTED</span>' : '');
+      (isDisp(t) ? '<span class="tag disp">DISPUTED</span>' : '') + (th.friend ? '<span class="tag">FRIEND</span>' : '');
     const where = !g ? '<span class="mut">distance unknown (no position for you)</span>'
       : g.dist_m == null ? '<span class="mut">drone not sending a position yet</span>'
       : `<span class="big">${fmtDist(g.dist_m)}</span><span class="big">${bearing(g.brg)}</span>`;
@@ -763,6 +1102,9 @@ function renderList() {
     o.push(`<button type="button" class="trk${stale ? ' stale' : ''}${u ? ' unc' : ''}${isNew(t) && !stale ? ' new' : ''}" data-open="${t.id}">` +
       `<div class="r1"><span class="num">#${t.id}</span><span class="id mono">${esc(idOf(t))}</span>${tags}` +
       (u ? `<span class="mut sm">unconfirmed</span>` : '') + `</div>` +
+      (why.length ? `<div class="thr"><span class="why">${reasonText(why[0])}` +
+        (why.length > 1 ? ` <span class="mut">(+${why.length - 1} more)</span>` : '') +
+        `</span></div>` : '') +
       `<div class="r2">${where}</div>` +
       `<div class="r2"><span>Height ${fmtAlt(h)}</span><span>Speed ${fmtSpd(l.speed)}</span>` +
       `<span class="mut">${esc((t.dji && t.dji.model) || uaName(t.ua))}</span></div>` +
@@ -771,11 +1113,33 @@ function renderList() {
       `</button>`);
   }
   o.push(...flagCards());
+  o.push(...sigThreatCards());
   o.push(...linkCards());
   o.push(...rfCards());
   o.push(...wifiDroneCards());
   o.push(...aircraftCards());
   setHTML('v-list', o.join(''));
+}
+
+/* Signals with a threat level but no position (rules 12-13, slice 16c):
+   FPV video, a control link, drone Wi-Fi or rotor sound getting louder, or
+   rotor sound with no radio. Judged from loudness only: never on the radar. */
+function sigThreatCards() {
+  const all = sigThreats().slice().sort((a, b) => lvRank(b) - lvRank(a));
+  if (!all.length) return [];
+  const o = ['<h2>Getting louder (no position)</h2>',
+    '<div class="mut sm">Judged from how loud a signal or rotor sound is, not from a position: these are not on the radar, and the place named is where the hearing node stands.</div>'];
+  for (const g of all) {
+    const th = g.threat, why = th.reasons || [], notes = threatNotes(th);
+    const nodes = (g.nodes || []).map(n => Number(n) === 0 ? 'hub' : 'node ' + (Number(n) | 0)).join(', ');
+    o.push(`<div class="trk${g.age_ms > 5000 ? ' stale' : ''}">` +
+      `<div class="r1"><span class="id">${esc(g.what || 'signal')}</span>${lvTag(lvOf(g))}</div>` +
+      why.map(r => `<div class="thr"><span class="why">${reasonText(r)}</span></div>`).join('') +
+      `<div class="r3"><span>${g.basis === 'sound' ? 'from the microphone' : 'from signal strength'}</span>` +
+      (nodes ? `<span>rising on ${esc(nodes)}</span>` : '') + `<span>heard ${ago(g.age_ms)}</span>` +
+      notes.map(n => `<span>${n}</span>`).join('') + `</div></div>`);
+  }
+  return o;
 }
 
 /* Open FPV links (wfb-ng, OpenHD, RubyFPV, DroneBridge): no position, so
@@ -938,6 +1302,17 @@ function claimSection(t) {
   return o;
 }
 
+// The drone's threat level and every reason (slice 16e). Nothing on hubs
+// that judge no levels.
+function threatSection(t) {
+  const l = lvOf(t);
+  if (!l) return st && st.places ? ['<h3>Threat level</h3><p class="mut">Not judged yet: it needs a confirmed, recent position.</p>'] : [];
+  const th = t.threat, why = th.reasons || [], notes = threatNotes(th);
+  return [`<h3>Threat level</h3><p>${lvTag(l)}${notes.length ? ' <span class="mut sm">' + notes.join('; ') + '</span>' : ''}</p>` +
+    (why.length ? `<ul class="why-list">${why.map(r => `<li>${reasonText(r)}</li>`).join('')}</ul>`
+      : '<p class="mut sm">Nothing unusual about what it is doing.</p>')];
+}
+
 function renderDetail() {
   const t = findTrack(sel);
   if (!t) {
@@ -951,6 +1326,7 @@ function renderDetail() {
   o.push(`<p><span class="tag">${isStale(t) ? 'STALE &middot; not heard for 60 s+' : 'ACTIVE'}</span> ` +
     `${esc(uaName(t.ua))} &middot; heard ${ago(t.age_ms)}</p>`);
   o.push(...claimSection(t));
+  o.push(...threatSection(t));
 
   o.push(`<h3>From you</h3>`);
   if (!g) o.push(`<p class="mut">Unknown: the hub has no position for you. <button type="button" class="btn" data-go="set">Set position</button></p>`);
@@ -1076,7 +1452,7 @@ function legacyCopy(text, done) {
   let ok = false;
   try { ok = document.execCommand('copy'); } catch (e) { /* unsupported */ }
   ta.remove();
-  if (!ok) window.prompt('Copy these coordinates:', text);
+  if (!ok) window.prompt('Copy this:', text);
   done(ok);
 }
 
@@ -1108,6 +1484,30 @@ function renderSettings() {
   $('alert-msg').textContent = !canVibrate ? 'This browser can’t vibrate (iPhones don’t allow it). Use sound instead.'
     : (S.sound || S.vibrate) && !tapped() ? 'Tap the screen once so the browser allows sound and vibration.' : '';
   renderHub();
+  renderProfile();
+}
+
+// The profile picker (slice 16e): it only makes a `profile NAME` line to
+// copy; nothing is sent to the hub (a page that could switch protection
+// off over the hotspot would need the owner's decision first).
+const PROFILE_TEXT = {
+  default: 'The standard numbers.',
+  home: 'A house: a drone back on a 2nd day in two weeks is a repeat visitor; hovering under 20 m for 6 s is low hover; lingering low for 3 minutes is a Warning.',
+  facility: 'A fenced site (infrastructure, a prison): a pilot within 100 m of the fence counts as at the fence; circling it is a Warning.',
+  event: 'Many friendly drones: several at once is not counted by number (drones during jamming still are); a pilot nearby and a drone coming back count one level lower.',
+  patrol: 'A handheld unit on the move: fast inbound from 18 m/s, or arriving within 45 s; following after 120 m.',
+};
+let profPick = null;
+function renderProfile() {
+  const pl = st && st.places;
+  setHTML('prof-now', pl
+    ? `<strong>In use on the hub: ${esc(pl.profile)}</strong> &middot; ` +
+      (pl.crowd == null ? 'several at once not counted by number' : `several at once from ${Number(pl.crowd) | 0} drones`)
+    : '<span class="mut">This hub does not report a profile (it judges no threat levels).</span>');
+  for (const b of document.querySelectorAll('[data-prof]')) b.setAttribute('aria-pressed', b.dataset.prof === profPick);
+  $('prof-desc').textContent = profPick ? PROFILE_TEXT[profPick] : 'Choose one to see what it does and get its line.';
+  $('prof-line').hidden = !profPick;
+  if (profPick) $('prof-out').textContent = 'profile ' + profPick;
 }
 
 function renderHub() {
@@ -1181,7 +1581,7 @@ function applyTheme() {
 // One delegated click handler: buttons are re-drawn every second, so they
 // carry what they do in data- attributes.
 document.addEventListener('click', e => {
-  const el = e.target.closest('[data-open],[data-go],[data-close],[data-dismiss],[data-copy],[data-tab],[data-th],[data-units]');
+  const el = e.target.closest('[data-open],[data-go],[data-close],[data-dismiss],[data-copy],[data-tab],[data-th],[data-units],[data-shape],[data-prof]');
   if (!el) return;
   const d = el.dataset;
   if (d.open != null) openDetail(+d.open);
@@ -1192,7 +1592,41 @@ document.addEventListener('click', e => {
   else if (d.tab) setTab(d.tab);
   else if (d.th) { S.theme = d.th; save(); applyTheme(); render(); }
   else if (d.units) { S.units = d.units; save(); render(); }
+  else if (d.shape && draw) { draw.shape = d.shape; render(); }
+  else if (d.prof && PROFILE_TEXT[d.prof]) { profPick = d.prof; render(); }
 });
+
+// Drawing: a tap on the radar places a point (and opens no drone).
+$('radar-box').addEventListener('click', e => {
+  if (!draw) return;
+  e.stopPropagation();
+  const svg = $('radar'), m = svg && svg.getScreenCTM();
+  if (!st || !st.own || !m) return;
+  const q = new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+  const p = llOf(q.x, q.y, radarRange());
+  if (draw.shape === 'circle') {
+    if (!draw.c) draw.c = p;
+    else { draw.r = Math.round(metresBetween(draw.c, p)); $('draw-r').value = draw.r; }
+  } else if (draw.pts.length < POLY_MAX) draw.pts.push(p);
+  render();
+}, true);
+$('draw-open').onclick = drawStart;
+$('draw-close').onclick = drawStop;
+$('draw-here').onclick = () => { if (draw && st && st.own) { draw.c = [st.own.lat, st.own.lon]; render(); } };
+$('draw-undo').onclick = () => {
+  if (!draw) return;
+  if (draw.shape === 'poly') draw.pts.pop();
+  else if (draw.r) { draw.r = null; $('draw-r').value = ''; } else draw.c = null;
+  render();
+};
+$('draw-reset').onclick = () => { if (draw) { Object.assign(draw, {c: null, r: null, pts: []}); $('draw-r').value = ''; render(); } };
+$('draw-r').oninput = () => {
+  const v = parseFloat($('draw-r').value.replace(',', '.'));
+  if (draw) { draw.r = isFinite(v) && v > 0 ? v : null; render(); }
+};
+$('draw-name').oninput = $('draw-ceil').oninput = () => render();
+$('draw-copy').onclick = () => { const {errs, lines} = drawLines(); if (!errs.length) copyText(lines.join('\n'), $('draw-copy')); };
+$('prof-copy').onclick = () => { if (profPick) copyText('profile ' + profPick, $('prof-copy')); };
 function goStatus() { setTab('set'); $('hub-h').scrollIntoView(); }
 $('strip').addEventListener('click', goStatus);
 $('strip').addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goStatus(); } });

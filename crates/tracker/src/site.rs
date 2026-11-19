@@ -1362,3 +1362,30 @@ mod tests_profile {
         assert!(sum.ends_with("several at once not counted (profile), visit history kept, profile event"), "{sum}");
     }
 }
+
+#[cfg(test)]
+mod tests_page_lines {
+    use super::*;
+
+    /// The lines the phone page's "Draw an area" and profile picker make
+    /// (web/index.html, `drawLines`): 7 decimals, a whole-metre radius,
+    /// then an optional ceiling line. Copied from the page in a browser.
+    #[test]
+    fn lines_made_on_the_phone_page_parse() {
+        let circle = "area garden circle 39.9521363 -75.1638244 150";
+        let poly = "area garden poly 39.9539336 -75.1638244 39.9530349 -75.1614799 39.9503015 -75.1626521 39.9516869 -75.1655829";
+        let mut st = SiteState::default();
+        for l in [circle, poly, "area garden ceiling 45", "profile event"] {
+            let parsed = parse_line(l).unwrap_or_else(|e| panic!("{l}: {e}"));
+            st.apply(parsed);
+        }
+        let a = st.places.area("garden").unwrap();
+        assert!(matches!(&a.shape, Some(Shape::Poly(v)) if v.len() == 4));
+        assert_eq!(a.ceiling(), 45.0);
+        assert_eq!(st.places.profile, Profile::Event);
+        assert!(matches!(parse_line(circle), Ok(SiteLine::AreaShape { shape: Shape::Circle { radius_m, .. }, .. }) if radius_m == 150.0));
+        // A polygon of 4 corners fits the console's 120 characters; one of
+        // 5 or more does not (the page says so).
+        assert!(poly.len() <= 120, "{}", poly.len());
+    }
+}
