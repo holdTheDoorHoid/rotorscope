@@ -14,7 +14,7 @@ as of commit `6651ecd` (2026-11-18); each section names the source file that is 
 | [`airspace-pack`](#airspace-pack) | Rust | Builds the offline airspace map pack for the hub's SD card |
 | [`bench/`](#bench) | Python | Two-board bench tests, one command each |
 | [`cc26xx-flash`](#cc26xx-flash) | Rust | Backs up and flashes a Sonoff CC2652P dongle |
-| [`check-image-identity.sh`](#check-image-identitysh) | Shell | Shows that firmware images hold no key: two independent checkouts, one with decoy keys, must build identical images |
+| [`check-image-identity.sh`](#check-image-identitysh) | Shell | Shows that firmware images hold no key and no builder details: two independent checkouts in different folders, one with decoy keys, must build identical images |
 | [`check-wifi-blobs.sh`](#check-wifi-blobssh) | Shell | Checks the Espressif radio libraries carry the CVE-2025-52471 fix, and the esp-radio patch |
 | [`dev-board.sh`](#dev-boardsh) | Shell | Flashes and reads boards under a per-board lock |
 | [`docs-build.sh`, `docs-check.py`](#docs-buildsh-and-docs-checkpy) | Shell, Python | Builds and checks this documentation site |
@@ -30,6 +30,7 @@ as of commit `6651ecd` (2026-11-18); each section names the source file that is 
 | [`p4-prepare.sh`](#p4-preparesh) | Shell | Prepares the patched esp-hal the P4 hub needs |
 | [`partitions-node.csv`](#partitions-nodecsv) | Data | Flash layout of a multi-image node (and the hub and single-image tables) |
 | [`rawcap-pull`](#rawcap-pull) | Rust | Rebuilds node-sdr captures from a console log |
+| [`release-build.sh`, `release-parts.py`](#release-buildsh-and-release-partspy) | Shell, Python | Builds a release: the shipped images of one commit, reproducibly, with checksums and parts lists |
 | [`repro-env.sh`](#repro-envsh) | Shell | Makes a firmware image independent of checkout path and build time |
 | [`rfuav-check`](#rfuav-check) | Rust | Runs the C5's FPV and DroneID detectors over RFUAV recordings |
 | [`rid-ble-beacon`](#rid-ble-beacon) | Rust | Bench-only Bluetooth Remote ID test transmitter (laptop) |
@@ -179,27 +180,28 @@ the Zigbee backup is **simulated only** (`tests/sim_flows.rs`). Source: `tools/c
 
 ## check-image-identity.sh
 
-**Purpose:** show that firmware images hold no link key and are the same for every kit: it builds
-the same commit from two independent throwaway checkouts, one of them with decoy key files and the
+**Purpose:** show that firmware images hold no link key and nothing about the computer that built
+them, and are the same for every kit and every builder: it builds the same commit from two
+independent throwaway checkouts in **different folders**, one of them with decoy key files and the
 retired key variable set, and compares the images.
 
 ```text
 tools/check-image-identity.sh [--plain] [--paths] [node-wifi|gateway]...   default: node-wifi gateway
 ```
 
-It compares the app image espflash would write (`espflash save-image`) by SHA-256 and reports the
-ELFs too (they also carry debug sections, which are never flashed); it also fails if an image
-carries a `link-key:` tag. Both builds go through `tools/repro-env.sh`, which removes the build time
-and the absolute source paths from the image; `--plain` builds without it, to show what differs
-then (the build time, 68 bytes on node-wifi). The two checkouts are built **in turn at the same
-directory path**: cargo hashes the location of every crate under `crates/` (outside each
-firmware's own workspace) into symbol names, so the same commit built in two different directories
-gives differently laid-out images. `--paths` adds that comparison too. Result on 2026-11-18: the
-node-wifi and gateway images (and ELFs) identical. It
+It compares the app image espflash would write (`espflash save-image`) and the ELF, byte for byte;
+it fails if an image carries a `link-key:` tag, or if the image or ELF holds the home folder path,
+user name, computer name or a build folder. Both builds go through `tools/repro-env.sh` and its fixed
+build path (`/tmp/rotorscope-repro`, a link to each checkout in turn), which removes the build time,
+host paths and the checkout's location from the image. `--plain` builds without it, to show what
+differs then; `--paths` also builds the second checkout where it is, without the fixed path (on
+2026-11-19: 407 bytes of the gateway's image and 4,666 of node-wifi's differ that way). Result on
+2026-11-19: the node-wifi and gateway images and ELFs identical, nothing of the builder found. It
 builds the committed tree (`git archive HEAD`), so commit first; it needs about 2.5 GB free while it
 runs, removes everything afterwards and touches no board. Exit 0 when every image matches.
 
-Source: `tools/check-image-identity.sh`. Background: docs/LINK-KEYS-DESIGN.md section 9.
+Source: `tools/check-image-identity.sh`. Background: [Releases](release.md#how-the-bytes-are-made-the-same-everywhere)
+and docs/LINK-KEYS-DESIGN.md section 9.
 
 ## check-wifi-blobs.sh
 
@@ -669,6 +671,28 @@ cargo run --release -p rawcap-pull -- c5.log --out caps --spectrum
 It never opens a serial port itself; capture with `tools/dev-board.sh --log 60 c5a | tee c5.log`.
 Source: `tools/rawcap-pull/src/main.rs`.
 
+## release-build.sh and release-parts.py
+
+**Purpose:** build a release: the shipped firmware images of one commit, made so that anyone with
+the same tool versions builds the same bytes, with `SHA256SUMS`, a record of the build inputs and a
+parts list per image. The whole recipe, and how to check a release, is in
+[Releases: build, check, sign](release.md).
+
+```text
+tools/release-build.sh [--commit REV] [--out DIR] [--only NAME,...] [--toolchain TC] [--p4-upstream DIR]
+tools/release-build.sh --self-test
+python3 -I tools/release-parts.py --self-test
+```
+
+Images: `gateway`, `node-wifi`, `node-ble`, `node-sdr`, `rid-beacon-BENCH-ONLY` (the bench
+transmitter, not for the field) and `hub-p4`. It builds from a fresh local clone of the commit,
+offline, and refuses a working tree with changes, bench builds, key tags, builder details in an
+output and cargo settings outside the repository that change the build. It signs nothing: it ends
+with the signing step for the owner. `release-parts.py` (standard library only) turns `cargo
+metadata` and `cargo tree` for one firmware into the parts list and a CycloneDX file.
+
+Source: `tools/release-build.sh`, `tools/release-parts.py`.
+
 ## repro-env.sh
 
 **Purpose:** make a firmware image independent of where and when it is built, so two builds of one
@@ -681,11 +705,16 @@ cargo build --release "${REPRO_CARGO_ARGS[@]}"
 
 It sets `SOURCE_DATE_EPOCH` to the commit's time unless already set (the app descriptor's build
 time and date then come from the commit), and `REPRO_CARGO_ARGS` to a `--config` that adds
-`--remap-path-prefix` for this checkout (to `/rotorscope`), the cargo home (`/cargo`) and the rustup
-home (`/rustup`), so panic messages name no local paths. The argument is the target triple (default
-`riscv32imac-unknown-none-elf`). `flash-node.sh` and `check-image-identity.sh` use it. It does not
-make images independent of the checkout's directory: build in the same directory path to get the
-same image (see `check-image-identity.sh`).
+`--remap-path-prefix` for the home folder (to `/home`), the rustup home (`/rustup`), the cargo home
+(`/cargo`) and this checkout (`/rotorscope`), so panic messages and debug info name no local paths.
+The argument is the target triple (default `riscv32imac-unknown-none-elf`).
+
+Remapping alone does not make the image independent of the checkout's folder: cargo puts the
+location of every `crates/*` crate into symbol names. For that, call `repro_link <checkout>` after
+sourcing it: it points the fixed path `/tmp/rotorscope-repro` at the checkout (under a lock, so one
+build uses it at a time) and adds `--manifest-path` through it to `REPRO_CARGO_ARGS`.
+`release-build.sh` and `check-image-identity.sh` build that way; `flash-node.sh` uses the remapping
+only. It also defines `repro_leaks <file>...`, the search for builder details both scripts use.
 
 Source: `tools/repro-env.sh`.
 
@@ -774,7 +803,7 @@ DragonSync inputs are in
 ## Where this lives in the code
 
 - `tools/*/src/main.rs`: each Rust tool's argument parser and usage text
-- `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`, `tools/fetch-droneid-samples.sh`, `tools/docs-build.sh`, `tools/check-wifi-blobs.sh`, `tools/check-image-identity.sh`, `tools/repro-env.sh`: the scripts, documented in their header comments
+- `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`, `tools/fetch-droneid-samples.sh`, `tools/docs-build.sh`, `tools/check-wifi-blobs.sh`, `tools/check-image-identity.sh`, `tools/repro-env.sh`, `tools/release-build.sh`, `tools/release-parts.py`: the scripts, documented in their header comments
 - `tools/partitions-node.csv`, `tools/partitions-single.csv`, `tools/partitions-hub.csv`: flash layouts
 - `tools/bench/run.py`, `tools/bench/judge.py`: the bench runner
 - `Cargo.toml`: which tools are workspace members
