@@ -631,6 +631,7 @@ fn signal_threats_reach_json_and_the_tracker_stays_small() {
         core::mem::size_of::<SignalThreat>()
     );
     assert!(hub < 1 << 20, "{hub}");
+    std::println!("S3 Tracker<64, 32>: {} B", core::mem::size_of::<crate::Tracker<64, 32>>());
     assert!(core::mem::size_of::<Trends<0>>() <= 32, "{}", core::mem::size_of::<Trends<0>>());
 }
 

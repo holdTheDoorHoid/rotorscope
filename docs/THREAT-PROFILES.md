@@ -1,8 +1,9 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
-Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a, 16b and 16d built
-(host tests and P4 firmware compile; not yet on the bench). See "Slice 16a as built", "Slice 16b as
-built" and "Slice 16d as built" at the end.**
+Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a, 16b, 16c and 16d built
+(host tests and P4 firmware compile; not yet on the bench; 16c's sound half waits for the acoustic
+branch). See "Slice 16a as built", "Slice 16b as built", "Slice 16d as built" and "Slice 16c as
+built" at the end.**
 
 Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
 repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
@@ -162,7 +163,7 @@ Presets that set the thresholds, so nobody tunes nineteen numbers by hand:
 |---|---|---|
 | 16a | path history, areas, bubble, own speed, threat level and reasons, friends, rules 1-6, lost-track hold, screen/JSON/evidence | nothing |
 | 16b | rules 7-11 (lingering, circling, low hover, drop, following) | 16a |
-| 16c | rules 12-13 (signal and sound trends, dark drone) | 16a; rule 13 needs the acoustic branch |
+| 16c | rules 12-13 (signal and sound trends, dark drone) | 16a; rule 13 needs the acoustic branch (built 2026-11-19 with a plain sound input; see below) |
 | 16d | rules 14-19 (across drones and days, repeat-visitor history on SD) | 16a-b |
 | 16e | profiles, tuning from bench and field runs, drawing areas on the phone map | web head linking |
 
@@ -420,3 +421,135 @@ Where it differs from the design, or needs a word:
   sum larger), and rules 14-19 run in their own 544-byte frame below it. The card file's reading
   runs in a 720-byte frame from the main loop, its writing in 608. The worst-case JSON line is 3,443
   bytes (the buffer is 3,456, unchanged). Host tests: 1,547 passed, 5 ignored (16b: 1,523).
+
+## Slice 16c as built (2026-11-19)
+
+Rules 12 and 13, for what has **no position**: FPV video, a control link's downlink, drone Wi-Fi,
+open FPV links, and rotor sound; and rule 14 for a striker without a position. Code:
+`crates/tracker/src/behaviour/trend.rs` (the level history, the rules, the place choice, the words),
+wired into `Tracker::tick_behaviour` after the drones; tests in `tests_trend.rs`. Each signal gets
+its **own** threat entry (`SignalThreat`, with the same `TrackThreat` level a drone has, moved by
+the same policy: rises at once, comes down 30 s after, snoozable), because these signals are not
+drone tracks and cannot be tied to one. Like the other slices it runs only on hubs that keep path
+history (the P4); the S3 hub and the laptop viewer keep no signal history.
+
+Where the levels come from (recorded as they arrive, per node, so two nodes hearing one emitter keep
+two histories even though the emitter table keeps only the latest node):
+
+| Signal | Level used | Which ones |
+|---|---|---|
+| RF emitter | dB above the node's noise floor | analog video, HDZero, LTE-style, narrow Wi-Fi, DJI video, DJI O4 video, DJI FPV air unit. **Not** the DJI controller (the pilot's), an unconfirmed FPV carrier (a Wi-Fi access point looks the same) or plain energy |
+| control link | RSSI (dBm) | only the drone's own packets (downlink, or direction unknown) of a link at least "likely"; the uplink is the pilot's radio, which does not move with the drone. Recorded from `ControlTable::ingest`, which the hub keeps outside the tracker |
+| drone Wi-Fi | RSSI | every Wi-Fi drone (the transmitter may be the drone or its controller) |
+| open FPV link | RSSI | air-to-ground and unknown-direction streams |
+| rotor sound | loudness (dBFS) | handed in once a second (`Tracker::hear_sound`), see below |
+
+The numbers in use (all in `trend.rs`, to tune on the bench):
+
+| What | Value | Why |
+|---|---|---|
+| history kept | 32 s of one-second levels (the loudest each second), 3 nodes per signal | 12 s for the trend, 20 s before it for "louder than before" |
+| the trend is judged over | the last 12 s; at least 5 seconds with a sample, spanning at least 5 s, the newest at most 2 s old | sparse band scans (one sample every 2 s) still work |
+| a rise is | at least 6 dB between the median of the first three samples and the median of the last three | 6 dB is halving the distance in free space (research §4); medians of three ignore one noisy sample |
+| steadily | Kendall's tau at least 0.5 (most pairs of samples agree it went up) | banking swings of 8 dB every few seconds fail it, a real rise with them on top passes |
+| not a step | no step between consecutive medians over two thirds of the rise | a video transmitter leaving pit mode (+14 dB in one second) is not an approach |
+| a new high | the new level above every sample of the 20 s before the window | a drone coming out of a null or a bank is back where it was, not closer |
+| not a crossing | no other node of the same signal falling steadily by 6 dB at the same time | research §4: up on one, down on another is a crossing track |
+| Warning | rising on two or more nodes at once, or the microphone agreeing (rotor sound getting louder, a dark drone, or a dark drone's level still held while the sound is heard) | rule 12's "Warning with 13" |
+| rule 13 | rotor sound heard for 5 s, not a low hum, not explained by a crewed aircraft, and no drone heard by radio from 15 s before the sound began until now | the acoustic branch's 5 s and 15 s |
+| "a drone heard by radio" | a confirmed drone track (but not one whose position is over 600 m from the hub: rotor sound carries 50-200 m), an open FPV link, an emitter of a kind that alerts, a Wi-Fi drone, a control link | a forged Remote ID far away cannot hide a dark drone; one forged near the hub can (and is itself in the bubble or the area) |
+
+Choices made here, and why (open to change):
+
+- **Which place a signal closes on.** It has no position, so the place is that of the node(s)
+  hearing it rise. The hub's own receiver (node 0), the microphone, and every node whose position
+  the site file does not give count as **at the hub**: the bubble when it is on, else the area(s)
+  the hub stands in or is nearest to (within the area's own size, at least 50 m, as 16d's "at or
+  near"), else the only area if there is exactly one. A node placed with a `node` line gives the
+  area(s) it stands in or is nearest to, else the bubble when the node is inside it. When nothing
+  fits, the rule still fires and the words name no place ("FPV video signal getting louder fast on
+  1 node (+8 dB in 7 s)"; JSON `place` null). A rise seen on two nodes in different areas names the
+  first; the striker check tries each.
+- **Rule 12 levels**: Caution on one node; Warning on two at once or with the microphone. Rotor
+  sound getting louder is rule 12 too: Caution, Warning with a radio signal getting louder at the
+  same time; dark and getting louder is a Warning (12 with 13), not Critical: lawn machinery and
+  traffic also get louder as they come.
+- **Rule 14 without a position**: a radio signal getting louder (not a sound: the spotter's own
+  rotors may be what gets louder) calls `Across::striker_if` with the place, as 16d left the hook.
+  Critical at a fixed area; Warning at the moving bubble (as 16d's slow striker there: the signal
+  has no speed). A spotter that is itself still heard flying in (its own beeline or fast inbound)
+  is not paired with it: the signal may be its own video. The spotter is marked as in 16d and its
+  reason names the signal: `spotter: a signal getting louder (S3) is closing on house` (JSON
+  `sig`, the signal's entry id, in place of `other`).
+- **Friends** cannot cover these signals: a `friend` line names a serial, and none of them carries
+  one. Nothing is lowered.
+- **Words say it is a trend**: `FPV video signal getting louder fast on 2 nodes (+8 dB in 7 s),
+  nearing house`, `..., rotor sound too`, `rotor sound getting louder (+7 dB in 6 s), nearing you`,
+  `rotor sound, no radio heard, for 29 s, near house`; the evidence and console text start with what
+  it is and "(no position)": `Warning: Analog video 5740.0 MHz (no position): ...`. Screen strip:
+  `CAUTION FPV video louder fast, house`, `WARNING FPV video louder fast, 2 nodes, house`, `WARNING
+  rotor sound, no radio heard`, `CRITICAL FPV video after spotter to house`. The strip shows a
+  signal only when it outranks the most serious drone (on a tie the drone's, judged from its
+  position, wins). The screen's Snooze snoozes signals at Warning or above too (one `Setting`
+  event each).
+- **Outputs**: a `{"t":"signal_threat"}` line per signal with a level (P4 console, once a second),
+  with `basis` (`"signal_trend"` or `"sound"`: never a position), `src` and `src_id` (the table and
+  entry it came from), `kind`, `what` (from the firmware's own tables, never over-the-air text),
+  `nodes` (rising now) and `threat` as a drone's; reasons for rules 12 and 13 have no `m` and gain
+  `db`, `nodes`, `kind`, `agreed` (`json.rs`). `/api/state` (`state_full`) gains
+  `"signal_threats":[...]` after the Wi-Fi drones. Evidence code 28 carries rule numbers 12 and 13,
+  and flag bit 4 ("no position": the id is the signal's entry, not a drone track).
+  [EVIDENCE-FORMAT.md](EVIDENCE-FORMAT.md).
+- **No CoT event for a signal.** CoT is a point on a map; a signal without a position has none, and
+  putting one at the hub or the area's middle is exactly the "reads as a position" mistake the
+  design forbids. (No hub that sends CoT runs the levels yet either.) The spotter's CoT remarks name
+  the signal (`spotter: a signal getting louder (S3) is closing on house`).
+
+**Expected false alarms** (THREAT-TACTICS.md §6):
+
+- 12: **the unit walking or driving towards a transmitter** (a handheld unit, or a node carried
+  towards a pilot standing still): nothing here can tell that from the drone approaching. A pilot
+  walking towards a node with Wi-Fi goggles or a DJI Wi-Fi drone's phone. Two co-located nodes
+  (the gateway and a relayed node on the same desk) give "2 nodes" for one view of the drone: the
+  Warning for two nodes assumes they stand apart. A video transmitter that ramps its power slowly
+  (not in one step). Mitigated, with tests: banking swings, a null that recovers, switching on at
+  full strength (one weak first sample included), pit mode, a still pilot, one spike, a crossing.
+- 13: a drone whose radio the hub does not hear (a protocol or band no node covers, a link out of
+  range of the nodes but the drone within earshot), a crewed aircraft the hub does not track, lawn
+  and garden machines, traffic tones above 140 Hz. Low hums (below 140 Hz) and aircraft-explained
+  sounds never count.
+- 14 without a position: a hobbyist's FPV arriving after another drone hovered; the spotter's own
+  video getting louder as it drifts in slowly (only the spotter flying a beeline is excluded).
+
+**What is not done**:
+
+- **Nothing feeds the microphone yet.** The `acoustic` branch is not merged; on this branch the
+  sound half (rule 13 and rotor sound in rule 12) is host-tested only. **What the acoustic merge
+  must wire** (a few lines in the hub's sound loop, `firmware/hub-p4/src/ear.rs` on that branch):
+  after `tracker.ingest_sound(&report, now)` returns `Some(id)`, find the contact in
+  `tracker.sounds()` and call
+  `tracker.hear_sound(&RotorSound { id: c.id.0, first_ms: c.first_seen_ms, last_ms: c.last_seen_ms,
+  level_db: c.level_dbfs, low_hum: c.kind == SoundKind::LowHum, aircraft: c.kind ==
+  SoundKind::Aircraft }, now)`. The acoustic branch's `SoundTable` lives in the tracker without
+  path-history parameters (`impl Tracker<N, A>`); its `Tracker<N, A>` impls need the third
+  parameter `P` added on merge. Do **not** use its `radio_drone_recent` for rule 13:
+  `Tracker::last_radio_drone_ms` (this branch) is the rule's check (it adds control links and
+  leaves out far-away tracks); the two can be unified when it merges. The acoustic evidence codes
+  23 and 24 are untouched.
+- The sound trend uses the detector's loudness only; the research's other cue (blade-pass pitch
+  rising, throttle or Doppler) is not used.
+- Not on the bench: every number above is from scripted levels, not real FPV or sound recordings.
+  The first bench job is a walk-in and a fly-in with one FPV quad and two nodes, to see the real
+  slope, swings and spikes.
+- **Measured**: the P4 tracker is 416,464 bytes (16d: 393,904; the signal slots 22,560, 352 bytes
+  each). The S3 tracker (`Tracker<64, 32>`) grew 32 bytes (87,760). The widest `signal_threat` line
+  is 730 bytes (buffer 1,024). The P4 firmware compiles with no warnings; the main stack frame is
+  68,128 bytes (16d: 68,112); the once-a-second housekeeping frame is 3,632 bytes (16d: 3,712), and
+  rules 12-14 for signals run in their own 816-byte frame below it; the rise announcement for
+  signals has its own 896-byte frame. Host tests: 1,569 passed, 5 ignored (16d: 1,547); tracker 324
+  (16d: 304).
+- **Hub wiring** (`firmware/hub-p4`): rises are announced with the drones' (`app.rs`,
+  `announce_signal_levels`), the console prints the `signal_threat` lines (`report.rs`), the
+  screen's Snooze covers signals (`site.rs`). Emitters, Wi-Fi drones and open links reach the
+  tracker as before; control links through the control table, which now hands each packet's level
+  to the tracker. No link protocol change; `crates/link` untouched.
