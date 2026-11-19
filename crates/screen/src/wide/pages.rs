@@ -1421,10 +1421,24 @@ impl P<'_, '_> {
         let auto = st.theme == ThemeMode::Auto;
         let note_h = if auto { 30 } else { 0 };
         let top = y0 + 44;
-        let pitch = ((self.bottom - top - note_h - 4) / rows.len() as i32).min(38);
+        let avail = self.bottom - top - note_h - 4;
+        // All rows at up to 38 px each; when the caveats strip leaves too
+        // little room, 30 px rows that scroll to keep the cursor in view.
+        let (pitch, fit) = if avail / rows.len() as i32 >= 30 {
+            ((avail / rows.len() as i32).min(38), rows.len())
+        } else {
+            (30, (avail / 30).max(1) as usize)
+        };
+        let cur = if editing { ui.settings_row() } else { 0 };
+        let start = if cur >= fit { cur + 1 - fit } else { 0 };
+        if fit < rows.len() {
+            // Scrolled: say which rows show, beside the title.
+            let t: String<24> = fmt(format_args!("rows {}-{} of {}", start + 1, start + fit, rows.len()));
+            self.tr(&t, W - M, y0 + 6, &f.small, l.dim);
+        }
         let mut v: String<40> = String::new();
         let mut y = top;
-        for (i, row) in rows.iter().enumerate() {
+        for (i, row) in rows.iter().enumerate().skip(start).take(fit) {
             let sel = editing && ui.settings_row() == i;
             if sel {
                 self.c.rrect(8, y, W - 16, pitch - 4, l.radius.min(8), l.sel_fill);
