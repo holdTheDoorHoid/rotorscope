@@ -611,6 +611,21 @@ impl Logger {
         self.ev_file.as_ref().map_or("-", |f| f.name.as_str())
     }
 
+    /// Whether the next [`Logger::tick`] may block the loop for long: a card
+    /// probe, the mount (about 0.6 s) or the evidence folder's retry is due.
+    /// False between probes and while recording normally (writes are
+    /// short). The main loop sends a link beacon first when this holds, and
+    /// only then, so beacons keep their period the rest of the time (found
+    /// on the bench, 2026-11-19: asked on every pass, the early beacon made
+    /// the rate 4 a second, not 2).
+    pub fn slow_step_due(&self, now: u64) -> bool {
+        match self.state {
+            State::NoCard(at) | State::Error(at) => now >= at,
+            State::Waking(_, next) => now >= next,
+            State::Recording => self.ev_file.is_none() && now >= self.ev_retry_at,
+        }
+    }
+
     /// One step. Call every main-loop pass. `utc_ms`: GPS time now, if
     /// known; `gps_present`: a receiver is answering (worth waiting for its
     /// time before naming the file).

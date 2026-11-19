@@ -177,9 +177,11 @@ the old-firmware board of step 5.
    `cargo run -p link-key -- node c5a --label c5a`; the same for `c5b`. Then
    `cargo run -p link-key -- hub-roster p4` and `cargo run -p link-key -- show` (slots 0 and 1,
    their key checks).
-5. Reset the P4. Console: `linkauth: rskit keyed, kit <id>, 2 node slot(s) loaded`, two `slot`
-   lines naming the nodes' MACs, `rsboot read-only latest=<N>`; the strip shows
-   `NO BOOT COUNTER: link closed` (expected in this build).
+5. Reset the P4. Console: `linkauth: rsboot read-only latest=<N> (rskit-readonly build: no
+   epoch, keyed link stays closed)` and `linkauth: rskit keyed, kit <id>, but NO BOOT COUNTER
+   this boot: keyed link CLOSED`; the strip shows `NO BOOT COUNTER: link closed` (expected in
+   this build). The `2 node slot(s) loaded` line and the two `slot` lines naming the nodes' MACs
+   come with the default build of step 2, once the hub has an epoch.
 
 ### 2. Let the hub write its boot counter
 

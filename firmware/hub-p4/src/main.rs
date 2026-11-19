@@ -542,9 +542,12 @@ fn main() -> ! {
                 console::pump();
             });
         }
-        // The SD step can block ~0.6 s (the mount): a beacon first if the
-        // last is 250 ms old, so the beacon gap stays under 1 s.
-        gw.beacon_if_older(ms, 250);
+        // The SD step can block ~0.6 s (a card probe or the mount): when one
+        // is due, a beacon first if the last is 250 ms old, so the beacon gap
+        // stays under 1 s. Not on every pass: that halved the beacon period.
+        if sdlog.slow_step_due(ms) {
+            gw.beacon_if_older(ms, 250);
+        }
         sdlog.tick(app.tracker, faa, &mut ev, ms, utc, gps.status.state != tracker::json::GpsState::Absent);
         if let Some((st, facts)) = sdlog.take_site() {
             site.load(&st, &facts, &mut app, &mut ev, ms);
