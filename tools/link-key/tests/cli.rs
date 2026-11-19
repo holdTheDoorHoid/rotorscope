@@ -29,6 +29,8 @@ fn run(tmp: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_link-key"))
         .args(args)
         .env("TMPDIR", tmp)
+        // The runtime directory is preferred when set: keep the test in its own.
+        .env("XDG_RUNTIME_DIR", tmp)
         .env_remove("ROTORSCOPE_KIT_DIR")
         .env_remove("ROTORSCOPE_BENCH")
         .output()

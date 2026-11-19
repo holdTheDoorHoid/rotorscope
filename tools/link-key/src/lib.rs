@@ -546,6 +546,17 @@ pub mod interrupt {
     }
 }
 
+/// Where the private temporary directory goes: the user's runtime directory
+/// when the system gives one (`XDG_RUNTIME_DIR`: memory-backed and readable
+/// by that user only, so a key image never reaches a disk), otherwise the
+/// system's temporary directory.
+pub fn tmp_parent(runtime_dir: Option<std::ffi::OsString>, fallback: PathBuf) -> PathBuf {
+    match runtime_dir.map(PathBuf::from) {
+        Some(p) if p.is_absolute() && p.is_dir() => p,
+        _ => fallback,
+    }
+}
+
 /// What the board-writing commands need.
 pub struct Ctx<'a> {
     /// Holds `kit.key` and `kit.roster`.

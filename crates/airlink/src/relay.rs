@@ -1035,7 +1035,8 @@ pub fn parse_mac(s: &str) -> Option<Mac> {
     let mut parts = s.split(':');
     for b in m.iter_mut() {
         let p = parts.next()?;
-        if p.len() != 2 {
+        // Two hex digits: `from_str_radix` would take a sign ("+f" as 0x0f).
+        if p.len() != 2 || !p.bytes().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
         *b = u8::from_str_radix(p, 16).ok()?;
@@ -1093,6 +1094,14 @@ impl DropPattern {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mac_is_six_pairs_of_hex_digits_and_nothing_else() {
+        assert_eq!(super::parse_mac("02:00:00:00:00:1a"), Some([2, 0, 0, 0, 0, 0x1a]));
+        for bad in ["+2:00:00:00:00:1a", "02:00:00:00:00:-1", "02:00:00:00:00", "02:00:00:00:00:1a:00", "02:00:00:00:00:1g"] {
+            assert_eq!(super::parse_mac(bad), None, "{bad}");
+        }
+    }
+
     extern crate std;
     use std::vec::Vec;
 

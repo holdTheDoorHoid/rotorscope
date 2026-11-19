@@ -154,3 +154,11 @@ fn key_classes_are_named() {
     assert_eq!(Algorithm::from_record_version(1), Some(Algorithm::EcdsaP256Sha256));
     assert_eq!(Algorithm::EcdsaP256Sha256.name(), "ecdsa-p256-sha256");
 }
+
+#[test]
+fn hex_is_hex_digits_only() {
+    assert_eq!(verify::unhex(" 00ffA1 "), Some(vec![0, 0xff, 0xa1]));
+    for bad in ["+f", "0+", "-1", "0x00", "abc", "zz", "00 ff"] {
+        assert_eq!(verify::unhex(bad), None, "{bad}");
+    }
+}

@@ -151,10 +151,18 @@ pub(crate) fn parse_head(head: &str) -> (Request, usize) {
                 *slot = Some(v.to_string());
             }
         };
+        // The two headers the origin check reads may be sent once. Sent
+        // twice, which one counts is a guess: the value becomes one the
+        // check refuses (no authority contains a space).
+        let once = |name: &str, slot: &mut Option<String>| {
+            if k.eq_ignore_ascii_case(name) {
+                *slot = Some(if slot.is_some() { "sent twice".to_string() } else { v.to_string() });
+            }
+        };
         set("if-none-match", &mut r.if_none_match);
         set("content-type", &mut r.content_type);
-        set("host", &mut r.host);
-        set("origin", &mut r.origin);
+        once("host", &mut r.host);
+        once("origin", &mut r.origin);
         if k.eq_ignore_ascii_case("content-length") {
             len = v.parse().unwrap_or(usize::MAX);
         }
@@ -470,6 +478,16 @@ mod tests {
         // A GET needs no content type but still the right Host.
         let get = req("GET /api/state HTTP/1.1\nHost: 127.0.0.1:8080\n");
         assert_eq!(check(&get, b), Ok(()));
+        // Host or Origin sent twice is refused, whichever order they come in.
+        for twice in [
+            "Host: evil.example\nHost: 127.0.0.1:8080\n",
+            "Host: 127.0.0.1:8080\nHost: evil.example\n",
+            "Host: 127.0.0.1:8080\nhost: 127.0.0.1:8080\n",
+            "Host: 127.0.0.1:8080\nOrigin: http://evil.example\nOrigin: http://127.0.0.1:8080\n",
+        ] {
+            let get = req(&format!("GET /api/state HTTP/1.1\n{twice}"));
+            assert_eq!(check(&get, b), Err(Refusal::Origin), "{twice}");
+        }
         let get = req("GET /api/state HTTP/1.1\nHost: evil.example:8080\n");
         assert_eq!(check(&get, b), Err(Refusal::Origin));
     }

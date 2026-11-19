@@ -111,7 +111,7 @@ fn run(argv: &[String]) -> Result<String, String> {
     let mut rng = os_random;
     let mut ctx = Ctx {
         kit_dir: kit_dir.clone(),
-        tmp_parent: std::env::temp_dir(),
+        tmp_parent: link_key::tmp_parent(std::env::var_os("XDG_RUNTIME_DIR"), std::env::temp_dir()),
         board: if a.dry_run { &mut dry } else { &mut real },
         dry_run: a.dry_run,
         rng: &mut rng,

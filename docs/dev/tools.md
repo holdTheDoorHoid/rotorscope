@@ -612,8 +612,9 @@ How it behaves:
   above it, so the nodes follow a re-provisioned hub at once.
 - A key image goes to a 0600 file in a private temporary directory and is overwritten and deleted
   as soon as it is written, also on Ctrl-C (the command then says "interrupted" and exits 130).
-  Only `kill -9` or a power cut in that second leaves `link-key-<pid>-<random>` in the system
-  temporary directory.
+  The directory is made in your runtime directory (`XDG_RUNTIME_DIR`, held in memory and readable
+  only by you) when the system provides one, so the image never reaches a disk; otherwise in the
+  system temporary directory. Only `kill -9` in that second leaves `link-key-<pid>-<random>` there.
 - `kit new --force` replaces the master: then the hub and every node must be provisioned again.
 - `link-key new` and `link-key id` (the one-key-per-kit commands) are removed. A leftover
   `tools/link.key` is read by nothing; keep it only until every board runs current firmware.

@@ -234,7 +234,8 @@ pub fn parse_mac(s: &str) -> Option<[u8; 6]> {
     let mut parts = s.split([':', '-']);
     for b in out.iter_mut() {
         let p = parts.next()?;
-        if p.len() != 2 {
+        // Two hex digits: `from_str_radix` would take a sign ("+f" as 0x0f).
+        if p.len() != 2 || !p.bytes().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
         *b = u8::from_str_radix(p, 16).ok()?;
@@ -931,6 +932,7 @@ mod tests {
     fn refuses_bad_lines_with_a_reason() {
         for bad in [
             "node 02:00:00 1 2",
+            "node +2:00:00:00:00:18 39.9 -75.1",
             "node 02:00:00:00:00:18 91 0",
             "node 02:00:00:00:00:18 39.9",
             "node all there",

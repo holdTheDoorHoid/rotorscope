@@ -599,3 +599,14 @@ fn secret_file_lifecycle() {
     assert!(!p.exists() && !dir.exists());
     assert_eq!(std::fs::read(&link).unwrap(), vec![0u8; 100]);
 }
+
+#[test]
+fn the_temporary_directory_prefers_the_users_runtime_directory() {
+    let t = TempDir::new();
+    let fallback = PathBuf::from("/nonexistent-fallback");
+    assert_eq!(tmp_parent(Some(t.0.clone().into_os_string()), fallback.clone()), t.0);
+    // Unset, relative, or not a directory: the system's.
+    assert_eq!(tmp_parent(None, fallback.clone()), fallback);
+    assert_eq!(tmp_parent(Some("relative/dir".into()), fallback.clone()), fallback);
+    assert_eq!(tmp_parent(Some(t.0.join("missing").into_os_string()), fallback.clone()), fallback);
+}
