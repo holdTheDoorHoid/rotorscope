@@ -140,7 +140,8 @@ fn age_s(rx_ms: u64, now_ms: u64) -> f64 {
     now_ms.saturating_sub(rx_ms) as f64 / 1000.0
 }
 
-fn east_north(speed: f64, dir_deg: f64) -> (f64, f64) {
+/// East and north parts of a speed along a direction (degrees true).
+pub fn east_north(speed: f64, dir_deg: f64) -> (f64, f64) {
     let r = dir_deg.to_radians();
     (speed * sin(r), speed * cos(r))
 }
@@ -222,6 +223,43 @@ pub fn height_difference(d: &Body, a: &Body) -> (Option<f64>, AltBasis) {
     }
 }
 
+/// Where `b` is relative to `a` now, metres east and north: the distance
+/// between their reported positions, each moved on along its own velocity
+/// for the time since it was received (at most [`MAX_EXTRAPOLATE_S`]).
+/// Shared with the threat-level rules ([`crate::behaviour`]).
+pub fn relative_now(a: &Body, b: &Body) -> (f64, f64) {
+    let rb = geo::range_bearing(a.lat, a.lon, b.lat, b.lon);
+    let (mut px, mut py) = east_north(rb.distance_m, rb.bearing_deg);
+    let step = |x: &Body| {
+        let t = x.age_s.min(MAX_EXTRAPOLATE_S);
+        x.vel.map_or((0.0, 0.0), |(e, n)| (e * t, n * t))
+    };
+    let (be, bn) = step(b);
+    let (ae, an) = step(a);
+    px += be - ae;
+    py += bn - an;
+    (px, py)
+}
+
+/// The closest point of approach of two things moving in straight lines:
+/// `rel_pos` is where the second is from the first now (metres east,
+/// north), `rel_vel` how fast that changes (m/s). `Some((seconds, metres))`
+/// when they are getting closer and will be closest within `lookahead_s`;
+/// `None` when they are not closing (or hardly moving relative to each
+/// other). Shared with the threat-level rules ([`crate::behaviour`]).
+pub fn closest_approach(rel_pos: (f64, f64), rel_vel: (f64, f64), lookahead_s: f64) -> Option<(f64, f64)> {
+    let ((px, py), (vx, vy)) = (rel_pos, rel_vel);
+    let v2 = vx * vx + vy * vy;
+    if v2 <= 0.01 {
+        return None;
+    }
+    let t = -(px * vx + py * vy) / v2;
+    (t > 0.0 && t <= lookahead_s).then(|| {
+        let (cx, cy) = (px + vx * t, py + vy * t);
+        (t, sqrt(cx * cx + cy * cy))
+    })
+}
+
 /// What [`assess`] found: level, horizontal range now (m), height
 /// difference now (m), closest approach (seconds, metres), height basis.
 pub type Assessment = (Level, f64, Option<f64>, Option<(f64, f64)>, AltBasis);
@@ -229,16 +267,7 @@ pub type Assessment = (Level, f64, Option<f64>, Option<(f64, f64)>, AltBasis);
 /// Judge one pair. `None`: nothing worth reporting.
 pub fn assess(d: &Body, a: &Body) -> Option<Assessment> {
     // Relative position (aircraft from drone), each extrapolated to now.
-    let rb = geo::range_bearing(d.lat, d.lon, a.lat, a.lon);
-    let (mut px, mut py) = east_north(rb.distance_m, rb.bearing_deg);
-    let step = |b: &Body| {
-        let t = b.age_s.min(MAX_EXTRAPOLATE_S);
-        b.vel.map_or((0.0, 0.0), |(e, n)| (e * t, n * t))
-    };
-    let (ae, an) = step(a);
-    let (de, dn) = step(d);
-    px += ae - de;
-    py += an - dn;
+    let (px, py) = relative_now(d, a);
     let range = sqrt(px * px + py * py);
 
     let (dz, basis) = height_difference(d, a);
@@ -254,17 +283,7 @@ pub fn assess(d: &Body, a: &Body) -> Option<Assessment> {
     // still: a hovering drone often sends no speed.
     let (ve, vn) = a.vel.unwrap_or((0.0, 0.0));
     let (we, wn) = d.vel.unwrap_or((0.0, 0.0));
-    let (vx, vy) = (ve - we, vn - wn);
-    let v2 = vx * vx + vy * vy;
-    let cpa = if v2 > 0.01 {
-        let t = -(px * vx + py * vy) / v2;
-        (t > 0.0 && t <= LOOKAHEAD_S).then(|| {
-            let (cx, cy) = (px + vx * t, py + vy * t);
-            (t, sqrt(cx * cx + cy * cy))
-        })
-    } else {
-        None
-    };
+    let cpa = closest_approach((px, py), (ve - we, vn - wn), LOOKAHEAD_S);
     let dz_at = |t: f64| dz.map(|z| z + (a.vz.unwrap_or(0.0) - d.vz.unwrap_or(0.0)) * t);
 
     let mut level = None;
