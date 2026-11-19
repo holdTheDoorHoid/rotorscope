@@ -20,7 +20,8 @@
 //! the streak travels in the job record).
 //!
 //! Node robustness counters (WP-13 section 7, for `NodeHealth`): plans
-//! refused, deaf fall-backs ([`DeafWatch`]), switches refused and seconds
+//! refused, deaf fall-backs and their verdicts ([`DeafWatch`]), switches
+//! refused and seconds
 //! until the next switch is allowed, read with [`health`].
 #![no_std]
 
@@ -35,14 +36,18 @@ use esp_bootloader_esp_idf::partitions::{
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
 
 use link::{Assignment, NodeRole};
-pub use nodeimage::deaf::{DEAF_MS, DeafWatch};
+pub use nodeimage::deaf::{Counts as DeafCounts, DEAF_MS, DeafWatch, Event as DeafEvent, PROBATION_MS};
 use nodeimage::switchlimit;
 use nodeimage::{HEAD_LEN, Image, JOB_LABEL, JOB_MAX};
 
 // Counters. Each has one writer (the image's control task), so a plain load
 // and store is enough: the C3 has no atomic read-modify-write.
 static PLANS_REFUSED: AtomicU32 = AtomicU32::new(0);
+// The image's `DeafWatch` counters, copied here for `health`.
 static DEAF_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static DEAF_BLAMED: AtomicU32 = AtomicU32::new(0);
+static DEAF_OUTAGES: AtomicU32 = AtomicU32::new(0);
+static DEAF_REFUSED: AtomicU32 = AtomicU32::new(0);
 static SWITCHES_REFUSED: AtomicU32 = AtomicU32::new(0);
 /// The switch streak this image was started with (from the job record).
 static STREAK: AtomicU8 = AtomicU8::new(0);
@@ -57,9 +62,12 @@ pub fn count_plan_refused() {
     bump(&PLANS_REFUSED);
 }
 
-/// The node fell back to its built-in plan ([`DeafWatch::check`]).
-pub fn count_deaf_fallback() {
-    bump(&DEAF_FALLBACKS);
+/// Publish the image's deaf counters ([`DeafWatch::counts`]) for [`health`].
+pub fn set_deaf_counts(c: DeafCounts) {
+    DEAF_FALLBACKS.store(c.fallbacks, Relaxed);
+    DEAF_BLAMED.store(c.blamed, Relaxed);
+    DEAF_OUTAGES.store(c.outages, Relaxed);
+    DEAF_REFUSED.store(c.refused, Relaxed);
 }
 
 /// Seconds since boot.
@@ -72,7 +80,14 @@ pub fn uptime_s() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Health {
     pub plans_refused: u32,
+    /// Fall-backs to the built-in plan, and what each turned out to be:
+    /// the plan was blamed (gateway heard within the probation) or the
+    /// gateway was away (outage). Assigns turned away while a blamed id is
+    /// refused.
     pub deaf_fallbacks: u32,
+    pub deaf_blamed: u32,
+    pub deaf_outages: u32,
+    pub deaf_refused: u32,
     pub switches_refused: u32,
     /// Seconds until an image switch is allowed (0: allowed now).
     pub switch_wait_s: u32,
@@ -82,6 +97,9 @@ pub fn health() -> Health {
     Health {
         plans_refused: PLANS_REFUSED.load(Relaxed),
         deaf_fallbacks: DEAF_FALLBACKS.load(Relaxed),
+        deaf_blamed: DEAF_BLAMED.load(Relaxed),
+        deaf_outages: DEAF_OUTAGES.load(Relaxed),
+        deaf_refused: DEAF_REFUSED.load(Relaxed),
         switches_refused: SWITCHES_REFUSED.load(Relaxed),
         switch_wait_s: switchlimit::wait_s(STREAK.load(Relaxed), uptime_s()),
     }
