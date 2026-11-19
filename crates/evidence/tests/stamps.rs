@@ -134,6 +134,39 @@ fn a_token_over_another_hash_fails() {
 }
 
 #[test]
+fn a_stamp_only_failure_says_so_in_the_verdict() {
+    let mut b = bundle::build();
+    let t = b.stamp(STAMPED_N, "https://tsa-a.test/tsr", &fixture("tsa-a/other.tsr"), NONCE_A);
+    b.add_stamp(t);
+    // Records and signatures check against the supplied key; only the stamp fails.
+    let key = evidence::sign::public_test_key();
+    let with_key = Options { expect_key: Some(key), ..opts() };
+    let r = verify::verify_bundle(&b.json(), &with_key);
+    assert_eq!(r.exit_code(), 1, "still a failure");
+    let v = r.verdict();
+    assert!(v.starts_with("FAILED (TIME-STAMP): the log's own records and signatures check out against a key you supplied; but a time-stamp did not check out: time-stamp 0 (https://tsa-a.test/tsr)."), "{v}");
+    assert!(!v.contains("not what its signer wrote"), "{v}");
+    // Signer not checked (no outside key matched): it says so.
+    let mut unchecked = verify::Report::default();
+    unchecked.findings.push(verify::Finding { level: Level::Fail, at: verify::Where { source: "time-stamp 3 (https://cal.test)".into(), ..Default::default() }, what: "x".into() });
+    let v = unchecked.verdict();
+    assert!(v.starts_with("FAILED (TIME-STAMP): the log's own records link and are signed consistently, but the signer was not checked") && v.contains("time-stamp 3 (https://cal.test)"), "{v}");
+    // A record source that merely starts with the words is not a stamp.
+    unchecked.findings[0].at.source = "time-stamp notes.bin".into();
+    assert!(unchecked.verdict().starts_with("FAILED: the log is not what its signer wrote"));
+    // A record failure as well: the old sentence.
+    b.bundle.batches[0].sha256 = "00".repeat(32);
+    let r = verify::verify_bundle(&b.json(), &with_key);
+    assert_eq!(r.exit_code(), 1);
+    assert!(r.verdict().starts_with("FAILED: the log is not what its signer wrote"), "{}", r.verdict());
+    // A record failure alone: the old sentence.
+    let mut c = bundle::build();
+    c.bundle.batches[0].sha256 = "00".repeat(32);
+    let r = verify::verify_bundle(&c.json(), &with_key);
+    assert!(r.verdict().starts_with("FAILED: the log is not what its signer wrote"), "{}", r.verdict());
+}
+
+#[test]
 fn a_removed_stamp_shows() {
     let mut b = stamped();
     b.bundle.timestamps.remove(1);
@@ -155,9 +188,15 @@ fn outstanding_failed_and_single_service_are_reported() {
     let r = verify::verify_bundle(&b.json(), &opts());
     assert!(fails(&r).is_empty(), "{:?}", fails(&r));
     let n = notes(&r);
-    assert!(n.iter().any(|n| n.contains("1 independent service(s)")), "{n:?}");
+    assert!(n.iter().any(|n| n.contains("1 independent witness(es)")), "{n:?}");
     assert!(n.iter().any(|n| n.contains("outstanding since")), "{n:?}");
     assert!(n.iter().any(|n| n.contains("3 attempt(s)") && n.contains("timed out 2")), "{n:?}");
+    // OpenTimestamps on (any number of calendars) counts as one more witness.
+    b.bundle.stamping.as_mut().unwrap().ots_calendars = vec!["https://cal-a.test".into(), "https://cal-b.test".into()];
+    let n = notes(&verify::verify_bundle(&b.json(), &opts()));
+    assert!(!n.iter().any(|n| n.contains("independent witness")), "{n:?}");
+    assert_eq!(verify::independent_witnesses(&["https://a.test/x".into()], &["https://c.test".into(), "https://d.test".into()]), 2);
+    assert_eq!(verify::independent_witnesses(&["https://a.test/x".into(), "http://A.test:80/y".into()], &[]), 1);
 }
 
 #[test]

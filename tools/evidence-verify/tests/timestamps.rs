@@ -143,3 +143,97 @@ fn check_timestamps_needs_a_bundle() {
     assert_eq!(code, 2, "{text}");
     let _ = std::fs::remove_dir_all(d);
 }
+
+// ---- OpenTimestamps (WP-14d): offline, against headers the checker supplies --
+
+const OTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/evidence/tests/fixtures/ots");
+
+/// The fixed bundle with one OpenTimestamps proof (a fixture file) of the
+/// stamped entry.
+fn ots_bundle(d: &Path, proof: &str) -> PathBuf {
+    let mut b = bundle::build();
+    b.bundle.stamping.as_mut().unwrap().ots_calendars = vec!["https://alice.calendar.test".into()];
+    let token = std::fs::read(format!("{OTS}/{proof}")).unwrap();
+    let mut t = b.stamp(STAMPED_N, "https://alice.calendar.test", &token, "");
+    t.kind = "ots".into();
+    t.nonce = None;
+    b.add_stamp(t);
+    let p = d.join("bundle.json");
+    std::fs::write(&p, b.json()).unwrap();
+    p
+}
+
+fn header_line() -> (String, String) {
+    let text = std::fs::read_to_string(format!("{OTS}/headers.txt")).unwrap();
+    let l = text.lines().find(|l| !l.starts_with('#') && !l.trim().is_empty()).unwrap();
+    let (h, x) = l.split_once(' ').unwrap();
+    (h.to_string(), x.trim().to_string())
+}
+
+#[test]
+fn an_opentimestamps_proof_is_checked_offline_against_a_supplied_header() {
+    let d = dir("ots-ok");
+    let b = ots_bundle(&d, "complete.ots");
+    let out = d.join("stamps");
+    let (code, text) = run(&["--allow-test-key", "--btc-headers", &format!("{OTS}/headers.txt"), "--check-timestamps", s(&out), s(&b)], Some(""));
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("existed by about") && text.contains("Bitcoin block 500000") && text.contains("block hash ") && text.contains("compare the block hash"), "{text}");
+    assert!(out.join("stamp-0.ots").exists(), "{text}");
+    eprintln!("{text}");
+    assert_eq!(std::fs::read(out.join("stamp-0.ots")).unwrap(), std::fs::read(format!("{OTS}/complete.ots")).unwrap());
+    // The same header on the command line.
+    let (h, x) = header_line();
+    let (code, text) = run(&["--allow-test-key", "--btc-header", &format!("{h}:{x}"), s(&b)], Some(""));
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("existed by about"), "{text}");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_pending_or_unchecked_opentimestamps_proof_is_said_to_be_so() {
+    let d = dir("ots-pending");
+    let b = ots_bundle(&d, "pending.ots");
+    let (code, text) = run(&["--allow-test-key", s(&b)], Some(""));
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("NOT YET ANCHORED") && !text.contains("existed by about"), "{text}");
+    eprintln!("{text}");
+    let b = ots_bundle(&d, "complete.ots");
+    let (_, text) = run(&["--allow-test-key", s(&b)], Some(""));
+    assert!(text.contains("NOT CHECKED, no header for block 500000"), "{text}");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_bad_or_wrong_header_fails_and_bad_arguments_do_not_run() {
+    let d = dir("ots-bad");
+    let b = ots_bundle(&d, "complete.ots");
+    let (h, x) = header_line();
+    // The nonce changed: the header no longer meets its target.
+    let mut bytes = verify_unhex(&x);
+    bytes[76] ^= 1;
+    let bad = format!("{h}:{}", evidence::verify::hex(&bytes));
+    let (code, text) = run(&["--allow-test-key", "--btc-header", &bad, s(&b)], Some(""));
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("is refused"), "{text}");
+    // Bitcoin's genesis header supplied as block 500000: valid work, wrong root.
+    let genesis = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c";
+    let (code, text) = run(&["--allow-test-key", "--btc-header", &format!("{h}:{genesis}"), s(&b)], Some(""));
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("does not lead to the Merkle root"), "{text}");
+    assert!(text.contains("FAILED (TIME-STAMP): the log's own records and signatures check out") && !text.contains("not what its signer wrote"), "{text}");
+    eprintln!("{text}");
+    for bad_arg in [vec!["--btc-header", "500000:00"], vec!["--btc-header", "nope"], vec!["--btc-headers", "/nonexistent/headers.txt"]] {
+        let mut a: Vec<&str> = bad_arg.clone();
+        a.push(s(&b));
+        let (code, text) = run(&a, Some(""));
+        assert_eq!(code, 2, "{bad_arg:?}: {text}");
+    }
+    std::fs::write(d.join("x.bin"), b"").unwrap();
+    let (code, _) = run(&["--btc-header", &format!("{h}:{x}"), s(&d.join("x.bin"))], Some(""));
+    assert_eq!(code, 2, "headers go with a bundle");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+fn verify_unhex(x: &str) -> Vec<u8> {
+    evidence::verify::unhex(x).unwrap()
+}

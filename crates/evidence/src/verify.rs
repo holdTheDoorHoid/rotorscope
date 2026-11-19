@@ -123,6 +123,10 @@ pub struct Options {
     /// Accept the published test key ([`sign::public_test_key`]). For this
     /// project's own tests only: anyone can sign with that key.
     pub allow_test_key: bool,
+    /// Bitcoin block headers the person checking supplies, by height, to
+    /// check OpenTimestamps proofs against (`--btc-header`, `--btc-headers`).
+    /// Never fetched: where they come from is the checker's choice.
+    pub btc_headers: Vec<(u64, crate::ots::BlockHeader)>,
 }
 
 impl Options {
@@ -138,6 +142,13 @@ impl Options {
         }
         self.trusted_keys.iter().find(|(t, _)| t == k).map(|(_, l)| l.clone())
     }
+}
+
+/// A finding about one outside time-stamp (named "time-stamp N (service)").
+fn is_stamp_finding(f: &Finding) -> bool {
+    let Some(rest) = f.at.source.strip_prefix("time-stamp ") else { return false };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(" (") && f.at.offset.is_none() && f.at.boot.is_none()
 }
 
 /// Printed with every verdict: what the checker cannot see.
@@ -240,13 +251,35 @@ impl Report {
 
     /// The one-line verdict for [`exit_code`](Self::exit_code). Always print
     /// [`NOT_PROVEN`] with it.
-    pub fn verdict(&self) -> &'static str {
+    ///
+    /// When the only failures are outside time-stamps (an RFC 3161 token or
+    /// an OpenTimestamps proof), the verdict says so: what the log's own
+    /// records and signatures showed, and which stamp did not check out.
+    /// The exit code is still a failure.
+    pub fn verdict(&self) -> String {
+        let fails: Vec<&Finding> = self.findings.iter().filter(|f| f.level == Level::Fail).collect();
+        if !fails.is_empty() && fails.iter().all(|f| is_stamp_finding(f)) {
+            let mut which: Vec<&str> = fails.iter().map(|f| f.at.source.as_str()).collect();
+            which.dedup();
+            let rest = self.findings.iter().filter(|f| f.level != Level::Fail).map(|f| f.level).max();
+            let records = match (self.signer_checked(), rest) {
+                (true, Some(Level::Gap)) => "the log's own records and signatures check out against a key you supplied, with gaps (see GAP lines)",
+                (true, _) => "the log's own records and signatures check out against a key you supplied",
+                (false, _) => "the log's own records link and are signed consistently, but the signer was not checked (no key supplied from outside the log)",
+            };
+            return format!(
+                "FAILED (TIME-STAMP): {records}; but {} did not check out: {}. A stamp fails when its token or proof is bad, or when the server's access log it covers was changed after it was stamped; either way, what that stamp would show (that the log existed by its time) is not shown. See the FAIL lines above.",
+                if which.len() == 1 { "a time-stamp" } else { "time-stamps" },
+                which.join("; ")
+            );
+        }
         match self.exit_code() {
             0 => "VERIFIED: every record links, every signature checks against a key you supplied, and a signature covers every record checked.",
             1 => "FAILED: the log is not what its signer wrote, or it cannot be accepted. See the FAIL lines above.",
             3 => "SIGNER CHECKED, WITH GAPS: what is signed checks against a key you supplied, but some records are missing or not covered by a signature (see GAP lines). Missing records may have been removed; that cannot be told apart from records never written or never received.",
             _ => "SELF-CONSISTENT, SIGNER NOT CHECKED: anyone could have made this log. The key it was checked against came from the log itself; give the expected key with --key HEX or --keys FILE.",
         }
+        .to_string()
     }
 
     /// [`NOT_PROVEN`], with what the boot counters let the checker say
@@ -1270,6 +1303,10 @@ pub mod bundle {
     /// manual `--tsa` stamp) or the access log's head (version 2).
     pub const COVERS_CHAIN_HEAD: &str = "chain-head";
     pub const COVERS_AUDIT_HEAD: &str = "audit-head";
+    /// What kind of stamp: an RFC 3161 token, or an OpenTimestamps proof
+    /// (additive within bundle format 2: docs/EVIDENCE-FORMAT.md).
+    pub const KIND_RFC3161: &str = "rfc3161";
+    pub const KIND_OTS: &str = "ots";
 
     fn chain_head() -> String {
         COVERS_CHAIN_HEAD.into()
@@ -1279,9 +1316,9 @@ pub mod bundle {
     /// `authority`, `imprint`, `boot`, `seq`, `head` and `token`.
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
     pub struct Timestamp {
-        /// "rfc3161" (others, e.g. "ots", are planned).
+        /// [`KIND_RFC3161`] or [`KIND_OTS`].
         pub kind: String,
-        /// The service's URL.
+        /// The service's URL (for OpenTimestamps: the calendar's).
         pub authority: String,
         /// What was sent, hex: [`head_imprint`] or [`audit_imprint`].
         pub imprint: String,
@@ -1309,8 +1346,15 @@ pub mod bundle {
         /// The request's nonce (INTEGER contents), hex.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub nonce: Option<String>,
-        /// The authority's reply (TimeStampResp) exactly as received, base64.
+        /// RFC 3161: the authority's reply (TimeStampResp) exactly as
+        /// received. OpenTimestamps: the whole proof as a `.ots` file
+        /// (digest = `imprint`). Base64.
         pub token: String,
+        /// OpenTimestamps: this line is the completed form of an earlier
+        /// (pending) proof; the SHA-256 of that line's `token`, hex. The
+        /// earlier line is kept unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub upgrade_of: Option<String>,
         /// The authority's published certificate chain as fetched when the
         /// stamp was taken (base64 of the bytes received) and from where.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1332,8 +1376,13 @@ pub mod bundle {
     pub struct Stamping {
         /// Automatic stamping was switched on by the server's operator.
         pub enabled: bool,
-        /// The services it stamps with.
+        /// The RFC 3161 services it stamps with.
         pub authorities: Vec<String>,
+        /// The OpenTimestamps calendars it stamps with (empty: OpenTimestamps
+        /// off). Together they count as one more independent witness (the
+        /// anchor is the Bitcoin chain, whichever calendar carried it).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub ots_calendars: Vec<String>,
         /// Stamps asked for and not (yet) received.
         pub outstanding: Vec<Outstanding>,
         /// Every failed attempt (refused, unreachable, or a reply that did
@@ -1546,7 +1595,7 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
             });
         }
     }
-    check_timestamps(&mut rep, &b, &hashes, &entries, &batch_info);
+    check_timestamps(&mut rep, &b, &hashes, &entries, &batch_info, &opts.btc_headers);
     rep.findings.sort_by_key(|f| std::cmp::Reverse(f.level));
     rep
 }
@@ -1586,12 +1635,22 @@ pub fn url_host(url: &str) -> String {
 /// Outside time-stamps in a bundle: each is recomputed from the bundle's own
 /// audit chain (or chain head), its token read (not its signature: see
 /// `evidence-verify --check-timestamps`), and what it shows said plainly.
-fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], entries: &[Option<bundle::AuditEntry>], batch_info: &[(u64, Option<u64>)]) {
+fn check_timestamps(
+    rep: &mut Report,
+    b: &bundle::Bundle,
+    hashes: &[[u8; 32]],
+    entries: &[Option<bundle::AuditEntry>],
+    batch_info: &[(u64, Option<u64>)],
+    headers: &[(u64, crate::ots::BlockHeader)],
+) {
     use bundle::*;
     let w = |s: String| Where { source: s, ..Default::default() };
     const NOT_WHEN: &str = "A stamp shows the log existed by then; it does not show when the records in it were written";
     let mut token_shas: Vec<String> = Vec::new();
     let mut good = 0usize;
+    // OpenTimestamps lines completed by a later line (by the later line's
+    // `upgrade_of`): line index of the completing line, by token SHA-256.
+    let upgraded: Vec<(String, usize)> = b.timestamps.iter().enumerate().filter_map(|(k, t)| t.upgrade_of.clone().map(|u| (u, k))).collect();
     for (i, t) in b.timestamps.iter().enumerate() {
         let at = w(format!("time-stamp {i} ({})", t.authority));
         let token = crate::b64::decode_vec(&t.token);
@@ -1652,8 +1711,16 @@ fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], e
             rep.add(Level::Fail, at, "time-stamp token is not valid base64");
             continue;
         };
-        if t.kind != "rfc3161" {
-            rep.add(Level::Note, at, format!("{} time-stamp over {what}: this checker reads only RFC 3161 tokens", t.kind));
+        if t.kind == KIND_OTS {
+            let by = upgraded.iter().find(|(u, _)| *u == hex(&crate::sha256(&tok))).map(|(_, k)| *k);
+            let ctx = OtsContext { at: &at, what: &what, upload_ms, newest_gps, completed_by: by, headers };
+            if check_ots(rep, t, &tok, &imprint, &ctx) {
+                good += 1;
+            }
+            continue;
+        }
+        if t.kind != KIND_RFC3161 {
+            rep.add(Level::Note, at, format!("{} time-stamp over {what}: this checker does not know this kind of stamp (newer format?)", t.kind));
             continue;
         }
         let info = match crate::tsp::tst_info(&tok) {
@@ -1722,11 +1789,13 @@ fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], e
         if !st.enabled {
             rep.add(Level::Note, at.clone(), "the server says automatic outside time-stamping was off");
         } else {
-            let mut hosts: Vec<String> = st.authorities.iter().map(|a| url_host(a)).collect();
-            hosts.sort();
-            hosts.dedup();
-            if hosts.len() < 2 {
-                rep.add(Level::Note, at.clone(), format!("the server stamped with {} independent service(s); two are needed so that one failing or misbehaving is not the only witness", hosts.len()));
+            let w = independent_witnesses(&st.authorities, &st.ots_calendars);
+            if w < 2 {
+                rep.add(
+                    Level::Note,
+                    at.clone(),
+                    format!("the server stamped with {w} independent witness(es) (RFC 3161 services on different hosts, plus OpenTimestamps counted once when it was on); two are needed so that one failing or misbehaving is not the only witness"),
+                );
             }
         }
         for o in &st.outstanding {
@@ -1746,4 +1815,132 @@ fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], e
     if good == 0 && (b.stamping.as_ref().is_some_and(|s| s.enabled) || !b.timestamps.is_empty()) {
         rep.add(Level::Note, w("time-stamping".into()), "no readable outside time-stamp: nothing but the server's own word shows when this log existed");
     }
+}
+
+/// Independent witnesses: RFC 3161 services on different hosts, plus one
+/// for OpenTimestamps when any calendar is on (its anchor is the Bitcoin
+/// chain, whichever calendar carried the proof; calendars are not counted
+/// separately).
+pub fn independent_witnesses(rfc3161: &[String], ots_calendars: &[String]) -> usize {
+    let mut hosts: Vec<String> = rfc3161.iter().map(|a| url_host(a)).collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts.len() + usize::from(!ots_calendars.is_empty())
+}
+
+struct OtsContext<'a> {
+    at: &'a Where,
+    what: &'a str,
+    upload_ms: Option<u64>,
+    newest_gps: Option<u64>,
+    /// A later line holds the completed form of this one.
+    completed_by: Option<usize>,
+    headers: &'a [(u64, crate::ots::BlockHeader)],
+}
+
+/// How to get a block header, said wherever one is missing.
+pub const HEADER_HOWTO: &str = "from your own Bitcoin node: bitcoin-cli getblockheader $(bitcoin-cli getblockhash HEIGHT) false; or the same header from two or more block explorers run by different people";
+
+/// One OpenTimestamps line, offline: the proof is replayed from the imprint
+/// (recomputed from the bundle) to each attestation; a Bitcoin attestation
+/// is compared with the Merkle root of the header the checker supplied for
+/// that height. True when at least one such check passed.
+fn check_ots(rep: &mut Report, t: &bundle::Timestamp, tok: &[u8], imprint: &[u8; 32], c: &OtsContext<'_>) -> bool {
+    use crate::ots;
+    let at = c.at.clone();
+    let cal = &t.authority;
+    let proof = match ots::parse_proof(tok) {
+        Ok(p) => p,
+        Err(e) => {
+            rep.add(Level::Fail, at, format!("OpenTimestamps proof cannot be read: {e}"));
+            return false;
+        }
+    };
+    if proof.digest != *imprint {
+        rep.add(Level::Fail, at, "the OpenTimestamps proof is not over the imprint stored with it: it does not stamp this log");
+        return false;
+    }
+    let walk = proof.walk();
+    let mut skipped = walk.skipped.clone();
+    skipped.sort();
+    skipped.dedup();
+    for why in &skipped {
+        rep.add(Level::Note, at.clone(), format!("a branch of the OpenTimestamps proof was not followed: {why}"));
+    }
+    let anchors = walk.bitcoin();
+    if anchors.is_empty() {
+        let cals: Vec<String> = walk.pending().into_iter().map(|(u, _)| u).collect();
+        let msg = match c.completed_by {
+            Some(k) => format!("OpenTimestamps proof from {cal}, pending form (kept as received; time-stamp {k} is its completed form)"),
+            None => format!(
+                "OpenTimestamps proof from {cal} over {}: NOT YET ANCHORED. It holds only the promise of {} to put it into a Bitcoin block (usually within hours); a pending proof shows no time. The server fetches the completed proof later; export again to get it",
+                c.what,
+                if cals.is_empty() { "no calendar".to_string() } else { cals.join(", ") }
+            ),
+        };
+        rep.add(Level::Note, at, msg);
+        return false;
+    }
+    let mut ok = false;
+    for (height, msg) in anchors {
+        let Some((_, header)) = c.headers.iter().find(|(h, _)| *h == height) else {
+            rep.add(
+                Level::Note,
+                at.clone(),
+                format!(
+                    "OpenTimestamps proof from {cal} over {} claims Bitcoin block {height}: NOT CHECKED, no header for block {height} was supplied. Give it with --btc-header {height}:HEX or --btc-headers FILE ({})",
+                    c.what,
+                    HEADER_HOWTO.replace("HEIGHT", &height.to_string())
+                ),
+            );
+            continue;
+        };
+        if let Err(e) = header.check_work() {
+            rep.add(Level::Fail, at.clone(), format!("the header you supplied for Bitcoin block {height} is refused: {e}"));
+            continue;
+        }
+        // Real blocks at recent heights carry far more work than a header
+        // made on one computer: refuse one below the floor for its height.
+        let floor = match ots::check_floor(header.bits(), height) {
+            Err(e) => {
+                rep.add(Level::Fail, at.clone(), format!("the header you supplied for Bitcoin block {height} is refused: {e}"));
+                continue;
+            }
+            Ok(None) => format!(
+                "Its work is at or above this checker's floor for that height (difficulty {:.3e}), so forging it would cost what real mining at that height costs; that still does not prove it is on the real chain.",
+                ots::difficulty(header.bits())
+            ),
+            Ok(Some(note)) => format!("Note: {note}; a header that easy can be made on one computer in under an hour."),
+        };
+        if msg.len() != 32 || msg[..] != header.merkle_root() {
+            rep.add(
+                Level::Fail,
+                at.clone(),
+                format!("OpenTimestamps proof from {cal} does not lead to the Merkle root of the header supplied for Bitcoin block {height}: it does not show this log in that block (a wrong header, or a proof that is not over this log)"),
+            );
+            continue;
+        }
+        ok = true;
+        let time_ms = u64::from(header.time()) * 1000;
+        let mut delays = Vec::new();
+        if let Some(u) = c.upload_ms {
+            delays.push(format!("Block time {} the newest upload it covers was stored (server clock)", fmt_delay(time_ms, u)));
+        }
+        if let Some(g) = c.newest_gps {
+            delays.push(format!("{} the newest GPS time in the records it covers", fmt_delay(time_ms, g)));
+        }
+        let delays = if delays.is_empty() { String::new() } else { format!(" {}.", delays.join("; ")) };
+        rep.add(
+            Level::Note,
+            at.clone(),
+            format!(
+                "{} existed by about {}: an OpenTimestamps proof (via {cal}) leads from this log's imprint to the Merkle root of Bitcoin block {height} (block hash {}, block time {} from the header you supplied). Checked offline against your header only: that it is the real block {height} is as good as the source you got it from, so compare the block hash with a source you trust. {floor} The time is the block's, set by its miner (it can be off by up to about two hours), not the upload's: it is coarse.{delays} A stamp shows the log existed by then; it does not show when the records in it were written",
+                c.what,
+                fmt_utc(time_ms),
+                header.hash_hex(),
+                fmt_utc(time_ms)
+            ),
+        );
+    }
+    ok
 }

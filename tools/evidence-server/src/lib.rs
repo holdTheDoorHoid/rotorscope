@@ -18,7 +18,7 @@
 //! | `POST /api/devices/{id}/annotations` `{boot, seq, text}` | a note on a record | annotate |
 //! | `GET /api/devices/{id}/export` | the export bundle (header `X-Bundle-SHA256`) | export |
 //! | `POST /api/devices/{id}/timestamp` | ask for an outside time-stamp of the access log now (stamping must be on) | timestamp (when it arrives) |
-//! | `GET /api/stamping` | outside time-stamping: on or off, services, warnings | - |
+//! | `GET /api/stamping` | outside time-stamping: on or off, RFC 3161 services, OpenTimestamps calendars, independent witnesses, warnings | - |
 //!
 //! Who: the `X-Actor` header names the person (bench: not authenticated).
 //! With `--token`, every call except uploads needs
@@ -37,6 +37,7 @@
 //! (map tiles come from OpenStreetMap as images).
 
 pub mod lines;
+pub mod ots;
 pub mod plan;
 pub mod stamp;
 pub mod store;
@@ -429,9 +430,12 @@ async fn stamping(State(app): State<Shared>, h: HeaderMap) -> Response {
     Json(serde_json::json!({
         "enabled": cfg.enabled,
         "services": cfg.authorities.iter().map(|a| a.url.clone()).collect::<Vec<_>>(),
+        "ots_calendars": cfg.active_calendars(),
         "independent": cfg.independent(),
         "warnings": cfg.warnings(),
         "what_it_shows": stamp::WHAT_IT_SHOWS,
+        "witnesses": stamp::WITNESSES,
+        "ots_shows": stamp::OTS_SHOWS,
         "every_min": cfg.every_ms / 60_000,
         "alarm_h": cfg.alarm_ms / 3_600_000,
     }))
