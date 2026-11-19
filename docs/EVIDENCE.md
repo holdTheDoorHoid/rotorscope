@@ -557,7 +557,7 @@ with the Merkle root of the block header **you supply** for that height:
 
 ```text
 evidence-verify --key <hex> --btc-headers headers.txt bundle.json
-evidence-verify --key <hex> --btc-header 905000:<160 hex digits> bundle.json
+evidence-verify --key <hex> --btc-header 850000:<160 hex digits> bundle.json
 ```
 
 `headers.txt` holds `HEIGHT HEX` per line (`#` comments). The checker never
@@ -568,11 +568,31 @@ more block explorers run by different people. The checker:
 
 - refuses a header that does not meet the proof-of-work target it states,
   or whose target is easier than Bitcoin's main chain allows (**fail**);
+- refuses a header whose difficulty is below the **floor for the height the
+  proof names** (**fail**, saying why). A header at the easiest target can
+  be made for any Merkle root on one computer (the test fixture's took 38
+  minutes on this laptop); real blocks at recent heights carry vastly more
+  work. The floors, each well below the real chain's lowest difficulty since
+  that height, so that no genuine header is refused:
+
+  | from height | least difficulty | real difficulty there | lowest real difficulty since (as found) | margin |
+  |---:|---:|---|---|---:|
+  | 600,000 | 10^12 | 13.0 x 10^12 at block 600,000, October 2019 ([blockchain.com explorer](https://www.blockchain.com/explorer/blocks/btc/600000)) | about 13.67 x 10^12, July 2021, after China's mining ban, reported as the lowest since January 2020 ([The Block](https://www.theblock.co/news/ecosystems/2021-07-19-bitcoin-mining-difficulty-lowest-january-2020-111816), [CoinDesk](https://www.coindesk.com/bitcoin-network-sees-fourth-straight-downward-difficulty-adjustment)) | about 13x |
+  | 800,000 | 10^13 | 53.9 x 10^12 at block 800,000, July 2023 ([blockchain.com explorer](https://www.blockchain.com/explorer/blocks/btc/800000)) | about 52.3 x 10^12, the epoch before the adjustment of 9 August 2023 ([Bitcoin.com News](https://news.bitcoin.com/bitcoin-network-adjusts-mining-difficulty-rises-0-12-to-52-39-trillion)); above 100 x 10^12 since late 2024 ([The Block](https://www.theblock.co/amp/post/324537/bitcoin-mining-difficulty-100-trillion)) | about 5x |
+
+  Not confirmed from a primary source: the exact lowest difficulty since
+  each height (the figures above are from an explorer and the press; the
+  late-2019 values were not found, but the July 2021 low was reported as
+  the lowest since January 2020). A floor makes forging a header cost what
+  real mining at that height costs (at 10^13, about 4 x 10^22 hashes: some
+  days of a large (100 PH/s) mining farm's output); it does **not** prove the header is on
+  the real chain. Below height 600,000 only the easiest-target rule applies,
+  and the checker says that proofs anchored that long ago get no
+  height-based check;
 - **fails** a proof whose operations do not lead to that header's Merkle
   root, or that is not over the imprint;
 - otherwise prints the block height, the block hash and the block time,
-  and says plainly that it checked against **your** header only: a header at
-  the easiest target can be made on one computer in minutes, so it is the
+  and says plainly that it checked against **your** header only: it is the
   real block only if you got it from a source you trust; compare the block
   hash;
 - for a pending proof, prints "NOT YET ANCHORED" (a note, never a pass);
@@ -598,11 +618,15 @@ completed, header supplied:
 NOTE  time-stamp 0 (https://alice.calendar.test): the access log through entry
       #2 (...) existed by about 2026-11-18T11:30:05.000Z: an OpenTimestamps
       proof (via https://alice.calendar.test) leads from this log's imprint to
-      the Merkle root of Bitcoin block 905000 (block hash 00000000d52c84c0...,
+      the Merkle root of Bitcoin block 500000 (block hash 00000000d52c84c0...,
       block time 2026-11-18T11:30:05.000Z from the header you supplied).
       Checked offline against your header only: that it is the real block
-      905000 is as good as the source you got it from, so compare the block
-      hash with a source you trust. The time is the block's, set by its miner
+      500000 is as good as the source you got it from, so compare the block
+      hash with a source you trust. Note: block 500000 is before height
+      600000: this checker has no height-based floor on a header's work that
+      far back, so the header is checked only against Bitcoin's easiest
+      target; a header that easy can be made on one computer in under an
+      hour. The time is the block's, set by its miner
       (it can be off by up to about two hours), not the upload's: it is
       coarse. Block time 13 min after the newest upload it covers was stored
       (server clock); 3 h 8 min after the newest GPS time in the records it
@@ -610,21 +634,40 @@ NOTE  time-stamp 0 (https://alice.calendar.test): the access log through entry
       the records in it were written
 
 completed, no header supplied:
-NOTE  ... claims Bitcoin block 905000: NOT CHECKED, no header for block 905000
-      was supplied. Give it with --btc-header 905000:HEX or --btc-headers FILE
+NOTE  ... claims Bitcoin block 500000: NOT CHECKED, no header for block 500000
+      was supplied. Give it with --btc-header 500000:HEX or --btc-headers FILE
       (from your own Bitcoin node: bitcoin-cli getblockheader $(bitcoin-cli
-      getblockhash 905000) false; or the same header from two or more block
+      getblockhash 500000) false; or the same header from two or more block
       explorers run by different people)
 
 failed (a header for another block, with valid work):
 FAIL  time-stamp 0 (https://alice.calendar.test): OpenTimestamps proof from
       https://alice.calendar.test does not lead to the Merkle root of the
-      header supplied for Bitcoin block 905000: it does not show this log in
+      header supplied for Bitcoin block 500000: it does not show this log in
       that block (a wrong header, or a proof that is not over this log)
 ```
 
-A failure makes the whole check FAILED (exit 1), as a failed RFC 3161 stamp
-does; a pending or unchecked proof is a note and changes no verdict.
+(The synthetic fixture names block 500,000, below the first floor, because
+its header was mined on a laptop at the easiest difficulty.) At a height
+with a floor, the success line says instead that the header's work is at or
+above the floor, "so forging it would cost what real mining at that height
+costs; that still does not prove it is on the real chain".
+
+A failed time-stamp or proof makes the check fail (exit 1), as a failed
+RFC 3161 stamp does. When stamps are the only failures, the verdict says so
+instead of "the log is not what its signer wrote":
+
+```text
+FAILED (TIME-STAMP): the log's own records and signatures check out against a
+key you supplied; but a time-stamp did not check out: time-stamp 0
+(https://alice.calendar.test). A stamp fails when its token or proof is bad,
+or when the server's access log it covers was changed after it was stamped;
+either way, what that stamp would show (that the log existed by its time) is
+not shown. See the FAIL lines above.
+```
+
+Any failure in the records or signatures keeps the old verdict. A pending or
+unchecked proof is a note and changes no verdict.
 
 With `--check-timestamps DIR`, each proof is also written as
 `DIR/stamp-N.ots` (a standard `.ots` file over the digest printed with it),
