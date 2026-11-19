@@ -144,9 +144,8 @@ fn photographer_circling_the_house_next_door_is_not_circling_ours() {
 #[test]
 fn lawnmower_survey_over_the_area_is_not_circling() {
     // Seven 200 m passes 30 m apart over the house at 5 m/s, then a hover.
-    // (The passes that go straight over the middle are "heading for" the
-    // house under 16a's approach rules, Critical: worth knowing, not the
-    // point here.)
+    // The passes that go straight over the middle are "heading for" the
+    // house (Warning), but at 5 m/s never Critical.
     let corner = at_site(-100.0, -100.0);
     let mow = move |t: f64| Flight::Mow { corner, width_m: 200.0, rows: 7, spacing_m: 30.0, speed_mps: 5.0, alt_m: up(60.0) }.at(t);
     let mut sim = Sim::new(&[HOUSE]);
@@ -154,6 +153,7 @@ fn lawnmower_survey_over_the_area_is_not_circling() {
     assert!(seen.ever(Rule::InArea));
     assert!(!seen.ever(Rule::Circling));
     assert!(!seen.ever(Rule::Loitering) && !seen.ever(Rule::LowHover) && !seen.ever(Rule::Drop));
+    assert!(!seen.ever(Rule::FastInbound), "a 5 m/s survey pass is not Critical");
 }
 
 #[test]

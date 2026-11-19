@@ -99,7 +99,7 @@ Grouped by what they need. Numbers are starting points to tune with tests and a 
 5. **Beeline**: flying toward you, a fairly straight path, predicted to pass within the area within
    60 s. Warning.
 6. **Fast inbound**: as 5, faster than 25 m/s (camera drones top out near 16-21 m/s; FPV attack
-   drones 40+ m/s) or under 30 s to arrival. Critical.
+   drones 40+ m/s), or under 30 s to arrival while closing at 10 m/s or more. Critical.
 
 **Lingering (need a position and a recent path)**
 7. **Loitering**: staying within a small circle for minutes. Caution, Warning when long and low.
@@ -301,6 +301,7 @@ Where it differs from the design above, or needs a word:
   housekeeping frame grew from 2,736 to 3,008 bytes, and the new path checks run in their own
   frames below it (848 bytes for rules 7-10, 208 for rule 11). Host tests: 1,523 passed, 5 ignored
   (16a: 1,503).
-- **Seen on the way, not changed (16a)**: a survey drone flying a pass straight over the middle
-  of the area at walking pace or faster is "heading for" the house under rules 5 and 6, and
-  arrives within 30 s, so it is Critical for that pass. Worth tuning with the profiles.
+- **Tuned after review (16a rule 6)**: a survey drone flying a pass straight over the middle of
+  the area at walking pace was Critical (it "arrives within 30 s"). Now "under 30 s to arrival"
+  makes Critical only when the drone is also closing at 10 m/s or more; slower passes stay at
+  Warning (rule 5). Faster than 25 m/s is Critical at any distance, as before.

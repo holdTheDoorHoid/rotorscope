@@ -91,8 +91,13 @@ pub const LOOKAHEAD_S: f32 = 60.0;
 /// Closing faster than this is "fast inbound" (camera drones top out near
 /// 16-21 m/s; FPV attack drones fly 40 m/s and more).
 pub const FAST_MPS: f32 = 25.0;
-/// Arriving sooner than this is "fast inbound".
+/// Arriving sooner than this is "fast inbound", when also closing at
+/// [`SOON_MIN_MPS`] or more.
 pub const SOON_S: f32 = 30.0;
+/// A drone arriving soon but slower than this (a survey drone passing over
+/// at walking or cycling pace) stays at Warning: Critical is for things
+/// that may hit within seconds.
+pub const SOON_MIN_MPS: f32 = 10.0;
 /// Slower than this relative to the place is not an approach.
 pub const MIN_APPROACH_MPS: f32 = 3.0;
 /// A pilot this close outside an area counts as "at the fence".
@@ -920,7 +925,7 @@ pub fn evaluate<const P: usize>(
         };
         let Some(eta) = eta else { continue };
         let r = Reason::new(Rule::Beeline, Level::Warning, &tg.name, from_middle).with_eta(eta).with_speed(closing);
-        if closing > FAST_MPS || eta < SOON_S {
+        if closing > FAST_MPS || (eta < SOON_S && closing >= SOON_MIN_MPS) {
             let mut c = r;
             c.rule = Rule::FastInbound;
             c.level = Level::Critical;
