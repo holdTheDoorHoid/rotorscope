@@ -36,8 +36,17 @@
 //! Wherever it has to guess, it guesses "delivered" (an alarm missed, never
 //! a false one). If forged acknowledgements swallow *everything*, the
 //! `NodeHealth` reports stop too, and the existing alarms for a silent node
-//! take over: this check stops raising [`LOSS_STALE_MS`] after the last
+//! take over: the comparison stops raising [`LOSS_STALE_MS`] after the last
 //! report.
+//!
+//! **Reports swallowed, the rest let through.** The comparison runs when a
+//! report arrives, so whoever drops the packets carrying `NodeHealth` (a
+//! captured gateway can tell them apart: frames are authenticated, not
+//! hidden) would blind it while dropping whatever else it liked. So a node
+//! that has reported before, is still heard ([`HEARD_RECENT_MS`], at least
+//! [`OVERDUE_MIN_FRAMES`] frames since its last report) and whose last
+//! report is [`REPORTS_OVERDUE_MS`] old is raised as the same `LinkLoss`,
+//! with detail [`LOSS_DETAIL_NO_REPORTS`] (bench, 2026-11-19).
 //!
 //! **Ending.** The verdict is taken at each report and raised once a second
 //! from [`Tracker::expire`] while it holds, so one lost report does not end
@@ -60,6 +69,18 @@ pub const LOSS_MIN_PCT: u32 = 20;
 /// A verdict counts for this long after the report that made it (four
 /// report periods): one or two lost reports do not end the alarm.
 pub const LOSS_STALE_MS: u64 = 20_000;
+/// A node that has reported before, is still being heard, and whose last
+/// report is this old (six report periods) has had its reports swallowed:
+/// raised as [`ThreatKind::LinkLoss`] with detail [`LOSS_DETAIL_NO_REPORTS`].
+pub const REPORTS_OVERDUE_MS: u64 = 30_000;
+/// "Still being heard": frames verified from the node within this long...
+pub const HEARD_RECENT_MS: u64 = 10_000;
+/// ...and at least this many since its last report (a stray frame or two
+/// after a node stops is not "heard").
+pub const OVERDUE_MIN_FRAMES: u32 = 10;
+/// `detail` of a `LinkLoss` raised because the reports themselves stopped
+/// arriving. The ordinary finding's detail is a percentage of at least 20.
+pub const LOSS_DETAIL_NO_REPORTS: u32 = 0;
 /// More frames a second than any node sends (the radio's ceiling with
 /// small frames): bounds what a counter wrap can claim.
 pub const MAX_FRAMES_PER_S: u64 = 4_000;
@@ -93,11 +114,15 @@ struct NodeDelivery {
     verdict_ms: u64,
     /// Hub second of the last raise (at most one a second).
     raised_s: Option<u64>,
+    /// `received` as [`DeliveryWatch::check`] last saw it, and when it last
+    /// saw it grow: when the node was last heard.
+    heard_total: u32,
+    heard_ms: Option<u64>,
 }
 
 impl NodeDelivery {
     const fn new(node: u8) -> Self {
-        Self { node, received: 0, claimed: 0, last: None, samples: Vec::new(), loss: None, verdict_ms: 0, raised_s: None }
+        Self { node, received: 0, claimed: 0, last: None, samples: Vec::new(), loss: None, verdict_ms: 0, raised_s: None, heard_total: 0, heard_ms: None }
     }
 }
 
@@ -182,6 +207,17 @@ impl DeliveryWatch {
         e.loss.filter(|_| now_ms.saturating_sub(e.verdict_ms) < LOSS_STALE_MS)
     }
 
+    /// The reports-overdue finding: `(frames heard since the last report, its
+    /// age in ms)` for a node that has reported, is still heard, and whose
+    /// last report is [`REPORTS_OVERDUE_MS`] old.
+    fn overdue(e: &NodeDelivery, now_ms: u64) -> Option<(u32, u32)> {
+        let last = e.samples.last()?;
+        let age = now_ms.saturating_sub(last.at_ms);
+        let since = e.received.wrapping_sub(last.received);
+        let heard = e.heard_ms.is_some_and(|h| now_ms.saturating_sub(h) < HEARD_RECENT_MS);
+        (age >= REPORTS_OVERDUE_MS && heard && since >= OVERDUE_MIN_FRAMES).then_some((since, age.min(u64::from(u32::MAX)) as u32))
+    }
+
     /// The latest finding for `node`: frames missing over the window and
     /// frames claimed in it, while it holds.
     pub fn loss(&self, node: u8, now_ms: u64) -> Option<(u32, u32)> {
@@ -189,12 +225,43 @@ impl DeliveryWatch {
         Self::current(e, now_ms).map(|(m, c, _)| (m, c))
     }
 
+    /// For the console, per node watched: `(node, claimed, received,
+    /// window_ms, reports, age_ms, lossy)`: the frames the node claimed and
+    /// the hub verified between the oldest report in the window and the
+    /// latest, how many reports the window holds, how old the latest is,
+    /// and whether that report found the window lossy. Totals, not secrets.
+    pub fn snapshot(&self, now_ms: u64, mut f: impl FnMut(u8, u32, u32, u32, usize, u64, bool)) {
+        for e in self.v.iter() {
+            let (Some(base), Some(last)) = (e.samples.first(), e.samples.last()) else { continue };
+            f(
+                e.node,
+                last.claimed.wrapping_sub(base.claimed),
+                last.received.wrapping_sub(base.received),
+                last.at_ms.saturating_sub(base.at_ms).min(u64::from(u32::MAX)) as u32,
+                e.samples.len(),
+                now_ms.saturating_sub(last.at_ms),
+                e.loss.is_some(),
+            );
+        }
+    }
+
     /// Called often: for each node at most once a second, `(node, sighting)`
     /// to raise while it is losing frames.
     pub fn check(&mut self, now_ms: u64, mut raise: impl FnMut(u8, ThreatSighting)) {
         let s = now_ms / 1000;
         for e in self.v.iter_mut() {
-            let Some((missing, claimed, window)) = Self::current(e, now_ms) else { continue };
+            if e.received != e.heard_total {
+                e.heard_total = e.received;
+                e.heard_ms = Some(now_ms);
+            }
+            // The comparison's verdict while it holds; failing that, a node
+            // still heard whose reports have stopped arriving.
+            let (count, window, detail) = match (Self::current(e, now_ms), Self::overdue(e, now_ms)) {
+                // Percent of what it sent (claimed >= missing >= 50).
+                (Some((missing, claimed, window)), _) => (missing, window, (u64::from(missing) * 100 / u64::from(claimed.max(1))) as u32),
+                (None, Some((since, age))) => (since, age, LOSS_DETAIL_NO_REPORTS),
+                (None, None) => continue,
+            };
             if e.raised_s == Some(s) {
                 continue;
             }
@@ -207,12 +274,11 @@ impl DeliveryWatch {
                     freq: 0,
                     width_khz: 0,
                     level: 0,
-                    count: missing,
+                    count,
                     window_ms: window,
                     source: [0; 6],
                     target: [0; 6],
-                    // Percent of what it sent (claimed >= missing >= 50).
-                    detail: (u64::from(missing) * 100 / u64::from(claimed.max(1))) as u32,
+                    detail,
                     ssid: heapless::String::new(),
                     uptime_us: 0,
                 },
@@ -236,6 +302,12 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     pub fn ingest_node_health(&mut self, node: u8, h: &link::NodeHealth, now_ms: u64) {
         self.delivery.health(node, h.uptime_s, h.frames_sent, now_ms);
         self.expire(now_ms);
+    }
+
+    /// The delivery check's numbers per node, for the console
+    /// ([`DeliveryWatch::snapshot`]).
+    pub fn delivery_snapshot(&self, now_ms: u64, f: impl FnMut(u8, u32, u32, u32, usize, u64, bool)) {
+        self.delivery.snapshot(now_ms, f);
     }
 }
 
@@ -313,6 +385,81 @@ mod tests {
         let later = t + LOSS_STALE_MS + crate::threats::THREAT_ACTIVE_MS;
         tr.expire(later);
         assert!(link_loss(&tr, 2, later).is_none());
+    }
+
+    /// A gateway that drops the packets carrying `NodeHealth` (it can tell
+    /// them by size or content: frames are authenticated, not hidden) while
+    /// passing some of the rest. Found on the bench, 2026-11-19: for 110 s
+    /// no report arrived, the node was still heard, and nothing was raised,
+    /// because the comparison only runs when a report arrives. A node that
+    /// is heard but whose reports stopped is itself a finding.
+    #[test]
+    fn swallowed_health_reports_while_the_node_is_heard_raise_link_loss() {
+        let mut tr: Tracker = Tracker::default();
+        let mut st = (100, 5_000);
+        let t0 = run(&mut tr, 2, &mut st, 0, 13, 12, 100);
+        assert!(link_loss(&tr, 2, t0).is_none());
+        // From now on the reports are swallowed; a quarter of the node's
+        // other frames still arrive.
+        let mut t = t0;
+        let mut raised_at = None;
+        for s in 1..=45u64 {
+            t = t0 + s * 1_000;
+            if s % 5 == 0 {
+                tr.link_received(2, 3);
+            }
+            tr.expire(t);
+            if raised_at.is_none() && link_loss(&tr, 2, t).is_some() {
+                raised_at = Some(s * 1_000);
+            }
+        }
+        let at = raised_at.expect("a heard node whose reports stopped is reported");
+        assert!((REPORTS_OVERDUE_MS..REPORTS_OVERDUE_MS + 2_000).contains(&at), "raised after {at} ms");
+        let l = link_loss(&tr, 2, t).unwrap();
+        assert!(l.by_hub);
+        assert_eq!(l.detail, LOSS_DETAIL_NO_REPORTS, "not a percentage: the reports themselves are missing");
+        // A report gets through at last. It is cumulative, so the ordinary
+        // comparison now sees what went missing: still raised, as a percent.
+        let t = t + 1_000;
+        st.0 += 46;
+        st.1 += 9 * 12;
+        tr.ingest_node_health(2, &link::NodeHealth { uptime_s: st.0, frames_sent: st.1, ..Default::default() }, t);
+        let l = link_loss(&tr, 2, t).expect("still raised");
+        assert!(l.detail >= 20, "{}", l.detail);
+        // Reports flow again and everything arrives: it ends by itself.
+        let t = run(&mut tr, 2, &mut st, t, 14, 12, 100);
+        tr.expire(t + crate::threats::THREAT_ACTIVE_MS);
+        assert!(link_loss(&tr, 2, t + crate::threats::THREAT_ACTIVE_MS).is_none());
+    }
+
+    /// What the reports-overdue rule must not catch: a node that fell
+    /// silent altogether (the silent-node alarms have it), a node that never
+    /// reported (old firmware, or not heard long enough), and a stray frame
+    /// or two after the last report.
+    #[test]
+    fn overdue_reports_are_not_raised_for_silent_unreported_or_barely_heard_nodes() {
+        // Silent altogether.
+        let mut tr: Tracker = Tracker::default();
+        let t0 = run(&mut tr, 2, &mut (100, 5_000), 0, 13, 12, 100);
+        for s in 1..=120u64 {
+            tr.expire(t0 + s * 1_000);
+            assert!(link_loss(&tr, 2, t0 + s * 1_000).is_none(), "silent at {s} s");
+        }
+        // Never reported: frames only.
+        let mut tr: Tracker = Tracker::default();
+        for s in 1..=120u64 {
+            tr.link_received(3, 5);
+            tr.expire(s * 1_000);
+            assert!(link_loss(&tr, 3, s * 1_000).is_none());
+        }
+        // A few stray frames after the last report, then silence.
+        let mut tr: Tracker = Tracker::default();
+        let t0 = run(&mut tr, 4, &mut (100, 5_000), 0, 13, 12, 100);
+        tr.link_received(4, OVERDUE_MIN_FRAMES - 1);
+        for s in 1..=120u64 {
+            tr.expire(t0 + s * 1_000);
+            assert!(link_loss(&tr, 4, t0 + s * 1_000).is_none(), "stray frames at {s} s");
+        }
     }
 
     #[test]

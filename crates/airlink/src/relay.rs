@@ -978,8 +978,13 @@ pub enum Forge {
     Replay,
     /// Hold the next urgent transmit this long.
     Delay(u16),
-    /// Radio-acknowledge this address's packets, then discard this percent.
+    /// Radio-acknowledge this address's packets, then discard this percent,
+    /// scattered ([`DropPattern::new`]).
     Drop(Mac, u8),
+    /// The same in a steady pattern ([`DropPattern::steady`]): against a
+    /// node's regular traffic it can remove every packet of one kind, such
+    /// as every health report.
+    DropSteady(Mac, u8),
     /// Stop dropping.
     DropOff,
 }
@@ -1004,7 +1009,11 @@ pub fn parse_forge(line: &str) -> Option<Forge> {
                 if p > 100 {
                     return None;
                 }
-                Forge::Drop(mac, p)
+                match w.next() {
+                    None => return Some(Forge::Drop(mac, p)),
+                    Some("steady") => Forge::DropSteady(mac, p),
+                    Some(_) => return None,
+                }
             }
         },
         _ => return None,
@@ -1026,28 +1035,50 @@ pub fn parse_mac(s: &str) -> Option<Mac> {
     parts.next().is_none().then_some(m)
 }
 
-/// Drops exactly `percent` of 100 in a steady pattern (no randomness needed
-/// on the bench).
+/// Drops exactly `percent` of every 100, with no randomness needed on the
+/// bench. Two orders:
+///
+/// - [`DropPattern::new`], scattered: packet `i` of each 100 is dropped when
+///   `37 * i mod 100 < percent`. A node's traffic is regular (a few packets
+///   every 5 s); a steady pattern lines up with it and takes the same packet
+///   of every round, so on the bench (2026-11-19) "80 %" removed every
+///   health report and no other kind. Scattered, each kind of packet loses
+///   about `percent`.
+/// - [`DropPattern::steady`]: that steady pattern, kept on purpose, for the
+///   case of a gateway that drops one kind of packet.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DropPattern {
     pub percent: u8,
+    steady: bool,
     acc: u8,
 }
 
 impl DropPattern {
     pub const fn new(percent: u8) -> Self {
-        DropPattern { percent, acc: 0 }
+        DropPattern { percent, steady: false, acc: 0 }
+    }
+
+    pub const fn steady(percent: u8) -> Self {
+        DropPattern { percent, steady: true, acc: 0 }
     }
 
     /// Whether to drop the next one.
     pub fn should_drop(&mut self) -> bool {
-        let a = u16::from(self.acc) + u16::from(self.percent.min(100));
-        if a >= 100 {
-            self.acc = (a - 100) as u8;
-            true
+        let p = u16::from(self.percent.min(100));
+        if self.steady {
+            let a = u16::from(self.acc) + p;
+            if a >= 100 {
+                self.acc = (a - 100) as u8;
+                true
+            } else {
+                self.acc = a as u8;
+                false
+            }
         } else {
-            self.acc = a as u8;
-            false
+            // `acc` is the packet's place in the current 100.
+            let i = u16::from(self.acc);
+            self.acc = if i >= 99 { 0 } else { self.acc + 1 };
+            (37 * i) % 100 < p
         }
     }
 }
@@ -1627,6 +1658,8 @@ mod tests {
         assert_eq!(parse_forge("gwforge flip 02:00:00:00:00:0a"), Some(Forge::Flip(A)));
         assert_eq!(parse_forge("gwforge delay 1000"), Some(Forge::Delay(1000)));
         assert_eq!(parse_forge("gwforge drop 02:00:00:00:00:0b 50"), Some(Forge::Drop(B, 50)));
+        assert_eq!(parse_forge("gwforge drop 02:00:00:00:00:0b 80 steady"), Some(Forge::DropSteady(B, 80)));
+        assert_eq!(parse_forge("gwforge drop 02:00:00:00:00:0b 80 often"), None);
         assert_eq!(parse_forge("gwforge drop off"), Some(Forge::DropOff));
         for bad in ["", "gwforge", "gwforge flip", "gwforge flip 02:00:00:00:00", "gwforge flip 02:00:00:00:00:0a:01", "gwforge drop 02:00:00:00:00:0b 101", "gwforge delay -1", "gwforge batch now", "fault panic", "gwforge zap"] {
             assert_eq!(parse_forge(bad), None, "{bad}");
@@ -1636,9 +1669,41 @@ mod tests {
     #[test]
     fn drop_pattern_is_exact() {
         for p in [0u8, 1, 33, 50, 99, 100] {
-            let mut d = DropPattern::new(p);
-            let n = (0..100).filter(|_| d.should_drop()).count();
-            assert_eq!(n, usize::from(p), "{p}");
+            for mut d in [DropPattern::new(p), DropPattern::steady(p)] {
+                for round in 0..3 {
+                    let n = (0..100).filter(|_| d.should_drop()).count();
+                    assert_eq!(n, usize::from(p), "{p} round {round}");
+                }
+            }
         }
+    }
+
+    /// A node sends a few packets every 5 s, the health report always in
+    /// the same place. The steady pattern can take that one packet every
+    /// time; the scattered one takes about its share of every place.
+    #[test]
+    fn scattered_drops_do_not_line_up_with_regular_traffic() {
+        for per_round in [2usize, 4, 5, 8, 10] {
+            let mut d = DropPattern::new(80);
+            let mut kept = std::vec![0u32; per_round];
+            for i in 0..per_round * 100 {
+                if !d.should_drop() {
+                    kept[i % per_round] += 1;
+                }
+            }
+            for (place, k) in kept.iter().enumerate() {
+                assert!((10..=30).contains(k), "{per_round} a round, place {place}: {k} of 100 kept");
+            }
+        }
+        // The steady pattern at 80 % with five packets a round keeps one
+        // place and never the others.
+        let mut d = DropPattern::steady(80);
+        let mut kept = [0u32; 5];
+        for i in 0..500 {
+            if !d.should_drop() {
+                kept[i % 5] += 1;
+            }
+        }
+        assert_eq!(kept.iter().filter(|&&k| k == 0).count(), 4, "{kept:?}");
     }
 }

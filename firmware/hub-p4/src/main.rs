@@ -659,6 +659,16 @@ fn main() -> ! {
             );
             if ms / 1000 % 5 == 0 {
                 print_gps_adsb(&app, &gps, &adsbee, ms);
+                // The delivery check's numbers (docs/LINK-KEYS-DESIGN.md 7.3):
+                // what each node says it sent against what was verified.
+                app.tracker.delivery_snapshot(ms, |node, claimed, received, window_ms, reports, age_ms, lossy| {
+                    println!(
+                        "hub-p4: delivery node {node}: claimed={claimed} received={received} over {} s ({reports} report(s), last {} s ago){}",
+                        window_ms / 1000,
+                        age_ms / 1000,
+                        if lossy { " LOSSY" } else { "" }
+                    );
+                });
                 if let Some(f) = gw.feed.as_ref() {
                     println!(
                         "hub-p4: webhead tx={} frames={} dropped={} refused={} queued={} csbee_err={} encode_err={}",

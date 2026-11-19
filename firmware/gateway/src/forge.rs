@@ -9,6 +9,7 @@
 //! | `gwforge replay` | sends the hub the last relayed packet again | hub `replay` |
 //! | `gwforge delay <ms>` | holds the next urgent transmit that long, past the 300 ms rule | node `late` |
 //! | `gwforge drop <mac> <percent>` | discards that share of the address's packets after the radio acknowledged them | hub `LinkLoss` within 60 s |
+//! | `gwforge drop <mac> <percent> steady` | the same in a steady pattern, which against a node's regular traffic removes every packet of one kind (on the bench: every health report) | hub `LinkLoss` with detail 0 (reports missing) after 30 s |
 //! | `gwforge drop off` | stops dropping | |
 //!
 //! Nothing here transmits anything of its own: it alters, holds or drops
@@ -200,6 +201,7 @@ fn apply(f: Forge) {
             Forge::Flip(m) => s.flip = Some(m),
             Forge::Delay(ms) => s.delay = Some(ms),
             Forge::Drop(m, p) => s.drop = Some((m, DropPattern::new(p))),
+            Forge::DropSteady(m, p) => s.drop = Some((m, DropPattern::steady(p))),
             Forge::DropOff => s.drop = None,
         }
     });

@@ -411,7 +411,17 @@ it verified per slot. Every `NodeHealth` the hub compares the two over a sliding
 node claims at least 50 frames more than arrived and more than 20 % of what it sent, the hub
 raises `LinkLoss` naming the node: an evidence event and a screen entry. Cumulative counters
 make a lost `NodeHealth` harmless. If forged ACKs swallow everything, `NodeHealth` stops
-arriving too, and the existing deaf-node alarm fires. Downlink: the gateway's `TxDone` is
+arriving too, and the existing deaf-node alarm fires.
+
+**Reports swallowed, the rest let through.** The comparison runs when a `NodeHealth` arrives.
+A captured gateway can tell which packets carry one (frames are authenticated, not hidden), so
+dropping just those would blind the comparison while it dropped whatever else it liked. A node
+that has reported before, is still heard (frames verified in the last 10 s, at least 10 since
+its last report) and whose last report is 30 s old is therefore raised as the same `LinkLoss`,
+with `detail` 0 (the ordinary finding's detail is the percentage missing, 20 or more). Found on
+the bench, 2026-11-19: with a steady 80 % drop pattern no health report arrived for 110 s and
+nothing was raised. The hub prints the numbers every 5 s:
+`hub-p4: delivery node <n>: claimed=<c> received=<r> over <s> s (<k> report(s), last <a> s ago)`. Downlink: the gateway's `TxDone` is
 also radio-level only. The hub already resends `Assign` every few seconds and confirms by
 the plan id echoed in `Status`, which stays the proof.
 
