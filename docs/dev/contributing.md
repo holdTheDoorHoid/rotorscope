@@ -38,7 +38,9 @@ are limits of the signals, not bugs: anyone can broadcast a forged Remote ID, fo
 
 1. Fork the repository and make a branch for one change.
 2. Make the change, with its tests and documentation (the rules below).
-3. Run `cargo test`, and `tools/docs-build.sh check` if you touched the documentation.
+3. Run `cargo test`, and `tools/docs-build.sh check` if you touched the documentation. CI runs
+   these and more on every pull request; [What CI checks](build-test-flash.md#what-ci-checks) lists
+   each check and how to run it yourself.
 4. Open a pull request against `main`. Say what you changed, why, and how far you proved it: host
    tests, compile-checked only, or a bench run (which boards, which date).
 
@@ -89,6 +91,8 @@ Rotorscope is **GPL-3.0-or-later**. From `PLAN.md` (decided 2026-11-09) and `RES
 - Where a project's licence does not fit, use it for **facts only**: `crates/droneid` takes layouts,
   constants and published examples from DroneID research and contains no code from it.
 - `third_party/opendroneid-core-c` keeps its Apache-2.0 licence and is for host tests only.
+- The licences of crates.io dependencies are checked by CI against the list in `deny.toml`
+  ([Adding a licence](build-test-flash.md#adding-a-licence)).
 
 ### Never commit secrets, recordings or bench logs
 

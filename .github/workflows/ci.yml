@@ -1,0 +1,203 @@
+name: CI
+
+# Checks every push to main and p4-hub, and every pull request. What each job
+# checks and how to run it on your own machine: docs/dev/build-test-flash.md,
+# "What CI checks".
+#
+# Built to be hard to abuse: read-only token, no secrets, no
+# pull_request_target, every action pinned to a commit, every downloaded tool
+# checked against a recorded SHA-256, and no step runs text that comes from an
+# issue, a pull request, a branch name or a commit message. No image or other
+# artifact is uploaded.
+
+on:
+  push:
+    branches: [main, p4-hub]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_DENY_VERSION: "0.20.2"
+  # SHA-256 of cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz, as published
+  # with the release (its .sha256 asset and GitHub's asset digest agree).
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  # The esp-radio release firmware/patches/esp-radio is made from;
+  # tools/check-wifi-blobs.sh compares the two. Same checksum as in that script.
+  ESP_RADIO_CRATE: "esp-radio-1.0.0-beta.1.crate"
+  ESP_RADIO_SHA256: "50247f4e91000fc87661e77254126c74acc4535f822ee247f7778807202dc938"
+
+jobs:
+  # Offline script checks: no Rust toolchain needed.
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ci-scripts-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Hidden-character scan (self-test, then every tracked file)
+        run: |
+          python3 -I tools/check-hidden-chars.py --self-test
+          python3 -I tools/check-hidden-chars.py
+
+      - name: Documentation links
+        run: python3 -I tools/docs-check.py
+
+      - name: dev-board.sh self-test (dry runs, no board)
+        run: tools/dev-board.sh --self-test
+
+      - name: flash-node.sh self-test (no board)
+        run: tools/flash-node.sh --self-test
+
+      - name: check-wifi-blobs.sh self-test (fake data)
+        run: tools/check-wifi-blobs.sh --self-test
+
+  # Host tests of the root workspace (crates/ and tools/).
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: ci-test-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  # Every lockfile is current, and the radio libraries they pull in are the
+  # checked ones.
+  lockfiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-lockfiles-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # The lockfile list and the checks live in tools/ci-lockfiles.sh. It sets
+    # RUSTUP_TOOLCHAIN=stable: node-ble and rid-beacon name Espressif's "esp"
+    # toolchain, but resolving dependencies compiles nothing.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo --version
+
+      - name: Every lockfile is listed
+        run: tools/ci-lockfiles.sh list
+
+      - name: Prepare the P4 hub's patched esp-hal (pinned commit, patch SHA-256 checked)
+        run: tools/p4-prepare.sh
+
+      - name: Resolve every lockfile with --locked
+        run: tools/ci-lockfiles.sh resolve
+
+      - name: Fetch the esp-radio release the patched copy is compared with
+        run: |
+          set -euo pipefail
+          dir="${CARGO_HOME:-$HOME/.cargo}/registry/cache/ci-download"
+          mkdir -p "$dir"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$ESP_RADIO_CRATE" \
+            "https://static.crates.io/crates/esp-radio/$ESP_RADIO_CRATE"
+          echo "$ESP_RADIO_SHA256  $dir/$ESP_RADIO_CRATE" | sha256sum --check
+
+      - name: Radio libraries carry the CVE-2025-52471 fix
+        run: tools/check-wifi-blobs.sh
+
+  # Build the two stock-toolchain RISC-V images. Nothing is uploaded.
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gateway
+            dir: firmware/gateway
+            alias: fw
+          - name: node-wifi-c5-espnow
+            dir: firmware/node-wifi/c5
+            alias: fw24-now
+    concurrency:
+      group: ci-firmware-${{ matrix.name }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust for riscv32imac
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update \
+            --target riscv32imac-unknown-none-elf --component rust-src
+          cargo +stable --version
+
+      - name: Build
+        env:
+          FW_DIR: ${{ matrix.dir }}
+          FW_ALIAS: ${{ matrix.alias }}
+        run: |
+          set -euo pipefail
+          cd "$FW_DIR"
+          cargo "$FW_ALIAS" --locked
+
+  # Advisories, licences, duplicate versions and sources, for every lockfile.
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-deny-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          cargo --version
+
+      - name: Install cargo-deny (pinned release, checksum verified)
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          tmp="$RUNNER_TEMP/cargo-deny"
+          mkdir -p "$tmp" "$HOME/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/$name.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $tmp/$name.tar.gz" | sha256sum --check
+          tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
+          bin="$(find "$tmp" -type f -name cargo-deny | head -n 1)"
+          [ -n "$bin" ] || { echo "no cargo-deny binary in $name.tar.gz" >&2; exit 1; }
+          install -m 0755 "$bin" "$HOME/bin/cargo-deny"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/cargo-deny" --version | grep -qF "$CARGO_DENY_VERSION"
+
+      - name: Every lockfile is listed
+        run: tools/ci-lockfiles.sh list
+
+      - name: Prepare the P4 hub's patched esp-hal (pinned commit, patch SHA-256 checked)
+        run: tools/p4-prepare.sh
+
+      - name: cargo deny, every lockfile
+        run: tools/ci-lockfiles.sh deny

@@ -1,0 +1,76 @@
+# cargo-deny settings for every lockfile in this repository: the root workspace
+# and each firmware/*/Cargo.lock. CI (.github/workflows/ci.yml, job `deny`) runs
+#
+#   cargo deny --manifest-path <dir>/Cargo.toml --config deny.toml --locked \
+#       check -W unmaintained
+#
+# once per lockfile. Written for cargo-deny 0.20.2. How to run it yourself and
+# how to add a licence: docs/dev/build-test-flash.md, "What CI checks".
+
+[graph]
+# No `targets`: every platform's dependencies are checked, so the firmware's
+# RISC-V and Xtensa dependencies are included as well as the host's.
+all-features = true
+
+[advisories]
+# RustSec. Vulnerabilities always fail. Unsound-code advisories fail when they
+# hit a crate one of ours depends on directly (cargo-deny's default).
+# Unmaintained crates are reported for the whole graph but only warn: CI
+# passes `-W unmaintained`. Yanked versions warn.
+db-urls = ["https://github.com/RustSec/advisory-db"]
+unmaintained = "all"
+unsound = "workspace"
+yanked = "warn"
+# An exception needs a RUSTSEC id and a reason that says why the code path is
+# not reachable here, for example:
+#   { id = "RUSTSEC-0000-0000", reason = "..." },
+ignore = []
+
+[licenses]
+# Every licence here can be combined with GPL-3.0-or-later, the licence of
+# this project. Built from the licence fields of every package in all nine
+# lockfiles (cargo metadata --locked, 2026-11-19). A crate whose licence
+# expression cannot be satisfied from this list fails the check.
+allow = [
+    "0BSD",             # smoltcp, managed, xarxa-driver; one OR choice in adler2
+    "Apache-2.0",
+    "BSD-3-Clause",     # subtle, domain, octseq; matchit (MIT AND BSD-3-Clause)
+    "GPL-3.0-or-later", # this project's own crates
+    "ISC",              # riscv, riscv-rt, rustls-webpki, untrusted; ring (Apache-2.0 AND ISC)
+    "MIT",
+    "Unicode-3.0",      # the icu_* crates; unicode-ident ((MIT OR Apache-2.0) AND Unicode-3.0)
+    "Zlib",             # zlib-rs, foldhash
+]
+# Licences allowed for one named crate only, so that a new crate under the
+# same licence is stopped and looked at.
+exceptions = [
+    # Weak copyleft per file; compatible with GPL-3.0 (MPL-2.0 section 3.3).
+    # Host tools only (cc26xx-flash and others reach serial ports through it).
+    { crate = "serialport", allow = ["MPL-2.0"] },
+    # A permissive licence for data: the bundled Mozilla root certificates.
+    # Host tools only (through rustls).
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+    # The se05x secure-element crate, approved for use under LGPL-3.0-only,
+    # is not in any lockfile as of 2026-11-19. When it is added, add:
+    #   { crate = "se05x", allow = ["LGPL-3.0-only"] },
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate cost flash and review time; warn, do not fail.
+multiple-versions = "warn"
+
+[sources]
+# Only crates.io, plus the git sources a lockfile really uses.
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "rev"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    # firmware/hub-p4 only: the ESP32-P4 register crates, pulled in by the
+    # pinned, patched esp-hal that tools/p4-prepare.sh prepares. Each is
+    # pinned to a commit in firmware/hub-p4/Cargo.lock.
+    "https://github.com/esp-rs/esp-pacs",
+]
+# The other eight lockfiles do not use esp-pacs; do not warn about that.
+unused-allowed-source = "allow"

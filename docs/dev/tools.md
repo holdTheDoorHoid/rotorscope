@@ -14,8 +14,10 @@ as of commit `6651ecd` (2026-11-18); each section names the source file that is 
 | [`airspace-pack`](#airspace-pack) | Rust | Builds the offline airspace map pack for the hub's SD card |
 | [`bench/`](#bench) | Python | Two-board bench tests, one command each |
 | [`cc26xx-flash`](#cc26xx-flash) | Rust | Backs up and flashes a Sonoff CC2652P dongle |
+| [`check-hidden-chars.py`](#check-hidden-charspy) | Python | Fails on Unicode that can hide or reorder source text, in every tracked file |
 | [`check-image-identity.sh`](#check-image-identitysh) | Shell | Shows that firmware images hold no key: two independent checkouts, one with decoy keys, must build identical images |
 | [`check-wifi-blobs.sh`](#check-wifi-blobssh) | Shell | Checks the Espressif radio libraries carry the CVE-2025-52471 fix, and the esp-radio patch |
+| [`ci-lockfiles.sh`](#ci-lockfilessh) | Shell | The lockfile checks CI runs: every lockfile listed, current, and passed by cargo-deny |
 | [`dev-board.sh`](#dev-boardsh) | Shell | Flashes and reads boards under a per-board lock |
 | [`docs-build.sh`, `docs-check.py`](#docs-buildsh-and-docs-checkpy) | Shell, Python | Builds and checks this documentation site |
 | [`droneid-file`](#droneid-file) | Rust | Decodes DJI DroneID from an I/Q recording |
@@ -177,6 +179,30 @@ Status: `info`, `read` and `flash` of Sniffle were run on one real dongle (2026-
 the Zigbee backup is **simulated only** (`tests/sim_flows.rs`). Source: `tools/cc26xx-flash/src/main.rs`,
 `src/ccfg.rs`. Guide: [A Sonoff dongle as a Bluetooth 5 receiver](../SONOFF.md).
 
+## check-hidden-chars.py
+
+**Purpose:** fail on characters that can make text look different from what a compiler or reviewer
+reads ("Trojan Source"): bidirectional controls (U+202A to U+202E, U+2066 to U+2069), zero-width
+characters (U+200B to U+200D, U+2060, and U+FEFF anywhere but the first character of a file), and
+every other control or format character, and U+2028 and U+2029, except tab, line feed and carriage
+return.
+
+```text
+python3 -I tools/check-hidden-chars.py              every file Git tracks
+python3 -I tools/check-hidden-chars.py FILE...      just these files
+python3 -I tools/check-hidden-chars.py --self-test  checks of this script on temporary files
+```
+
+Each finding is printed as `path:line:column: U+XXXX NAME (rule)`, never the character itself.
+Files with a NUL byte are skipped as binary; files that are not UTF-8 are skipped with a note.
+Exceptions are lines of `path U+XXXX reason` in `tools/hidden-chars-allow.txt`
+([Adding a hidden-character exception](build-test-flash.md#adding-a-hidden-character-exception)).
+
+**Reads:** the files and the allow-list. Exit 0 when clean, 1 on a finding, 2 when the allow-list
+has a malformed line. Standard library only.
+
+Source: `tools/check-hidden-chars.py`.
+
 ## check-image-identity.sh
 
 **Purpose:** show that firmware images hold no link key and are the same for every kit: it builds
@@ -226,6 +252,25 @@ network. Exit 0 when all is good, 1 with what failed and why.
 
 Source: `tools/check-wifi-blobs.sh`. Background: `firmware/patches/README.md`,
 docs/LINK-KEYS-DESIGN.md section 8.
+
+## ci-lockfiles.sh
+
+**Purpose:** the lockfile checks CI runs, runnable on your machine
+([What CI checks](build-test-flash.md#what-ci-checks)).
+
+```text
+tools/ci-lockfiles.sh list      every tracked Cargo.lock is in the script's list
+tools/ci-lockfiles.sh resolve   each lockfile is current (cargo metadata --locked)
+tools/ci-lockfiles.sh deny      cargo-deny with deny.toml on each lockfile
+```
+
+`resolve` and `deny` need `tools/p4-prepare.sh` to have run once (for `firmware/hub-p4`), and use
+stock stable Rust (`RUSTUP_TOOLCHAIN=stable` unless you set it). `deny` needs cargo-deny 0.20.2.
+
+**Reads:** the lockfiles and manifests; the first run downloads crates, and `deny` the RustSec
+advisory database. Exit 0 when all pass, 1 naming each lockfile that failed, 2 on a usage error.
+
+Source: `tools/ci-lockfiles.sh`, `deny.toml`.
 
 ## dev-board.sh
 
@@ -774,7 +819,7 @@ DragonSync inputs are in
 ## Where this lives in the code
 
 - `tools/*/src/main.rs`: each Rust tool's argument parser and usage text
-- `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`, `tools/fetch-droneid-samples.sh`, `tools/docs-build.sh`, `tools/check-wifi-blobs.sh`, `tools/check-image-identity.sh`, `tools/repro-env.sh`: the scripts, documented in their header comments
+- `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/p4-prepare.sh`, `tools/fetch-droneid-samples.sh`, `tools/docs-build.sh`, `tools/check-wifi-blobs.sh`, `tools/check-image-identity.sh`, `tools/repro-env.sh`, `tools/ci-lockfiles.sh`, `tools/check-hidden-chars.py`: the scripts, documented in their header comments
 - `tools/partitions-node.csv`, `tools/partitions-single.csv`, `tools/partitions-hub.csv`: flash layouts
 - `tools/bench/run.py`, `tools/bench/judge.py`: the bench runner
 - `Cargo.toml`: which tools are workspace members

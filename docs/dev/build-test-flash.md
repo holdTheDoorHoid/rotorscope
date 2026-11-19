@@ -1,7 +1,7 @@
 # Build, test and flash
 
 **Level: 🟡 Intermediate** · How to run the tests, build each firmware, put it on a board safely,
-watch what the board says, and run the bench tests.
+watch what the board says, run the bench tests, and run the checks CI runs.
 
 All commands run from the repository folder unless a step says `cd` somewhere. Set your machine up
 first ([Set up your machine](setup.md)).
@@ -292,6 +292,91 @@ scenarios (`--train`, `--forge`) are in [Bench tests](../BENCH.md#node-sdr-under
 Status: DJI DroneID is **proven on recordings**, on the laptop and through the chip's own capture
 path; it has not been heard from a real drone.
 
+## What CI checks
+
+CI (continuous integration) means GitHub runs a set of checks on every change. Every push to
+`main` or `p4-hub`, and every pull request, runs `.github/workflows/ci.yml`; the documentation
+site has its own workflow, `.github/workflows/docs.yml`. Each check below can be run on your own
+machine with the command shown, and a pull request is easier to review if you run them first.
+
+Status as of 2026-11-19: **built, not yet tried**. Each command was run on a laptop, but the
+workflow itself has not yet run on GitHub, and `deny.toml` has not yet been read by cargo-deny.
+
+| Job | What it checks | On your machine |
+|---|---|---|
+| `scripts` | No hidden or reordering Unicode characters in any tracked file; the documentation's links; the self-tests of `dev-board.sh`, `flash-node.sh` and `check-wifi-blobs.sh` (no board needed) | `python3 -I tools/check-hidden-chars.py`, `python3 -I tools/docs-check.py`, `tools/dev-board.sh --self-test`, `tools/flash-node.sh --self-test`, `tools/check-wifi-blobs.sh --self-test` |
+| `test` | The host tests of the root workspace | `cargo test --workspace --locked` |
+| `lockfiles` | All nine `Cargo.lock` files (the root and each `firmware/*/`) match their `Cargo.toml`; the Espressif radio libraries are the checked ones | `tools/ci-lockfiles.sh resolve`, then `tools/check-wifi-blobs.sh` |
+| `firmware` | `gateway` (`cargo fw`) and the C5 ESP-NOW `node-wifi` (`cargo fw24-now`) build with `--locked`. No image is kept | the commands in [Build the firmware](#build-the-firmware), with `--locked` |
+| `deny` | Every lockfile against `deny.toml`: known vulnerabilities, licences, duplicate crate versions, where crates come from | `tools/ci-lockfiles.sh deny` |
+
+`tools/ci-lockfiles.sh` holds the list of lockfiles and fails if a new `Cargo.lock` is added
+without being listed. It uses stock stable Rust even for folders that name Espressif's toolchain,
+because checking a lockfile compiles nothing. The P4 hub's lockfile needs its patched esp-hal, so
+run this once first (CI does too):
+
+```bash
+tools/p4-prepare.sh
+```
+
+What CI does not do: build the S3 (Xtensa) images, which need Espressif's toolchain (their
+lockfiles are still checked), or the other RISC-V images; run anything on a board; or run the tests
+that need recordings (they print `SKIPPED` and pass).
+
+### Results you will see
+
+- **Vulnerability:** fails. Update the crate in the folder named (`cargo update -p <crate>`) and
+  commit that `Cargo.lock`. If there is no fixed version and the affected code cannot be reached
+  from Rotorscope, the owner may add the advisory to `ignore` in `deny.toml`, with that reason.
+- **Unmaintained or yanked crate, two versions of one crate:** a warning; CI still passes.
+- **Licence not allowed:** fails. See below.
+- **Source not allowed:** fails. Crates come from crates.io, plus the one git source the P4 hub's
+  esp-hal uses (`esp-rs/esp-pacs`, pinned to commits).
+
+### Install cargo-deny
+
+CI downloads the cargo-deny 0.20.2 release and checks it against the SHA-256 written in
+`ci.yml`. On your machine, install the same version:
+
+```bash
+cargo install cargo-deny --version 0.20.2 --locked
+```
+
+### Adding a licence
+
+Every licence a dependency uses must be compatible with Rotorscope's GPL-3.0-or-later (see
+[Contributing](contributing.md#licences-what-may-be-ported)). The allowed list is `[licenses]` in
+`deny.toml`, and each entry carries a comment naming the crates that need it.
+
+1. Read the crate's licence. If it is GPL-2.0-only, has no licence, or you are not sure it is
+   compatible, stop and ask in the pull request.
+2. If only one crate needs it, add an entry to `exceptions` for that crate alone, with a comment
+   saying what the licence is and where the crate is used. That way a second crate under the same
+   licence is stopped and looked at.
+3. Add a licence to `allow` only when it is a common permissive licence many crates use.
+
+The project owner approves every new licence.
+
+### Adding a hidden-character exception
+
+`tools/check-hidden-chars.py` fails on characters that can make text look different from what a
+compiler or reviewer reads (the "Trojan Source" problem): direction controls, zero-width
+characters, and other invisible control characters. It names each one without printing it:
+
+```text
+crates/example/src/lib.rs:12:30: U+200B ZERO WIDTH SPACE (zero-width)
+```
+
+Remove the character, or write it as an escape (`\u{200B}` in Rust). If it really must stay in the
+file, add one line to `tools/hidden-chars-allow.txt`: the path, the code point and a reason.
+
+```text
+crates/example/src/lib.rs U+200B test input for the name cleaner, which must strip it
+```
+
+The line allows that one code point in that one file. As of 2026-11-19 the list is empty. Run
+`python3 -I tools/check-hidden-chars.py --self-test` after changing the script.
+
 **Next:** [Crate reference](crates.md)
 
 ## Where this lives in the code
@@ -303,3 +388,6 @@ path; it has not been heard from a real drone.
 - `tools/dev-board.sh`, `tools/flash-node.sh`, `tools/partitions-node.csv`: flashing
 - `tools/bench/run.py`, `tools/bench/judge.py`: the bench runner
 - `tools/droneid-hil/src/main.rs`, `tools/fetch-droneid-samples.sh`: DroneID on the chip
+- `.github/workflows/ci.yml`, `.github/workflows/docs.yml`: what CI runs
+- `deny.toml`, `tools/ci-lockfiles.sh`: the lockfile, advisory and licence checks
+- `tools/check-hidden-chars.py`, `tools/hidden-chars-allow.txt`: the hidden-character scan
