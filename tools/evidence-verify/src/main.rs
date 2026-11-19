@@ -33,6 +33,16 @@
 //!                        repeat for each authority. Without it the check
 //!                        uses the chain the server stored, which proves
 //!                        less (the server supplied it)
+//!   --btc-header H:HEX   (bundles) the 80-byte header of Bitcoin block H, hex,
+//!                        to check OpenTimestamps proofs against; repeat
+//!   --btc-headers FILE   the same, one `H HEX` per line, `#` comments.
+//!                        Headers are never fetched: get them from your own
+//!                        Bitcoin node (bitcoin-cli getblockheader
+//!                        $(bitcoin-cli getblockhash H) false) or from
+//!                        several sources you trust. A pending proof is
+//!                        reported as not yet anchored; with
+//!                        --check-timestamps each proof is also written out
+//!                        as DIR/stamp-N.ots for other OpenTimestamps tools
 //!
 //! exit codes:
 //!   0  VERIFIED: every link and signature checks out against a key given
@@ -67,11 +77,38 @@ fn usage() -> ExitCode {
     eprintln!("               from the unit's screen or console at setup, or your own key record");
     eprintln!("  --keys FILE  trusted keys, one per line: HEX then a label; # comments");
     eprintln!("  --check-timestamps DIR [--tsa-ca ROOT.pem]...  check a bundle's time-stamp tokens with openssl");
+    eprintln!("  --btc-header H:HEX | --btc-headers FILE   Bitcoin block headers (you supply them) for OpenTimestamps proofs");
     eprintln!("  Without --key or --keys the log is checked only against the key it names itself,");
     eprintln!("  which anyone could have generated: the result is never VERIFIED.");
     eprintln!("exit: 0 verified, 1 failed, 2 could not run, 3 signer checked but gaps or unsigned records,");
     eprintln!("      4 self-consistent but signer not checked (no key supplied)");
     ExitCode::from(2)
+}
+
+/// `HEIGHT:HEX` (or `HEIGHT HEX`).
+fn parse_header_arg(s: &str) -> Option<(u64, evidence::ots::BlockHeader)> {
+    let (h, x) = s.split_once([':', ' '])?;
+    Some((h.trim().parse().ok()?, evidence::ots::BlockHeader::from_hex(x)?))
+}
+
+/// A headers file: `HEIGHT HEX` per line, `#` comments, blank lines.
+fn load_headers(path: &Path) -> Result<Vec<(u64, evidence::ots::BlockHeader)>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(h) = line.split_once(char::is_whitespace).and_then(|(h, x)| parse_header_arg(&format!("{h}:{}", x.trim()))) else {
+            return Err(format!("{} line {}: not HEIGHT and an 80-byte header in hex (160 digits)", path.display(), i + 1));
+        };
+        out.push(h);
+    }
+    if out.is_empty() {
+        return Err(format!("{}: no headers", path.display()));
+    }
+    Ok(out)
 }
 
 fn parse_key(h: &str) -> Option<[u8; 65]> {
@@ -108,6 +145,7 @@ fn main() -> ExitCode {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut stamp_dir: Option<PathBuf> = None;
     let mut tsa_cas: Vec<PathBuf> = Vec::new();
+    let mut headers_given = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -153,6 +191,28 @@ fn main() -> ExitCode {
                     return usage();
                 }
             },
+            "--btc-header" => {
+                let Some(h) = args.next().as_deref().and_then(parse_header_arg) else {
+                    eprintln!("--btc-header needs HEIGHT:HEX (the 80-byte block header, 160 hex digits)");
+                    return usage();
+                };
+                opts.btc_headers.push(h);
+                headers_given = true;
+            }
+            "--btc-headers" => {
+                let Some(f) = args.next() else {
+                    eprintln!("--btc-headers needs a file");
+                    return usage();
+                };
+                match load_headers(Path::new(&f)) {
+                    Ok(h) => opts.btc_headers.extend(h),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                headers_given = true;
+            }
             "-h" | "--help" => {
                 usage();
                 return ExitCode::SUCCESS;
@@ -168,6 +228,10 @@ fn main() -> ExitCode {
     let is_bundle = paths.len() == 1 && paths[0].extension().is_some_and(|e| e.eq_ignore_ascii_case("json"));
     if (stamp_dir.is_some() || !tsa_cas.is_empty()) && !is_bundle {
         eprintln!("--check-timestamps and --tsa-ca take one export bundle (.json)");
+        return ExitCode::from(2);
+    }
+    if headers_given && !is_bundle {
+        eprintln!("--btc-header and --btc-headers take one export bundle (.json)");
         return ExitCode::from(2);
     }
     if !tsa_cas.is_empty() && stamp_dir.is_none() {
@@ -247,7 +311,19 @@ fn check_timestamps(json: &[u8], dir: &Path, cas: &[PathBuf], rep: &mut Report, 
     }
     for (i, t) in b.timestamps.iter().enumerate() {
         let at = format!("time-stamp {i} ({})", t.authority);
-        if t.kind != "rfc3161" {
+        if t.kind == verify::bundle::KIND_OTS {
+            // For other OpenTimestamps tools (e.g. `ots info`); the digest it
+            // is over is the imprint stored beside it.
+            if let Some(token) = evidence::b64::decode_vec(&t.token) {
+                let p = dir.join(format!("stamp-{i}.ots"));
+                std::fs::write(&p, &token).map_err(|e| format!("{}: {e}", p.display()))?;
+                if !quiet {
+                    println!("  {at}: OpenTimestamps proof over digest {}: {}", t.imprint, p.display());
+                }
+            }
+            continue;
+        }
+        if t.kind != verify::bundle::KIND_RFC3161 {
             continue;
         }
         let Some(token) = evidence::b64::decode_vec(&t.token) else { continue };
