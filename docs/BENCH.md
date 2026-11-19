@@ -131,8 +131,9 @@ report that the lock did not serialize (not proven; it could not be reproduced w
 ## Link keys: bench checklist
 
 The per-node link keys (docs/LINK-KEYS-DESIGN.md, docs/ESPNOW.md "Securing the link") are
-host-tested and compile-checked; **nothing in this section has run on hardware yet**. It walks the
-design's test plan (section 9) on the bench kit: P4 hub `p4`, gateway `c5c`, nodes `c5a` and
+host-tested, and this checklist was **run on hardware on 2026-11-19** ("Results, 2026-11-19" at
+the end of this section: six faults found and fixed, what passed, what could not be run). It walks
+the design's test plan (section 9) on the bench kit: P4 hub `p4`, gateway `c5c`, nodes `c5a` and
 `c5b`. All forged traffic comes from our own boards through their normal radio path (the
 `forgetest` and `gwforge` builds); no other transmitter is used. Do the parts in order: each
 relies on the one before.
@@ -145,6 +146,10 @@ tools/check-wifi-blobs.sh                          # radio libraries and the pat
 tools/check-image-identity.sh                      # images do not depend on the kit (identical builds)
 tools/dev-board.sh --self-test && tools/flash-node.sh --self-test
 ```
+
+`dev-board.sh --self-test` also runs the real `espflash partition-table` over every
+`tools/partitions-*.csv`: espflash 4.7.0 cannot read a table with a data subtype it has no name
+for, which is why `rskey`, `rskit` and `rsboot` are `data, undefined`.
 
 The P4's USB port is a CH340, which `--register` does not look for. Add it to
 `tools/boards.local` by hand, so `tools/link-key` reaches it under the same lock as everything
@@ -203,9 +208,14 @@ the old-firmware board of step 5.
    `link-key show`.
 3. Run 5 minutes. P4 `hub-p4: gwlink` line: `pkts` and `ok` grow, `bad_tag`, `replay`, `stale`,
    `old_fw`, `not_in_roster`, `late_uplink`, `future_uplink` stay 0; `beacons` about 2 a second,
-   `rosters` one per 5 s, `cmds` and `acked` grow (the `Assign`s). Both nodes report, their
-   `Status` echoes the hub's plan ids, and neither prints a `link_auth` line. The gateway's
-   `"t":"gw"` line: `relayed` grows, refusals 0, `uart_drops` 0. The strip has no link line.
+   `rosters` one per 5 s plus one at each gateway `Hello`, `cmds` and `acked` grow (the
+   `Assign`s). Both nodes report, their `Status` echoes the hub's plan ids, and no counter on a
+   node's `link_auth` line moves (node-ble prints the line only once one is non-zero). Every 5 s
+   the hub prints `delivery node <n>: claimed=<c> received=<r>` for each node: the two numbers
+   stay equal. The gateway's `"t":"gw"` line: `relayed` grows, refusals 0; `uart_drops` and
+   `unlisted` hold whatever arrived before the hub's first roster (a handful, at the gateway's
+   start) and do not grow. The strip has no link line. After a hub restart `stale` and
+   `catching_up` each rise by one per node, with no alert.
    This is also the bench check of the patched esp-radio on C5 boards that run Wi-Fi and BLE at
    once: a node switched to the Bluetooth role (node-ble with ESP-NOW) must keep reporting adverts.
 
@@ -218,9 +228,12 @@ the node would report `missing`):
 ```sh
 export ROTORSCOPE_BENCH=1
 (cd firmware/node-wifi/c5 && cargo build --release --features esp32c5,band24,espnow,forgetest --target-dir ../target-espnow)
-tools/dev-board.sh --pt tools/partitions-node.csv \
+tools/dev-board.sh --pt tools/partitions-node.csv --erase ota_1 --erase ota_2 \
   --app ota_0=firmware/node-wifi/target-espnow/riscv32imac-unknown-none-elf/release/node-wifi --multi 90 c5a
 ```
+
+`--erase ota_1 --erase ota_2` leaves c5a with the Wi-Fi image only, so the hub cannot move it to
+the Bluetooth image (which has no `forge` commands) in the middle of the table.
 
 Commands are typed on c5a's USB (`tools/dev-board.sh --log 20 c5a --send $'forge claim <c5b MAC>\r'`).
 
@@ -230,7 +243,7 @@ Commands are typed on c5a's USB (`tools/dev-board.sh --log 20 c5a --send $'forge
 | Commands another node | `forge cmd <c5b MAC>` | c5b's `link_auth` line: `bad_tag` +1; c5b's plan unchanged |
 | Forges a beacon | `forge beacon` | c5b `bad_tag` +1, its gateway address unchanged |
 | Withheld batch | `forge hold 5` | P4 `late_uplink` +1; nothing from that batch in the tracker |
-| Flood on its own address | `forge spam 500`, then `forge spam 0` | gateway `over_budget` for c5a; c5b's delivery unchanged; P4 CPU in the `{"t":"hub"}` line under 10 % |
+| Flood on its own address | `forge spam 500`, then `forge spam 0` | gateway `over_budget` for c5a; c5b's `failed` and `dropped` do not move; the P4's `link` line keeps its `loops=` (about 550 a second) and a `max_gap` under 1 ms |
 | Frames it may not send | `forge hubfix`, `csbee`, `flags`, `via`, `hello`, `threat`, `join` | P4 `refused=` +1 each and its own `forged_link` detail 5 naming c5a; the gateway's counters do not move; nothing in the "Must never" column of "Origin checks" happens |
 
 Captured gateway: `ROTORSCOPE_BENCH=1` and `(cd firmware/gateway && cargo build --release --features gwforge)`,
@@ -240,9 +253,10 @@ flashed to c5c as in step 3. The P4's strip shows `BENCH GATEWAY`. Typed on c5c'
 |---|---|
 | `gwforge batch` | P4 `bad_tag` +1 for the first roster slot |
 | `gwforge flip <c5a MAC>` | c5a `bad_tag` +1 at the next command to it; its plan unchanged |
-| `gwforge replay` | P4 `replay` +1 |
+| `gwforge replay` | P4 `dup` +1: the tool sends the last relayed packet again, which to the hub is a radio retry of the newest batch (dropped, never taken twice). An older packet would count as `replay`; that order rule is host-tested only |
 | `gwforge delay 1000` | the next `TimeSync` arrives late: an aero node (none on this bench) counts `late` +1; without one, check the P4's `ts_held_max` and that nothing else changes |
-| `gwforge drop <c5a MAC> 50` | within 60 s **Node reports going missing** (`link_loss`) for c5a on the P4; `gwforge drop off` ends it |
+| `gwforge drop <c5a MAC> 60` | within 60 s **Node reports going missing** (`link_loss`, `detail` the percent missing) for c5a on the P4, and its `delivery node` line says `LOSSY`; `gwforge drop off` ends it. On a quiet bench a node sends about 100 frames a minute, so 50 % stays just under the rule's 50 missing frames: use 60 or more |
+| `gwforge drop <c5a MAC> 80 steady` | the steady pattern removes every packet that carries c5a's health report: its `delivery node` line says `last <n> s ago` and climbing, and after 30 s `link_loss` with `detail` 0; `gwforge drop off` ends it |
 
 Then flash the normal gateway and node builds again (step 3) and unset `ROTORSCOPE_BENCH`.
 
@@ -254,7 +268,7 @@ Then flash the normal gateway and node builds again (step 3) and unset `ROTORSCO
 | Damaged record | `ROTORSCOPE_BENCH=1 cargo run -p link-key -- node c5b --slot 1 --bench-corrupt`, then `hub-roster p4` | `why":"damaged"`, the same strip line |
 | Back to normal | `cargo run -p link-key -- node c5b --slot 1`, `hub-roster p4` | keyed again, generation one higher; the hub's node number for c5b is unchanged |
 | Revoke | `cargo run -p link-key -- revoke --slot 1`, `hub-roster p4` | the gateway drops c5b's packets as `not_in_roster` (the hub pushes only live slots), and its beacon tag is zero (c5b counts `not_for_this_slot`); provision it again afterwards |
-| Old node firmware | build node-wifi from a commit before the cut-over (`6651ecd`) in a scratch checkout with the old kit key, `ROTORSCOPE_LINK_KEY_FILE=<this checkout>/tools/link.key cargo fw24-now`, flash it to c5b | P4 `old_fw` grows, strip `OLD FIRMWARE: 1 node` |
+| Old node firmware | build node-wifi from a commit before the cut-over (`6651ecd`) in a scratch checkout with the old kit key, `ROTORSCOPE_LINK_KEY_FILE=<this checkout>/tools/link.key cargo fw24-now`, flash it to c5b | Only an old node that was **already linked** keeps sending and is counted (gateway `old_firmware`, a `forged_link` detail 8 on the P4, strip `OLD FIRMWARE: 1 node`). One that starts fresh cannot read the new beacons, never finds the gateway (`"gw":false`, `pkts` 0) and is simply a node that does not report |
 | Old gateway | the gateway from `6651ecd` the same way | strip `OLD FIRMWARE: gateway`; nothing relayed |
 | Hub re-provisioned | `cargo run -p link-key -- hub p4` again, reset the P4 | "above the old counter"; both nodes keep reporting without a 60 s gap |
 
@@ -270,6 +284,48 @@ for randomness before the radio starts (each board's boot line still shows `"rng
 C5 or `"trng"` on the S3 and C3). Node-number reuse is host-only by design. Held fix: stop the GPS
 emulator mid-run (docs/BENCH.md "GPS time and trust scenarios"); the phone page must show the fix
 as held, not live.
+
+### Results, 2026-11-19
+
+Run on P4 hub `p4`, gateway `c5c`, nodes `c5a` and `c5b`, with a bench kit made for this run.
+The final firmware is commit `615a725`. The logs are kept off the repository.
+
+**Faults found and fixed during the run** (each with a test that fails without the fix, except the
+first, which is a tool check):
+
+| Found | Fix |
+|---|---|
+| espflash panicked on all three new partition tables (data subtypes `0x40`-`0x42`), before any board was touched | `rskey`, `rskit`, `rsboot` are `data, undefined`; `--self-test` runs the real espflash over the tables (`47c4891`) |
+| The hub sealed 4 beacons a second, not 2 (1,239 in 313 s): the early beacon in front of the SD step ran on every pass | early beacon only when a slow SD step is due (`37f0d37`) |
+| Every hub restart raised one "Forged node traffic" alert per node (their last batch of the old boot, `stale`) | a genuine old-boot batch from a slot not yet accepted, in the first 90 s, counts as `catching_up` and raises nothing (`c449277`) |
+| `gwforge drop <mac> 80` for two minutes raised nothing: the steady pattern removed every health report, and the hub compares only when one arrives | a heard node whose reports are 30 s overdue is a `link_loss` with detail 0; `gwforge drop` scatters, `... steady` keeps the old pattern; the hub prints its delivery numbers (`ea52876`) |
+| Every gateway restart raised one "Forged node traffic" alert per node (`not_in_roster`, before the first roster arrived) | before its first roster the gateway counts such packets as `unlisted` and reports nothing (`30a0d4f`) |
+| With beacons exactly 500 ms apart a Bluetooth-role node (200 ms of link time a second) heard none for 74 s after an image switch; 2 restarts in 5 found no gateway in 29 s | one beacon in every 500 ms, at a varying place in it (`615a725`): 6 restarts in 6 found the gateway in 1 to 4 s |
+
+**What passed** (final firmware unless a commit is named):
+
+| Step | Result |
+|---|---|
+| 1. Hub layout and read-only build | Elecrow's bootloader takes the new table (`rskit`, `rsboot` listed as unknown data, the first four rows byte-identical to the factory table). ROM flash read works at `0xC10000`: `rskit keyed, kit <id>`, `rsboot read-only latest=<N>` |
+| 2. The hub's first flash write | `rsboot written <N+2> at +0x10, read back`; +1 at each of four further boots; the partition read back holds 5 entries and erased flash after them. No crash, no damage to the application |
+| 3. Clean run, 315 s (`41030d1`) and 195 s (final) | 620 of 620 and 390 of 390 packets accepted; every refusal counter 0; gateway `relayed` equal, `hub_corrupt` 0; no reset; final: 2.0 beacons a second, `claimed` equal to `received` for both nodes |
+| 3. Hub restart | new epoch, both nodes proven again within 5 s without restarting; `stale` 2, `catching_up` 2, no alert |
+| 4. Captured node (`forgetest` on c5a) | `claim`: the driver took the MAC change, P4 `bad_tag` +5 and a `forged_link` naming c5b's address. `cmd`, `beacon`: c5b `bad_tag` +1 each (gateway `foreign` +1 for the beacon). `hold 5`: `late_uplink` +1, detail 11. Seven hub-only frame types: `refused` +7, detail 5 naming c5a. `spam 500` for 35 s: 5,259 sent, gateway `over_budget` 3,845, 40 a second reached the hub and failed their tag; c5b `failed` 0, `dropped` unchanged; hub loop 544 passes a second (548 before), longest gap 0.5 ms |
+| 4. Captured gateway (`gwforge` on c5c) | `batch`: P4 `bad_tag` +1. `flip`: c5a `bad_tag` +1, command not taken. `replay`: `dup` +1. `drop 60`: `link_loss` 59 % after 50 s. `drop 80 steady`: `link_loss` detail 0 after 45 s. Both ended by themselves after `drop off` |
+| 5. Provisioning | erased record: `"auth":"missing"`, no reports, P4 `unprov` grows, `flash-node.sh` exits 1 naming it. `--bench-corrupt`: `"auth":"damaged"`. Provisioned again: generation +1, keyed. `revoke`: gateway `not_in_roster` +45 in 40 s, c5b `not_for_this_slot`, P4 `forged_link` detail 9 naming it. Old gateway against the new hub (seen at the change-over): `OLD FIRMWARE: the gateway speaks protocol 13`. `link-key hub` again: "above the old counter", c5a never stopped (longest pause 1 s) |
+
+**Not run, or not as written**
+
+- **The screen was not looked at.** Every strip line above (`NO BOOT COUNTER`, `OLD FIRMWARE`,
+  `UNPROVISIONED NODE`, `BENCH GATEWAY`) is checked from the console counters and from the
+  screen snapshots, not from the panel. Someone has to look.
+- `gwforge delay`: nothing urgent is sent without an aero node, so it never fired.
+- `replay` as a counter, and a cold-started old-firmware node: see the notes in the tables above.
+- Section 6's rows remain host-tested only.
+- **Open, not fixed:** under a scattered 60 % loss the `link_loss` alarm ended and came back
+  once while the loss went on (few reports arrive, the window holds under 50 missing frames
+  for a moment). Each hub restart can swap which node gets the Bluetooth role, costing each an
+  image switch. The gateway's `uart_drops` counts the packets heard before its first roster.
 
 ## End-to-end through the P4 (2026-11-15)
 
