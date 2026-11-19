@@ -53,3 +53,4 @@ FLARMKEY.TXT
 
 # Documentation site: the diagram library is fetched by tools/docs-build.sh.
 docs/assets/mermaid.min.js
+/release-out/
