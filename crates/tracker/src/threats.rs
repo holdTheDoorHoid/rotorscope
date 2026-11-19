@@ -476,10 +476,12 @@ pub const NODE_ANY: u8 = 0xFF;
 
 /// Kinds that say the hub may be missing drones, or that its picture is
 /// being forged: jamming and Blinded (a node is deaf), GPS interference in
-/// the area, a flood of fake IDs, forged node traffic. They can only be
-/// snoozed for [`SNOOZE_MS`], never muted, and never from the site file.
+/// the area, a flood of fake IDs, forged node traffic, a node's reports
+/// going missing on the link. They can only be snoozed for [`SNOOZE_MS`],
+/// never muted, and never from the site file.
 pub fn is_safety_kind(kind: ThreatKind) -> bool {
-    kind.is_jamming() || matches!(kind, ThreatKind::AreaGnss | ThreatKind::IdFlood | ThreatKind::ForgedLink)
+    kind.is_jamming()
+        || matches!(kind, ThreatKind::AreaGnss | ThreatKind::IdFlood | ThreatKind::ForgedLink | ThreatKind::LinkLoss)
 }
 
 /// Which fields of a rule must equal the threat's (see [`key_of`]).
@@ -507,6 +509,7 @@ pub mod key {
 /// | AreaGnss | target (1 jamming, 2 spoofing) |
 /// | IdFlood | table, node (0 for the hub-wide tables; the shedding node) |
 /// | ForgedLink | node, source |
+/// | LinkLoss | node |
 /// | EvilTwin, DroneNetClone, AttackTool | network name, source |
 /// | Karma, MavlinkAttack | source |
 /// | DroneDeauth, DroneTakeover | target (the drone's network) |
@@ -1389,9 +1392,10 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
     /// an evicted entry; docs/LINK-KEYS-DESIGN.md 7.5). Every mute and
     /// snooze naming the number is dropped ([`ThreatTable::forget_node`]),
     /// and what the hub learned about the old board's link (its normal frame
-    /// rate) is forgotten. Returns the rules dropped.
+    /// rate, its delivery counts) is forgotten. Returns the rules dropped.
     pub fn forget_node(&mut self, node: u8, now_ms: u64) -> usize {
         self.deaf.reset(node);
+        self.delivery.forget(node);
         self.threats.forget_node(node, now_ms)
     }
 

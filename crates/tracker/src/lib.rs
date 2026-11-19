@@ -74,6 +74,7 @@ pub mod claims;
 pub mod continuity;
 pub mod ctrllinks;
 pub mod cot;
+pub mod delivery;
 pub mod csv;
 pub mod dji;
 pub mod geo;
@@ -965,6 +966,9 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     /// Attacks and jamming (protocol 9) and the hub's deaf-node check.
     threats: threats::ThreatTable,
     deaf: threats::DeafWatch,
+    /// Per node: frames it says it delivered against frames the hub
+    /// verified from it, for the link-loss alarm ([`delivery`]).
+    delivery: delivery::DeliveryWatch,
     /// Drone / crewed-aircraft pairs already announced.
     conflict_watch: conflict::ConflictWatch,
     /// UTC and node positions for the spoofing checks.
@@ -1008,6 +1012,7 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
             nodes: signals::NodeTable::new(),
             threats: threats::ThreatTable::new(),
             deaf: threats::DeafWatch::new(),
+            delivery: delivery::DeliveryWatch::new(),
             conflict_watch: conflict::ConflictWatch::new(),
             spoof_cfg: spoof::SpoofConfig {
                 utc_offset_ms: None,
@@ -1678,6 +1683,9 @@ impl<const N: usize, const A: usize> Tracker<N, A> {
         }
         let threats = &mut self.threats;
         self.shed.check(now_ms, |node, s| {
+            let _ = threats.ingest(node, true, &s, now_ms);
+        });
+        self.delivery.check(now_ms, |node, s| {
             let _ = threats.ingest(node, true, &s, now_ms);
         });
         let before = self.tracks.len();
