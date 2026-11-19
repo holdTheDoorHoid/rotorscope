@@ -12,6 +12,7 @@ build = "build.rs"
 sha2 = { version = "0.11", default-features = false }
 
 [dev-dependencies]
+fuzzkit = { path = "../fuzzkit" }
 # Tests inflate the page to check it round-trips.
 flate2 = "1"
 # Tests drive the hub's DHCP server type with the hub's pool (src/dhcp.rs).
