@@ -30,6 +30,7 @@
 //! theme-day field-day     # Auto's theme while the sun is up
 //! theme-night red-night   # Auto's theme at night (and before it knows)
 //! theme-switch twilight   # twilight (civil dawn and dusk) | sunrise (sunrise and sunset)
+//! brightness 3            # screen backlight 1..5 (Red Night caps it at 2)
 //! ```
 //!
 //! `ssid=` takes the rest of the line (names may hold spaces), so it comes
@@ -144,6 +145,8 @@ pub enum ThemeSetting {
     Night(ThemeName),
     /// `theme-switch twilight` (`true`: civil dawn and dusk) or `sunrise`.
     SwitchTwilight(bool),
+    /// `brightness 1..5`: the screen backlight level.
+    Brightness(u8),
 }
 
 /// The theme lines' state: each `None` until a line sets it.
@@ -154,6 +157,7 @@ pub struct ThemeSite {
     pub day: Option<ThemeName>,
     pub night: Option<ThemeName>,
     pub switch_twilight: Option<bool>,
+    pub brightness: Option<u8>,
 }
 
 impl ThemeSite {
@@ -163,6 +167,7 @@ impl ThemeSite {
             ThemeSetting::Day(x) => self.day = Some(x),
             ThemeSetting::Night(x) => self.night = Some(x),
             ThemeSetting::SwitchTwilight(x) => self.switch_twilight = Some(x),
+            ThemeSetting::Brightness(x) => self.brightness = Some(x),
         }
     }
 
@@ -185,7 +190,7 @@ impl core::fmt::Display for ThemeSite {
         }
         write!(
             f,
-            " (day {}, night {}, switch {})",
+            " (day {}, night {}, switch {}",
             name(self.day),
             name(self.night),
             match self.switch_twilight {
@@ -193,7 +198,11 @@ impl core::fmt::Display for ThemeSite {
                 Some(true) => "twilight",
                 Some(false) => "sunrise",
             }
-        )
+        )?;
+        match self.brightness {
+            Some(b) => write!(f, ", brightness {b})"),
+            None => f.write_str(", brightness default)"),
+        }
     }
 }
 
@@ -324,6 +333,16 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         };
         return Ok(SiteLine::Theme(t));
     }
+    if word.eq_ignore_ascii_case("brightness") {
+        let v = it.next().ok_or("say: brightness 1..5")?;
+        if it.next().is_some() {
+            return Err("say: brightness 1..5");
+        }
+        return match v.parse::<u8>() {
+            Ok(b @ 1..=5) => Ok(SiteLine::Theme(ThemeSetting::Brightness(b))),
+            _ => Err("brightness is a level from 1 to 5"),
+        };
+    }
     if word.eq_ignore_ascii_case("unmute") {
         return match it.next() {
             Some(w) if w.eq_ignore_ascii_case("all") => Ok(SiteLine::UnmuteAll),
@@ -360,7 +379,7 @@ pub fn parse_line(line: &str) -> Result<SiteLine, SiteError> {
         m.check_permanent()?;
         return Ok(SiteLine::Mute(m));
     }
-    Err("unknown line (node, home, mute, unmute, control, theme)")
+    Err("unknown line (node, home, mute, unmute, control, theme, brightness)")
 }
 
 /// Node positions held by [`SiteState`].
@@ -544,6 +563,7 @@ pub fn write_theme<W: Write>(w: &mut W, t: ThemeSetting) -> core::fmt::Result {
         ThemeSetting::Day(n) => writeln!(w, "theme-day {}", n.word()),
         ThemeSetting::Night(n) => writeln!(w, "theme-night {}", n.word()),
         ThemeSetting::SwitchTwilight(tw) => writeln!(w, "theme-switch {}", if tw { "twilight" } else { "sunrise" }),
+        ThemeSetting::Brightness(b) => writeln!(w, "brightness {b}"),
     }
 }
 
@@ -799,6 +819,23 @@ mod tests {
     }
 
     #[test]
+    fn brightness_lines_read_back() {
+        assert_eq!(parse_line("brightness 3"), Ok(SiteLine::Theme(ThemeSetting::Brightness(3))));
+        assert_eq!(parse_line("BRIGHTNESS 5 # full"), Ok(SiteLine::Theme(ThemeSetting::Brightness(5))));
+        for bad in ["brightness", "brightness 0", "brightness 6", "brightness 2 3", "brightness high", "brightness -1"] {
+            assert!(parse_line(bad).is_err(), "{bad}");
+        }
+        for b in 1..=5 {
+            let mut s: heapless::String<32> = heapless::String::new();
+            write_theme(&mut s, ThemeSetting::Brightness(b)).unwrap();
+            assert_eq!(parse_line(&s), Ok(SiteLine::Theme(ThemeSetting::Brightness(b))), "{s}");
+        }
+        let st = load("brightness 4\ntheme red-night\nbrightness 2\n");
+        assert_eq!(st.theme.brightness, Some(2), "the last line wins");
+        assert!(std::format!("{}", st.theme).ends_with("brightness 2)"));
+    }
+
+    #[test]
     fn theme_lines_read_back_and_last_one_wins() {
         use ThemeName::*;
         assert_eq!(parse_line("theme auto"), Ok(SiteLine::Theme(ThemeSetting::Theme(None))));
@@ -825,12 +862,12 @@ mod tests {
         let st = load("theme red-night\ntheme-night glass-cockpit\ntheme auto\ntheme-switch sunrise\n");
         assert_eq!(
             st.theme,
-            ThemeSite { theme: Some(None), day: None, night: Some(GlassCockpit), switch_twilight: Some(false) }
+            ThemeSite { theme: Some(None), day: None, night: Some(GlassCockpit), switch_twilight: Some(false), brightness: None }
         );
         assert_eq!(st.used, 4);
         let sum = LoadSummary { st: &st, sha256: &[0; 32], bytes: 1, lines: 4 };
         let text = std::format!("{sum}");
-        assert!(text.ends_with("; theme auto (day default, night glass-cockpit, switch sunrise)"), "{text}");
+        assert!(text.ends_with("; theme auto (day default, night glass-cockpit, switch sunrise, brightness default)"), "{text}");
         assert!(std::format!("{}", ThemeSite::default()).starts_with("theme default"));
     }
 
