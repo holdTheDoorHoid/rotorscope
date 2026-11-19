@@ -192,13 +192,15 @@ screen and lists itself in the hello line and the evidence boot event
 
 | Piece | What |
 |---|---|
-| Layout | `screen::wide` (feature `wide`): status bar 0..38, page, caveats strip, and three context keys at y 436..474 whose labels say what UP / SELECT / DOWN do on the screen showing |
-| Touch | `display::key_at` = `screen::wide::key_at`: y >= 416 (12 px above the strip, generous), x in thirds edge to edge (0..266 UP, 267..532 SELECT, 533..799 DOWN). Touches on the page are ignored. SELECT held 700 ms = Back, as before |
+| Layout | `screen::wide` (feature `wide`): status bar 0..38, a warning band 38..72 while any warning holds, page, fault / notes lines, and three context keys at y 414..476 (filling the touch zone) whose labels say what UP / SELECT / DOWN do on the screen showing |
+| Touch | `display::key_at` = `screen::wide::key_at`: y >= 410, x in thirds edge to edge (0..266 UP, 267..532 SELECT, 533..799 DOWN). SELECT held 1000 ms (`screen::wide::HOLD_MS`) = Back; the key fills up while held (redrawn every 100 ms). A touch on the page fires on release where it went down (moved > 20 px: not a tap) and goes to `screen::wide::tap_target` (drone markers, the readout card, list / flag / settings rows, the banner), then `Ui::tap`; a touch that began before the screen changed is ignored |
+| Backlight | Settings Brightness 1..5 -> STC8 register 0x20 at 10/25/45/70/100 %, written when the level changes (100 % at boot until the first frame); Red Night caps it at level 2 (`Ui::backlight_level`). Not verified on the panel |
+| Actions | Settings actions report back (`App::action_result`): "done" shows only when the hub did it; otherwise the reason ("No GPS position: not placed", "Home set in site file: not changed", "Nothing left to mute") |
 | Band | 800 x 48 RGB565 (75 KB) in **PSRAM** at 1 MB (`BAND_OFFSET`, between the framebuffer and the tracker), 10 bands per frame, each copied into the framebuffer, `between(gw)` after each. The old 15 KB internal-RAM band static is gone, so the stack grew |
-| Stack | `_stack_start - _stack_end` = **185,672 B** (origin/main 6651ecd: 170,688 B): `.bss` 68,584 -> 53,224 B (the band left), `.data` +376 B |
+| Stack | `_stack_start - _stack_end` = **185,128 B** after the review fixes (185,672 B before them; origin/main 6651ecd: 170,688 B): `.bss` 68,584 -> 53,224 B (the band left), `.data` +376 B, then +544 B |
 | Fonts | Anti-aliased 4-bit glyphs (B612, B612 Mono, IBM Plex Sans Condensed; SIL OFL) in flash: 235 KB of bitmaps plus metrics. Image: `.rodata` 129 KB -> 367 KB, `.text` +12 KB (the 320x240 renderer and its mono fonts are no longer linked), about +250 KB of the 16 MB flash in all |
 | Cost | Host estimate only: a full radar frame takes 2.8 ms on the laptop (release), about 0.3 ms per band. Expect several ms per band on the P4; `max_band` on the `link` line will say. Not measured on the chip |
-| Themes | Settings: Theme Auto / Glass Cockpit / Field Day / Red Night; with Auto, Day theme, Night theme, Switch at. Saved as `theme`, `theme-day`, `theme-night`, `theme-switch` lines appended to `ROTORSCP/SITE.TXT` when an edit ends (one Setting evidence event per line); console `L theme red-night` sets one; the file is applied at mount |
+| Themes | Settings: Theme Auto / Glass Cockpit / Field Day / Red Night; with Auto, Day theme, Night theme, Switch at. Saved as `theme`, `theme-day`, `theme-night`, `theme-switch` and `brightness` lines appended to `ROTORSCP/SITE.TXT` when an edit ends (one Setting evidence event per line); console `L theme red-night` / `L brightness 2` sets one; the file is applied at mount. No buzzer on this board: the Buzzer row is hidden |
 
 ## GPS, ADS-B and the console (2026-11-15, branch `p4-parity`)
 

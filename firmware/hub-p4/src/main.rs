@@ -400,6 +400,8 @@ fn main() -> ! {
     let mut bench = bench::Bench::default();
     let mut last = Instant::now();
     let mut last_report = 0u64;
+    // The backlight level last written (0: none yet; boot wrote 100%).
+    let mut backlight = 0u8;
     let mut loops = 0u32;
     let mut max_gap_us = 0u64;
     let mut prev = Instant::now();
@@ -465,17 +467,31 @@ fn main() -> ! {
             report::tick(&mut app, &gw, &gps, &adsbee, &sdlog, faa, ms);
         }
         app.touch(&mut i2c, ms);
-        match app.take_request() {
-            Some(screen::Request::HubMoved) => gpsmem.forget_home(&mut gps, &mut sdlog, &mut ev, "screen", ms),
-            Some(screen::Request::AcceptHome) => gpsmem.confirm_home(&mut gps, &mut sdlog, &mut ev, "screen", ms),
-            Some(screen::Request::MuteAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, false, ms, &mut ev),
-            Some(screen::Request::SnoozeAlarms { seen_ms }) => site.silence_seen(&mut app, seen_ms, true, ms, &mut ev),
-            Some(screen::Request::UnmuteAlarms) => site.unmute_operator(&mut app, ms, &mut ev),
+        // A settings action: done, then the result back to the screen
+        // (it says "done" only when the hub says so).
+        let result = match app.take_request() {
+            Some(screen::Request::HubMoved) => Some(gpsmem.forget_home(&mut gps, &mut sdlog, &mut ev, "screen", ms)),
+            Some(screen::Request::AcceptHome) => Some(gpsmem.confirm_home(&mut gps, &mut sdlog, &mut ev, "screen", ms)),
+            Some(screen::Request::MuteAlarms { seen_ms }) => Some(site.silence_seen(&mut app, seen_ms, false, ms, &mut ev)),
+            Some(screen::Request::SnoozeAlarms { seen_ms }) => Some(site.silence_seen(&mut app, seen_ms, true, ms, &mut ev)),
+            Some(screen::Request::UnmuteAlarms) => Some(site.unmute_operator(&mut app, ms, &mut ev)),
             Some(screen::Request::NodesAtHub) => {
                 let own = app.own_pos(&gps, ms).map(|p| (p.lat, p.lon));
-                site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen);
+                Some(site.all_nodes_here(&mut app, &gw, own, &mut sdlog, &mut ev, site::From::Screen))
             }
-            None => {}
+            None => None,
+        };
+        if let Some(r) = result {
+            app.action_result(r);
+        }
+        // The backlight follows Brightness (capped in Red Night): written
+        // when the level changes.
+        let level = app.backlight_level();
+        if level != backlight {
+            let pct = screen::backlight_pct(level);
+            let ack = i2c.write(STC8_ADDR, &[STC8_BACKLIGHT, pct]);
+            println!("hub-p4: backlight level {level} ({pct}%): ack {ack}");
+            backlight = level;
         }
         // A finished settings edit that changed the theme: to the card.
         if let Some((before, after)) = app.take_settings_change() {
@@ -870,8 +886,8 @@ fn command(
             ev.event(evidence::EventCode::Setting, t.as_bytes(), &[]);
             println!("hub-p4: cmd {t}");
         }
-        b'm' => lines.gm.forget_home(gps, sdlog, ev, "console", now),
-        b'H' => lines.gm.confirm_home(gps, sdlog, ev, "console", now),
+        b'm' => drop(lines.gm.forget_home(gps, sdlog, ev, "console", now)),
+        b'H' => drop(lines.gm.confirm_home(gps, sdlog, ev, "console", now)),
         b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());

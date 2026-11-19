@@ -448,8 +448,14 @@ impl Faa {
                 who: who14,
                 level: *level,
                 rule: f.rule.code(),
-                text: faarules::text::screen_text(f),
+                text: faarules::text::screen_words(f),
                 secs: f.secs.min(65_535.0) as u16,
+                // The page opens a tracked drone's detail from its row.
+                drone: match key {
+                    Key::Drone(id) if tracker.get(*id).is_some() => Some(id.0),
+                    _ => None,
+                },
+                aircraft: matches!(key, Key::Aircraft(_)),
             });
         }
         v
