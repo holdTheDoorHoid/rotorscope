@@ -22,7 +22,8 @@ mismatch with published figures (their messages say which). What the tests do, b
 - compare our Remote ID decoder with the official C library, field for field
   (`crates/odid-ref`, `crates/rid/tests/`);
 - push random and mutated bytes through every decoder: nothing may panic or hang
-  (`crates/rid/tests/robustness.rs` runs 2,000,000 iterations per test by default; set
+  ([fuzz tests](#fuzz-tests) in every crate and tool that reads outside input; also
+  `crates/rid/tests/robustness.rs`, which runs 2,000,000 iterations per test by default; set
   `RID_FUZZ_ITERS` to change that);
 - run detectors on synthetic attacks, floods, jamming and flights;
 - simulate hardware on the host: an SD card at clock-edge level (`crates/sdnative`), the Sonoff
@@ -34,6 +35,76 @@ mismatch with published figures (their messages say which). What the tests do, b
 
 Some DSP tests push millions of samples, so the root `Cargo.toml` builds `jamwatch`, `fpvscan`,
 `rawcap`, `wirebus` and `ctrlwatch` optimised even in test builds.
+
+### Fuzz tests
+
+Code that reads bytes from outside (a radio, a serial line, an SD card, a file, a web request)
+also has **fuzz tests**: tests that feed it thousands of random byte strings and damaged copies of
+good inputs, and fail if anything panics, runs too long, or breaks a rule the test checks. Typical
+rules: decoding what was encoded gives it back, a decoder's slices stay inside its input, and a
+changed packet never passes its key check. They are ordinary tests, so `cargo test` runs them with
+no extra tools. Their names start with `fuzz_`; they live in each crate's or tool's `tests/fuzz.rs`
+or `src/fuzz_tests.rs`. Their shared helper, `crates/fuzzkit`, has no dependencies and is used by
+tests only. Each crate's set takes about 2 seconds or less in a normal (debug) test build.
+
+| Variable | What it does | Default |
+|---|---|---|
+| `ROTORSCOPE_FUZZ_ITERS` | Inputs per test. A number (`200000`) replaces every test's own count; `x50` multiplies each test's count by 50 | each test's own count |
+| `ROTORSCOPE_FUZZ_SEED` | Where the random generator starts, as a decimal or `0x` hex number | a fixed value, so every run tries the same inputs |
+
+A longer run, for example before a release:
+
+```bash
+ROTORSCOPE_FUZZ_ITERS=x50 cargo test fuzz
+```
+
+A failing input is printed in hex, with the test, the seed and a line to replay it:
+
+```text
+FUZZ FAILURE in link::Decoder
+  seed: 0x5eed0f70705c0f, iteration 812 of 6000
+  input (12 bytes): 0301020304000000a0860100
+  replay: ROTORSCOPE_FUZZ_REPLAY=0301020304000000a0860100 cargo test <this test>
+```
+
+To run that one input again, put the printed hex in `ROTORSCOPE_FUZZ_REPLAY` and name the test
+(here `fuzz_frame_stream` in `crates/link`):
+
+```bash
+ROTORSCOPE_FUZZ_REPLAY=0301020304000000a0860100 cargo test -p link fuzz_frame_stream
+```
+
+An input that runs longer than `ROTORSCOPE_FUZZ_HANG_SECS` seconds (default 20) is printed the
+same way as `FUZZ HANG`, and the test program stops, because a stuck call cannot be cancelled.
+Once fixed, keep the input as a named test with the exact bytes (`fuzzkit::unhex` reads the hex),
+as `overflow_never_decodes_the_tail_as_a_frame` in `crates/link/src/lib.rs` does.
+
+> [!IMPORTANT]
+> If a failing input looks like a security weakness, do not commit it or describe it in a public
+> issue: report it privately, as the [contributing guide](contributing.md) says.
+
+To add a fuzz test for a new reader:
+
+1. Add `fuzzkit = { path = "../fuzzkit" }` under `[dev-dependencies]` in the crate's
+   `Cargo.toml` (from a tool: `path = "../../crates/fuzzkit"`).
+2. Collect a few good inputs as seeds: the crate's own test vectors or encoder output. Damage to a
+   good input reaches much deeper than random bytes.
+3. Call `fuzzkit::run` with a name, the seeds, a default count and a closure that runs the reader
+   and asserts its rules. `fuzzkit::run_with` takes a `fuzzkit::Config` for longer inputs or a
+   dictionary of keywords for text formats.
+4. Pick the count so the crate's fuzz tests stay under about 2 seconds in a debug build.
+
+```rust
+#[test]
+fn fuzz_my_parser() {
+    let good = my_crate::encode(&my_crate::Thing::example());
+    fuzzkit::run("my_crate::parse", &[&good], 5_000, |bytes| {
+        if let Ok(t) = my_crate::parse(bytes) {
+            assert_eq!(my_crate::parse(&my_crate::encode(&t)), Ok(t));
+        }
+    });
+}
+```
 
 ### Tests that need recordings
 
@@ -297,6 +368,7 @@ path; it has not been heard from a real drone.
 ## Where this lives in the code
 
 - `Cargo.toml`: workspace members and the optimised test profiles
+- `crates/fuzzkit/src/lib.rs`: the fuzz test runner and its environment variables
 - `firmware/*/.cargo/config.toml`: the `cargo fw` aliases
 - `tools/link-key/src/main.rs`, `tools/partitions-*.csv`: the link keys and where they live on a board
 - `crates/link/src/benchfence.rs`: the bench fence every firmware build uses
