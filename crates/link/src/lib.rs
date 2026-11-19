@@ -1234,6 +1234,8 @@ pub struct StreamDecoder<T> {
     acc: postcard::accumulator::CobsAccumulator<MAX_FRAME>,
     /// True while the accumulator holds part of a frame.
     pending: bool,
+    /// Dropping the rest of an overlong chunk, up to its delimiter.
+    skipping: bool,
     _t: core::marker::PhantomData<T>,
 }
 
@@ -1248,6 +1250,7 @@ impl<T: for<'de> Deserialize<'de>> StreamDecoder<T> {
         Self {
             acc: postcard::accumulator::CobsAccumulator::new(),
             pending: false,
+            skipping: false,
             _t: core::marker::PhantomData,
         }
     }
@@ -1257,6 +1260,16 @@ impl<T: for<'de> Deserialize<'de>> StreamDecoder<T> {
     pub fn feed(&mut self, mut input: &[u8], mut on_frame: impl FnMut(Result<T, LinkError>)) {
         use postcard::accumulator::FeedResult;
         loop {
+            if self.skipping {
+                // The rest of an overlong chunk: never the start of a frame.
+                match input.iter().position(|&b| b == 0) {
+                    Some(z) => {
+                        input = &input[z + 1..];
+                        self.skipping = false;
+                    }
+                    None => return,
+                }
+            }
             if !self.pending {
                 let start = input.iter().position(|&b| b != 0).unwrap_or(input.len());
                 input = &input[start..];
@@ -1273,13 +1286,18 @@ impl<T: for<'de> Deserialize<'de>> StreamDecoder<T> {
                 FeedResult::DeserError(rest) => (Err(LinkError::Corrupt), rest),
                 FeedResult::Success { data, remaining } => (Ok(data), remaining),
             };
-            // An overflow without a delimiter leaves us mid-frame.
-            self.pending = matches!(result, Err(LinkError::Overflow)) && !rest.is_empty();
+            // An overflow with no delimiter in `input` leaves us mid-chunk:
+            // drop everything up to the next delimiter (`rest` has none).
+            self.pending = false;
+            self.skipping = matches!(result, Err(LinkError::Overflow)) && !input.contains(&0);
             on_frame(result);
             input = rest;
         }
     }
 }
+
+#[cfg(test)]
+mod fuzz_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1400,7 +1418,7 @@ mod tests {
         }
     }
 
-    fn samples() -> [Frame; 21] {
+    pub(crate) fn samples() -> [Frame; 21] {
         [
             Frame::Hello {
                 role: NodeRole::Wifi5,
@@ -1950,6 +1968,27 @@ mod tests {
         let f = samples()[3].clone();
         dec.feed(encode(&f, &mut buf).unwrap(), |r| out.push(r));
         assert_eq!(out.first(), Some(&Err(LinkError::Overflow)));
+        assert_eq!(out.last(), Some(&Ok(f)));
+    }
+
+    /// Found by `fuzz_frame_stream`: an overlong chunk with no delimiter in
+    /// one call used to restart the frame part-way through, so its tail (if
+    /// it held a whole frame) decoded as a frame. Everything up to the next
+    /// delimiter belongs to the overlong chunk and is dropped.
+    #[test]
+    fn overflow_never_decodes_the_tail_as_a_frame() {
+        let mut buf = [0u8; MAX_FRAME];
+        let f = samples()[0].clone();
+        let enc = encode(&f, &mut buf).unwrap();
+        let mut long = std::vec![0x01; MAX_FRAME];
+        long.extend_from_slice(&enc[..enc.len() - 1]);
+        let mut dec = Decoder::new();
+        let mut out = std::vec::Vec::new();
+        dec.feed(&long, |r| out.push(r));
+        dec.feed(&[0x00], |r| out.push(r));
+        assert_eq!(out, std::vec![Err(LinkError::Overflow)]);
+        // The next frame decodes as usual.
+        dec.feed(enc, |r| out.push(r));
         assert_eq!(out.last(), Some(&Ok(f)));
     }
 

@@ -312,7 +312,7 @@ impl<B: AsMut<[u8]>> GwDecoder<B> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     extern crate std;
     use std::vec::Vec as StdVec;
@@ -321,7 +321,7 @@ mod tests {
 
     /// One of every message, at its largest and with every integer at its
     /// widest varint, plus small ones.
-    fn ups() -> StdVec<GwUp<'static>> {
+    pub(crate) fn ups() -> StdVec<GwUp<'static>> {
         std::vec![
             GwUp::Hello { protocol: crate::PROTOCOL_VERSION, firmware: "gateway 0.1.0-ab".try_into().unwrap(), mac: [0xFF; 6], channel: 6 },
             GwUp::Packet { src: [0xFF; 6], rssi: i8::MIN, held_us: u32::MAX, data: &FULL },
@@ -334,7 +334,7 @@ mod tests {
         ]
     }
 
-    fn downs() -> StdVec<GwDown<'static>> {
+    pub(crate) fn downs() -> StdVec<GwDown<'static>> {
         std::vec![
             GwDown::Roster(core::iter::repeat_n([0xFF; 6], MAX_ROSTER).collect()),
             GwDown::Roster(Vec::new()),

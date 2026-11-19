@@ -1494,6 +1494,7 @@ name = "link"
 version = "0.1.0"
 dependencies = [
  "ctrlwatch",
+ "fuzzkit",
  "heapless 0.8.0",
  "openlink",
  "postcard",
