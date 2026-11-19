@@ -21,7 +21,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use evidence_server::{router, store::Store, App};
 
@@ -86,7 +86,8 @@ fn serve(args: &[String]) {
         _ => panic!("--tls-cert and --tls-key go together"),
     };
     let name = arg(args, "--name").unwrap_or_else(|| format!("{}://{listen}", if tls.is_some() { "https" } else { "http" }));
-    let app = Arc::new(App { store: Mutex::new(store), open_registration: args.iter().any(|a| a == "--open-registration"), token: arg(args, "--token").or_else(|| std::env::var("EVIDENCE_TOKEN").ok()), server_name: name.clone(), tsa_url: arg(args, "--tsa") });
+    let token = arg(args, "--token").or_else(|| std::env::var("EVIDENCE_TOKEN").ok());
+    let app = Arc::new(App::new(store, token, args.iter().any(|a| a == "--open-registration"), name.clone(), arg(args, "--tsa")));
     let n = app.lock().devices.len();
     eprintln!("evidence-server: data {data}, {n} devices, listening on {name}{}", if tls.is_none() { " (plain HTTP: bench only, not evidence-grade transport)" } else { "" });
     if app.token.is_none() {
@@ -130,12 +131,18 @@ async fn serve_tls(listener: tokio::net::TcpListener, r: axum::Router, cfg: Arc<
         let acceptor = acceptor.clone();
         let r = r.clone();
         tokio::spawn(async move {
-            let Ok(tls) = acceptor.accept(tcp).await else { return };
+            // A peer that opens a connection and never finishes the
+            // handshake must not hold a task and a socket for ever.
+            let Ok(Ok(tls)) = tokio::time::timeout(std::time::Duration::from_secs(15), acceptor.accept(tcp)).await else { return };
             let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                 req.extensions_mut().insert(ConnectInfo(addr));
                 r.clone().oneshot(req.map(axum::body::Body::new))
             });
-            let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls), svc).await;
+            let _ = hyper::server::conn::http1::Builder::new()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(std::time::Duration::from_secs(30))
+                .serve_connection(hyper_util::rt::TokioIo::new(tls), svc)
+                .await;
         });
     }
 }

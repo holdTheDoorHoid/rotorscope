@@ -39,6 +39,20 @@ pub fn response_status(resp: &[u8]) -> Option<u8> {
     (resp.get(j..j + 2)? == [0x02, 0x01]).then(|| resp.get(j + 2).copied())?
 }
 
+/// The largest reply taken from an authority (a token with its signing
+/// certificate chain is a few kilobytes).
+pub const MAX_REPLY: usize = 256 << 10;
+
+/// Read at most `max` bytes; more is an error, not a truncated reply.
+pub fn read_capped(r: impl std::io::Read, max: usize) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut r.take(max as u64 + 1), &mut body).map_err(|e| e.to_string())?;
+    if body.len() > max {
+        return Err(format!("reply longer than {max} bytes"));
+    }
+    Ok(body)
+}
+
 pub fn request(url: &str, imprint: &[u8; 32]) -> Result<Vec<u8>, String> {
     let mut nonce = [0u8; 8];
     getrandom::getrandom(&mut nonce).map_err(|e| e.to_string())?;
@@ -48,8 +62,7 @@ pub fn request(url: &str, imprint: &[u8; 32]) -> Result<Vec<u8>, String> {
         .timeout(std::time::Duration::from_secs(20))
         .send_bytes(&req)
         .map_err(|e| e.to_string())?;
-    let mut body = Vec::new();
-    std::io::Read::read_to_end(&mut resp.into_reader(), &mut body).map_err(|e| e.to_string())?;
+    let body = read_capped(resp.into_reader(), MAX_REPLY)?;
     match response_status(&body) {
         Some(0 | 1) => Ok(body),
         Some(s) => Err(format!("authority refused (PKIStatus {s})")),
@@ -67,5 +80,14 @@ mod tests {
         assert_eq!(r[r.len() - 3..], [1, 1, 0xff]);
         assert_eq!(super::response_status(&[0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x00]), Some(0));
         assert_eq!(super::response_status(&[0x30, 0x81, 0x05, 0x30, 0x03, 0x02, 0x01, 0x02]), Some(2));
+    }
+
+    /// An authority (or whoever answers in its place) cannot make the
+    /// server hold an endless reply in memory.
+    #[test]
+    fn a_reply_is_capped() {
+        let endless = std::io::repeat(0x30);
+        assert!(super::read_capped(endless, 1024).unwrap_err().contains("longer than 1024"));
+        assert_eq!(super::read_capped(&[1u8; 1024][..], 1024).unwrap().len(), 1024);
     }
 }

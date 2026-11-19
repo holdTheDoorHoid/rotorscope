@@ -8,10 +8,11 @@
 //! | method, path | what | audit entry |
 //! |---|---|---|
 //! | `GET /` | map + list page | (the data call below is logged) |
+//! | `GET /static/...` | the page's script and style, and the map library (Leaflet 1.9.4, served from here) | - |
 //! | `POST /api/devices` `{public_key, name}` | register a unit by its public key | register |
 //! | `GET /api/devices` | units, stored ranges | - |
 //! | `GET /api/devices/{id}` | one unit: next record number per boot (for uploaders; needs the token) | - |
-//! | `POST /api/devices/{id}/batches` (octet-stream) | records back to back, ending in a signed checkpoint | upload |
+//! | `POST /api/devices/{id}/batches` (octet-stream, at most [`MAX_BATCH_BYTES`]) | one boot's records back to back, ending in a signed checkpoint, or ending exactly at the record a later boot's stored continuity record names (a boot's unsigned tail) | upload |
 //! | `GET /api/devices/{id}/detections` | detections for the map and list | view |
 //! | `GET /api/devices/{id}/audit` | the unit's audit chain | view |
 //! | `POST /api/devices/{id}/annotations` `{boot, seq, text}` | a note on a record | annotate |
@@ -23,7 +24,19 @@
 //! `Authorization: Bearer <token>`. Uploads are authenticated by the unit's
 //! own signatures, not by the uploader. Without `--token`, registering a unit
 //! is refused unless the server was started with `--open-registration`.
+//!
+//! **Limits.** A batch is checked (every link and signature) without holding
+//! the store, at most [`App::verify_slots`] at a time, so a large or slow
+//! upload does not stall other requests; only the final overlap and link
+//! checks and the write hold it. Bodies are capped ([`MAX_BATCH_BYTES`],
+//! [`MAX_JSON_BYTES`]); a unit's name and a note have length caps.
+//!
+//! **The page** loads its script, style and map library from this server
+//! only, under a Content-Security-Policy that allows no other script source
+//! (map tiles come from OpenStreetMap as images).
 
+pub mod lines;
+pub mod plan;
 pub mod store;
 pub mod tsa;
 
@@ -40,6 +53,12 @@ use store::{Store, StoreError};
 
 pub struct App {
     pub store: Mutex<Store>,
+    /// Each registered unit's public key, outside the store's lock, so an
+    /// upload can be checked while the store is busy.
+    keys: std::sync::RwLock<std::collections::HashMap<String, [u8; 65]>>,
+    /// Uploads being checked at once (each holds its batch in memory and a
+    /// CPU while it checks signatures).
+    pub verify_slots: tokio::sync::Semaphore,
     pub token: Option<String>,
     /// Let anyone register a unit when there is no `--token`. Off by
     /// default: without a token, registration is refused.
@@ -58,20 +77,51 @@ impl App {
     }
 }
 
+/// The largest upload taken (records are at most 1 KiB each).
+pub const MAX_BATCH_BYTES: usize = 16 << 20;
+/// The largest JSON body taken (registration, notes).
+pub const MAX_JSON_BYTES: usize = 64 << 10;
+/// A unit's name, in characters.
+pub const MAX_NAME_CHARS: usize = 100;
+/// A note on a record, in characters.
+pub const MAX_NOTE_CHARS: usize = 4000;
+
+impl App {
+    pub fn new(store: Store, token: Option<String>, open_registration: bool, server_name: String, tsa_url: Option<String>) -> Self {
+        let keys = store.devices.iter().map(|(id, d)| (id.clone(), d.key)).collect();
+        let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
+        App {
+            store: Mutex::new(store),
+            keys: std::sync::RwLock::new(keys),
+            verify_slots: tokio::sync::Semaphore::new(cpus.clamp(1, 8)),
+            token,
+            open_registration,
+            server_name,
+            tsa_url,
+        }
+    }
+
+    fn key_of(&self, id: &str) -> Option<[u8; 65]> {
+        self.keys.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(id).copied()
+    }
+}
+
 pub type Shared = Arc<App>;
 
 pub fn router(app: Shared) -> Router {
+    use axum::extract::DefaultBodyLimit;
     Router::new()
         .route("/", get(page))
+        .route("/static/{file}", get(static_file))
         .route("/api/devices", get(list_devices).post(register))
         .route("/api/devices/{id}", get(device))
-        .route("/api/devices/{id}/batches", post(upload))
+        .route("/api/devices/{id}/batches", post(upload).layer(DefaultBodyLimit::max(MAX_BATCH_BYTES)))
         .route("/api/devices/{id}/detections", get(detections))
         .route("/api/devices/{id}/audit", get(audit))
         .route("/api/devices/{id}/annotations", post(annotate))
         .route("/api/devices/{id}/export", get(export))
         .route("/api/devices/{id}/timestamp", post(timestamp))
-        .layer(axum::extract::DefaultBodyLimit::max(16 << 20))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .with_state(app)
 }
 
@@ -112,8 +162,39 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Conn {
     }
 }
 
-async fn page() -> Html<&'static str> {
-    Html(include_str!("page.html"))
+/// What the page may load: its own script and style from here, map tiles
+/// as images from OpenStreetMap, data from here. No inline script, no other
+/// script source, no framing.
+pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://tile.openstreetmap.org; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+fn hardened(mut r: Response) -> Response {
+    let h = r.headers_mut();
+    h.insert("content-security-policy", HeaderValue::from_static(CSP));
+    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    // Tile requests would otherwise tell OpenStreetMap this server's address.
+    h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    r
+}
+
+async fn page() -> Response {
+    hardened(Html(include_str!("page.html")).into_response())
+}
+
+/// The page's own files and the vendored map library (Leaflet 1.9.4,
+/// BSD-2-Clause, `static/LEAFLET-LICENSE`), compiled into the server.
+async fn static_file(Path(file): Path<String>) -> Response {
+    let (body, ct): (&'static [u8], &'static str) = match file.as_str() {
+        "page.js" => (include_bytes!("static/page.js"), "text/javascript; charset=utf-8"),
+        "page.css" => (include_bytes!("static/page.css"), "text/css; charset=utf-8"),
+        "leaflet.js" => (include_bytes!("static/leaflet.js"), "text/javascript; charset=utf-8"),
+        "leaflet.css" => (include_bytes!("static/leaflet.css"), "text/css; charset=utf-8"),
+        "LEAFLET-LICENSE" => (include_bytes!("static/LEAFLET-LICENSE"), "text/plain; charset=utf-8"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let mut r = hardened(body.into_response());
+    r.headers_mut().insert("content-type", HeaderValue::from_static(ct));
+    r
 }
 
 async fn list_devices(State(app): State<Shared>, h: HeaderMap) -> Response {
@@ -124,7 +205,7 @@ async fn list_devices(State(app): State<Shared>, h: HeaderMap) -> Response {
     let v: Vec<_> = s
         .devices
         .values()
-        .map(|d| serde_json::json!({ "key_id": d.info.key_id, "name": d.info.name, "registered_utc_ms": d.info.registered_utc_ms, "batches": d.batches.len(), "ranges": d.ranges(), "detections": d.points.len(), "problems": d.load_problems }))
+        .map(|d| serde_json::json!({ "key_id": d.info.key_id, "name": d.info.name, "registered_utc_ms": d.info.registered_utc_ms, "batches": d.batches.len(), "ranges": d.ranges(), "detections": d.points.len(), "problems": d.load_problems, "test_key": d.key == evidence::sign::public_test_key() }))
         .collect();
     Json(v).into_response()
 }
@@ -146,9 +227,18 @@ async fn register(State(app): State<Shared>, c: Conn, h: HeaderMap, Json(r): Jso
         )
             .into_response();
     }
+    if r.name.chars().count() > MAX_NAME_CHARS || r.name.chars().any(char::is_control) {
+        return err(StoreError::Rejected(format!("name: at most {MAX_NAME_CHARS} characters, no control characters")));
+    }
     let who = actor(&h, c.0);
-    match app.lock().register(&r.public_key, &r.name, &who) {
-        Ok(info) => (StatusCode::CREATED, Json(info)).into_response(),
+    let mut s = app.lock();
+    match s.register(&r.public_key, &r.name, &who) {
+        Ok(info) => {
+            if let Some(d) = s.devices.get(&info.key_id) {
+                app.keys.write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(info.key_id.clone(), d.key);
+            }
+            (StatusCode::CREATED, Json(info)).into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -165,11 +255,27 @@ async fn device(State(app): State<Shared>, Path(id): Path<String>, h: HeaderMap)
     }
 }
 
+/// Checked without the store (signatures are the slow part), then kept
+/// under it. Two uploads of the same records may both pass the first step;
+/// the second then finds the first's records stored and is refused.
 async fn upload(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: HeaderMap, body: Bytes) -> Response {
     let who = actor(&h, c.0);
+    let Some(key) = app.key_of(&id) else {
+        return err(StoreError::NotFound);
+    };
+    let checked = {
+        let Ok(_slot) = app.verify_slots.acquire().await else {
+            return err(StoreError::Io("shutting down".into()));
+        };
+        let b = body.clone();
+        match tokio::task::spawn_blocking(move || store::check_batch(&b, &key)).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => return err(e),
+            Err(e) => return err(StoreError::Io(e.to_string())),
+        }
+    };
     let mut s = app.lock();
-    let r = s.device_mut(&id).and_then(|d| d.upload(&body, &who));
-    match r {
+    match s.device_mut(&id).and_then(|d| d.commit(&checked, &body, &who)) {
         Ok(res) => (StatusCode::CREATED, Json(res)).into_response(),
         Err(e) => err(e),
     }
@@ -227,6 +333,9 @@ async fn annotate(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h:
     let Some(boot) = evidence::verify::unhex(&a.boot).and_then(|v| <[u8; 8]>::try_from(v).ok()) else {
         return err(StoreError::Rejected("boot must be 16 hex digits".into()));
     };
+    if a.text.chars().count() > MAX_NOTE_CHARS {
+        return err(StoreError::Rejected(format!("a note is at most {MAX_NOTE_CHARS} characters")));
+    }
     if !d.has_record(&boot, a.seq) {
         return err(StoreError::Rejected(format!("no record #{} for boot {}", a.seq, a.boot)));
     }
@@ -241,20 +350,32 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, c: Conn, h: H
         return r;
     }
     let who = actor(&h, c.0);
+    // What to send is fixed under the store; reading the batch files and
+    // building the bundle is not (stored batches never change).
+    let plan = match app.lock().device(&id) {
+        Ok(d) => d.bundle_plan(&app.server_name),
+        Err(e) => return err(e),
+    };
+    let built = tokio::task::spawn_blocking(move || {
+        let bundle = plan.build()?;
+        let body = serde_json::to_vec_pretty(&bundle).unwrap();
+        Ok::<_, StoreError>((bundle.batches.len(), body))
+    })
+    .await;
+    let (batches, body) = match built {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => return err(e),
+        Err(e) => return err(StoreError::Io(e.to_string())),
+    };
+    let sha = evidence::verify::hex(&evidence::sha256(&body));
     let mut s = app.lock();
     let d = match s.device_mut(&id) {
         Ok(d) => d,
         Err(e) => return err(e),
     };
-    let bundle = match d.bundle(&app.server_name) {
-        Ok(b) => b,
-        Err(e) => return err(e),
-    };
-    let body = serde_json::to_vec_pretty(&bundle).unwrap();
-    let sha = evidence::verify::hex(&evidence::sha256(&body));
     // Logged after it is built, so the bundle holds the chain up to here
     // and this entry records exactly what left the server.
-    if let Err(e) = d.audit(&who, "export", serde_json::json!({ "bundle_sha256": sha, "bytes": body.len(), "batches": bundle.batches.len() })) {
+    if let Err(e) = d.audit(&who, "export", serde_json::json!({ "bundle_sha256": sha, "bytes": body.len(), "batches": batches })) {
         return err(e);
     }
     let mut r = body.into_response();
