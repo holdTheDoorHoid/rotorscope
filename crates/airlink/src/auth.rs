@@ -129,14 +129,14 @@ pub struct Stamp {
 }
 
 impl Stamp {
-    fn write(&self, b: &mut [u8]) {
+    pub(crate) fn write(&self, b: &mut [u8]) {
         b[0..4].copy_from_slice(&self.epoch.to_le_bytes());
         b[4..8].copy_from_slice(&self.clock.to_le_bytes());
         b[8..12].copy_from_slice(&self.session.to_le_bytes());
         b[12..16].copy_from_slice(&self.counter.to_le_bytes());
     }
 
-    fn read(b: &[u8]) -> Self {
+    pub(crate) fn read(b: &[u8]) -> Self {
         let w = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
         Stamp { epoch: w(0), clock: w(4), session: w(8), counter: w(12) }
     }

@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 # HMAC-SHA256 tags (src/auth.rs). No default features: no_std, no alloc.
 sha2 = { version = "0.11", default-features = false }
+# Per-node link keys (`LinkKey`, `NodeKey`) for the version 3 packets (src/v3).
+kitkeys = { path = "../kitkeys" }
 
 [build-dependencies]
 sha2 = { version = "0.11", default-features = false }

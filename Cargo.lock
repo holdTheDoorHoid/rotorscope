@@ -44,6 +44,7 @@ name = "airlink"
 version = "0.1.0"
 dependencies = [
  "heapless 0.8.0",
+ "kitkeys",
  "link",
  "sha2 0.11.1",
 ]
