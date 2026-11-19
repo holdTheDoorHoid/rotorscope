@@ -845,6 +845,7 @@ fn command(
                 alt: Some(15.0),
                 source: app::OwnSource::Manual,
                 at_ms: now,
+                motion: Some((0.0, None)),
             });
             app.housekeeping(gps, now);
             app.redraw_now();
@@ -872,11 +873,11 @@ fn command(
         b'T' => lines.gm.accept_time(gps, ev, "console"),
         b'L' => {
             *lines.site = Some(heapless::String::new());
-            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off");
+            println!("hub-p4: cmd type one site line, then Enter (Esc cancels): node <address> <lat> <lon> | node <address> clear | node all here | home <lat> <lon> [height] | home clear | mute <kind> [source=..] [target=..] [mhz=..] [ssid=..] | unmute all | control ids on|off | control content on|off | area <name> circle <lat> <lon> <m> | area <name> poly <lat> <lon> ... | area <name> ceiling <m> | area <name> clear | area here <m> | bubble <m> | bubble off | friend <serial> [label] | friend <serial> clear");
         }
         #[cfg(not(feature = "testpoint"))]
         b'p' => println!("hub-p4: cmd p (test position) is in bench builds only (feature testpoint)"),
-        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
+        b'h' | b'?' => println!("hub-p4: cmd help: {}c=clear the manual own position, b=time airspace lookups, a=aero plan (auto / 1090 / UAT / FLARM / OGN / control links), m=hub moved (forget the GPS home), H=accept the new GPS home the hub found, T=accept GPS time as it is now, L=site line (node position / hub home / mute alarm / control ids|content on|off / area / bubble / friend), n=evidence note, k=evidence checkpoint now, r=replay evidence file, u=evidence stream on/off, e=evidence shutdown checkpoint, h=help. JSON lines start with '{{', evidence lines with '@EV1'.", if cfg!(feature = "testpoint") { "p=set the test own position (bench), " } else { "" }),
         b'\r' | b'\n' | b' ' => {}
         _ => println!("hub-p4: cmd unknown (h for help)"),
     }

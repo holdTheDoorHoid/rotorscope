@@ -175,6 +175,11 @@ pub struct Fix {
     /// Not from the receiver's latest epoch: held while the integrity monitor
     /// suspects spoofing (the learned home, or the last trusted fix).
     pub held: bool,
+    /// Ground speed (m/s) and direction of travel (degrees true) from the
+    /// receiver (UBX NAV-PVT gSpeed / headMot, NMEA RMC), for the threat
+    /// levels' moving bubble. A held fix does not move: speed 0.
+    pub speed_mps: Option<f32>,
+    pub course_deg: Option<f32>,
 }
 
 /// UTC anchored to hub time.
@@ -644,7 +649,17 @@ impl Gps {
             && let Some((lat, lon)) = f.position()
         {
             let alt_hae_m = if f.fix.has_altitude() { f.alt_ellipsoid_m.map(f64::from) } else { None };
-            Some(Fix { lat, lon, alt_hae_m, at_ms: now, hacc_m: f.h_acc_m, hdop: f.hdop, held: false })
+            Some(Fix {
+                lat,
+                lon,
+                alt_hae_m,
+                at_ms: now,
+                hacc_m: f.h_acc_m,
+                hdop: f.hdop,
+                held: false,
+                speed_mps: f.speed_mps,
+                course_deg: f.heading_deg,
+            })
         } else {
             None
         };
@@ -716,10 +731,22 @@ impl Gps {
                 hacc_m: b.and_then(|b| b.hacc_m),
                 hdop: b.and_then(|b| b.hdop),
                 held: true,
+                speed_mps: Some(0.0),
+                course_deg: None,
             },
-            (None, Some(b)) => Fix { held: true, ..b },
+            (None, Some(b)) => Fix { held: true, speed_mps: Some(0.0), course_deg: None, ..b },
             // Not reached: callers pass a fix or hold with a home.
-            (None, None) => Fix { lat: 0.0, lon: 0.0, alt_hae_m: None, at_ms: 0, hacc_m: None, hdop: None, held: true },
+            (None, None) => Fix {
+                lat: 0.0,
+                lon: 0.0,
+                alt_hae_m: None,
+                at_ms: 0,
+                hacc_m: None,
+                hdop: None,
+                held: true,
+                speed_mps: Some(0.0),
+                course_deg: None,
+            },
         }
     }
 }

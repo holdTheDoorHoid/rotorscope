@@ -13,6 +13,15 @@
 //!
 //! **The screen's Mute / Snooze** silences specific alarms for a time
 //! (`tracker::threats`): logged, never written to the file, gone at reboot.
+//! Snooze also snoozes the alerts of drones at Warning or above (threat
+//! levels, `tracker::behaviour`), for the same five minutes.
+//!
+//! **Places to protect** (`area`, `bubble`, `friend` lines) live in the
+//! tracker (`Tracker::places`), like the mute rules. A load logs each
+//! change to them (a friend lowers alarms, so a swapped card adding one
+//! must leave a trace). `area here R` (console only) becomes an ordinary
+//! `area here circle LAT LON R` line at the hub's position before it is
+//! applied and saved.
 
 use core::fmt::Write;
 
@@ -23,10 +32,33 @@ use crate::evlog::Evidence;
 use crate::links::GatewayLink;
 use crate::sd::Logger;
 
+/// What the hub keeps of the site file itself: node positions, the
+/// placed home and the control-link switches. The mute rules and the
+/// places live in the tracker, so this is not a whole `SiteState` (which
+/// would put ~3.5 KB of mutes and places a second time on the main stack).
+#[derive(Default)]
+struct Kept {
+    nodes: heapless::Vec<([u8; 6], f64, f64), { site::MAX_PLACED }>,
+    control_ids: Option<bool>,
+    control_content: Option<bool>,
+    home: Option<(f64, f64, Option<f64>)>,
+}
+
+impl Kept {
+    fn place(&mut self, mac: [u8; 6], lat: f64, lon: f64) {
+        self.nodes.retain(|n| n.0 != mac);
+        if self.nodes.is_full() {
+            self.nodes.remove(0);
+        }
+        let _ = self.nodes.push((mac, lat, lon));
+    }
+}
+
 #[derive(Default)]
 pub struct Site {
-    /// Node positions (the mute rules live in the tracker).
-    st: SiteState,
+    /// Node positions, home, switches (the mute rules and the places to
+    /// protect live in the tracker).
+    st: Kept,
     /// The placed hub home changed (file load or an operator line): the
     /// main loop hands it to the GPS checks (`take_home`). `Some(None)`:
     /// cleared.
@@ -96,7 +128,7 @@ impl Site {
         ev.event(evidence::EventCode::Setting, t.as_bytes(), &sum.data());
         crate::println!("hub-p4: {t}");
         let mut logged = 0usize;
-        let n = site::changes_since(app.tracker.mutes(), &self.st.nodes, st, |c| {
+        site::changes_since(app.tracker.mutes(), &self.st.nodes, st, |c| {
             if logged < site::MAX_CHANGE_EVENTS {
                 let mut t: heapless::String<256> = heapless::String::new();
                 let _ = site::write_change(&mut t, &c);
@@ -105,12 +137,24 @@ impl Site {
             }
             logged += 1;
         });
+        // Areas, the bubble and friends: each change, within the same bound.
+        site::place_changes(app.tracker.places(), &st.places, |c| {
+            if logged < site::MAX_CHANGE_EVENTS {
+                let mut t: heapless::String<256> = heapless::String::new();
+                let _ = site::write_place_change(&mut t, &c);
+                ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+                crate::println!("hub-p4: {t}");
+            }
+            logged += 1;
+        });
+        let n = logged;
         if n > site::MAX_CHANGE_EVENTS {
             let mut t: heapless::String<96> = heapless::String::new();
             let _ = write!(t, "site file changed: {} more changes not logged one by one", n - site::MAX_CHANGE_EVENTS);
             ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
             crate::println!("hub-p4: {t}");
         }
+        app.tracker.set_places(&st.places);
         let refused = app.tracker.set_site_mutes(&st.mutes, now);
         if refused > 0 {
             crate::println!("hub-p4: site file: {refused} mute rules refused by the tracker");
@@ -141,12 +185,25 @@ impl Site {
                 }
             }
             SiteLine::UnmuteAll => app.tracker.unmute_all(now),
-            l @ SiteLine::Control { .. } => self.st.apply(l),
-            l @ (SiteLine::Home { .. } | SiteLine::HomeClear) => {
-                self.st.apply(l);
+            SiteLine::Control { what: site::ControlSetting::Ids, on } => self.st.control_ids = Some(on),
+            SiteLine::Control { what: site::ControlSetting::Content, on } => self.st.control_content = Some(on),
+            SiteLine::Home { lat, lon, alt } => {
+                self.st.home = Some((lat, lon, alt));
                 self.home_changed = Some(self.st.home);
             }
-            SiteLine::AllNodesHere | SiteLine::Nothing => {}
+            SiteLine::HomeClear => {
+                self.st.home = None;
+                self.home_changed = Some(None);
+            }
+            l @ (SiteLine::AreaShape { .. }
+            | SiteLine::AreaCeiling { .. }
+            | SiteLine::AreaClear { .. }
+            | SiteLine::Bubble { .. }
+            | SiteLine::Friend(_)
+            | SiteLine::FriendClear { .. }) => {
+                site::apply_place(app.tracker.places_mut(), &l);
+            }
+            SiteLine::AllNodesHere | SiteLine::AreaHere { .. } | SiteLine::Nothing => {}
         }
     }
 
@@ -172,8 +229,27 @@ impl Site {
         if parsed == SiteLine::AllNodesHere {
             return self.all_nodes_here(app, gw, own, sd, ev, From::Console);
         }
+        if let Err(e) = site::check_room(app.tracker.places(), &parsed) {
+            crate::println!("hub-p4: site line refused: {e}");
+            return;
+        }
         let mut text: heapless::String<128> = heapless::String::new();
-        let _ = writeln!(text, "{}", line.trim());
+        let parsed = match parsed {
+            // A circle round the hub now, saved with its centre.
+            SiteLine::AreaHere { radius_m } => {
+                let Some((lat, lon)) = own else {
+                    crate::println!("hub-p4: area here: the hub has no position yet (GPS fix or manual)");
+                    return;
+                };
+                let shape = tracker::behaviour::Shape::Circle { lat, lon, radius_m };
+                let _ = site::write_area(&mut text, "here", &shape);
+                SiteLine::AreaShape { name: tracker::behaviour::Name::try_from("here").unwrap_or_default(), shape }
+            }
+            l => {
+                let _ = writeln!(text, "{}", line.trim());
+                l
+            }
+        };
         self.apply_line(parsed, app, now);
         self.save(&text, From::Console, sd, ev);
     }
@@ -211,6 +287,20 @@ impl Site {
     /// (`seen_ms`). One Setting event per rule; nothing goes to the card.
     #[inline(never)]
     pub fn silence_seen(&mut self, app: &mut App, seen_ms: u64, snooze: bool, now: u64, ev: &mut Evidence) {
+        if snooze {
+            // Drones at Warning or above: their level alerts, five minutes.
+            for id in app.tracker.snooze_levels(now) {
+                let mut t: heapless::String<160> = heapless::String::new();
+                let _ = write!(t, "screen: snooze 5 min: threat level alerts of drone track {}", id.0);
+                if let Some(d) = app.tracker.get(id).and_then(|d| d.primary_id()).and_then(|u| u.id.as_str()) {
+                    // The ID arrived over the air: shown cleaned.
+                    let _ = write!(t, " ({})", link::printable::Printable(d));
+                }
+                let _ = write!(t, "; level still shown and logged; ends at hub uptime {} s", (now + tracker::behaviour::SNOOZE_MS) / 1000);
+                ev.event(evidence::EventCode::Setting, t.as_bytes(), &[3]);
+                crate::println!("hub-p4: {t}");
+            }
+        }
         let added = if snooze { app.tracker.snooze_seen(seen_ms, now) } else { app.tracker.mute_seen(seen_ms, now) };
         for m in &added {
             let mut t: heapless::String<256> = heapless::String::new();

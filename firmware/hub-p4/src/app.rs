@@ -17,7 +17,9 @@ use crate::{display, links};
 pub const MAX_TRACKS: usize = 64;
 /// ADS-B aircraft (the tracker's default capacity, as the S3 hub with `adsbee`).
 pub const MAX_AIRCRAFT: usize = tracker::aircraft::MAX_AIRCRAFT;
-pub type HubTracker = Tracker<MAX_TRACKS, MAX_AIRCRAFT>;
+/// Every track keeps a path history for the threat levels
+/// (`tracker::behaviour`, ~4.4 KB a track): the tracker lives in PSRAM.
+pub type HubTracker = Tracker<MAX_TRACKS, MAX_AIRCRAFT, MAX_TRACKS>;
 
 /// Where the own position in use came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,9 @@ pub struct OwnPos {
     pub alt: Option<f64>,
     pub source: OwnSource,
     pub at_ms: u64,
+    /// Ground speed (m/s) and course (degrees true) when known: the
+    /// receiver's for a live GPS fix, 0 for a manual or held position.
+    pub motion: Option<(f32, Option<f32>)>,
 }
 
 /// What the screen needs from outside the tracker and the gateway link.
@@ -156,6 +161,23 @@ impl App {
         self.announce_spoof(ev, now);
         self.announce_disputes(ev, now);
         self.announce_conflicts(ev, now);
+        self.announce_levels(ev, now);
+    }
+
+    /// Drones whose threat level rose (to caution or above, tracker
+    /// `behaviour`): one evidence event (`threat_level`) and one console
+    /// line per rise, with the reasons. A snoozed drone's rise is still
+    /// logged (the snooze only stops the screen's alert).
+    #[inline(never)]
+    fn announce_levels(&mut self, ev: &mut crate::evlog::Evidence, now: u64) {
+        while let Some(r) = self.tracker.take_level_rise(now) {
+            let Some(t) = self.tracker.get(r.track) else { continue };
+            // The drone's ID arrived over the air.
+            let text: heapless::String<256> = clean(&tracker::behaviour::describe(t, now));
+            let data = tracker::behaviour::rise_data(t, &r);
+            ev.event(evidence::format::EventCode::ThreatLevel, text.as_bytes(), &data);
+            crate::println!("hub-p4: LEVEL {}", text);
+        }
     }
 
     /// Nodes' Status and Stats: role and plan, then the deaf-node and
@@ -421,7 +443,14 @@ impl App {
     pub fn own_pos(&self, gps: &crate::gps::Gps, now: u64) -> Option<OwnPos> {
         let max_age = self.tracker.config().own_fix_max_age_ms;
         gps.fresh_fix(now, max_age)
-            .map(|f| OwnPos { lat: f.lat, lon: f.lon, alt: f.alt_hae_m, source: OwnSource::Gps, at_ms: f.at_ms })
+            .map(|f| OwnPos {
+                lat: f.lat,
+                lon: f.lon,
+                alt: f.alt_hae_m,
+                source: OwnSource::Gps,
+                at_ms: f.at_ms,
+                motion: if f.held { Some((0.0, None)) } else { f.speed_mps.map(|s| (s, f.course_deg)) },
+            })
             .or(self.manual)
     }
 
@@ -436,7 +465,8 @@ impl App {
                 // evidence log's fix age; the tracker must not age it out.
                 let held = p.source == OwnSource::Gps && gps.fix.is_some_and(|f| f.held);
                 let stamp = if p.source == OwnSource::Manual || held { now } else { p.at_ms };
-                self.tracker.set_own_position(p.lat, p.lon, p.alt, stamp);
+                let motion = if p.source == OwnSource::Manual { Some((0.0, None)) } else { p.motion };
+                self.tracker.set_own_fix(p.lat, p.lon, p.alt, stamp, motion);
             }
             None => self.tracker.clear_own_position(),
         }
@@ -446,6 +476,9 @@ impl App {
             None => self.tracker.clear_utc(),
         }
         self.tracker.expire(now);
+        // Threat levels: path history, then every drone against the areas,
+        // the bubble and the friends (rises are announced from `ingest`).
+        self.tracker.tick_behaviour(now);
         if let Some(ct) = self.control.as_deref_mut() {
             ct.expire(now, self.tracker.config());
         }
@@ -591,7 +624,9 @@ impl App {
         };
         self.state.flags = ext.flags.clone();
         // The "Alarms" row acts on what this frame shows (`seen` = now).
+        // Its Snooze also snoozes drones at Warning or above (threat levels).
         let (mutable, snoozable) = self.tracker.alarm_counts(now, now);
+        let snoozable = snoozable.saturating_add(self.tracker.snoozable_levels(now).min(255) as u8);
         self.state.threats = screen::Threats {
             active: self.tracker.active_threats(now).count().min(255) as u8,
             jammed: self.tracker.partly_blind(now),
