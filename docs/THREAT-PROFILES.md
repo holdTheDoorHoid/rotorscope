@@ -1,7 +1,8 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
-Status: **design accepted 2026-11-18, branch `threat-profiles`; slice 16a built (host tests and
-P4 firmware compile; not yet on the bench). See "Slice 16a as built" at the end.**
+Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a and 16b built (host
+tests and P4 firmware compile; not yet on the bench). See "Slice 16a as built" and "Slice 16b as
+built" at the end.**
 
 Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
 repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
@@ -196,9 +197,8 @@ Where it differs from the design above, and why:
 - **Two signs.** Rules 2, 3 and 4 all need the drone (or its pilot) in or at an area, and rule 1 is
   "in the area", so a drone over an area with its pilot outside (1 + 3), with its pilot inside
   (1 + 2) or too high (1 + 4) is a **Warning**, as the brief asks. With the bubble on, a hobbyist
-  flying near you with the pilot also near you is therefore a Warning. Worth watching on the bench
-  and in the field; the profiles (16e) are the place to soften it, for example by not counting
-  rule 2 together with rule 1 in the bubble.
+  flying near you with the pilot also near you was therefore a Warning; **slice 16b changed this**
+  (see below): in the bubble a nearby pilot no longer counts towards the pair.
 - **Rule 4 measures height above the unit** (the drone's GPS height minus the hub's), else the
   height the drone broadcasts above its take-off point or the ground. It applies to the bubble
   too, with the default 120 m.
@@ -217,3 +217,90 @@ Where it differs from the design above, and why:
 - Only confirmed tracks (WP-09 probation) are judged, so one forged frame raises nothing.
 - On the console a site line is at most 120 characters, so a polygon of more than about five
   corners goes in the file (file lines may now be 384 characters).
+
+## Slice 16b as built (2026-11-18)
+
+Rules 7-11 (lingering, circling, low hover, drop, following), for drones that report their
+position, confirmed tracks only, from the path history 16a keeps (so on the P4 hub only). Code:
+`crates/tracker/src/behaviour/linger.rs` (rules 7-10), `follow.rs` (rule 11), wired into
+`evaluate` in `mod.rs`; new scripted flights in `scenario.rs` (a drop, a lawnmower survey) and the
+tests in `tests_linger.rs`. The hub's own trail (for rule 11) is in `path.rs`.
+
+The numbers in use (all in `linger.rs` and `follow.rs`, to tune on the bench), and why:
+
+| Rule | What | Value | Why |
+|---|---|---|---|
+| 7 Loitering | every position within | 50 m of where it is now | a Remote ID position is good to about 30 m, so a still drone shows as a cloud about that wide; 50 m still means "one spot" |
+| | Caution after | 3 min | a passing drone or one photo is over within a minute or two |
+| | Warning after | 5 min, **and** under 40 m above the unit | the design's own example ("hovering low over the yard for 5 min"); 40 m is about where a camera picks out faces and windows. Lower than 15 m is rule 9 |
+| | counts in an area or within | 50 m outside it | watching from just beyond the fence |
+| 8 Circling | turns added up to | 360 degrees, mostly one way (all the turning at most 1.5 times the net turn) | a real circle turns one way; jittery positions turn both ways |
+| | the path followed in steps of at least | 15 m (positions first averaged over 5, one a second) | wobble of a hovering drone's position makes no turns |
+| | a step turning more than | 100 degrees ends the search | jumps of the position turn every which way |
+| | at least | 8 turns, at least 1 m/s along the path | the smallest circle counted is about 20 m in radius; tighter is within the error of the positions |
+| | circle's radius under | 150 m | wider is not "round one place" |
+| | within the last | 5 min (first the last 2 min at one point a second, then 5 min at one every 5 s, averaged in threes, for slow wide circles) | |
+| | counts when | the circle's middle is in the place, or the circle reaches into it | the estate photographer next door does not count |
+| | the circle must close: the drone back within | one radius (at least 30 m) of where the turn began | a drone that circled and flew off stops counting about one radius later |
+| 9 Low hover | inside a place, under | 15 m above the unit | window height (the design and the research) |
+| | nearly still (within 15 m of where it is now) for | 10 s | |
+| 10 Drop | heights averaged over | 5 reports | GPS heights wobble a few metres |
+| | down at least | 10 m | |
+| | a pause near the bottom (within 3 m) of | 3 s | a drop needs a moment to release |
+| | then up at least | 8 m | a drone that lands and stays down is not a drop |
+| | all within | 60 s, the bottom inside the place (or within 10 m of its edge) | |
+| 11 Following | the unit travelled at least | 200 m (straight line, so pacing a street does not add up) | |
+| | the drone within, the whole way | the bubble's radius, at least 100 m (one wild position forgiven) | |
+| | and the drone itself moved | at least half as far, within 45 degrees of the unit's direction | keeps out a drone you walk past or one hovering where you walk |
+
+Policy, as 16a (rises at once, comes down 30 s after the rule stops; the reasons stay shown
+while it is held). How the new rules combine:
+
+- **Loitering and "in the area" are one sign**, not two: loitering *is* being there, for longer.
+  So a drone loitering over the area is Caution (and Warning only when long and low), not a
+  Warning after 3 minutes. Loitering just outside the fence is Caution on its own.
+- **Circling and "in the area" are two signs**: a drone circling over the area is a Warning
+  (the brief's "orbit over the area"). A circle that takes the area in without flying over it
+  is Caution.
+- Low hover, drop and following are Warning on their own.
+- **Friends**: rules 7-11 give a friend only Notice (as rules 1-4). Following is lowered too,
+  because a follow-me selfie drone is the classic friendly case. The approach rules (5, 6) are
+  still never lowered.
+- **The 16a tuning issue, fixed**: in the bubble, a pilot near you (rule 2) no longer counts
+  towards the two-signs Warning (a pilot nearby is normal in a park). Both reasons are still
+  shown. For fixed areas nothing changed: drone and pilot both inside is still a Warning.
+
+Where it differs from the design above, or needs a word:
+
+- **The bubble moves**, so for loitering only the time the unit itself stood about (within 50 m)
+  counts: a drone hovering where you walk is not loitering at you (and one that keeps up is
+  following).
+- **Low hover beside its own pilot in the bubble** does not count (that is a take-off or a
+  landing next to the person flying it). In a fixed area it counts.
+- **Expected false alarms** (THREAT-TACTICS.md §6): a roof or gutter inspector hovering low is a
+  Warning, and so is a drone that lands inside the area and sits there (rule 9). A photographer
+  dropping for a shot and climbing again would look like a drop. These are the price of catching
+  window-peeping and payload drops; the profiles (16e) are where to soften them.
+- **Heights.** Rule 9 uses the height above the unit as 16a does (the drone's GPS height minus the
+  hub's, else the height it broadcasts above take-off or ground); no height, no rule 9. Rule 10
+  works on the GPS heights kept in the path, so a drone that broadcasts no GPS height makes no
+  drop (a mix of the two kinds of height could fake a dip).
+- **The unit's own trail**: one point every 5 s, four points for each drone path ring (256 on the
+  P4 hub, about 21 minutes, 3 KB). Hubs without path rings keep none. A gap in the hub's fixes of
+  over a minute starts it again. The P4 tracker grows by about 3 KB (still well under 1 MiB).
+- **New numbers in the outputs**: JSON reasons may carry `for_s` (how long: loitering, circling,
+  low hover, following) and `ago_s` now also for the drop; `h_m` for loitering, circling, low hover
+  and drop. Evidence code 28 carries the rule numbers 7-11. Reason words, for example
+  `lingering at house for 5 min, 30 m up`, `circling shed (100 m radius), a full turn in 79 s`,
+  `hovering low over house, 8 m up, for 12 s`, `dropped 31 m over house (down to 20 m up) and
+  climbed again, 4 s ago`, `following you for 420 m (5 min)`.
+- **One hit per rule** per fixed area and per bubble is now kept while judging (the most serious,
+  then the nearest), so many overlapping areas can no longer overflow the list of hits.
+- **Measured**: the P4 tracker is 371,864 bytes (16a: 368,784; the own trail is 3,076). The P4
+  firmware compiles; its main stack frame is unchanged (68,080 bytes); the once-a-second
+  housekeeping frame grew from 2,736 to 3,008 bytes, and the new path checks run in their own
+  frames below it (848 bytes for rules 7-10, 208 for rule 11). Host tests: 1,523 passed, 5 ignored
+  (16a: 1,503).
+- **Seen on the way, not changed (16a)**: a survey drone flying a pass straight over the middle
+  of the area at walking pace or faster is "heading for" the house under rules 5 and 6, and
+  arrives within 30 s, so it is Critical for that pass. Worth tuning with the profiles.
