@@ -437,6 +437,8 @@ pub struct LinkCaveats {
     pub old_nodes: u8,
     /// Distinct unprovisioned nodes announced in the last minute.
     pub unprovisioned: u8,
+    /// The gateway is a bench build that forges traffic on purpose.
+    pub bench_gateway: bool,
 }
 
 /// Why the hub's kit records cannot key the link.
@@ -465,8 +467,8 @@ impl KitProblem {
 }
 
 impl LinkCaveats {
-    /// The link line, `None` when all is well: kit problem first, then old
-    /// firmware, then unprovisioned nodes.
+    /// The link line, `None` when all is well: kit problem first, then a
+    /// bench (forging) gateway, old firmware, unprovisioned nodes.
     pub fn line(&self) -> Option<String<64>> {
         use core::fmt::Write;
         let mut s: String<64> = String::new();
@@ -478,6 +480,9 @@ impl LinkCaveats {
         };
         if let Some(k) = self.kit {
             put(format_args!("{}", k.text()));
+        }
+        if self.bench_gateway {
+            put(format_args!("BENCH GATEWAY"));
         }
         match (self.old_gateway, self.old_nodes) {
             (false, 0) => {}

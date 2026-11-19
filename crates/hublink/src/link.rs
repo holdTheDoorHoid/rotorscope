@@ -10,7 +10,7 @@
 //! | Mode | Packets from nodes | Beacons, commands, time syncs | Roster to the gateway |
 //! |---|---|---|---|
 //! | [`Mode::Keyed`] | version 3 Frames verified per roster slot ([`airlink::v3::Hub::open_frames`]); everything else refused | sealed per slot; beacons carry one tag per slot | live (not revoked) roster MACs |
-//! | [`Mode::Open`] (provisioned open) | version 1 Frames from anyone; version 3 refused (`not_in_roster`: a keyed node at an open hub) | version 1, unsealed | empty (an open kit has no roster) |
+//! | [`Mode::Open`] (provisioned open) | version 1 Frames from anyone; version 3 refused (`not_in_roster`: a keyed node at an open hub) | version 1, unsealed | the addresses heard in the last minute (per-address budgets at the gateway; others share its open lane) |
 //! | [`Mode::Closed`] (records missing or damaged, no boot counter) | none: all refused | none | empty |
 //!
 //! Unprovisioned announcements are counted in every mode (distinct sender
@@ -22,7 +22,9 @@
 //! 1. The gateway sends `Hello` (protocol 14 and up). An older protocol is
 //!    refused: no beacons, no commands, `OLD FIRMWARE: gateway` on screen.
 //!    Nothing is sealed before a `Hello`: every tag covers the gateway's MAC.
-//! 2. On a `Hello` (and every [`ROSTER_MS`]) the hub sends `Roster`.
+//! 2. On every `Hello` (the gateway sends one at boot and every 5 s, and
+//!    relays no keyed node packet until it has a roster) and every
+//!    [`ROSTER_MS`] the hub sends `Roster`.
 //! 3. Every [`BEACON_MS`] the hub seals a fresh `Beacon` (the gateway
 //!    never repeats one). An empty roster on a keyed hub makes no beacon.
 //! 4. A node's first verified batch of a new session gets a `Sync` echoing
@@ -215,7 +217,13 @@ pub struct View {
     pub old_nodes: u8,
     /// Distinct unprovisioned nodes announced in the last minute.
     pub unprovisioned: u8,
+    /// The gateway is a bench build that forges traffic on purpose
+    /// (`gwforge`: its firmware string starts "gw FORGE").
+    pub bench_gateway: bool,
 }
+
+/// The firmware string a `gwforge` (bench) gateway sends in its Hello.
+pub const BENCH_GATEWAY_PREFIX: &str = "gw FORGE";
 
 pub struct HubLink {
     mode: Mode,
@@ -334,7 +342,12 @@ impl HubLink {
     }
 
     pub fn view(&self, now: u64) -> View {
-        View { old_gateway: self.old_gateway.is_some(), old_nodes: self.old_nodes.count(now), unprovisioned: self.unprov.count(now) }
+        View {
+            old_gateway: self.old_gateway.is_some(),
+            old_nodes: self.old_nodes.count(now),
+            unprovisioned: self.unprov.count(now),
+            bench_gateway: self.gateway.as_ref().is_some_and(|g| g.firmware.starts_with(BENCH_GATEWAY_PREFIX)),
+        }
     }
 
     // ------------------------------------------------------- from the gateway --
@@ -355,9 +368,11 @@ impl HubLink {
                 self.gateway = Some(Gateway { mac, channel, protocol, firmware });
                 self.hub.set_gateway(mac);
                 if new {
-                    self.roster_at = None;
                     self.last_beacon = None;
                 }
+                // The roster at every Hello: a gateway that rebooted (same
+                // address) relays no node packet until it has one.
+                self.roster_at = None;
                 out(Up::Gateway { accepted: true, protocol });
                 self.tick_roster(now, sink);
             }
@@ -604,10 +619,20 @@ impl HubLink {
             return;
         }
         let mut macs: Vec<Mac, { gw::MAX_ROSTER }> = Vec::new();
-        if self.mode == Mode::Keyed {
-            for s in self.slots.iter().flatten() {
-                let _ = macs.push(s.mac);
+        match self.mode {
+            Mode::Keyed => {
+                for s in self.slots.iter().flatten() {
+                    let _ = macs.push(s.mac);
+                }
             }
+            // An open kit has no roster; the nodes heard lately get the
+            // gateway's per-address budgets instead of its shared lane.
+            Mode::Open => {
+                for m in self.open_nodes.recent(now) {
+                    let _ = macs.push(m);
+                }
+            }
+            Mode::Closed => {}
         }
         if Self::put(&mut self.enc, &mut self.stats, sink, &GwDown::Roster(macs)) {
             self.stats.rosters += 1;

@@ -515,6 +515,8 @@ fn caveat_link_line() {
     assert_eq!(c.lines()[0].as_deref(), Some("OLD FIRMWARE: gateway, 3 nodes"));
     c.link = LinkCaveats { old_nodes: 1, ..LinkCaveats::default() };
     assert_eq!(c.lines()[0].as_deref(), Some("OLD FIRMWARE: 1 node"));
+    c.link = LinkCaveats { bench_gateway: true, ..LinkCaveats::default() };
+    assert_eq!(c.lines()[0].as_deref(), Some("BENCH GATEWAY"));
     for (k, t) in [
         (KitProblem::Missing, "NO KIT KEYS: link closed"),
         (KitProblem::Damaged, "KIT RECORDS DAMAGED: link closed"),
@@ -540,9 +542,9 @@ fn caveat_link_line() {
     // Old gateway, a few old nodes and unprovisioned ones fit the panel's
     // 52 columns; past that the renderer cuts the tail (the count of
     // unprovisioned nodes), never the start.
-    c.link = LinkCaveats { kit: None, old_gateway: true, old_nodes: 9, unprovisioned: 9 };
+    c.link = LinkCaveats { kit: None, old_gateway: true, old_nodes: 9, unprovisioned: 9, bench_gateway: false };
     let l = c.lines();
     assert!(l[1].as_ref().unwrap().len() <= 52, "{:?}", l[1]);
-    c.link = LinkCaveats { kit: None, old_gateway: true, old_nodes: 16, unprovisioned: 16 };
+    c.link = LinkCaveats { kit: None, old_gateway: true, old_nodes: 16, unprovisioned: 16, bench_gateway: false };
     assert!(c.lines()[1].as_ref().unwrap().starts_with("OLD FIRMWARE: gateway, 16 nodes  UNPROVISIONED NODE"));
 }

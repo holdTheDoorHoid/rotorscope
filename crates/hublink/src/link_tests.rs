@@ -490,6 +490,9 @@ fn open_kit_takes_version_1_and_refuses_keyed_nodes() {
     assert!(v1.push(&[5, 6, 0]));
     let v1 = v1.packet(1).to_vec();
     assert_eq!(k.packet(MAC_X, &v1), [Got::Batch { slot: None, mac: MAC_X, payload: std::vec![5, 6, 0] }]);
+    // The node heard goes in the roster at the next Hello (its own budget).
+    k.up(hello(14));
+    assert_eq!(k.wire.take(), [Down::Roster(std::vec![MAC_X])]);
     // A keyed node (version 3) at an open hub: refused, not taken unchecked.
     let mut keyed_hub = Kit::new(keyed(5));
     keyed_hub.start();
@@ -561,4 +564,33 @@ fn sizes() {
     let n = core::mem::size_of::<HubLink>();
     std::println!("HubLink {n} bytes");
     assert!(n < 16 * 1024, "{n}");
+}
+
+#[test]
+fn roster_at_every_hello_and_a_bench_gateway_is_shown() {
+    let mut k = Kit::new(keyed(100));
+    k.up(hello(14));
+    assert_eq!(k.wire.take(), [Down::Roster(std::vec![MAC_A, MAC_B])]);
+    // The same gateway again 1 s later (it rebooted): the roster at once.
+    k.wait(1000);
+    k.up(hello(14));
+    assert_eq!(k.wire.take(), [Down::Roster(std::vec![MAC_A, MAC_B])]);
+    assert!(!k.link.view(k.ht).bench_gateway);
+    k.up(GwUp::Hello { protocol: 14, firmware: "gw FORGE 0.1".try_into().unwrap(), mac: GW, channel: 6 });
+    assert!(k.link.view(k.ht).bench_gateway);
+}
+
+/// Every Transmit ends in one TxDone, a cancelled one with `radio_acked`
+/// false: a cancelled Sync is sent again.
+#[test]
+fn a_cancelled_sync_is_sent_again() {
+    let mut k = Kit::new(keyed(100));
+    k.start();
+    let p = k.batch(0);
+    k.packet(MAC_A, &p);
+    let t = transmits(&k.wire.take());
+    k.up(GwUp::TxDone { id: t[0].0, to: MAC_A, radio_acked: false, attempts: 0, held_ms: 0 });
+    k.wait(SYNC_RETRY_MS);
+    k.tick();
+    assert_eq!(transmits(&k.wire.take()).len(), 1);
 }
