@@ -1,0 +1,14 @@
+:root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --accent: #0b5fff; --warn-bg: #fff3cd; --warn-fg: #5c4400; }
+@media (prefers-color-scheme: dark) { :root { --bg: #141414; --fg: #eee; --muted: #999; --line: #333; --accent: #6ea0ff; --warn-bg: #3a2f00; --warn-fg: #ffe08a; } }
+body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+header h1 { font-size: 16px; margin: 0 12px 0 0; }
+input, select, button { font: inherit; padding: 4px 6px; }
+#map { height: 50vh; }
+.note { color: var(--muted); padding: 6px 16px; }
+.warn { background: var(--warn-bg); color: var(--warn-fg); padding: 6px 16px; }
+.warn ul { margin: 4px 0; padding-left: 20px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.s { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.wrap { overflow-x: auto; padding: 0 8px 24px; }
