@@ -91,7 +91,7 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 14 | shutdown | (none); a shutdown checkpoint follows |
 | 15 | gps_receiver | 1 answering, 0 silent |
 | 16 | o4_decrypted | session key ID (4), record selector (1); text is what it decrypted to, never the key |
-| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); text describes it. For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
+| 17 | threat | kind (1, `link::ThreatKind` index), reporting node's station address (6); from WP-14a also episode (u32, 1 = the alarm entry's first), how it was raised (1: 0 first, 1 again after an earlier episode ended, 2 still sounding when its mute or snooze ended), raises within the last minute (1). Text describes it. One record per raise (see "Threat episodes" below). For a node's report the raw `Threat` frame is the record before it (a MAVLink alarm announced when its suspicion is backed may come later); hub-raised kinds (area_gnss, id_flood, blinded) have no frame; their address is the node they are about (blinded, id_flood of table `node`) or all zero |
 | 18 | gnss_jamming | kind (1), level (i16); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 19 | gnss_spoofing | kind (1), level (i32); see docs/GNSS-INTEGRITY.md. Kind 0 = back to normal |
 | 20 | spoof_suspect | check (1, `tracker::spoof::Check` code), confidence 0-100 (1); text names the track and the evidence (docs/SPOOFING.md) |
@@ -99,8 +99,26 @@ Body fields marked "lv" are a u16 length followed by that many bytes.
 | 22 | aircraft_conflict | level (1: 1 advisory, 2 caution, 3 warning), drone track id (u32), aircraft address (u32), aircraft source (1); text: the pair, distance, height difference, predicted closest approach |
 | 23, 24 | (reserved) | taken by the acoustic work: 23 `sound`, 24 `sound_clip` (on the acoustic branch) |
 | 25 | id_disputed | drone track id (u32 LE), what (1: bit 0 position, 1 Self-ID, 2 operator ID, 3 a second ID), other claim's source (1: 0 Remote ID, 1 DroneID, 2 DJI Wi-Fi, 3 control link, 4 decrypted O4, 255 none); text: two transmitters claim this ID, how far apart, neither verified (tracker `claims`, docs/SPOOFING.md) |
+| 26 | threat_ended | kind (1), node station address (6), episode (u32), active ms (u64: first to last report of the episode), frames (u64), reports (u32), peak level (i8: dBm, dB above the floor for jamming), raises in the episode (u32), flags (1: bit 0 held as flapping, bit 1 its alarm entry was removed while it was still sounding), end records lost before this one (u32). Text: the same in words. Closes the latest `threat` record (17) of the same alarm |
 
 Unknown codes are reported, not rejected (a newer firmware may add some).
+Fields added at the end of an event's data by a later firmware are
+ignored by an older reader: read the fields you know by position, and
+accept data longer than that.
+
+**Threat episodes** (code 17 and 26, from WP-14a). A threat (an alarm entry
+on the hub: one kind from one node, against one target or band) is
+*raised* when first reported, and *raised again* when reported after it
+had ended. It *ends* after 10 s with no report. Each raise is a `threat`
+record and each end of a raised episode a `threat_ended` record, so an
+alarm tripped briefly and then used again for a real attack leaves two
+episodes on record, not one. A threat that **flaps** is bounded: once it
+has been raised 3 times within 60 s, its episode ends only after 60 s with
+no report, and the raises in between are counted into that episode
+(`raises`, flag "held") instead of each getting a record. The third raise's
+text says the hold begins. Records per alarm entry are thus at most about
+four a minute. A silenced (muted or snoozed) alarm is not raised and so
+has no end record; its raw frames are logged as before.
 
 ### Kind 2: detection
 

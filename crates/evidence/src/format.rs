@@ -251,6 +251,38 @@ pub enum EventCode {
     /// Text: the ID, how far apart, and that neither is verified.
     /// (Codes 23 and 24 are taken by the acoustic work: `sound`, `sound_clip`.)
     IdDisputed = 25,
+    /// An announced threat episode ended (WP-14a): quiet long enough, or
+    /// its alarm entry removed while it may still be going on. Closes the
+    /// `threat` record that raised it. Data: [`threat_ended`] layout. Text:
+    /// what it totalled.
+    ThreatEnded = 26,
+}
+
+/// Data of a `threat` event (17). The first 7 bytes are the original
+/// layout; firmware from WP-14a on appends the episode fields.
+pub mod threat {
+    /// kind (1), node station address (6)
+    pub const BASE: usize = 7;
+    /// + episode number for this alarm entry (u32, 1 = first), how it was
+    /// raised (1: [`RAISE_FIRST`], [`RAISE_AGAIN`], [`RAISE_AFTER_SILENCE`]),
+    /// raises within the last minute (1).
+    pub const WITH_EPISODE: usize = BASE + 4 + 1 + 1;
+    pub const RAISE_FIRST: u8 = 0;
+    pub const RAISE_AGAIN: u8 = 1;
+    pub const RAISE_AFTER_SILENCE: u8 = 2;
+}
+
+/// Data of a `threat_ended` event (26).
+pub mod threat_ended {
+    /// kind (1), node station address (6), episode (u32), active ms (u64),
+    /// frames (u64), reports (u32), peak level (i8), raises in the episode
+    /// (u32), flags (1: [`HELD`], [`REMOVED`]), end records lost before
+    /// this one (u32).
+    pub const LEN: usize = 1 + 6 + 4 + 8 + 8 + 4 + 1 + 4 + 1 + 4;
+    /// Held as flapping: several raises reported as this one episode.
+    pub const HELD: u8 = 1;
+    /// Its alarm entry was removed before it went quiet.
+    pub const REMOVED: u8 = 2;
 }
 
 impl EventCode {
@@ -280,6 +312,7 @@ impl EventCode {
             21 => LinkForgery,
             22 => AircraftConflict,
             25 => IdDisputed,
+            26 => ThreatEnded,
             _ => return None,
         })
     }
@@ -309,6 +342,7 @@ impl EventCode {
             LinkForgery => "link_forgery",
             AircraftConflict => "aircraft_conflict",
             IdDisputed => "id_disputed",
+            ThreatEnded => "threat_ended",
         }
     }
 }

@@ -1730,6 +1730,8 @@ mod tests_conflict;
 #[cfg(test)]
 mod tests_deaf;
 #[cfg(test)]
+mod tests_episodes;
+#[cfg(test)]
 mod tests_control;
 #[cfg(test)]
 mod tests_flood;

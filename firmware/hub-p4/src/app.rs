@@ -271,71 +271,97 @@ impl App {
         }
     }
 
-    /// New attacks and jamming (protocol 9, and the hub's own deaf-node
-    /// check): one evidence event and one console line each, once.
+    /// Attacks and jamming (protocol 9, and the hub's own deaf-node check):
+    /// one evidence event and one console line each time a threat is raised
+    /// (again after it ended, WP-14a), and one more when that episode ends,
+    /// with what it totalled. A flapping threat is bounded (tracker
+    /// `threats::FLAP_RAISES`) and the records say so. Out of line: the
+    /// main loop's frame is the P4's tightest stack budget.
+    #[inline(never)]
     fn announce_threats(&mut self, gw: &GatewayLink<'_>, ev: &mut crate::evlog::Evidence, now: u64) {
         use core::fmt::Write;
+        use evidence::format::threat;
+        let mac_of = |node: u8| node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
         while let Some(id) = self.tracker.take_new_threat(now) {
             let Some(t) = self.tracker.get_threat(id) else { continue };
-            let mac = t.node.checked_sub(1).and_then(|i| gw.nodes.get(i as usize)).map(|n| n.mac).unwrap_or([0; 6]);
+            let mut text: heapless::String<384> = heapless::String::new();
+            // Hub-raised kinds are about the hub (area GPS: all zero) or the
+            // node in their detail (id_flood of table `node`).
+            let mac = if t.kind == link::ThreatKind::AreaGnss { [0; 6] } else { mac_of(t.node) };
             if t.kind == link::ThreatKind::AreaGnss {
                 // Raised by the hub from aircraft and drones: its own text.
-                let text = tracker::area_gnss::describe(t);
-                let mut data = [0u8; 7];
-                data[0] = t.kind as u8;
-                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
-                crate::println!("hub-p4: THREAT {}", text);
-                continue;
-            }
-            if t.kind == link::ThreatKind::IdFlood {
+                let _ = text.push_str(&tracker::area_gnss::describe(t));
+            } else if t.kind == link::ThreatKind::IdFlood {
                 // Raised by the tracker itself (WP-09, `tracker::probation`):
                 // a flood of forged drone IDs, aircraft addresses or
                 // control links, with the rate seen; or one node shedding
                 // a flood (its address; zero for the hub-wide tables).
-                let text = tracker::probation::describe(t);
-                let mut data = [0u8; 7];
-                data[0] = t.kind as u8;
-                data[1..7].copy_from_slice(&mac);
-                ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
-                crate::println!("hub-p4: THREAT {}", text);
-                continue;
-            }
-            let mut text: heapless::String<192> = heapless::String::new();
-            let _ = write!(text, "{} (node {}", t.label(), t.node);
-            if t.channel != 0 {
-                let _ = write!(text, ", ch {}", t.channel);
-            }
-            if t.freq != 0 {
-                let _ = write!(text, ", {:.1} MHz", t.freq_mhz());
-            }
-            let _ = if let Some(d) = t.contested() {
-                // A control link with more transmitters than it can have.
-                write!(
-                    text,
-                    ", {}, {} transmitters, {}, {} events, {} dBm)",
-                    d.system.map_or("?", |s| s.label()),
-                    d.transmitters,
-                    ctrlwatch::contested::rule_name(d.rules),
-                    t.count,
-                    t.level
-                )
-            } else if t.kind.is_jamming() {
-                write!(text, ", +{} dB, detail {})", t.level, t.detail)
+                let _ = text.push_str(&tracker::probation::describe(t));
             } else {
-                write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
-            };
-            if !t.ssid.is_empty() {
-                // From a link frame: never printed or logged as received,
-                // and only what the frame claimed (WP-11b).
-                let _ = write!(text, " claimed \"{}\"", link::printable::Printable(&t.ssid));
+                let _ = write!(text, "{} (node {}", t.label(), t.node);
+                if t.channel != 0 {
+                    let _ = write!(text, ", ch {}", t.channel);
+                }
+                if t.freq != 0 {
+                    let _ = write!(text, ", {:.1} MHz", t.freq_mhz());
+                }
+                let _ = if let Some(d) = t.contested() {
+                    // A control link with more transmitters than it can have.
+                    write!(
+                        text,
+                        ", {}, {} transmitters, {}, {} events, {} dBm)",
+                        d.system.map_or("?", |s| s.label()),
+                        d.transmitters,
+                        ctrlwatch::contested::rule_name(d.rules),
+                        t.count,
+                        t.level
+                    )
+                } else if t.kind.is_jamming() {
+                    write!(text, ", +{} dB, detail {})", t.level, t.detail)
+                } else {
+                    write!(text, ", {} frames, {} dBm, detail {})", t.count, t.level, t.detail)
+                };
+                if !t.ssid.is_empty() {
+                    // From a link frame: never printed or logged as received,
+                    // and only what the frame claimed (WP-11b).
+                    let _ = write!(text, " claimed \"{}\"", link::printable::Printable(&t.ssid));
+                }
+                if let Some(maker) = tracker::threats::drone_maker(t) {
+                    let _ = write!(text, " ({maker})");
+                }
             }
-            if let Some(maker) = tracker::threats::drone_maker(t) {
-                let _ = write!(text, " ({maker})");
-            }
-            let mut data = [0u8; 7];
+            // Raised again, and the flapping bound when it starts.
+            let _ = tracker::threats::raise_note(t, &mut text);
+            let mut data = [0u8; threat::WITH_EPISODE];
             data[0] = t.kind as u8;
-            data[1..].copy_from_slice(&mac);
+            data[1..7].copy_from_slice(&mac);
+            data[7..11].copy_from_slice(&t.episode().to_le_bytes());
+            data[11] = match t.raise_kind() {
+                tracker::threats::RaiseKind::First => threat::RAISE_FIRST,
+                tracker::threats::RaiseKind::Again => threat::RAISE_AGAIN,
+                tracker::threats::RaiseKind::AfterSilence => threat::RAISE_AFTER_SILENCE,
+            };
+            data[12] = t.raises_in_window().min(255) as u8;
             ev.event(evidence::format::EventCode::Threat, text.as_bytes(), &data);
+            crate::println!("hub-p4: THREAT {}", text);
+        }
+        while let Some(e) = self.tracker.take_ended_threat(now) {
+            use evidence::format::threat_ended as te;
+            let mut text: heapless::String<320> = heapless::String::new();
+            let _ = tracker::threats::end_text(&e, &mut text);
+            let mac = if e.kind == link::ThreatKind::AreaGnss { [0; 6] } else { mac_of(e.node) };
+            let mut d = [0u8; te::LEN];
+            d[0] = e.kind as u8;
+            d[1..7].copy_from_slice(&mac);
+            d[7..11].copy_from_slice(&e.episode.to_le_bytes());
+            d[11..19].copy_from_slice(&e.duration_ms().to_le_bytes());
+            d[19..27].copy_from_slice(&e.count.to_le_bytes());
+            d[27..31].copy_from_slice(&e.reports.to_le_bytes());
+            d[31] = e.peak_level as u8;
+            d[32..36].copy_from_slice(&e.raises.to_le_bytes());
+            d[36] = if e.held { te::HELD } else { 0 } | if e.why == tracker::threats::EndWhy::Removed { te::REMOVED } else { 0 };
+            d[37..41].copy_from_slice(&e.lost_before.to_le_bytes());
+            ev.event(evidence::format::EventCode::ThreatEnded, text.as_bytes(), &d);
             crate::println!("hub-p4: THREAT {}", text);
         }
     }
