@@ -1555,9 +1555,15 @@ pub fn fmt_duration(ms: u64) -> String {
     }
 }
 
-/// "X after" or "X before" for `later - earlier`.
+/// "X after" or "X before" for `later - earlier`. Within a minute either
+/// way is "within a minute of": an authority's time is often whole seconds,
+/// and two clocks are compared.
 fn fmt_delay(later: u64, earlier: u64) -> String {
-    if later >= earlier { format!("{} after", fmt_duration(later - earlier)) } else { format!("{} BEFORE", fmt_duration(earlier - later)) }
+    match later.abs_diff(earlier) {
+        0..60_000 => "within a minute of".into(),
+        d if later > earlier => format!("{} after", fmt_duration(d)),
+        d => format!("{} BEFORE", fmt_duration(d)),
+    }
 }
 
 /// The host name in a service URL (`https://host:port/path` -> `host`),
@@ -1663,7 +1669,7 @@ fn check_timestamps(rep: &mut Report, b: &bundle::Bundle, hashes: &[[u8; 32]], e
         let when = fmt_utc(info.gen_time_ms);
         let mut delays = Vec::new();
         if let Some(u) = upload_ms {
-            delays.push(format!("stamped {} the newest upload it covers was stored (server clock)", fmt_delay(info.gen_time_ms, u)));
+            delays.push(format!("Stamped {} the newest upload it covers was stored (server clock)", fmt_delay(info.gen_time_ms, u)));
         }
         if let Some(g) = newest_gps {
             delays.push(format!("{} the newest GPS time in the records it covers", fmt_delay(info.gen_time_ms, g)));
