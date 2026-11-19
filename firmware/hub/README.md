@@ -250,29 +250,68 @@ Each new password costs one erase of the salt sector.
 `salt` in the `hotspot` line: `stored` (as last boot), `new` (first boot or after `R`; a `warn` line
 says how to read it), `this_boot_only` (see above), `none` (`open-hotspot`).
 
-## Station mode (fixed sensor, O5): owner's steps
+## Station mode (fixed sensor, O5): a bench build for now
 
-Station mode is compiled in **only** if `firmware/hub/wifi.local.toml` exists when you build. The file
-is gitignored, so it never gets committed. Without it, no station code is built.
+Station mode lets the hub join your own Wi-Fi network as well as running its hotspot. Today the
+network name and password are compiled into the firmware image from a file, so anyone holding the
+image, or a dump of the hub's flash, can read the password, and every site needs its own image.
+Until the run-time record below exists, a build therefore takes the file only as a **bench build**
+that says so, and refuses to build while the file is present without the bench switch.
 
-1. Create `firmware/hub/wifi.local.toml` yourself, with your network's name and password:
+1. Create `firmware/hub/wifi.local.toml` yourself (it is gitignored), with your network's name and
+   password:
 
    ```toml
    ssid = "YourNetwork"
    psk  = "your-wifi-password"   # "" for an open network
    ```
 
-2. Tell cargo the file is new, then build as usual: `touch firmware/hub/build.rs` (or build once
-   with `HUB_WIFI_RESCAN=1 cargo fw`). Cargo cannot see a file appear by itself without
-   recompiling the hub on every build; edits and deletion of an existing file are noticed
-   automatically. Cargo prints
-   `warning: station mode ON (wifi.local.toml found; ssid and psk compiled in)`. The SSID and password
-   are never printed.
-3. Flash the hub. The boot line shows `"station":true`. Then `{"t":"sta","state":"up","ch":N}`
-   appears once the hub has joined.
-4. To turn station mode off, delete the file and rebuild.
+2. Tell cargo the file is new: `touch firmware/hub/build.rs` (or build once with
+   `HUB_WIFI_RESCAN=1`). Cargo cannot see a file appear by itself without recompiling the hub on
+   every build; edits and deletion of an existing file are noticed automatically.
+3. Build as a bench build, from `firmware/hub/s3`:
 
-The password ends up inside the firmware image, so don't share images built with station mode on.
+   ```bash
+   ROTORSCOPE_BENCH=1 ROTORSCOPE_BENCH_STATION=1 cargo fw
+   ```
+
+   Cargo prints `warning: station mode ON (bench build: ...)`. The SSID and password are never
+   printed. The image carries `bench-build:env:ROTORSCOPE_BENCH_STATION`, so `tools/dev-board.sh`
+   flashes it only with `ROTORSCOPE_BENCH=1`, and the boot line lists it under `bench`.
+4. Flash the hub. The boot line shows `"station":true`. Then `{"t":"sta","state":"up","ch":N}`
+   appears once the hub has joined.
+5. To turn station mode off, move the file out of `firmware/hub` and rebuild without the switch.
+   While the file is there, a build without `ROTORSCOPE_BENCH_STATION=1` stops with an error, so
+   a field image can never pick up the password by accident.
+
+Do not share or field an image built this way: the password is inside it.
+
+### Planned: the network set at run time (design, not built)
+
+The image will carry no network details, so one image serves every site and an image on its own
+gives nothing away:
+
+- **Where the record lives.** One flash sector of the `nvs` partition, beside the hotspot salt
+  (which uses the last sector). It holds a magic number, a version, the SSID (1-32 bytes), the
+  passphrase (empty or 8-63 characters), `allow_writes`, and a CRC. No record means no station: the
+  hub behaves as a build without station mode does today.
+- **How it gets there.** Over USB only, with the **BOOT** button held, as for reading the hotspot
+  password: a console command takes the SSID and the passphrase and writes the record, and another
+  erases it. Nothing on the hotspot or the station network can set, read or change it. A host tool
+  can also write the sector with `espflash write-bin`, as `tools/link-key` does for the nodes'
+  `rskey`.
+- **How the password is protected at rest.** Honestly: by the hub being in your hands. The record is
+  in the hub's own flash, not in any image, log or SD card (the SD card leaves the box, so the
+  card's `SITE.TXT` was ruled out). Anyone who can read that hub's flash over USB can read the
+  password, as with any Wi-Fi device. Only Espressif's flash encryption (an eFuse setting that
+  cannot be undone) protects against that; it is a separate decision for the kit. The USB console
+  never prints the passphrase, even with BOOT held.
+- **What the phone page shows.** Whether a station network is set, its SSID, joined or not, the
+  channel, and the channel-6 warning. Never the passphrase, and no control to change it.
+- **Boot line.** `"station":true` when a record is present, as now.
+
+Not started. The current build-time path stays, as a bench build, until this exists and has been
+tried on a board.
 
 On the joined network the hub serves the same page and API on port 80 (one connection at a time). It
 also sends CoT multicast there, and gets its address by DHCP.
@@ -297,7 +336,7 @@ radio brings two limits:
   every channel, and phones on the hotspot see short stalls. To limit this, retries happen only once
   every 30 s.
 
-Station mode has not been run on hardware yet. Nobody has created the file.
+Station mode has not been run on hardware yet (**built, not yet tried**).
 
 ## Endpoints
 

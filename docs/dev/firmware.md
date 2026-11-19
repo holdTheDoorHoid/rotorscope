@@ -300,11 +300,14 @@ target, and an Xtensa build whose linker is not on `PATH`. `rust-version = "1.88
 | `adsbee` | | An ADSBee 1090's CSBee output on UART2 (S3 only; costs node link 2; excludes `gps-uart`) |
 | `webhead` | | Adds the aircraft table for the P4's forwarded ADS-B; every build already understands the P4's feed |
 
-**Build-time inputs** (`build.rs`). `ROTORSCOPE_BENCH`. **Station mode** is compiled in only when
-the gitignored file `firmware/hub/wifi.local.toml` exists, with `ssid` (1-32 bytes), `psk` (empty
-for an open network, else 8-63 characters) and optional `allow_writes` (let the station network
-change the own position and the CoT switch). After creating the file, touch `build.rs` or build once
-with `HUB_WIFI_RESCAN=1`. `demo` builds bake in the build time as a stand-in clock.
+**Build-time inputs** (`build.rs`). `ROTORSCOPE_BENCH`. **Station mode** is a bench build for
+now: it is compiled in only when the gitignored file `firmware/hub/wifi.local.toml` exists and the
+bench switch `ROTORSCOPE_BENCH_STATION` is set (with `ROTORSCOPE_BENCH=1`), because the file's
+`ssid` (1-32 bytes) and `psk` (empty for an open network, else 8-63 characters) end up inside the
+image. A build with the file but without the switch stops with an error. Optional `allow_writes`
+lets the station network change the own position and the CoT switch. After creating the file,
+touch `build.rs` or build once with `HUB_WIFI_RESCAN=1`. The planned run-time record that replaces
+the file is described in the hub README ("Station mode"). `demo` builds bake in the build time as a stand-in clock.
 
 **Tasks.** Core 0 runs a thread-mode embassy executor: ingest into the tracker, the 1 Hz tick and
 USB stream, USB commands, the network side (hotspot, DHCP, DNS, HTTP tasks, CoT, station mode)
