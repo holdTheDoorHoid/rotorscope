@@ -26,9 +26,14 @@
 //! packet is sealed with a tag and a freshness stamp ([`auth::VERSION_AUTH`]),
 //! so forged and replayed packets are rejected both ways; without one the link
 //! is unauthenticated, as before (docs/ESPNOW.md, "Securing the link").
+//!
+//! [`v3`] is the next version (docs/LINK-KEYS-DESIGN.md): per-node keys from
+//! `kitkeys`, a tick clock, a multi-tag beacon and a gateway that holds no
+//! key. It sits beside version 2 until the cut-over; nothing above changes.
 #![cfg_attr(not(test), no_std)]
 
 pub mod auth;
+pub mod v3;
 mod hmac;
 /// The build script's key decision, compiled here for its tests only.
 #[cfg(test)]
@@ -203,6 +208,14 @@ impl Batch {
         // Always fits: MAX_PAYLOAD leaves room for the trailer.
         let n = auth::seal(key, src, &mut self.buf, self.len, stamp).unwrap_or(self.len);
         &self.buf[..n]
+    }
+
+    /// The batch as a version 3 packet sealed by `node` at node uptime
+    /// `now_ms` ([`v3::Node::seal_frames`]). Call again for every retry: each
+    /// attempt gets a fresh stamp. `None` while the node may not send yet.
+    pub fn sealed_v3(&mut self, seq: u16, node: &mut v3::Node, now_ms: u64) -> Option<&[u8]> {
+        let n = node.seal_frames(&mut self.buf, self.len, seq, now_ms)?;
+        Some(&self.buf[..n])
     }
 
     pub fn clear(&mut self) {
