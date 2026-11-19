@@ -66,6 +66,12 @@ So, on every hub:
 | Identifiers (`control ids`) | Which system, where in the band, how strong, how sure | Also the link's identifier |
 | Content (`control content`) | No content and no raw packets kept | Stick positions, telemetry, positions, raw packets for evidence |
 
+The content setting reaches further than control radios. With it on, the Wi-Fi nodes also read
+drone telemetry (MAVLink) that someone sends over a Wi-Fi network with no password
+([Attacks on drones](../DRONE-ATTACKS.md), "Hostile MAVLink telemetry"). That means looking inside
+another person's Wi-Fi traffic. With it off, they never do. Networks with a password are never
+looked into either way.
+
 The two are separate choices, made with lines in the hub's site file
 ([Site settings](../SITE.md)), and every change is written to the evidence log. The project
 owner has turned content decoding on for their own kit on their stated permission; that
