@@ -1,6 +1,7 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
-Status: **design accepted 2026-11-18, branch `threat-profiles`; slice 16a in progress.**
+Status: **design accepted 2026-11-18, branch `threat-profiles`; slice 16a built (host tests and
+P4 firmware compile; not yet on the bench). See "Slice 16a as built" at the end.**
 
 Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
 repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
@@ -143,8 +144,8 @@ Presets that set the thresholds, so nobody tunes nineteen numbers by hand:
 - A new module `crates/tracker/src/behaviour/`, pure Rust and host-tested like the rest of the
   tracker. Hub-side only: **no link protocol change**.
 - A short **path history per drone**: one point a second for 2 minutes, one every 5 s for
-  20 minutes. About 3 KB per drone, about 200 KB for 64 drones, in PSRAM next to the tracker
-  (the tracker must stay under 1 MiB).
+  20 minutes. About 4.4 KB per drone (12-byte points), about 280 KB for 64 drones, in PSRAM inside
+  the tracker (the tracker must stay under 1 MiB; it is 369 KB).
 - The hub's own speed and direction added to `OwnFix` for the bubble.
 - Output: level and reasons on the screen, `/api/state` JSON, CoT (TAK colours), the SD log and the
   evidence log (a new evidence code).
@@ -163,3 +164,56 @@ Presets that set the thresholds, so nobody tunes nineteen numbers by hand:
 | 16c | rules 12-13 (signal and sound trends, dark drone) | 16a; rule 13 needs the acoustic branch |
 | 16d | rules 14-19 (across drones and days, repeat-visitor history on SD) | 16a-b |
 | 16e | profiles, tuning from bench and field runs, drawing areas on the phone map | web head linking |
+
+## Slice 16a as built (2026-11-18)
+
+Code: `crates/tracker/src/behaviour/` (rules and level policy in `mod.rs`, `path.rs`,
+`places.rs`, scripted flights in `scenario.rs`, tests in `tests.rs`); site lines in
+`crates/tracker/src/site.rs` (see [SITE.md](SITE.md)); outputs in `json.rs` (`"threat"` on every
+track line), `cot.rs` (remarks, and orange at Warning, red at Critical), the screen's bottom strip,
+and the evidence log (code 28 `threat_level`, [EVIDENCE-FORMAT.md](EVIDENCE-FORMAT.md)).
+
+The numbers in use (all in `behaviour/mod.rs`, to tune on the bench):
+
+| What | Value |
+|---|---|
+| a position is judged while it is younger than | 5 s |
+| area checks use the average of the last | 5 positions, moved on along the drone's velocity |
+| a drone counted inside stays inside until it is beyond the edge by | 10 m |
+| "fairly straight": the path of the last 20 s (at least 10 s of it, 5 s above 15 m/s), its two halves within | 25 degrees of each other, each half over 15 m, and within 30 degrees of the reported direction |
+| an approach needs a speed towards the place of at least | 3 m/s |
+| "heading for it" when already inside: passing the middle within | a quarter of the area's size, at least 40 m |
+| pilot "at the fence" | within 30 m outside |
+| a level comes down after | 30 s without the rule that raised it |
+
+Where it differs from the design above, and why:
+
+- **Path history only on the P4 hub.** The tracker has a third size, `P`, for the drones with a
+  history. The P4 hub uses one per track; the S3 hub and the laptop viewer use none (their
+  tracker stays the size it was, apart from about 170 bytes a track for the level itself). With no
+  history only rules 1-4 could fire, on the latest position alone; the S3 hub does not run the
+  levels at all yet.
+- **Two signs.** Rules 2, 3 and 4 all need the drone (or its pilot) in or at an area, and rule 1 is
+  "in the area", so a drone over an area with its pilot outside (1 + 3), with its pilot inside
+  (1 + 2) or too high (1 + 4) is a **Warning**, as the brief asks. With the bubble on, a hobbyist
+  flying near you with the pilot also near you is therefore a Warning. Worth watching on the bench
+  and in the field; the profiles (16e) are the place to soften it, for example by not counting
+  rule 2 together with rule 1 in the bubble.
+- **Rule 4 measures height above the unit** (the drone's GPS height minus the hub's), else the
+  height the drone broadcasts above its take-off point or the ground. It applies to the bubble
+  too, with the default 120 m.
+- **Lost-track hold.** The 30 s are counted from when the drone was last heard (a position up to
+  5 s old is still judged, so counting from the last judgement would hold it 35 s).
+- **Snooze.** There is no per-drone button on the screen yet: the Settings "Alarms" Snooze snoozes
+  every drone at Warning or above for 5 minutes (the tracker can snooze one drone; the screen
+  does not offer it yet). A snoozed drone leaves the strip; its level is still in the JSON and the
+  evidence log.
+- **Evidence.** One `threat_level` event per rise to Caution or above (not for Notice); a fall is
+  not logged.
+- **Screen.** One red (Warning, Critical) or yellow (Caution) line at the top of the bottom strip,
+  for the most serious drone. The strip keeps its four lines: when all five would show, the
+  silenced-alarms and switches lines share one.
+- **Friends** match any of the drone's IDs, the DJI serial included.
+- Only confirmed tracks (WP-09 probation) are judged, so one forged frame raises nothing.
+- On the console a site line is at most 120 characters, so a polygon of more than about five
+  corners goes in the file (file lines may now be 384 characters).

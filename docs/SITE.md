@@ -1,4 +1,4 @@
-# Site settings: where the nodes are, and muted alarms
+# Site settings: where the nodes are, muted alarms, places to protect
 
 The P4 hub keeps its site settings in one plain text file on its SD card,
 `ROTORSCP/SITE.TXT`. You can edit it on a computer, or change it on the hub
@@ -131,6 +131,44 @@ While one is on, the strip along the bottom of the screen says so
 (`ON: control IDs, control content`). (The `audio clips on` switch of the
 acoustic branch, not merged here, is shown the same way once it is.)
 
+## Places to protect, and friendly drones
+
+These lines feed the threat levels ([THREAT-PROFILES.md](THREAT-PROFILES.md)):
+every drone that reports its position is judged against them, and gets one
+level (Notice, Caution, Warning, Critical) with the reasons.
+
+      area house circle 39.95210 -75.16380 150     # name, centre, radius in metres
+      area yard poly 39.9520 -75.1640 39.9523 -75.1636 39.9519 -75.1633
+      area house ceiling 90                        # highest a drone may fly over it, metres above the hub
+      area house clear                             # forget the area
+      area here 200                                # (console only) a circle round the hub where it is now
+      bubble 300                                   # a circle that moves with the hub's own GPS
+      bubble off
+      friend 1581F5FKD229400B4WW1 our own Mini     # a drone you know: serial, then a label
+      friend 1581F5FKD229400B4WW1 clear
+
+* **Areas.** Up to 8. A name is up to 12 letters, digits, `_` or `-`. A
+  circle has a radius of 10 to 10,000 m; a polygon has 3 to 16 corners,
+  latitude first for each. Writing an area again replaces its outline and
+  keeps its ceiling. The ceiling is 120 m (400 ft) unless a line says
+  otherwise. A ninth area is **refused** ("too many areas (8): clear one
+  first"): an area is never dropped to make room.
+* **`area here 200`** works only on the console (it needs the hub's live
+  position, like `node all here`). The hub saves it to the card as an
+  ordinary `area here circle LAT LON 200` line, so the place stays put if
+  the hub moves later. In the file, `area here 200` itself is ignored.
+* **The bubble** is a circle round the hub's current GPS position, so a
+  handheld unit protects whoever carries it. It uses the hub's own speed
+  and direction: walking past a hovering drone is not "the drone heading
+  for you", a drone flying at you is.
+* **Friends.** Up to 8. A friend's drone is **lowered, never hidden**: being
+  in an area, its pilot at the fence and so on count only as Notice, but
+  "heading straight for you" and "fast inbound" are never lowered, because
+  a serial number can be faked. A friend line on a swapped card is logged
+  like any other change.
+* A console line is at most 120 characters, so a polygon with more than
+  about five corners belongs in the file (a file line may be 384).
+
 ## What a load of the file leaves in the evidence log
 
 The hub reads the file at every card mount. A swapped or edited card must not
@@ -139,18 +177,22 @@ trace, so every load writes evidence "setting" events:
 
 1. **One summary**: the file's SHA-256 (in the text and as the first 32 data
    bytes), its size and line count, lines used and ignored, how many mutes for
-   good, how many mute lines not honoured, how many node positions, and the
-   control switches. For example `site file loaded: sha256 9f2c...e1, 412
+   good, how many mute lines not honoured, how many node positions, the
+   control switches, and how many areas, the bubble's radius and how many
+   friends. For example `site file loaded: sha256 9f2c...e1, 412
    bytes, 14 lines (12 used, 2 ignored); 1 mutes for good, 1 mute lines not
-   honoured; 3 node positions; control ids off, control content off`.
+   honoured; 3 node positions; control ids off, control content off; 2
+   areas, bubble off, 1 friends`.
 2. **One per change** from what the hub was using: a mute added or removed, a
    node placed, moved (with the old position) or cleared, e.g. `site file
    changed: node 10:bd:a3:ce:bd:18 at 39.9600000 -75.1638000 (was 39.9521000
-   -75.1638000); spoof checks use it`. The same file loaded again changes
-   nothing and logs only the summary.
+   -75.1638000); spoof checks use it`; an area set or removed, the bubble,
+   a friend added or removed (`site file changed: friend SN1 "our own Mini"
+   added (its area alarms are lowered to Notice; fast inbound never is)`).
+   The same file loaded again changes nothing and logs only the summary.
 3. **Bounded.** However long the file (it is read a piece at a time; later
-   lines win), the hub holds at most 24 mutes and 16 node positions, so one
-   load can change at most 80 things. At most 48 are logged one by one; the
+   lines win), the hub holds at most 24 mutes, 16 node positions, 8 areas, a bubble and 8 friends, so one
+   load can change at most 105 things. At most 48 are logged one by one; the
    rest are counted in one more event (`site file changed: N more changes not
    logged one by one`). The hash always covers the whole file.
 
@@ -161,5 +203,14 @@ they take effect, as before.
 
 Press `L`, type one line exactly as in the file, press Enter (Esc cancels).
 The line is appended to the file and logged as an evidence "setting" event.
-`node all here` works only here and on the screen, since it needs the hub's
-live position. `unmute all` drops every mute, the file's included.
+`node all here` and `area here R` work only here (and `node all here` on the
+screen), since they need the hub's live position. `unmute all` drops every
+mute, the file's included.
+
+## Snoozing a drone's threat level
+
+On the screen, Settings, **Alarms**: the Snooze row also counts drones at
+Warning or above, and SEL snoozes their alerts for **5 minutes**, like a
+jamming alarm. A snoozed drone leaves the red line at the bottom of the
+screen, but its level is still in the phone page's data and still written to
+the evidence log (marked snoozed). Nothing switches the threat levels off.

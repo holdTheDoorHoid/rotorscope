@@ -658,9 +658,9 @@ pub fn write_mute_text<W: Write>(w: &mut W, m: &Mute, now_ms: u64) -> core::fmt:
 
 /// One load of the site file at most logs this many change events; the
 /// rest are counted in one more event. (A file of any length holds at most
-/// [`crate::threats::MAX_MUTES`] mutes and [`MAX_PLACED`] positions, so a
-/// load can change at most 80 things; a huge file costs one hash, one
-/// summary and at most this many events.)
+/// [`crate::threats::MAX_MUTES`] mutes, [`MAX_PLACED`] positions, 8 areas,
+/// a bubble and 8 friends, so a load can change at most 105 things; a huge
+/// file costs one hash, one summary and at most this many events.)
 pub const MAX_CHANGE_EVENTS: usize = 48;
 
 /// What changed from one load of the site file to the next.
