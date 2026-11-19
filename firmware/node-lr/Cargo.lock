@@ -23,6 +23,7 @@ dependencies = [
 name = "airlink"
 version = "0.1.0"
 dependencies = [
+ "kitkeys",
  "sha2",
 ]
 
@@ -1273,6 +1274,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "kitkeys"
+version = "0.1.0"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]
