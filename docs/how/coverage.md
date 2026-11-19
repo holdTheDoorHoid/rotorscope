@@ -113,7 +113,10 @@ Bluetooth, DroneID, FPV 5.8, ADS-B, Gateway, LR radio), its frames per second, R
 drops and how long it has been up. A node that stops reporting shows **NOT RESPONDING**.
 
 On a hub that assigns jobs (the P4), each node also gets a small line under it with what it was
-asked to do (the picture above has no such lines), for example `-> Wi-Fi 2.4 plan 5a3c running` (`crates/screen/src/render.rs`).
+asked to do, for example `-> Wi-Fi 2.4 plan 5a3c running` (`crates/screen/src/render.rs`):
+
+![The Health page with three nodes; under Wi-Fi 2.4 a line reads "Wi-Fi 2.4 plan 5a3c running", and under DroneID a highlighted line reads "DroneID plan 0b17 sent"](../images/screen/health_assigned.png)
+
 "running" means the node has echoed that plan back; "sent", in the highlight colour, means the
 hub sent it and is still waiting.
 

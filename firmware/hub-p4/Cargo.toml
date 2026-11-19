@@ -3,7 +3,7 @@
 # Bare-metal Rust on esp-hal, but NOT the crates.io esp-hal: upstream supports
 # P4 silicon v3.0+ only. Every esp-* crate here is the pinned esp-hal commit
 # plus the community pre-v3 patch, prepared by tools/p4-prepare.sh. Run that
-# once before building. See README.md.
+# once before building. See BRINGUP.md.
 [package]
 name         = "hub-p4"
 version      = "0.1.0"
@@ -21,19 +21,20 @@ bench = false
 
 [features]
 default = ["wirebus"]
-# PLAN.md Phase 5a: poll many nodes on UART3 as a wired bus (crates/wirebus,
+# PLAN.md Phase 5a: poll many nodes on UART3 (the peripheral; on the board's
+# UART1 header since 2026-11-17) as a wired bus (crates/wirebus,
 # docs/WIREBUS.md, src/bus.rs). An ESP-NOW gateway (or one point-to-point
 # node) on UART3 is still recognised at run time and read as before. Build
 # with --no-default-features to never poll.
 wirebus = []
 # Bring-up only: UART2 transmits sample link frames onto the gateway RX pin
-# (GPIO28) inside the chip, so the UART3 reader is tested without any wire.
-# Leave the UART3 header unconnected while this runs.
+# (GPIO48) inside the chip, so the UART3 reader is tested without any wire.
+# Leave the UART1 header unconnected while this runs.
 selftest = []
 # Bench only: once a second, a made-up ESP-NOW node (02:52:53:00:00:01, a
 # locally administered address no real board has) "reports" through the link
 # decoder with Via + Hello + Status, so the coverage coordinator assigns it and
-# the hub sends real commands to the gateway. Nothing is driven onto GPIO28,
+# the hub sends real commands to the gateway. Nothing is driven onto GPIO48,
 # so the gateway wire can stay connected.
 fakenode = []
 # Bench only: once a second, a made-up drone (Remote ID Basic ID
@@ -50,9 +51,9 @@ benchlog = []
 # the same name (see firmware/hub/Cargo.toml).
 show-link-ids = []
 # Bench only: on-chip loop-back test of the GPS and ADS-B inputs. UART2
-# plays a Quectel LC29H(AA) on the GPS pads (GPIO48/47), the PPS pad
+# plays a Quectel LC29H(AA) on the GPS pads (GPIO28/27), the PPS pad
 # (GPIO29) is pulsed from inside the chip, and UART4 sends CSBee lines onto
-# its own RX pad (GPIO30). Leave the UART1 header, GPIO29 and GPIO30
+# its own RX pad (GPIO30). Leave the UART3-IN header, GPIO29 and GPIO30
 # unconnected while it runs. Excludes `selftest` (both use UART2).
 gpsloop = []
 # As `gpsloop`, but UART2 plays a u-blox MAX-M10S as shipped (NMEA at 9600),

@@ -100,9 +100,9 @@ OPTIONS:
                              the time).
     --duration SECS          Stop live inputs (--ble, --sniffle) after SECS
                              seconds. With --once, the default is 10.
-    --demo                   Add two simulated drones circling --own-pos
-                             (or Philadelphia City Hall), a simulated
-                             wfb-ng FPV link, three simulated aircraft
+    --demo                   Add two simulated Remote ID drones circling
+                             --own-pos (or Philadelphia City Hall), a
+                             simulated wfb-ng FPV link, three simulated aircraft
                              (ADS-B), and one of each protocol-4 signal: a
                              DJI drone on OcuSync DroneID (also in Remote
                              ID), an encrypted O4 drone, a DJI Wi-Fi
@@ -310,7 +310,38 @@ fn role_from_hello(v: &serde_json::Value) -> Option<NodeRole> {
         "fpv" => Some(NodeRole::Fpv),
         "droneid" => Some(NodeRole::DroneId),
         "gateway" => Some(NodeRole::Gateway),
+        // node-lr's hello line names the board ("node":"lr") and carries no
+        // "role"; its Status frames say Aero.
+        "aero" | "lr" => Some(NodeRole::Aero),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod hello_tests {
+    use super::*;
+
+    fn role(line: &str) -> Option<NodeRole> {
+        role_from_hello(&serde_json::from_str(line).unwrap())
+    }
+
+    #[test]
+    fn hello_roles_are_read_whatever_their_case() {
+        assert_eq!(role(r#"{"t":"hello","role":"Wifi24"}"#), Some(NodeRole::Wifi24));
+        assert_eq!(role(r#"{"t":"hello","node":"ble"}"#), Some(NodeRole::Ble));
+        assert_eq!(role(r#"{"t":"hello","role":"gateway"}"#), Some(NodeRole::Gateway));
+    }
+
+    #[test]
+    fn the_lr2021_node_is_an_aero_node() {
+        assert_eq!(role(r#"{"t":"hello","node":"lr","fw":"node-lr"}"#), Some(NodeRole::Aero));
+        assert_eq!(role(r#"{"t":"hello","role":"Aero"}"#), Some(NodeRole::Aero));
+    }
+
+    #[test]
+    fn an_unknown_role_is_no_role() {
+        assert_eq!(role(r#"{"t":"hello","node":"toaster"}"#), None);
+        assert_eq!(role(r#"{"t":"hello"}"#), None);
     }
 }
 

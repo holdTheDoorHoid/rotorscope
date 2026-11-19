@@ -657,10 +657,6 @@ Every packet starts with `HEADER = 6` bytes:
 | 3 | 1 | kind | `1` Beacon, `2` Frames, `3` Command |
 | 4 | 2 | seq | `u16`, little-endian |
 
-> [!NOTE]
-> The module comment at the top of `crates/airlink/src/lib.rs` says "a 5-byte header"; the constant
-> `HEADER` and every builder use 6 bytes, as does `docs/ESPNOW.md`. The code is right.
-
 `parse()` returns `None` for anything else: wrong magic, an unknown version or kind, fewer than 6
 bytes, or a sealed packet too short to hold a trailer. Other ESP-NOW users share the air, and are
 ignored that way.
@@ -786,11 +782,6 @@ confused:
 | `Address.check` | `"A"`, `mac`, `addr`, `epoch` as two bytes little-endian (`address_check`) |
 | `BusDone.crc` | every byte of the answer before the `BusDone` frame, then `addr`, `seq`, `more` as 0/1 (`done_crc`) |
 
-> [!NOTE]
-> The doc comments on `BusJoin` and `Address` in `crates/link/src/lib.rs` describe the check as
-> `wirebus::crc` "over the other fields"; the implementation also mixes in the `"J"` or `"A"`
-> prefix. Use `wirebus::crc::join_check` and `address_check`.
-
 **Polling.** One answer in flight per node (stop-and-wait). A polled node sends whole units (a
 frame, or a `Via` with its frame) up to `budget` bytes, always at least one unit if any is waiting,
 then a `BusDone`. The hub keeps an answer only if the CRC matches and acknowledges it in the next
@@ -892,10 +883,11 @@ rid-view reads only a few keys and shows the rest as a summary:
 
 | Line | Keys rid-view uses | Where they come from |
 |---|---|---|
-| `hello` | `role`, or else `node` (`wifi24`, `wifi5`, `ble`, `fpv`, `droneid`, `gateway`, compared ignoring case: node-wifi sends `Wifi24`) | node-wifi prints `role` (plus `fw`, `ver`, `chip`, `proto`, `fcs`, `can`, `images`, `plan_id`, `plan`, `reset`, `faulttest`, `bench`); node-ble prints `node: "ble"` (plus `fw`, `chip`, `proto`, `scan`, `uart_baud`, `espnow`, `can`, `images`, `plan_id`, `reset`, `faulttest`, `bench`) |
+| `hello` | `role`, or else `node` (`wifi24`, `wifi5`, `ble`, `fpv`, `droneid`, `gateway`, `aero` or `lr`, compared ignoring case: node-wifi sends `Wifi24`) | node-wifi prints `role` (plus `fw`, `ver`, `chip`, `proto`, `fcs`, `can`, `images`, `plan_id`, `plan`, `reset`, `faulttest`, `bench`); node-ble prints `node: "ble"` (plus `fw`, `chip`, `proto`, `scan`, `uart_baud`, `espnow`, `can`, `images`, `plan_id`, `reset`, `faulttest`, `bench`) |
 | `stats` | `fps` and `drop` (Wi-Fi node), or `adv` per `win_ms` and `tot_drops` (BLE node) | `firmware/node-wifi/src/report.rs` `StatsLine`; `firmware/node-ble/src/out.rs` `StatsLine` |
 
-The node-lr `hello` line says `"node":"lr"`, which rid-view does not map to a role.
+The node-lr `hello` line says `"node":"lr"` and carries no `role`; rid-view reads it as the
+`Aero` role.
 
 ### Other line types
 

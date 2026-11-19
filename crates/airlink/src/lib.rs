@@ -1,9 +1,10 @@
 //! ESP-NOW between radio nodes and a gateway (protocol "RS" v1).
 //!
 //! The wired link is a byte stream of COBS-delimited `link` frames. Over the
-//! air we keep exactly those bytes and only add a 5-byte header: a node packs
-//! as many whole frames as fit into one ESP-NOW packet, and the gateway feeds
-//! the payload straight into a `link::Decoder`. One packet per batch rather
+//! air we keep exactly those bytes and only add a 6-byte header: a node packs
+//! as many whole frames as fit into one ESP-NOW packet, and the gateway splits
+//! the payload back into frames and relays those a node may originate
+//! (`link::origin::node_batch`). One packet per batch rather
 //! than per frame is the main efficiency lever: every ESP-NOW packet costs a
 //! preamble, a MAC header, an ACK and a contention window regardless of size,
 //! and a Wi-Fi node is deaf to drones while it transmits.

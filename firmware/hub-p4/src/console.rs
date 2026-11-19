@@ -19,14 +19,24 @@
 //! run, and straight to esp-println before that. Panics still print through
 //! esp-println (blocking, ROM routine), which is what a panic wants.
 //!
-//! Commands (one character, no Enter needed), as on the S3 hub's USB:
-//!   `p` set own position to the test point (manual source)
+//! Commands (one character, no Enter needed), as on the S3 hub's USB; they
+//! are handled by `command` in `main.rs`, whose `h` text is the full list:
+//!   `p` set own position to the test point (manual source); bench builds
+//!       only (feature `testpoint`)
 //!   `c` clear the manual own position
+//!   `b` time the airspace lookups
+//!   `a` aero nodes: step through auto and each single mode
 //!   `m` hub moved: forget the GPS home the spoofing checks learned
 //!   `H` accept the new GPS home the hub found (after a "NOT adopted" line)
 //!   `T` accept GPS time as it is now (after a time jump / time floor alarm)
 //!   `L` type one site line (node position, mute an alarm; `tracker::site`)
+//!   `n` type a note into the evidence log
+//!   `k` evidence checkpoint now
+//!   `r` replay the evidence file over the console
+//!   `u` evidence records also streamed on the console, on or off
+//!   `e` stop cleanly: shutdown event, last checkpoint, flush the card
 //!   `h` / `?` help
+//! Builds with the bench feature `faulttest` also take `fault ...` lines.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};

@@ -299,8 +299,9 @@ pub enum Command {
     /// end of this command.
     JoinSlot { epoch: u16, slots: u8, slot_us: u16 },
     /// Protocol 10, wired bus: the node with station address `mac` is bus
-    /// address `addr` for this `epoch`. `check` is `wirebus::crc` over the
-    /// other fields (a garbled grant must never bind the wrong node).
+    /// address `addr` for this `epoch`. `check` is `wirebus::address_check`:
+    /// the CRC over the letter `A` and the other fields (a garbled grant
+    /// must never bind the wrong node).
     Address { mac: [u8; 6], addr: u8, epoch: u16, check: u16 },
     /// Protocol 11: "it is now `utc_ms`" (Unix milliseconds), about once a
     /// second, for nodes that need UTC (FLARM / OGN hopping, [`AeroMode`]).
@@ -600,9 +601,15 @@ pub enum ThreatKind {
     /// drone IDs (or aircraft addresses, or control links) a second than a
     /// real sky produces: a flood of forged identities meant to bury real
     /// ones (`tracker::probation`, docs/SPOOFING.md "Floods"). `detail`:
-    /// bits 24-31 which table (0 drones, 1 aircraft, 2 control links), bits
-    /// 0-15 new identities a second over the window; `count` = new
-    /// identities in the window, `window_ms` = the window.
+    /// bits 24-31 which table (0 drones, 1 aircraft, 2 control links, 3 one
+    /// node discarding a flood of drone IDs). Tables 0-2: bits 16-23 which
+    /// rule raised it (0 new a second, 1 new in a minute, 2 active at once;
+    /// only the drone table has the last two), bits 0-15 that rule's
+    /// reading (new identities a second, or the count). Table 3: bits 16-23
+    /// new drone IDs a second from that node that never confirmed, bits
+    /// 0-15 frames a second it discarded. `count` = new identities in the
+    /// window, `window_ms` = the window. Encoded and read in
+    /// `tracker::probation`.
     IdFlood,
 }
 
@@ -1016,9 +1023,10 @@ pub enum Frame {
     Threat(ThreatSighting),
     /// Protocol 10, wired bus: a node without an address answering a
     /// [`Command::JoinSlot`]. `want` is the address it held last (0: none),
-    /// so the hub can give it back; `check` is `wirebus::crc` over `mac` and
-    /// `want` (two joins in the same slot collide on the wire, and a garbled
-    /// join must not bind a made-up address).
+    /// so the hub can give it back; `check` is `wirebus::join_check`: the CRC
+    /// over the letter `J`, `mac` and `want` (two joins in the same slot
+    /// collide on the wire, and a garbled join must not bind a made-up
+    /// address).
     BusJoin { mac: [u8; 6], want: u8, check: u16 },
     /// Protocol 10, wired bus: the end of a node's answer to a
     /// [`Command::Poll`]. `seq` numbers the answer (1-255, 0 = the answer

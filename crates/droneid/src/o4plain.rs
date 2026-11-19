@@ -1,6 +1,7 @@
 //! Parsers for O4 **plaintext**: what a CRYP auxiliary field or an INFP
 //! record contains once a separate decryption layer (not part of this
-//! crate, and not built yet) has turned its ciphertext back into bytes.
+//! crate: `crates/djicrypt`, which works only with a key the owner supplies
+//! at run time) has turned its ciphertext back into bytes.
 //!
 //! This module does no cryptography and never sees a key: it takes the
 //! decrypted bytes and checks and reads them, exactly like

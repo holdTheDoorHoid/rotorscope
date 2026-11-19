@@ -265,8 +265,7 @@ cargo run --release -p droneid-file -- caps/c5-1.cs16 --rate 40000000 --format c
 
 Each line gives position, frequency offset, SNR, which decode path worked (`systematic` or
 `turbo`), CRC status and the decoded fields; O4 records are reported as encrypted, not decrypted.
-**Reads:** the recording. **Writes:** stdout only. The file's doc comment also lists
-`--llr-dump <file>`; the argument parser does not accept it as of 2026-11-18.
+**Reads:** the recording. **Writes:** stdout only.
 
 Source: `tools/droneid-file/src/main.rs`.
 
