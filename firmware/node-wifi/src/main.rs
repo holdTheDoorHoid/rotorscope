@@ -632,7 +632,15 @@ async fn stats() {
             dnet: [drones.learned, drones.evicted, drones.refused],
             robust: {
                 let h = node_common::health();
-                [h.plans_refused, h.deaf_fallbacks, h.switches_refused, h.switch_wait_s]
+                [
+                    h.plans_refused,
+                    h.deaf_fallbacks,
+                    h.deaf_blamed,
+                    h.deaf_outages,
+                    h.deaf_refused,
+                    h.switches_refused,
+                    h.switch_wait_s,
+                ]
             },
         };
         last_seen = seen;

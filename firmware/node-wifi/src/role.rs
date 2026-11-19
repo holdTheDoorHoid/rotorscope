@@ -19,8 +19,10 @@
 //! that would still leave the node deaf is refused (the previous plan
 //! stays, `node_common::health().plans_refused`). And the deaf fall-back:
 //! no accepted gateway packet for a minute on a hub plan, and the node goes
-//! back to its built-in plan (id 0) and refuses that plan id until reboot
-//! (`node_common::DeafWatch`).
+//! back to its built-in plan (id 0). If the gateway is heard within the
+//! next 30 s the plan is blamed and its id refused for 10 min, doubling
+//! with each further blame up to 1 h; if not, the gateway was away and the
+//! plan is taken again (`node_common::DeafWatch`).
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
@@ -189,35 +191,52 @@ fn gateway_heard() -> u32 {
     0
 }
 
-/// The deaf fall-back, once a second: on a hub plan with no gateway packet
-/// for `node_common::DEAF_MS`, back to the built-in plan (id 0).
-fn deaf_check(deaf: &mut node_common::DeafWatch, heard: &mut u32) {
-    let now = Instant::now().as_millis();
-    let h = gateway_heard();
-    if h != *heard {
-        *heard = h;
-        deaf.heard(now);
+/// Say a deaf-watch event on USB and act on it.
+fn deaf_event(e: node_common::DeafEvent) {
+    use node_common::DeafEvent;
+    match e {
+        DeafEvent::FellBack { plan } => {
+            let cur = current();
+            let job = Job { role: cur.role, plan: builtin(cur.role), id: 0 };
+            critical_section::with(|cs| *JOB.borrow_ref_mut(cs) = Some(job.clone()));
+            crate::rx::set_mavlink(false);
+            crate::usb::usb_line!(
+                r#"{{"t":"deaf","verdict":"fell_back","plan":{plan},"note":"no gateway packet for {} s on this plan: built-in plan; gateway heard within {} s blames the plan"}}"#,
+                node_common::DEAF_MS / 1000,
+                node_common::PROBATION_MS / 1000
+            );
+            CHANGED.signal(());
+            report::assign_json(&job);
+            report::status_hub();
+        }
+        DeafEvent::Blamed { plan, refuse_ms } => {
+            crate::usb::usb_line!(r#"{{"t":"deaf","verdict":"blamed","plan":{plan},"refused_s":{}}}"#, refuse_ms / 1000);
+        }
+        DeafEvent::Outage { plan } => {
+            crate::usb::usb_line!(r#"{{"t":"deaf","verdict":"outage","plan":{plan},"note":"gateway away, plan not blamed"}}"#);
+        }
     }
+}
+
+/// The deaf fall-back, once a second (and before each command): feed the
+/// watch what the uplink accepted, and act on what it says.
+fn deaf_check(deaf: &mut node_common::DeafWatch, heard: &mut u32) {
     // Only a relayed node has a gateway to be deaf to.
     if !cfg!(feature = "espnow") {
         return;
     }
-    let cur = current();
-    if !deaf.check(now, cur.id) {
-        return;
+    let now = Instant::now().as_millis();
+    let h = gateway_heard();
+    if h != *heard {
+        *heard = h;
+        if let Some(e) = deaf.heard(now) {
+            deaf_event(e);
+        }
     }
-    node_common::count_deaf_fallback();
-    let job = Job { role: cur.role, plan: builtin(cur.role), id: 0 };
-    critical_section::with(|cs| *JOB.borrow_ref_mut(cs) = Some(job.clone()));
-    crate::rx::set_mavlink(false);
-    crate::usb::usb_line!(
-        r#"{{"t":"err","what":"deaf","plan":{},"note":"no gateway packet for {} s on this plan: back to the built-in plan, plan id refused until reboot"}}"#,
-        cur.id,
-        node_common::DEAF_MS / 1000
-    );
-    CHANGED.signal(());
-    report::assign_json(&job);
-    report::status_hub();
+    if let Some(e) = deaf.check(now, current().id) {
+        deaf_event(e);
+    }
+    node_common::set_deaf_counts(deaf.counts());
 }
 
 /// Apply hub commands; switch image for a role this image does not do.
@@ -237,9 +256,15 @@ pub async fn control(mut images: node_common::Images<'static>) {
         // The command itself came from the gateway (or the wire).
         deaf_check(&mut deaf, &mut heard);
         if is_wifi(a.role) && chip::OWN_ROLES & a.role.bit() != 0 {
-            if deaf.refuses(a.id) {
+            let now = Instant::now().as_millis();
+            if deaf.refuse_assign(now, a.id) {
                 REJECTED.fetch_add(1, Relaxed);
-                crate::usb::usb_line!(r#"{{"t":"err","what":"assign","why":"plan id made this node deaf; refused until reboot","plan":{}}}"#, a.id);
+                node_common::set_deaf_counts(deaf.counts());
+                crate::usb::usb_line!(
+                    r#"{{"t":"err","what":"assign","why":"plan id made this node deaf","plan":{},"refused_s":{}}}"#,
+                    a.id,
+                    deaf.refused_for_ms(now, a.id) / 1000
+                );
                 continue;
             }
             let plan = match plan_from(&a) {
