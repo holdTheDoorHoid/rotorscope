@@ -50,6 +50,11 @@ and what a hub with no such line uses (`tracker::sound::LowHum::RECOMMENDED`). W
   "unknown" set (three hours of everyday noise) 37 alerts become 25; drone alerts are unchanged
   (Bebop 16, Mambo 14, Bat Ear field files 13).
 
+On the board (2026-11-18, loudspeaker into the built-in microphone): a made-up 110 Hz rotor
+hum, heard for 23 s at 107-113 Hz, became a "Low hum" contact with no alert; the Mavic Pro
+field recording straight after raised the alert at 189 Hz. `low hum below 200` and back to 140
+typed at the console took effect and were logged.
+
 "Mostly" is counted over the contact's once-a-second reports, so one second at the wrong octave
 does not make a hum alert, and a hum whose pitch rises into the drone range and stays there
 does. A drone on the radio still makes the contact "Drone audible (close)".
