@@ -891,3 +891,20 @@ fn node_plan_rule() {
 fn espnow_channel_is_the_gateway_channel() {
     assert_eq!(ESPNOW_CHANNEL, u32::from(airlink::GATEWAY_CHANNEL));
 }
+
+/// What a relayed node does with a job read back from `rsjob` (role.rs
+/// `init`): a channel-6-free stored plan gets its visits if they can keep
+/// the node in reach of the gateway, and is refused (built-in plan) if no
+/// visit can.
+#[test]
+fn stored_plan_without_6_refused() {
+    // Long hops on 5 GHz (the dwell a node clamps to, 10 s): deaf whatever
+    // is inserted between them.
+    let deaf = [(149u32, 10_000u16), (36, 10_000)];
+    assert_eq!(node_espnow_plan(&deaf), Err(NodePlanError::Deaf));
+    // Ordinary hops without 6: the node inserts the visits itself.
+    let fixable = [(149u32, 150u16), (153, 50), (157, 50)];
+    let p = node_espnow_plan(&fixable).unwrap();
+    assert!(p.iter().any(|h| h.0 == ESPNOW_CHANNEL));
+    assert!(longest_away_from_6(&p).is_some_and(|w| w <= ESPNOW_MAX_AWAY_MS));
+}

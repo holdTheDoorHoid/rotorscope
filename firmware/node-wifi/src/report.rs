@@ -299,6 +299,10 @@ pub struct StatsLine {
     /// Drone networks (`wifiwatch::drones::Totals`): [learned, displaced
     /// while holding evidence, newcomers that had to wait], totals.
     pub dnet: [u32; 3],
+    /// Node robustness (`node_common::health`, WP-13 section 7): [plans
+    /// refused, deaf fall-backs, image switches refused, seconds until a
+    /// switch is allowed]. Totals since boot, then the wait now.
+    pub robust: [u32; 4],
 }
 
 pub fn stats_json(line: &StatsLine) {

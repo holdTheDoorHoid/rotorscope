@@ -630,6 +630,10 @@ async fn stats() {
             ],
             mavp: MAV_PRESSURE.each_ref().map(|c| c.load(Relaxed)),
             dnet: [drones.learned, drones.evicted, drones.refused],
+            robust: {
+                let h = node_common::health();
+                [h.plans_refused, h.deaf_fallbacks, h.switches_refused, h.switch_wait_s]
+            },
         };
         last_seen = seen;
         report::stats_json(&line);
