@@ -333,6 +333,12 @@ pub fn boot_bench_list(text: &[u8]) -> Option<&str> {
 /// Check `inputs` in order. Card files should be given in file-number
 /// order; batches in upload order.
 pub fn verify(inputs: &[Input], opts: &Options) -> Report {
+    verify_inner(inputs, opts, false)
+}
+
+/// `uploads`: the inputs are a server's batches, which by rule end on a
+/// signed checkpoint (so a boot's last unsigned records never reach it).
+fn verify_inner(inputs: &[Input], opts: &Options, uploads: bool) -> Report {
     let mut rep = Report::default();
     let mut chains: Vec<ChainState> = Vec::new();
     let mut index: HashMap<[u8; 8], usize> = HashMap::new();
@@ -439,7 +445,7 @@ pub fn verify(inputs: &[Input], opts: &Options) -> Report {
     for c in &mut chains {
         c.time.finish(&mut rep, c.sum.build.map(|b| b.built_unix_s));
     }
-    continuity_checks(&mut rep, &mut chains, opts);
+    continuity_checks(&mut rep, &mut chains, opts, uploads);
     time_across_boots(&mut rep, &chains, inputs.iter().all(|i| i.file_no.is_some()));
     let mut nos: Vec<u32> = file_tails.keys().copied().collect();
     nos.sort();
@@ -836,7 +842,7 @@ fn time_across_boots(rep: &mut Report, chains: &[ChainState], files: bool) {
 /// that boot too, its log must reach that far with that very record;
 /// a boot missing between two supplied ones is a missing boot. Run after
 /// every input is read, before the chains' gap lines.
-fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options) {
+fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options, uploads: bool) {
     use crate::continuity::{self as k, Continuity};
     let by_boot: HashMap<[u8; 8], usize> = chains.iter().enumerate().map(|(i, c)| (c.sum.boot, i)).collect();
     // Counters the supplied boots have (any of their continuity records).
@@ -923,6 +929,17 @@ fn continuity_checks(rep: &mut Report, chains: &mut [ChainState], opts: &Options
                     Level::Fail,
                     w.clone(),
                     format!("record #{last} of boot {prev} is not the one the unit had stored when this boot began (changed afterwards)"),
+                ),
+                // A server's batches end on a checkpoint by rule: a boot's
+                // records after its last one never reach it. Not told apart
+                // from records removed, so a gap, not a pass.
+                None if uploads && p.sum.last_seq.is_some() && p.last_signed_end == p.sum.last_seq => rep.add(
+                    Level::Gap,
+                    w.clone(),
+                    format!(
+                        "boot {prev}'s records #{}..#{last} are not here: when this boot began the card held them, but they came after that boot's last checkpoint and a server only takes batches that end on one. Copy them from the card to check them; until then they cannot be told apart from records removed",
+                        p.sum.last_seq.map_or(0, |l| l + 1)
+                    ),
                 ),
                 None if p.sum.last_seq.is_none_or(|l| l < last) => rep.add(
                     missing_level,
@@ -1334,7 +1351,7 @@ pub fn verify_bundle(json: &[u8], opts: &Options) -> Report {
     // chain order (each batch holds one boot's contiguous run; their arrival
     // order was checked against the audit log above).
     inputs.sort_by_key(|i| format::parse(&i.bytes).map(|r| (r.header.boot_id, r.header.seq)).unwrap_or(([0xFF; 8], u64::MAX)));
-    let inner = verify(&inputs, opts);
+    let inner = verify_inner(&inputs, opts, true);
     rep.findings.extend(inner.findings);
     rep.chains = inner.chains;
     rep.records = inner.records;

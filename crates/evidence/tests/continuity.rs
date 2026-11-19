@@ -101,3 +101,47 @@ fn a_wiped_card_restarts_the_counter_and_says_so() {
     assert!(fails(&r).is_empty());
     assert!(notes(&r).iter().any(|n| n.contains("boot counter 1") && n.contains("held no counter")), "{:?}", notes(&r));
 }
+
+/// A server's bundle: batches end on a checkpoint by rule, so a boot's
+/// records after its last checkpoint are never there. That is a gap (it
+/// cannot be told from removal), not a failure of every multi-boot bundle.
+#[test]
+fn a_bundle_without_a_boots_unsigned_tail_is_a_gap() {
+    use evidence::verify::bundle;
+    let (u, [a, b, _c]) = three();
+    // Boot 1 through its last checkpoint (#9), boot 2 through its own (#9).
+    let batches = [a.through(9), b.through(9)];
+    let pk = evidence::Signer::public_key(&u.signer);
+    let key_id = std::str::from_utf8(&evidence::fingerprint(&pk)).unwrap().to_string();
+    // JSON by hand (no JSON library in this test crate); entries carry no
+    // characters that need escaping.
+    let mut audit = Vec::new();
+    let mut prev = [0u8; 32];
+    let mut push = |entry: String| {
+        let h = bundle::audit_hash(&prev, &entry);
+        prev = h;
+        audit.push(format!(r#"{{"entry":"{}","hash":"{}"}}"#, entry.replace('"', "\\\""), verify::hex(&h)));
+    };
+    push(format!(r#"{{"n":0,"utc_ms":1,"actor":"t","action":"register","device":"{key_id}","detail":{{}}}}"#));
+    let mut out = Vec::new();
+    for (i, bytes) in batches.iter().enumerate() {
+        let sha = verify::hex(&evidence::sha256(bytes));
+        push(format!(r#"{{"n":{},"utc_ms":2,"actor":"t","action":"upload","device":"{key_id}","detail":{{"batch":{i},"sha256":"{sha}"}}}}"#, i + 1));
+        out.push(format!(r#"{{"n":{i},"received_utc_ms":2,"sha256":"{sha}","records":"{}"}}"#, evidence::b64::encode_vec(bytes)));
+    }
+    let json = format!(
+        r#"{{"format":"{}","created_utc_ms":3,"server":"test","device":{{"key_id":"{key_id}","public_key":"{}","name":"u","registered_utc_ms":1}},"batches":[{}],"audit":[{}],"firmware_hashes":["{}"],"timestamps":[]}}"#,
+        bundle::FORMAT,
+        verify::hex(&pk),
+        out.join(","),
+        audit.join(","),
+        verify::hex(&[0xF1; 32])
+    );
+    let json = json.into_bytes();
+    let r = verify::verify_bundle(&json, &opts());
+    assert!(fails(&r).is_empty(), "{:?}", fails(&r));
+    assert!(r.findings.iter().any(|f| f.level == Level::Gap && f.what.contains("after that boot's last checkpoint")), "{:?}", r.findings);
+    // The same records as plain files: a cut, which fails.
+    let r = verify::verify(&[Input::new("boot1.bin", a.through(9)), Input::new("boot2.bin", b.bytes)], &opts());
+    assert!(fails(&r).iter().any(|f| f.contains("cut off")), "{:?}", r.findings);
+}
