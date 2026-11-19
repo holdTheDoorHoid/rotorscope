@@ -1,8 +1,9 @@
 # ESP-NOW node link (experimental)
 
-Since 2026-11-17 (PLAN.md Phase 5a) the default way to connect nodes is the
+Since 2026-11-17 (PLAN.md Phase 5a) the hub's default build uses the
 wired bus (docs/WIREBUS.md): no radio transmission and no listening time
-lost. ESP-NOW stays an opt-in build for a node that cannot be wired.
+lost. The wired bus has not yet been wired on hardware; ESP-NOW is the only
+node link proven on hardware so far. ESP-NOW stays an opt-in build for a node that cannot be wired.
 
 A node that cannot be wired to the hub can send its reports over ESP-NOW to a
 **gateway**: one XIAO ESP32-C5 (`firmware/gateway`) wired to a hub UART. The
@@ -296,6 +297,12 @@ tests and all four images build with and without a key; the radio behaviour
 (syncs after a gateway restart, node image switches, the threat report on the
 hub) needs a bench run.
 
+*Update 2026-11-18: the keyed-kit bench run of 2026-11-18 (docs/BENCH.md, "Bench results,
+2026-11-18") covered part of this: P4 hub, C5 gateway and two C5 nodes, all keyed. The gateway
+refused each of seven forbidden frame kinds by origin, one forged-link threat (detail 5) reached
+the hub, and in 440 s of normal running `refused`, `corrupt` and `bad_tag` stayed 0 with both nodes
+assigned roles. It did not record node syncs after a gateway restart or a node image switch.*
+
 ## Who may send what
 
 The key proves a packet came from a board of this kit. It does not say what
@@ -307,7 +314,7 @@ no catch-all, so a new frame type does not compile until someone decides).
 |---|---|
 | A node | `Hello` and `Status` with a node role, `Detection`, `Stats`, `OpenLink`, `DroneId`, `Rf`, `DjiWifi`, `WifiDrone`, `Air`, `AeroStatus`, `Control`, `ControlEnergy`, `MavlinkEvidence`, `Threat` of every kind a node detects |
 | The gateway itself (no `Via` before it) | `Via`; `Hello` / `Status` with role `Gateway`; `Threat` `forged_link` |
-| The hub only (to its web head) | `HubFix` (the kit's GPS position and UTC), `Csbee` (aircraft from the hub's ADSBee), `Flags` (FAA flags), `Threat` `area_gnss` |
+| The hub only (to its web head) | `HubFix` (the kit's GPS position and UTC), `Csbee` (aircraft from the hub's ADSBee), `Flags` (FAA flags), `Threat` `area_gnss` and `id_flood` |
 | Bus control (wired bus only) | `BusJoin`, `BusDone` |
 
 Where it is enforced:
@@ -434,7 +441,7 @@ and the node from `firmware/node-wifi/target-espnow/...`.
 
 * Range test (walk the node away; then try the Long Range PHY).
 * More than two nodes, and two nodes under heavy traffic.
-* The node side of the downlink (applying an `Assign`) for Wi-Fi and BLE nodes; node-sdr applies it (DroneID and FPV plans).
+* ~~The node side of the downlink (applying an `Assign`) for Wi-Fi and BLE nodes; node-sdr applies it (DroneID and FPV plans).~~ *Update 2026-11-18: done; Wi-Fi and BLE nodes apply it too ("Node roles and image switching", 2026-11-15, below).*
 * The S3 build of node-wifi with `espnow` compiles; it has not been run.
 
 ### Node roles and image switching (2026-11-15, c5a node, c5c gateway, P4 hub)

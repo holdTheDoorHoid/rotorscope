@@ -1,7 +1,7 @@
 # Bench tests: checklist
 
 Two boards, one command, PASS or FAIL. Run everything from the project folder
-(`~/Desktop/rotorscope`).
+(the top of the repository).
 
 Nothing here transmits except `rid-beacon`, the test beacon. It uses a fake drone called
 `TESTDRONE0000000001` at the lowest power. Keep the two boards on the desk, a metre or so apart.
@@ -93,7 +93,7 @@ Both boards are 3.3 V; never use 5 V pins. The pins are placeholders from the co
 | `hub-uart-s3-wifi` | `s3b` running node-wifi | GPIO43 (labelled TX / D6) | GPIO4 | GND to GND |
 | `hub-uart-s3-ble` | `s3b` running node-ble | GPIO17 | GPIO6 | GND to GND |
 | `hub-uart-c5-wifi` | `c5a` running node-wifi | GPIO11 (labelled TX) | GPIO15 | GND to GND |
-| `hub-uart-c5-ble` | `c5a` running node-ble | GPIO10 | GPIO6 | GND to GND |
+| `hub-uart-c5-ble` | `c5a` running node-ble | GPIO11 | GPIO6 | GND to GND |
 
 The hub (`s3`) and the node each stay plugged into the computer by USB. Power the hub and the node
 from USB; do not also power them from the wire. Change the wires between tests.
@@ -269,8 +269,8 @@ beacons than the 0.4/s with the controller stop, but commands still arrive). Eac
 | Real DJI OcuSync / O4 DroneID on the hub | a real DJI drone (we never transmit DroneID) |
 | DJI legacy Wi-Fi DroneID | a Wi-Fi DJI (Spark, Mavic Air, Mini SE); we never transmit it |
 | Analog FPV video | a 5.8 GHz VTX and an amateur radio licence |
-| HDZero, Walksnail | an HDZero VTX / Walksnail kit (and HDZero scanning is not built) |
-| ExpressLRS | an LR1121 or SX1280 receiver (not built) |
+| HDZero, Walksnail | an HDZero VTX / Walksnail kit (HDZero scanning is built, synthetic tests only) |
+| ExpressLRS | an LR2021 radio for the LR2021 node (`firmware/node-lr`, `crates/ctrlwatch`: built, no hardware yet) |
 | Wi-Fi drone makers (Tello, Parrot, ...) | a real one; we never imitate a maker's network |
 | China GB 46750 Remote ID | a test-beacon mode or a DJI on 2026 firmware |
 | wfb-ng's real LDPC/STBC video | OpenIPC hardware |

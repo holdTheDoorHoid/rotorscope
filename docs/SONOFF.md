@@ -185,3 +185,6 @@ Tested 2026-11-11 on one ZBDongle-P (CP2102N, CC2652P, Z-Stack 2.7.1 build
   transmitter was at hand; those paths are unit-tested with constructed
   packets), and restoring the Zigbee backup onto the dongle (tested only
   against the simulated chip).
+- *Update 2026-11-18: BT5 extended and Long Range were heard on air on 2026-11-12, from a C5
+  `rid-beacon`: extended with `--sniffle-mode 1m` at -55 dBm, Long Range with `coded` at -56 dBm
+  (commit 8b30df8). The Zigbee restore is still tested only in simulation.*

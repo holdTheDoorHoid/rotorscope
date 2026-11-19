@@ -18,9 +18,9 @@ suspicious.
 * **A node somewhere else:** add a line with its address (shown on the hub's
   Health page) and its position in decimal degrees, latitude first:
 
-      node 10:bd:a3:ce:bd:18 39.95210 -75.16380   # roof, north corner
+      node aa:bb:cc:dd:ee:01 39.95210 -75.16380   # roof, north corner
 
-* **Forget a node's position:** `node 10:bd:a3:ce:bd:18 clear`
+* **Forget a node's position:** `node aa:bb:cc:dd:ee:01 clear`
 
 ## Where the hub itself stands (`home`)
 
@@ -39,9 +39,12 @@ Each change is an evidence "setting" event.
 
 ## Silencing alarms
 
-A silenced alarm is still recorded in the evidence log and listed in the
-hub's `"t":"threat"` lines (with `"muted":true`), but it no longer raises the
-ATTACK badge. **Nothing silenced ever clears JAMMED, AREA JAM / AREA FAKE or
+A silenced alarm is still listed in the hub's `"t":"threat"` lines (with
+`"muted":true`), but it no longer raises the ATTACK badge. An alarm that was
+sounding before you silenced it is already in the evidence log; one that
+starts while a mute already covers it (a site-file line, for example) is not
+written there as a new alarm, though the mute itself and the site file's
+loading are (*corrected 2026-11-18*). **Nothing silenced ever clears JAMMED, AREA JAM / AREA FAKE or
 ID FLOOD**: those say the hub may be missing drones, and stay on for as long
 as that is true.
 
@@ -145,7 +148,7 @@ trace, so every load writes evidence "setting" events:
    honoured; 3 node positions; control ids off, control content off`.
 2. **One per change** from what the hub was using: a mute added or removed, a
    node placed, moved (with the old position) or cleared, e.g. `site file
-   changed: node 10:bd:a3:ce:bd:18 at 39.9600000 -75.1638000 (was 39.9521000
+   changed: node aa:bb:cc:dd:ee:01 at 39.9600000 -75.1638000 (was 39.9521000
    -75.1638000); spoof checks use it`. The same file loaded again changes
    nothing and logs only the summary.
 3. **Bounded.** However long the file (it is read a piece at a time; later

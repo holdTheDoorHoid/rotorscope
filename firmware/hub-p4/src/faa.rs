@@ -5,8 +5,8 @@
 //!   logger (`sd.rs`), a block at a time, and checked (CRC) once. A missing
 //!   or damaged pack turns off the checks that need it (airspace, facility
 //!   map, terrain height, line of sight, 91.119); the night check and the
-//!   Remote ID checks still run, and a height reported "above ground" by the
-//!   drone is still checked. Once loaded, the pack stays in PSRAM even if
+//!   Remote ID checks still run, and a height the drone reports as "above
+//!   ground" or "above take-off" is still checked. Once loaded, the pack stays in PSRAM even if
 //!   the card is pulled.
 //! - **Engine.** `faarules::Engine` runs once a second over the tracker.
 //!   It has one entry for every drone and aircraft the tracker can hold

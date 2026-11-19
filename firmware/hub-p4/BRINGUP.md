@@ -10,7 +10,7 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 
 | Item | Value |
 |---|---|
-| Chip | ESP32-P4 rev v1.3, 40 MHz crystal, 360 MHz, MAC e8:f6:0a:e3:f6:de |
+| Chip | ESP32-P4 rev v1.3, 40 MHz crystal, 360 MHz, MAC aa:bb:cc:dd:ee:01 |
 | Memory | 16 MB flash, 32 MB PSRAM (AP, 200 MHz) |
 | Display | 800x480 IPS, **16-bit parallel RGB565** (not MIPI-DSI). DE 2, PCLK 3, HSYNC 40, VSYNC 41, B 8/7/6/5/4, G 14/13/12/11/10/9, R 19/18/17/16/15 |
 | Backlight | STC8 MCU on I2C 0x2F, register 0x20 = 0..100 |
@@ -22,7 +22,7 @@ provenance, applied by `tools/p4-prepare.sh` (we do not run the kit's tool).
 | UART3 header | 27 TX / 28 RX (XH2.54, also a 5 V input). **GPS** (since 2026-11-17; node link before). Its power pin is 5 V |
 | Web-head feed | UART2 TX on GPIO31 (wireless-module socket), 921600, to the web head's node-A RX; WEBHEAD.md (2026-11-15) |
 | Radio | ESP32-C6 on SDIO slot 1 (CMD 54, CLK 53, D0-D3 52/51/50/49), factory esp-hosted firmware; no UART/boot pads |
-| Factory image | Backed up: `~/Desktop/rotorscope-backups/elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
+| Factory image | Backed up outside the repository: `elecrow-p4-factory-16MB.bin`, SHA-256 32723c03..., bootloader and app image hashes verified |
 
 ## Build and flash
 
@@ -49,6 +49,10 @@ ROM prints `POWERON`, even with DTR and RTS held low before the port is opened. 
 log seen through a console is always a fresh boot, not a continuation.
 
 ## Results
+
+*Update 2026-11-18: steps 7, 11, 13 and 15 give the pins from before the 2026-11-17 header swap.
+Since then the gateway / node link is on the UART1 header (RX GPIO48, TX GPIO47) and the GPS on
+the UART3-IN header (RX GPIO28, TX GPIO27); see the pin table above.*
 
 | Step | What | Result (2026-11-14) |
 |---|---|---|
@@ -109,7 +113,8 @@ Measured 2026-11-14, log once a second: `vsync=42..43 eof=42..43` per
 descriptor address different on every sample, main loop ~140k iterations/s,
 longest gap between link polls ~0.26 ms outside the log prints.
 
-**Unverified: nobody has looked at the screen yet.** A person must check it.
+**Unverified: nobody has looked at the screen yet.** A person must check it. *Update 2026-11-18:
+checked: the owner confirmed the colour bars and border by eye on 2026-11-14 (step 6).*
 Expected: eight vertical bars, left to right white, yellow, cyan, green,
 magenta, red, blue, black, each 100 px wide, with a 1-pixel white frame
 around the whole panel (visible against the black bar on the right). If
@@ -190,9 +195,9 @@ What the S3 hub does and the P4 now does too, and what it cannot yet, is in
 | `src/gps.rs` | GPS on the **UART3-IN header** (hub RX GPIO28, hub TX GPIO27; UART1 peripheral; header power is 5 V), PPS on **GPIO29** (socket pin, rising-edge GPIO interrupt). Hunts 115200 / 9600 / 38400, detects u-blox MAX-M10S (UBX MON-VER) or Quectel LC29H (`$PQTMVERNO`), configures it for this boot only, publishes fix, UTC (PPS-anchored) and the sky view. **Untested with a real module** |
 | `src/adsbee.rs` | ADSBee CSBee on **UART4 RX GPIO30** (socket pin), 115200. **Untested with the real ADSBee** (not wired to the P4) |
 | `src/uartring.rs` | UART1/UART4 receive by interrupt into RAM rings (2 KB / 4 KB), like the gateway link |
-| `src/console.rs` | UART0 (the CH340 USB-C port) taken over from esp-println: log lines and JSON lines go through a 16 KB ring drained without waiting; JSON lines dropped whole when full. Commands `p` / `c` / `h`. Opening this port resets the P4 every time (ROM `POWERON`), even with DTR/RTS held low |
+| `src/console.rs` | UART0 (the CH340 USB-C port) taken over from esp-println: log lines and JSON lines go through a 16 KB ring drained without waiting; JSON lines dropped whole when full. Commands (`main.rs`): `c` clear manual position, `b` time airspace lookups, `a` aero plan, `m` / `H` GPS home, `T` accept GPS time, `L` site line, `n` / `k` / `r` / `u` / `e` evidence, `h` or `?` help; `p` (test position) in `testpoint` builds and `f` fault lines in `faulttest` builds only. Opening this port resets the P4 every time (ROM `POWERON`), even with DTR/RTS held low |
 | `src/report.rs` | 1 Hz JSON lines: `new`, `hub`, `track`, `link`, `aircraft` |
-| `src/gpsloop.rs` | `--features gpsloop` / `gpsloop-m10`: the on-chip loop-back (steps 15, 16). Leave the UART1 header and GPIO29/30 unconnected while it runs |
+| `src/gpsloop.rs` | `--features gpsloop` / `gpsloop-m10`: the on-chip loop-back (steps 15, 16). Leave the UART3-IN header (the UART1 header before 2026-11-17) and GPIO29/30 unconnected while it runs |
 
 Socket pin numbers are from Elecrow's wiki (SX1262 BUSY = 29, NSS = 30):
 check which socket hole is which with a meter before wiring, and keep any

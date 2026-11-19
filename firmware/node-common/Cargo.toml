@@ -24,8 +24,8 @@ esp32c5 = ["esp-hal/esp32c5", "esp-bootloader-esp-idf/esp32c5"]
 # single image, so `Images` is not used there).
 esp32c3 = ["esp-hal/esp32c3", "esp-bootloader-esp-idf/esp32c3"]
 # The wired-bus node (crates/wirebus, docs/WIREBUS.md): many nodes on one hub
-# UART, polled by the hub. `src/bus.rs`; used by node-wifi, node-ble and
-# node-sdr when they are built with their own `wirebus` feature.
+# UART, polled by the hub. `src/bus.rs`; used by node-wifi, node-ble,
+# node-sdr and node-lr when they are built with their own `wirebus` feature.
 wirebus = ["dep:wirebus", "dep:embassy-time", "dep:critical-section", "dep:portable-atomic"]
 # The ESP-NOW link (docs/LINK-KEYS-DESIGN.md, package 13g): `keystore` (the
 # rskey provisioning record at boot) and `linkauth` (the link glue every

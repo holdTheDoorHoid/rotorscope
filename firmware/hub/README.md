@@ -182,7 +182,7 @@ reports `"show_link_ids"`. Video and MAVLink content is never decoded.
 
 | | |
 |---|---|
-| SSID | `Rotorscope-XXXX`: the last two bytes of the chip's MAC, in hex (bench board: `Rotorscope-6DF0`) |
+| SSID | `Rotorscope-XXXX`: the last two bytes of the chip's MAC, in hex (bench board: `Rotorscope-A1B2`) |
 | Channel | **11**. Remote ID lives on channel 6, where Node A spends about 75% of its time, so the hub (the only transmitter in the box) stays as far from it as 2.4 GHz allows |
 | Security | WPA2-PSK with the unit's own password (below). With `--features open-hotspot` (a bench build) it is open; that build prints a warning on USB at every boot and the phone page shows the bench banner |
 | Address | `192.168.4.1/24`. DHCP hands out .50-.57 (8 addresses, 10-minute leases), with the hub as router and DNS |
@@ -191,7 +191,7 @@ reports `"show_link_ids"`. Video and MAVLink content is never decoded.
 
 ### Password scheme
 
-Each unit has its own password, for example `tx2y-b8g4-b4xd`: 12 characters in 3 groups (60 bits),
+Each unit has its own password, for example `7k2m-q9xw-4thc`: 12 characters in 3 groups (60 bits),
 lower-case Crockford base32 (no i, l, o or u, so nothing is misread as 1 or 0).
 
 ```
@@ -234,7 +234,7 @@ Press and hold BOOT *after* the hub has started (held during power-up or RESET, 
 downloader instead), then type `h`:
 
 ```
-{"t":"hotspot","ssid":"Rotorscope-6DF0","channel":11,"security":"wpa2","password":"…","salt":"stored",…}
+{"t":"hotspot","ssid":"Rotorscope-A1B2","channel":11,"security":"wpa2","password":"…","salt":"stored",…}
 ```
 
 Without the button the same line has no `password` field, and a `help` line says how to get it. The

@@ -6,7 +6,7 @@ hardware yet.
 
 ## Attached hardware
 
-The board on `/dev/ttyACM0` (Espressif USB JTAG, MAC `e8:f6:0a:81:6d:f0`) is an **ESP32-S3**,
+The board on `/dev/ttyACM0` (Espressif USB JTAG, MAC `aa:bb:cc:dd:ee:01`) is an **ESP32-S3**,
 revision v0.2. It has 4 MB of embedded flash and 40 MHz crystal. Secure boot and flash
 encryption are off. Identified with `espflash board-info`. It is not registered in `lab`, so
 nothing locks it against other agents.

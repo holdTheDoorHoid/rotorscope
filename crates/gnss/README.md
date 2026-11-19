@@ -4,7 +4,7 @@ GPS driver core for the Rotorscope hub: a u-blox **MAX-M10S** (protocol 34.x, fi
 SPG 5.10) or a Quectel **LC29H(AA)** (dual-band L1+L5, NMEA + `$PAIR`/`$PQTM` commands),
 detected automatically, plus a jamming/spoofing monitor for the receiver itself
 (`integrity`, see `docs/GNSS-INTEGRITY.md`). `#![no_std]`, no alloc, no unsafe, no dependencies,
-84 host tests.
+103 host tests.
 
 **Status:** the u-blox path is host-tested; the LC29H path is host-tested and both were
 loop-back tested on the P4 hub against an on-chip emulator (`firmware/hub-p4/PARITY.md`).
@@ -253,7 +253,7 @@ message set is ever needed, revisit.
 
 ## Tests
 
-`cargo test -p gnss` (59 tests). LC29H (`src/tests_lc29h.rs`, 16): a full dual-band NMEA 4.10
+`cargo test -p gnss` (103 tests: the 16 LC29H and 43 u-blox tests below, plus 36 in `src/tests_integrity.rs` and 8 in `src/timeguard.rs`). LC29H (`src/tests_lc29h.rs`, 16): a full dual-band NMEA 4.10
 epoch built from the protocol specification's example sentences (checksums re-checked), the
 sky view per constellation and band, QZSS under GP, ageing out a band, a lost GSV message,
 2D from GSA, every talker, RMC with the 4.10 navigational-status field, no-fix output,

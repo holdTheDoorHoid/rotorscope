@@ -461,7 +461,7 @@ fn health_assigned() {
         }),
     ]);
     let mut ui = Ui::default();
-    press(&mut ui, &st, &[Button::Down, Button::Down]);
+    press(&mut ui, &st, &[Button::Down, Button::Down, Button::Down]);
     ui.tick(NOW + 5_000);
     shot("health_assigned", &ui, &st);
 }

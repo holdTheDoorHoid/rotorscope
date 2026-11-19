@@ -47,3 +47,6 @@ tools/kit.key.new
 tools/flarm.keys
 FLARMKEY.TXT
 *.flarmkeys
+
+# Documentation site: the diagram library is fetched by tools/docs-build.sh.
+docs/assets/mermaid.min.js
