@@ -7,6 +7,16 @@ The **hub** is the board with the screen: it gathers what every listening board 
 [glossary](../project/glossary.md) for any unfamiliar word). The pictures here are drawn by the
 screen code itself, from made-up drones, at 320 by 240 dots.
 
+> [!IMPORTANT]
+> **This page is behind the P4 hub's screen, as of 2026-11-19.** The P4 now draws a newer layout
+> made for its 800 x 480 panel: the same pages in the same order, with more on each, three keys
+> along the bottom that say what they do, and a page you can touch. The pictures and the key
+> descriptions below are the smaller 320 x 240 layout. Use this page for what the pages and
+> marks mean; for the P4's exact keys and wording, see the
+> [screen notes beside the code](https://github.com/holdTheDoorHoid/rotorscope/blob/main/crates/screen/README.md).
+> The newer layout is **simulated only**: drawn and tested on a computer, and not yet looked at
+> on the panel.
+
 ## Which screen you have
 
 There are two hubs, and they draw the **same pages** with the same code.
@@ -14,31 +24,31 @@ There are two hubs, and they draw the **same pages** with the same code.
 | | P4 hub (the current one) | S3 hub (the first one) |
 |---|---|---|
 | Screen | 5-inch touch screen, 800 x 480 | 2.0- or 2.8-inch panel, 320 x 240 |
-| How the pages are drawn | The 320 x 240 picture, **doubled** to 640 x 480 on the left | The 320 x 240 picture, as is |
-| How you press | Three touch keys in a column on the right: **UP**, **SELECT**, **DOWN** | Three buttons: Up, Down, Select |
+| How the pages are drawn | A layout made for 800 x 480, with smoother lettering | The 320 x 240 layout pictured on this page |
+| How you press | Three touch keys along the bottom, each labelled with what it does on the page showing. You can also touch a drone, a list row or a settings row | Three buttons: Up, Down, Select |
 | Beeper | None (the board has a speaker, not yet used) | Beeps on a new drone |
 
-On the P4 every dot of the pictures below becomes a block of 2 x 2 dots: the same layout, only
-bigger. Touching the picture itself does nothing; only the three keys respond, lighting up
-briefly when touched. A layout made for the 5-inch screen may come later.
+Both layouts come from the same code, show the same pages and follow the same key logic. Until
+2026-11-19 the P4 drew the small layout doubled in size, with its three keys in a column on the
+right.
 
 **How far this is proven.** The pictures are **simulated only**: the test suite draws them from
-made-up data. The P4 has drawn these pages on its own panel on the bench, and its touch keys
-were tested by hand on 2026-11-14. Newer parts of the screen (GPS state, the alarm boxes, the
-strip along the bottom) have not yet been checked by eye on the panel. The S3 hub has not yet
+made-up data. The P4 drew the earlier, doubled layout on its own panel on the bench, and its
+touch keys were tested by hand on 2026-11-14. The layout made for 800 x 480 has not yet been
+looked at on the panel. The S3 hub has not yet
 been tried with a real panel, and the bench notes of 2026-11-18 record that its firmware did not
 link (over its memory budget by about 18 KB; [Bench tests](../BENCH.md)).
 
 ## Pressing things
 
 The screen needs only three keys. One of them does two jobs: a short press is **Select**, and
-holding it for 0.7 seconds is **Back**.
+holding it is **Back** (0.7 seconds on the S3's button, 1 second on the P4's touch key).
 
 | You press | On most pages | While choosing a drone | On a drone's detail |
 |---|---|---|---|
 | UP / DOWN | Next or previous page (they wrap round) | Move the cursor | Next or previous drone |
-| SELECT (short) | Start choosing a drone (radar, list) or edit (settings) | Open that drone's detail | Nothing |
-| SELECT (hold) | Go home to the radar | Stop choosing | Back to choosing |
+| SELECT (short) | Start choosing a drone (radar, list) or edit (settings) | Open that drone's detail | Back to the page you came from |
+| SELECT (hold) | Go home to the radar | Stop choosing | Back to the page you came from |
 
 The pages, in order: **Radar**, **List**, **Flags** (P4 hub only), **Signals**, **Health**,
 **Settings**. After each flip, the page's name shows in the
@@ -47,13 +57,14 @@ middle of the screen for 1.5 seconds (a **toast**):
 ![The drone list with a white box in the middle reading DRONE LIST](../images/screen/page_toast.png)
 
 On the S3, holding Up or Down repeats; on the P4 each tap is one press. Choosing a drone and
-editing settings give up after 30 seconds without a press; a detail page never times out.
+editing settings give up after 30 seconds without a press; a detail page goes back by itself
+after 2 minutes.
 
 ## The status bar
 
 The thin bar along the top is on every page. Read it left to right.
 
-![The radar under stress: GPS 4 with a small 2D, all three node dots hollow and crossed, an SD! box, 9 percent battery and the time shown as dashes](../images/screen/status_warnings.png)
+![The radar under stress: GPS 4 with a small 2D, a NOT LISTENING box where the node dots would be, an SD! box, 9 percent battery and the time shown as dashes](../images/screen/status_warnings.png)
 
 | Part | What you may see | Meaning |
 |---|---|---|
@@ -63,8 +74,8 @@ The thin bar along the top is on every page. Read it left to right.
 | | **NO FIX** box | GPS present but no fix: no distances |
 | | **NO GPS** box | No GPS receiver found |
 | | **GPS JAM?**, **GPS JAM**, **GPS FAKE?**, **GPS FAKE** box | P4 hub: its own GPS looks jammed or faked ([alarms](alarms.md)) |
-| **Listeners** | `●2.4 ●5 ●BT` | One dot per listening board with its label: filled when it is reporting, hollow and crossed when it is not |
-| | or one boxed word | P4 hub: an alarm, which takes the place of the dots: **AIRCRAFT**, **JAMMED**, **AREA FAKE**, **AREA JAM**, **ID FLOOD** or **ATTACK** (most urgent first; see [Alarms and warnings](alarms.md)) |
+| **Listeners** | `●2.4 ●5 ●BT` | One dot per listening board with its label. A board that has stopped reporting becomes a box, such as **5 DOWN**; **NOT LISTENING** means no drone listener is answering at all |
+| | or one boxed word | An alarm, which takes the place of the dots: **PLANE NEAR**, **JAMMED**, **AREA GPS?**, **AREA JAM**, **FAKE IDS** or **ATTACK** (most urgent first; see [Alarms and warnings](alarms.md)) |
 | **Recording** | `● REC` | The memory-card log is recording |
 | | `no SD` (small, grey) | No card. Allowed; not a fault |
 | | **SD!** box | The card is failing |
@@ -73,8 +84,8 @@ The thin bar along the top is on every page. Read it left to right.
 | | `USB` | Running from USB. The P4 always says this: its battery level is not wired up |
 | **Time** | `14:03 UTC` | World time from GPS, not your local time. `--:--` means no time yet |
 
-Listener labels: `2.4` and `5` are Wi-Fi listeners, `BT` Bluetooth, `DID` the DJI DroneID
-listener, `FPV` the video-link scanner, `GW` the gateway that relays wireless boards, `ADS` an
+Listener labels: `2.4` and `5` are Wi-Fi listeners, `BT` Bluetooth, `DJI` the DJI DroneID
+listener, `FPV` the video-link scanner, `LNK` the gateway that relays wireless boards, `AIR` an
 ADS-B aircraft receiver and `LR` a long-range radio board.
 
 ## Radar
@@ -106,7 +117,8 @@ The home page. It answers "is there a drone, how far, which way?" in one glance.
 The right-hand column is the **readout**: `NEAREST`, the distance in big digits with the unit as
 a word, an arrow in a small compass with the compass point and degrees (`NW 310°`), the height,
 and the end of the ID. At the bottom: active drones, and how many are stale. With nothing heard
-it says "Listening for drones".
+it says "No drone IDs heard. Drones without Remote ID may only show on Signals", or, when the
+kit is jammed or a listener is down, says that instead.
 
 **Choosing a drone.** Press SELECT and a cursor lands on the nearest drone. The readout then
 describes the chosen one and says so in an inverse box, **DRONE 3**, instead of NEAREST, so a
@@ -183,7 +195,7 @@ Below: **GPS** ("no trusted position/time" when the hub doubts its own GPS), **T
 [Crewed aircraft](aircraft.md)); **NEAR**, **AREA GPS** and **ALARMS** only when needed
 ([Alarms and warnings](alarms.md)).
 
-The P4 always lists its ADS-B input, as an `ADS` dot in the status bar and an **ADS-B** row here,
+The P4 always lists its ADS-B input, as an `AIR` dot in the status bar and an **ADS-B** row here,
 with an AIRCRAFT line. With no ADSBee wired to it (none is, as of 2026-11-18) that row says
 **NOT RESPONDING** and the dot is crossed: expected, not a fault.
 
@@ -197,39 +209,47 @@ Press SELECT to start editing, UP/DOWN to pick a row, SELECT to change it, hold 
 
 | Row | What SELECT does |
 |---|---|
-| **Theme** | Swaps Night (dark) and Day (light) |
-| **Brightness** | Steps through five levels. The S3 dims its backlight; the P4 does not yet apply it and stays at full |
-| **Buzzer** | On or off. Only the S3 has a beeper; the banner shows either way |
+| **Theme** | Steps through Auto, Red Night, Glass Cockpit and Field Day (see [Themes](#themes)). While it is Auto, three more rows appear: **Day theme**, **Night theme** and **Switch at** |
+| **Brightness** | Five levels. Both hubs dim their backlight to match; on the P4 this is not yet checked on the panel. Red Night holds it at level 2 or lower |
+| **Buzzer** | On or off. Only the S3 has a beeper, so the P4 has no such row; the banner shows either way |
 | **Hub moved** / **New home** | Tells the hub you really moved it, so it does not treat the new place as faked GPS ([GPS checks](../GNSS-INTEGRITY.md)). Reads **New home: Accept here** while a new place waits for your yes |
-| **Alarms** | Says what one press will do: `Mute 2 (2h)`, `Snooze 1 (5m)`, `Unmute 3` or `None sounding`. See [muting and snoozing](alarms.md#muting-and-snoozing) |
+| **Alarms** | Says what one press will do: `Mute 2, 2 h`, `Snooze 1, 5 min`, `Unmute 3` or `None active`. See [muting and snoozing](alarms.md#muting-and-snoozing) |
 | **Nodes at hub** | Records that every listening board stands where the hub is (a wired or bench kit), which sharpens one spoofing check ([Site settings](../SITE.md)) |
 
-After an action the row says what happened (`Done`, `Relearning`, `Accepted`, `Placed`). As
-of 2026-11-18 neither hub saves theme, brightness or buzzer: they reset at power-up.
+After an action the row says what happened, or why it could not be done (`No GPS position: not
+placed`). The P4 saves theme and brightness to the site file on its memory card (`ROTORSCP/SITE.TXT`)
+when you finish editing; the S3 does not save them.
 
 ## The strip along the bottom
 
 On the P4, facts that must not be forgotten stay as lines in the warning colour along the
 bottom of **every** page for as long as they are true.
 
-![The radar with two strip lines: NO EVIDENCE (file error): 1234 waiting, 56 dropped; and TEST KEY: log not evidence, BENCH BUILD, OPEN LINK](../images/screen/caveats_all.png)
+![The radar with two strip lines: NO EVIDENCE (file error): 1234 waiting, 56 dropped; and Test key: log not tamper-proof, Bench build, and a third mark cut off at the edge](../images/screen/caveats_all.png)
 
 | Line | Meaning |
 |---|---|
 | `NO EVIDENCE (no SD / SD error / file error): N waiting, M dropped` | Evidence is not reaching the card. Records are held in memory meanwhile; "dropped" ones are lost |
-| `TEST KEY: log not evidence` | The evidence log is signed with the published test key: anyone could have signed it |
-| `DEV KEY: not evidence-grade` | Signed with a development key built into the firmware |
-| `BENCH BUILD` | The firmware has bench-only test features in it. Not for real use |
-| `OPEN LINK` | The wireless link between boards has no key, so anyone nearby could inject fake reports |
-| `MUTED 2 1h59  SNOOZED 1 4m05  SITE MUTES 1` | Alarms silenced right now, and time left on the first to end |
+| `Test key: log not tamper-proof` | The evidence log is signed with the published test key: anyone could have signed it |
+| `Dev key: not evidence-grade` | Signed with a development key built into the firmware |
+| `Bench build` | The firmware has bench-only test features in it. Not for real use |
+| `Nodes unsecured` | The wireless link between boards has no key, so anyone nearby could inject fake reports |
+| `muted 2: 1 h 59 min  snoozed 1: 4:05  site 1` | Alarms silenced right now, and time left on the first to end |
 | `ON: control IDs, control content` | Collection switches turned on in the site file ([Law, safety and ethics](../start/law-and-ethics.md)) |
 
-## Night and Day
+## Themes
 
-Night is the default: white text on black, drones in amber, kind to night vision. Day is dark
-text on white for direct sun, with drones in dark orange.
+There are three looks, and **Auto**, which picks between two of them by the sun.
 
-![The same five-drone radar in the Day theme, black on white](../images/screen/radar_5_drones_day.png)
+| Theme | What it is for |
+|---|---|
+| **Glass Cockpit** (the default) | White text on near-black, with drones in magenta, labels in light blue and cautions in amber. Works by day and by night |
+| **Field Day** | Dark text on light grey for direct sun, with drones in dark orange |
+| **Red Night** | Pure red on black, to protect night vision, with the backlight held low |
+| **Auto** | Shows your day theme while the sun is up and your night theme after dark, worked out from the hub's GPS position and time. Until the hub has both it shows Glass Cockpit. It waits for a quiet moment to switch, and never switches while the hub's GPS may be faked |
+
+![The same five-drone radar in the Field Day theme, dark on light grey](../images/screen/radar_5_drones_day.png)
+![The same radar in the Red Night theme, every mark in red on black](../images/screen/radar_5_drones_red_night.png)
 
 Nothing relies on colour alone: filled or hollow, an X, a cross, a boxed word or a letter
 carries every meaning, so the screen still makes sense in black and white.
@@ -248,7 +268,7 @@ carries every meaning, so the screen still makes sense in black and white.
 - [`crates/screen`](https://github.com/holdTheDoorHoid/rotorscope/tree/main/crates/screen): every
   page (`src/render.rs`), the key logic (`src/ui.rs`), colours (`src/theme.rs`), its README
 - [`firmware/hub-p4/src/display.rs`](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/hub-p4/src/display.rs):
-  the 2x drawing and the touch key column; `touch.rs` and `app.rs` for the presses
+  the panel and the touch keys; `touch.rs` and `app.rs` for the presses and the drawing
 - [`firmware/hub/src/screen.rs`](https://github.com/holdTheDoorHoid/rotorscope/blob/main/firmware/hub/src/screen.rs):
   the S3's panel, buttons and beeper
 

@@ -56,7 +56,7 @@ This is a deliberate rule. Aircraft are for awareness, not detection:
 The only mark an aircraft gets on its own is a quiet **LOW** label: airborne, within 5 km of
 you and at most 2,000 ft above you (above sea level, if the hub does not know its own height). It is a word on the screen, not an alarm.
 
-![The Health page, with the ADS-B receiver listed as a node and an AIRCRAFT line reading "12 1 LOW N911PH 1.2km 1200ft"](../images/screen/health_aircraft.png)
+![The Health page, with the ADS-B receiver listed as a node and an AIRCRAFT line reading "12 1 LOW N911PH 1.2 km 1200ft"](../images/screen/health_aircraft.png)
 
 On the hub's screen, the Health page lists the ADSBee as a node (here `ADS-B`), with its message
 rate. The **AIRCRAFT** line gives the number of aircraft heard recently, how many are low, and the
@@ -83,7 +83,7 @@ where a drone is flying is the case this is for.
 At Caution or Warning the status bar shows **AIRCRAFT** in a box, ahead of JAMMED and ATTACK, and
 the Health page gets a **NEAR** line:
 
-![The Health page with AIRCRAFT boxed in the status bar and a NEAR line reading "drone 240m from N911PH +98ft"](../images/screen/health_conflict.png)
+![The Health page with PLANE NEAR boxed in the status bar and a NEAR line reading "drone 240 m from N911PH +98ft"](../images/screen/health_conflict.png)
 
 Each pair is also written to the [evidence log](../EVIDENCE.md), once per level (and again
 after 5 minutes if it is still close).

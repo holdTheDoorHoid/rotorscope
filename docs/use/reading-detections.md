@@ -171,7 +171,7 @@ If far more new IDs appear than a real sky produces, the hub raises a **flood** 
 status bar says **ID FLOOD**, the drone count adds `+58?`, and the unconfirmed rows (marked `?`)
 are then mostly fakes. Confirmed drones stay at the top.
 
-![The list during a flood: ID FLOOD in the status bar, DRONES 5 +58?, the five real drones first, then rows marked ? with identical made-up IDs](../images/screen/list_flood.png)
+![The list during a flood: FAKE IDS in the status bar, DRONES 5 +58?, the five real drones first, then rows marked ? with identical made-up IDs](../images/screen/list_flood.png)
 
 ## How much should I trust this?
 
