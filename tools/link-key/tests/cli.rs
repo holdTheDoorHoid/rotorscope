@@ -173,3 +173,59 @@ fn usage_on_nonsense() {
     assert!(!o.status.success());
     assert!(text(&o).contains("usage: link-key"));
 }
+
+/// The kit-key commands of the retired version 2 are gone.
+#[test]
+fn legacy_key_commands_are_gone() {
+    let tmp = TempDir::new();
+    for args in [&["new"][..], &["id"], &["new", "--force"]] {
+        let o = run(&tmp.0, args);
+        assert!(!o.status.success(), "{args:?}");
+        assert!(text(&o).contains("usage: link-key"), "{args:?}");
+    }
+    assert!(tmp_is_empty(&tmp.0));
+}
+
+/// Ctrl-C during a board write (section 13, 13a leftover): the key image is
+/// wiped and removed before the program ends, and it says so. The fake
+/// board script signals link-key itself, as a terminal's Ctrl-C would (the
+/// terminal also signals the board command, which then fails).
+#[test]
+fn interrupted_board_write_leaves_no_key_file() {
+    let s = setup();
+    let fake = s.kit.0.join("fake-dev-board.sh");
+    let seen = s.kit.0.join("seen");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n\
+             case \"$2\" in *write-bin*) f=${{2##* }}; f=${{f#\\'}}; f=${{f%\\'}}; [ -s \"$f\" ] && echo present >{seen};;\n\
+             *) exit 1;; esac\n\
+             kill -INT $PPID\n\
+             sleep 1\n\
+             exit 1\n",
+            seen = seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for args in [
+        &["open", "c5a", "--kit-dir", s.kit.0.to_str().unwrap(), "--table", &s.node_csv][..],
+        &["hub", "p4", "--kit-dir", s.kit.0.to_str().unwrap(), "--table", &s.hub_csv],
+    ] {
+        let _ = std::fs::remove_file(&seen);
+        let o = Command::new(env!("CARGO_BIN_EXE_link-key"))
+            .args(args)
+            .env("TMPDIR", &s.tmp.0)
+            .env("ROTORSCOPE_DEV_BOARD", &fake)
+            .env_remove("ROTORSCOPE_KIT_DIR")
+            .output()
+            .unwrap();
+        let t = text(&o);
+        assert_eq!(o.status.code(), Some(130), "{args:?}: {t}");
+        assert!(t.contains("interrupted") && t.contains("wiped and removed"), "{t}");
+        assert!(seen.exists(), "the board command saw the key image: {t}");
+        assert!(tmp_is_empty(&s.tmp.0), "{args:?} left a file behind");
+        assert_no_secret(&t, &s.master);
+    }
+}

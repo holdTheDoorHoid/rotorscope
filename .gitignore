@@ -31,7 +31,8 @@ O4KEY.TXT
 *.o4key
 *o4key*.txt
 
-# ESP-NOW link key (per kit, made by `cargo run -p link-key -- new`): never commit.
+# The retired one-per-kit ESP-NOW link key (version 2 firmware; nothing reads it
+# any more, but an owner may keep the file until every board is reflashed): never commit.
 tools/link.key
 *.linkkey
 # Kit master and roster (per-node link keys, `cargo run -p link-key -- kit new`):

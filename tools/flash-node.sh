@@ -33,8 +33,8 @@
 # stops a wired node-sdr ELF from landing in an ESP-NOW node's slot.
 #
 # Link keys (docs/LINK-KEYS-DESIGN.md 4.4, 4.5): images carry no key and are
-# the same for every kit; they are built with ROTORSCOPE_LINK_KEY_FILE=none so
-# no key can end up in one. Each board's key is in its rskey partition, put
+# the same for every kit (no build reads a key file or a key variable). Each
+# board's key is in its rskey partition, put
 # there by `tools/link-key node <board>` (or an open record by `link-key open
 # <board>`). After an ESP-NOW flash this script reads the boot line and calls
 # the flash good (exit 0) only if node-wifi says it is keyed
@@ -133,8 +133,8 @@ self_test() {
   t=$(mktemp -d); trap 'rm -rf "$t"' RETURN
   check() { if [[ $2 == 0 ]]; then echo "ok   $1"; else echo "FAIL $1"; fails=$((fails + 1)); fi; }
   printf 'abc ","link":"v3"} xyz' >"$t/v3.elf"
-  printf 'abc link-key:none "t":"bus","addr" xyz' >"$t/bus.elf"
-  printf 'abc link-key:none xyz' >"$t/wired.elf"
+  printf 'abc "t":"bus","addr" xyz' >"$t/bus.elf"
+  printf 'abc xyz' >"$t/wired.elf"
   printf '%s bench-build:faulttest' "$V3_MARK" >"$t/bench.elf"
   check_images espnow "$t/v3.elf" 2>/dev/null; check "espnow node takes a v3 image" $?
   check_images espnow "$t/v3.elf" "$t/wired.elf" 2>/dev/null; check "espnow node refuses a wired node-sdr image" $(( ! $? ))
@@ -185,10 +185,6 @@ fi
 kind=espnow
 [[ ${NODE_WIRED:-0} == 1 ]] && kind=wired
 [[ ${NODE_BUS:-0} == 1 ]] && kind=bus
-
-# No key in any image: until the cut-over removes airlink's compiled key, the
-# build still asks where one is; say none. Node firmware never reads it.
-export ROTORSCOPE_LINK_KEY_FILE=none
 
 chip=$("$here/dev-board.sh" --resolve "$board" | awk '{print $2}')
 [[ $chip == esp32c5 ]] || { echo "$board is $chip; multi-image nodes are ESP32-C5 only" >&2; exit 1; }

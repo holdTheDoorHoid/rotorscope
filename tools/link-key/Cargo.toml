@@ -6,5 +6,4 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-airlink = { path = "../../crates/airlink" }
 kitkeys = { path = "../../crates/kitkeys" }

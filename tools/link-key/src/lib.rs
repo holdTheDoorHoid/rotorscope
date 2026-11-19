@@ -12,6 +12,14 @@
 //! ([`SecretDir`]); `espflash write-bin` reads it from there, and the file is
 //! overwritten with zeros and removed as soon as the write returns (also on
 //! errors). Only its path is ever shown.
+//!
+//! Interrupts: while a key image is on disk, Ctrl-C (SIGINT), SIGTERM and
+//! SIGHUP do not kill this program ([`interrupt`]). The board command still
+//! gets the signal and stops, the file is wiped and removed as usual, and only
+//! then does the command end, with "interrupted" and exit status 130. What
+//! nothing can cover: SIGKILL or a power cut in that window, which leave the
+//! 0600 file in its 0700 directory under the system temporary directory
+//! (`link-key-<pid>-<random>`); delete it by hand.
 
 use kitkeys::roster::{Entry, Roster};
 use kitkeys::{KeyCheck, KitId, Mac, MasterKey, SLOTS, SoftKeySource, bootlog, hub, record};
@@ -329,6 +337,8 @@ pub trait Board {
     fn read_mac(&mut self, board: &str) -> Result<Mac, String>;
     /// `espflash write-bin <offset> <file>`.
     fn write_bin(&mut self, board: &str, offset: u32, file: &Path) -> Result<(), String>;
+    /// `espflash read-flash <offset> <len> <file>`: `len` bytes into `file`.
+    fn read_bin(&mut self, board: &str, offset: u32, len: usize, file: &Path) -> Result<(), String>;
 }
 
 fn shell_quote(s: &str) -> String {
@@ -351,6 +361,20 @@ pub fn write_bin_args(board: &str, offset: u32, file: &Path) -> Vec<String> {
         "--run".into(),
         format!(
             r#"espflash write-bin --port "$BOARD_PORT" --non-interactive {offset:#x} {}"#,
+            shell_quote(&file.to_string_lossy())
+        ),
+        "120".into(),
+        board.into(),
+    ]
+}
+
+/// `dev-board.sh` arguments that read `len` bytes at `offset` into `file`
+/// under the lock.
+pub fn read_bin_args(board: &str, offset: u32, len: usize, file: &Path) -> Vec<String> {
+    vec![
+        "--run".into(),
+        format!(
+            r#"espflash read-flash --port "$BOARD_PORT" --non-interactive {offset:#x} {len:#x} {}"#,
             shell_quote(&file.to_string_lossy())
         ),
         "120".into(),
@@ -394,6 +418,18 @@ impl Board for DevBoard {
             .map_err(|e| format!("{}: {e}", self.script.display()))?;
         if st.success() { Ok(()) } else { Err(format!("writing {board} at {offset:#x} failed ({st})")) }
     }
+
+    fn read_bin(&mut self, board: &str, offset: u32, len: usize, file: &Path) -> Result<(), String> {
+        let out = std::process::Command::new(&self.script)
+            .args(read_bin_args(board, offset, len, file))
+            .output()
+            .map_err(|e| format!("{}: {e}", self.script.display()))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(format!("reading {board} at {offset:#x} failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        }
+    }
 }
 
 /// Prints the commands a [`DevBoard`] would run; touches nothing.
@@ -423,9 +459,92 @@ impl Board for DryRun {
         self.line(write_bin_args(board, offset, file));
         Ok(())
     }
+
+    fn read_bin(&mut self, board: &str, offset: u32, len: usize, file: &Path) -> Result<(), String> {
+        self.line(read_bin_args(board, offset, len, file));
+        Err("--dry-run reads nothing".into())
+    }
 }
 
 // --------------------------------------------------------------- commands --
+
+/// Signals while a key image is on disk (see the module docs). Uses only the
+/// C library's `signal()`, which every Unix program already links: no
+/// dependency. A handler (not "ignore") is installed, because an ignored
+/// signal would stay ignored in the board command too, and Ctrl-C must stop
+/// that.
+pub mod interrupt {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The same numbers on Linux and macOS.
+    const SIGNALS: [i32; 3] = [1 /* SIGHUP */, 2 /* SIGINT */, 15 /* SIGTERM */];
+    const SIG_ERR: usize = usize::MAX;
+
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+
+    /// Signals noted since the program started.
+    static HITS: AtomicUsize = AtomicUsize::new(0);
+    /// Guards alive, and the handlers they replaced (for the last to restore).
+    static INSTALLED: Mutex<(usize, [usize; 3])> = Mutex::new((0, [0; 3]));
+
+    extern "C" fn note(_: i32) {
+        // Async-signal-safe: one atomic add.
+        HITS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Notes the three signals instead of dying while it lives.
+    pub struct Guard {
+        start: usize,
+    }
+
+    impl Guard {
+        pub fn new() -> Self {
+            let mut g = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
+            if g.0 == 0 {
+                for (i, s) in SIGNALS.iter().enumerate() {
+                    // SAFETY: `note` is an `extern "C" fn(i32)` that only
+                    // touches an atomic, as a signal handler must.
+                    let prev = unsafe { signal(*s, note as extern "C" fn(i32) as usize) };
+                    g.1[i] = if prev == SIG_ERR { 0 } else { prev };
+                }
+            }
+            g.0 += 1;
+            Guard { start: HITS.load(Ordering::SeqCst) }
+        }
+
+        /// Whether a signal arrived since this guard was made.
+        pub fn hit(&self) -> bool {
+            HITS.load(Ordering::SeqCst) != self.start
+        }
+    }
+
+    impl Default for Guard {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let mut g = INSTALLED.lock().unwrap_or_else(|e| e.into_inner());
+            g.0 -= 1;
+            if g.0 == 0 {
+                for (i, s) in SIGNALS.iter().enumerate() {
+                    // SAFETY: restores what `signal` returned (0 = default).
+                    unsafe { signal(*s, g.1[i]) };
+                }
+            }
+        }
+    }
+
+    /// Whether any signal was noted in this run (the exit status is then 130).
+    pub fn any() -> bool {
+        HITS.load(Ordering::SeqCst) != 0
+    }
+}
 
 /// What the board-writing commands need.
 pub struct Ctx<'a> {
@@ -444,13 +563,34 @@ fn written(ctx: &Ctx) -> &'static str {
 }
 
 fn write_image(ctx: &mut Ctx, board: &str, offset: u32, name: &str, bytes: &[u8]) -> Result<String, String> {
+    // Made first, so it is dropped last: the whole time the file exists.
+    let guard = interrupt::Guard::new();
     let dir = SecretDir::new(&ctx.tmp_parent).map_err(|e| format!("private temporary directory: {e}"))?;
     let file = dir.write(name, bytes).map_err(|e| format!("temporary file: {e}"))?;
     let r = ctx.board.write_bin(board, offset, file.path());
     let shown = file.path().display().to_string();
     drop(file); // overwritten and removed here, before anything else
     drop(dir);
+    if guard.hit() {
+        return Err(format!(
+            "interrupted while writing {board} at {offset:#x}: the key image ({shown}) was wiped and removed; \
+             the board may hold a partial write: run the command again"
+        ));
+    }
     r.map(|()| shown)
+}
+
+/// Read `len` bytes at `offset` from `board`. Nothing secret (the boot
+/// counter); the file still goes to a private directory and is removed.
+fn read_image(ctx: &mut Ctx, board: &str, offset: u32, len: usize, name: &str) -> Result<Vec<u8>, String> {
+    let dir = SecretDir::new(&ctx.tmp_parent).map_err(|e| format!("private temporary directory: {e}"))?;
+    let path = dir.path().join(name);
+    let r = ctx.board.read_bin(board, offset, len, &path).and_then(|()| {
+        std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
+    });
+    let _ = std::fs::remove_file(&path);
+    drop(dir);
+    r
 }
 
 /// Options of `link-key node`.
@@ -560,13 +700,54 @@ pub fn hub_roster(ctx: &mut Ctx, board: &str, table: &Path) -> Result<String, St
     push_roster(ctx, board, table, &rf)
 }
 
+/// The boot counter seed for a hub whose `rsboot` held `old` (`None`: not
+/// read). When the old log still reads good the seed goes just above its
+/// latest value, so the hub's next epoch is above every epoch its nodes have
+/// seen and they follow it at once; otherwise a random seed (the nodes then
+/// follow within the 60 s relink if it lands below). Returns the seed and
+/// how it was chosen.
+pub fn boot_seed(old: Option<&[u8]>, random: [u8; 4]) -> (u32, &'static str) {
+    if let Some(p) = old
+        && let bootlog::State::Good { latest, .. } = bootlog::read(p)
+        && let Some(seed) = latest.checked_add(1).filter(|s| *s < bootlog::MAX_VALUE)
+    {
+        return (seed, "above the old counter");
+    }
+    let why = match old.map(bootlog::read) {
+        None => "random (old counter not read)",
+        Some(bootlog::State::Missing) => "random (no old counter)",
+        Some(bootlog::State::Damaged) => "random (old counter damaged)",
+        Some(_) => "random (old counter exhausted)",
+    };
+    (bootlog::seed_from_random(random), why)
+}
+
 fn seed_boot(ctx: &mut Ctx, board: &str, table: &Path) -> Result<String, String> {
     let offset = partition_offset(table, "rsboot", bootlog::PARTITION_LEN)?;
+    let mut out = String::new();
+    let old = match read_image(ctx, board, offset, bootlog::PARTITION_LEN, "rsboot-old.bin") {
+        Ok(b) => Some(b),
+        Err(e) if ctx.dry_run => {
+            let _ = writeln!(
+                out,
+                "[dry-run] ({e}) a real run reads the old boot counter with the command above and seeds above it if it reads good"
+            );
+            None
+        }
+        Err(e) => {
+            let _ = writeln!(out, "{board}: could not read the old boot counter ({e}); using a random seed");
+            None
+        }
+    };
     let mut r = [0u8; 4];
     (ctx.rng)(&mut r).map_err(|e| format!("random source: {e}"))?;
-    let seed = bootlog::seed_from_random(r);
+    let (seed, how) = boot_seed(old.as_deref(), r);
     write_image(ctx, board, offset, "rsboot.bin", &bootlog::seed_image(seed))?;
-    Ok(format!("{board}: boot counter seed {}\n", written(ctx)))
+    let _ = writeln!(out, "{board}: boot counter seed {} ({how})", written(ctx));
+    if how.starts_with("random") && !ctx.dry_run {
+        out.push_str("If the seed is below what the nodes last saw, they follow the hub after their 60 s relink.\n");
+    }
+    Ok(out)
 }
 
 /// `link-key hub <hub-board>`: master and roster to `rskit`, boot counter

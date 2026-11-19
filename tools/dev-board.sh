@@ -43,11 +43,9 @@
 # feature or switch carries "bench-build:<list>"; flashing one needs
 # ROTORSCOPE_BENCH=1 (as building it did), and it is announced either way.
 #
-# ESP-NOW link key: before flashing, every ELF that carries a link-key tag
-# (gateway, ESP-NOW nodes) is checked against the kit key (tools/link.key, or
-# $ROTORSCOPE_LINK_KEY_FILE): a WARNING if it was built without a key or with
-# another one (docs/ESPNOW.md "Securing the link"). Only key IDs are printed,
-# never a key.
+# ESP-NOW link keys are not in any image: each board's key record lives in its
+# rskey partition (docs/LINK-KEYS-DESIGN.md 4.4), so images are the same for
+# every kit and nothing here looks for a key.
 #
 # Boards are addressed by their USB by-id path (it contains the MAC), never by
 # /dev/ttyACMn and never by a serial number. Names (s3, s3b, c5a, c5b, ...) are
@@ -82,32 +80,6 @@ chip_of() {  # chip_of <board>
   else echo esp32s3; fi
 }
 lock_name() { local b; b=$(basename "$1"); echo "${b//[^A-Za-z0-9_.:-]/_}.lock"; }
-
-# The link-key tag an ELF was built with ("none" or 8 hex digits), empty if it
-# has none (not an ESP-NOW image).
-elf_link_key() { grep -aoE 'link-key:(none|[0-9a-f]{8})' "$1" 2>/dev/null | head -1 | cut -d: -f2 || true; }
-check_link_keys() {  # check_link_keys <elf>...: report each image's key, warn on a mismatch
-  local f k kit="" keyfile=${ROTORSCOPE_LINK_KEY_FILE:-$here/link.key}
-  for f in "$@"; do
-    [[ -f $f ]] || continue
-    k=$(elf_link_key "$f"); [[ -n $k ]] || continue
-    if [[ -z $kit ]]; then
-      if [[ $keyfile != none && -f $keyfile ]]; then
-        kit=$(cd "$here/.." && cargo run -q -p link-key -- id "$keyfile" 2>/dev/null) || kit="?"
-      else
-        kit=none
-      fi
-    fi
-    if [[ $k == none ]]; then
-      echo "dev-board: WARNING: $(basename "$f") was built WITHOUT a link key; its ESP-NOW link is not authenticated" >&2
-    else
-      echo "dev-board: $(basename "$f"): link key $k"
-    fi
-    if [[ $kit != "?" && $k != "$kit" ]]; then
-      echo "dev-board: WARNING: $(basename "$f") has link key '$k' but the kit key is '$kit' ($keyfile): it will not talk to the rest of the kit; rebuild it" >&2
-    fi
-  done
-}
 
 # The bench list an ELF was built with, empty for a normal build.
 elf_bench() { grep -aoE 'bench-build:[A-Za-z0-9_,:-]+' "$1" 2>/dev/null | grep -v '^bench-build:none$' | head -1 | cut -d: -f2- || true; }
@@ -161,6 +133,11 @@ self_test() {
   # 5. Bench images are announced as refused without ROTORSCOPE_BENCH=1.
   out=$(run --dry-run "$t/bench.elf" 5 c5x)
   grep -q 'BENCH build (faulttest); refusing' <<<"$out"; check "bench image refused without ROTORSCOPE_BENCH=1" $?
+  # 6. Images carry no key: an old image's compiled key tag is not looked at,
+  #    and no key file is read (keys live in each board's rskey partition).
+  printf 'xx link-key:0a1b2c3d xx' >"$t/oldkey.elf"
+  out=$(ROTORSCOPE_LINK_KEY_FILE=$t/nonexistent run --dry-run "$t/oldkey.elf" 5 c5x)
+  ! grep -qi 'link key\|link\.key' <<<"$out" && grep -q 'espflash flash ' <<<"$out"; check "no compiled-key check, no key file read" $?
   (( fails == 0 )) && echo "dev-board self-test: all passed" || echo "dev-board self-test: $fails FAILED"
   return $(( fails > 0 ))
 }
@@ -291,7 +268,6 @@ chip=$(chip_of "$board")
 
 link_elfs=(); [[ -n $elf ]] && link_elfs+=("$elf")
 for a in "${apps[@]}"; do link_elfs+=("${a#*=}"); done
-(( ${#link_elfs[@]} )) && check_link_keys "${link_elfs[@]}"
 (( ${#link_elfs[@]} )) && check_bench "$dry" "${link_elfs[@]}"
 
 if (( dry )); then

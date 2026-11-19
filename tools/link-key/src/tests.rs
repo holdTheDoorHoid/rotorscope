@@ -90,11 +90,14 @@ struct Fake {
     fail: bool,
     seen: Vec<Seen>,
     links: TempDir,
+    /// What `read_bin` returns (`None`: the read fails), and the reads made.
+    flash: Option<Vec<u8>>,
+    reads: Vec<(u32, usize)>,
 }
 
 impl Fake {
     fn new(mac: Mac) -> Self {
-        Fake { mac, fail: false, seen: Vec::new(), links: TempDir::new() }
+        Fake { mac, fail: false, seen: Vec::new(), links: TempDir::new(), flash: None, reads: Vec::new() }
     }
 }
 
@@ -116,6 +119,14 @@ impl Board for Fake {
             link,
         });
         if self.fail { Err("board went away".into()) } else { Ok(()) }
+    }
+
+    fn read_bin(&mut self, _board: &str, offset: u32, len: usize, file: &Path) -> Result<(), String> {
+        self.reads.push((offset, len));
+        let b = self.flash.as_ref().ok_or("no answer")?;
+        assert_eq!(b.len(), len);
+        std::fs::write(file, b).unwrap();
+        Ok(())
     }
 }
 
@@ -377,10 +388,90 @@ fn hub_writes_master_roster_and_boot_seed() {
     assert_wiped(kit_img);
     assert_wiped(boot);
 
-    // --keep-boot leaves rsboot alone.
+    // --keep-boot leaves rsboot alone (and does not read it).
     let mut b2 = Fake::new([0; 6]);
     hub(&mut ctx(&k, &mut b2, &mut rng, false), "p4", &k.hub_csv, true).unwrap();
     assert_eq!(b2.seen.len(), 1);
+    assert!(b2.reads.is_empty());
+}
+
+/// The latest value of a boot counter image.
+fn latest(img: &[u8]) -> u32 {
+    match bootlog::read(img) {
+        bootlog::State::Good { latest, .. } => latest,
+        s => panic!("{s:?}"),
+    }
+}
+
+/// Section 13 (13a leftover): re-provisioning a hub whose counter still
+/// reads good seeds just above it, so the next epoch is above anything the
+/// nodes saw and they do not need the 60 s relink.
+#[test]
+fn hub_seeds_above_a_readable_old_counter() {
+    let k = kit();
+    let mut rng = counter_rng();
+    // An old log well above any random seed, with a few boots written.
+    let mut old = bootlog::seed_image(0x7fff_fff0).to_vec();
+    for _ in 0..3 {
+        let bootlog::State::Good { next, .. } = bootlog::read(&old) else { panic!() };
+        bootlog::apply(&mut old, &next);
+    }
+    assert_eq!(latest(&old), 0x7fff_fff3);
+    let mut b = Fake::new([0; 6]);
+    b.flash = Some(old.clone());
+    let out = hub(&mut ctx(&k, &mut b, &mut rng, false), "p4", &k.hub_csv, false).unwrap();
+    assert_eq!(b.reads, [(0x3f2000, bootlog::PARTITION_LEN)]);
+    assert!(out.contains("above the old counter"), "{out}");
+    assert_eq!(latest(&b.seen[1].bytes), 0x7fff_fff4);
+    // The hub's first boot after that takes the next value: above every old epoch.
+    let bootlog::State::Good { next, .. } = bootlog::read(&b.seen[1].bytes) else { panic!() };
+    assert!(next.value > latest(&old));
+    assert_wiped(&b.seen[1]);
+
+    // Unreadable, missing, damaged or exhausted: a random seed, said so.
+    let mut damaged = old.clone();
+    for e in damaged.chunks_mut(bootlog::ENTRY_LEN) {
+        if e.iter().any(|&x| x != 0xFF) {
+            e[0] ^= 1;
+        }
+    }
+    let mut exhausted = bootlog::seed_image(bootlog::MAX_VALUE).to_vec();
+    exhausted.truncate(bootlog::PARTITION_LEN);
+    for (flash, why) in [
+        (None, "old counter not read"),
+        (Some(vec![0xFF; bootlog::PARTITION_LEN]), "no old counter"),
+        (Some(damaged), "old counter damaged"),
+        (Some(exhausted), "old counter exhausted"),
+    ] {
+        let mut b = Fake::new([0; 6]);
+        b.flash = flash;
+        let out = hub(&mut ctx(&k, &mut b, &mut rng, false), "p4", &k.hub_csv, false).unwrap();
+        assert!(out.contains(why), "{why}: {out}");
+        assert!(latest(&b.seen[1].bytes) < bootlog::SEED_LIMIT, "{why}");
+    }
+}
+
+#[test]
+fn boot_seed_choices() {
+    let r = [1, 0, 0, 0];
+    assert_eq!(boot_seed(None, r), (2, "random (old counter not read)"));
+    assert_eq!(boot_seed(Some(&bootlog::seed_image(41)), r), (42, "above the old counter"));
+    // Just below the top: no room above it, so random.
+    let top = bootlog::seed_image(bootlog::MAX_VALUE - 1);
+    assert_eq!(boot_seed(Some(&top), r).1, "random (old counter exhausted)");
+    assert_eq!(boot_seed(Some(&[0u8; 16]), r).1, "random (old counter damaged)");
+}
+
+#[test]
+fn hub_dry_run_shows_how_it_reads_the_old_counter() {
+    let k = kit();
+    let mut rng = counter_rng();
+    let mut d = DryRun { script: "tools/dev-board.sh".into(), log: Vec::new() };
+    let out = hub(&mut ctx(&k, &mut d, &mut rng, true), "p4", &k.hub_csv, false).unwrap();
+    let read = d.log.iter().position(|l| l.contains("espflash read-flash") && l.contains("0x3f2000 0x2000")).expect("read shown");
+    let write = d.log.iter().rposition(|l| l.contains("espflash write-bin") && l.contains("0x3f2000")).expect("write shown");
+    assert!(read < write, "{:?}", d.log);
+    assert!(out.contains("seeds above it if it reads good"), "{out}");
 }
 
 #[test]
