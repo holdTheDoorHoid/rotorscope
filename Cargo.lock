@@ -1596,7 +1596,9 @@ dependencies = [
 name = "nodeimage"
 version = "0.1.0"
 dependencies = [
+ "airlink",
  "heapless 0.8.0",
+ "kitkeys",
  "link",
  "postcard",
 ]

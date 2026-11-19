@@ -217,9 +217,15 @@ fn partition_lookup() {
     assert_eq!(find_partition(NODE_CSV, "rskey"), Some((0x611000, 0x1000)));
     assert_eq!(find_partition(HUB_CSV, "rskit"), Some((0x3f0000, 0x2000)));
     assert_eq!(find_partition(NODE_CSV, "rskit"), None);
-    // The real node table has no rskey yet (package 13g adds it): refused.
-    let real = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../partitions-node.csv");
-    let e = partition_offset(&real, "rskey", 0x1000).unwrap_err();
+    // The real tables (package 13g added rskey to both).
+    let tools = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    assert_eq!(partition_offset(&tools.join("partitions-node.csv"), "rskey", 0x1000), Ok(0x611000));
+    assert_eq!(partition_offset(&tools.join("partitions-single.csv"), "rskey", 0x1000), Ok(0x3f0000));
+    // A table without one is refused.
+    let d = TempDir::new();
+    let t = d.0.join("none.csv");
+    std::fs::write(&t, "nvs, data, nvs, 0x9000, 0x6000\n").unwrap();
+    let e = partition_offset(&t, "rskey", 0x1000).unwrap_err();
     assert!(e.contains("no `rskey`"), "{e}");
     // Wrong size is refused.
     let d = TempDir::new();
