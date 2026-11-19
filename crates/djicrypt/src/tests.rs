@@ -30,13 +30,26 @@ fn deg_to_rad_e7(deg: f64) -> i32 {
 /// SPEC.md sender side: C1 = kG, S = kQ, t = SM3(x2||y2||1)[..16],
 /// C2 = K ^ t, C3 = SM3(x2||K||y2).
 fn wrap(q: &AffinePoint, k: &[u8; 16]) -> ([u8; 64], [u8; 32], [u8; 16]) {
-    wrap_with(q, k, NonZeroScalar::random(&mut OsRng))
+    wrap_with(q, k, random_scalar())
+}
+
+/// A random non-zero scalar from the operating system's generator. Bytes are
+/// drawn until they are a valid scalar (below n and not zero), which for
+/// SM2 is the first draw except about once in 2^32.
+fn random_scalar() -> NonZeroScalar {
+    loop {
+        let mut b = [0u8; 32];
+        OsRng.fill_bytes(&mut b);
+        if let Ok(s) = NonZeroScalar::try_from(&b[..]) {
+            return s;
+        }
+    }
 }
 
 /// [`wrap`] with a given ephemeral scalar (repeatable seeds for the fuzz tests).
 pub(crate) fn wrap_with(q: &AffinePoint, k: &[u8; 16], e: NonZeroScalar) -> ([u8; 64], [u8; 32], [u8; 16]) {
-    let c1 = (ProjectivePoint::GENERATOR * *e).to_affine().to_encoded_point(false);
-    let s = (ProjectivePoint::from(*q) * *e).to_affine().to_encoded_point(false);
+    let c1 = (ProjectivePoint::GENERATOR * *e).to_affine().to_sec1_point(false);
+    let s = (ProjectivePoint::from(*q) * *e).to_affine().to_sec1_point(false);
     let (x2, y2) = (s.x().unwrap(), s.y().unwrap());
     let t = Sm3::new().chain_update(x2).chain_update(y2).chain_update([0, 0, 0, 1]).finalize();
     let mut c2 = [0u8; 16];

@@ -47,8 +47,8 @@
 use aes::cipher::{KeyIvInit, StreamCipher};
 use droneid::o4plain::{self, CrypAux, Infp10, Infp11};
 use sha2::Sha256;
-use sm2::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use sm2::{AffinePoint, EncodedPoint, ProjectivePoint, SecretKey};
+use sm2::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
+use sm2::{AffinePoint, ProjectivePoint, Sec1Point, SecretKey};
 use sm3::{Digest, Sm3};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -125,7 +125,7 @@ impl PrivateKey {
     /// SHA-256 over its x||y), to show which key is installed without
     /// revealing it.
     pub fn fingerprint(&self) -> [u8; 4] {
-        let p = self.0.public_key().as_affine().to_encoded_point(false);
+        let p = self.0.public_key().as_affine().to_sec1_point(false);
         let mut h = Sha256::new();
         h.update(p.x().expect("not identity"));
         h.update(p.y().expect("not identity"));
@@ -264,14 +264,16 @@ pub fn unwrap_cryp(core: &[u8], d: &PrivateKey) -> Result<SessionKey, Error> {
     if core[0] != SEL_CRYP {
         return Err(Error::Shape);
     }
-    let (x1, y1) = (&core[9..41], &core[41..73]);
+    // `check_shape` fixed the length, so these cannot fail; no panic either way.
+    let x1 = <&[u8; 32]>::try_from(&core[9..41]).map_err(|_| Error::Shape)?;
+    let y1 = <&[u8; 32]>::try_from(&core[41..73]).map_err(|_| Error::Shape)?;
     let (c3, c2) = (&core[73..105], &core[105..121]);
-    let ep = EncodedPoint::from_affine_coordinates(x1.into(), y1.into(), false);
+    let ep = Sec1Point::from_affine_coordinates(x1.into(), y1.into(), false);
     // Decoding checks both coordinates are below p and on the curve.
-    let c1: Option<AffinePoint> = AffinePoint::from_encoded_point(&ep).into();
+    let c1: Option<AffinePoint> = AffinePoint::from_sec1_point(&ep).into();
     let c1 = c1.ok_or(Error::BadPoint)?;
     let s = (ProjectivePoint::from(c1) * *d.0.to_nonzero_scalar()).to_affine();
-    let enc = s.to_encoded_point(false);
+    let enc = s.to_sec1_point(false);
     let (Some(x2), Some(y2)) = (enc.x(), enc.y()) else {
         return Err(Error::Infinity);
     };

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 droneid = { workspace = true }
-sm2 = { version = "0.13", default-features = false, features = ["arithmetic"] }
+sm2 = { version = "0.14", default-features = false, features = ["arithmetic"] }
 sm3 = { version = "0.4", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 aes = { version = "0.8", default-features = false }

@@ -854,7 +854,9 @@ Every run also prints: "NOT PROVEN: that the log is complete."
 
 Cost on the P4: about 400 bytes per detection record (base64 on the console
 about 550 bytes); building one takes up to 1.8 ms; signing a checkpoint
-33 ms once a minute (software P-256 at 360 MHz); SD steps for the evidence
+54 ms once a minute (software P-256 at 360 MHz; measured on 2026-11-19 with
+`p256` 0.14, whose arithmetic was hardened against timing leaks; it was
+33 ms with 0.13); SD steps for the evidence
 file at most about 18 ms (a flush, same as the CSV's); opening the evidence
 file at mount about 50 ms (400 ms the very first time, when the folder is
 created). Records queue in 256 KB of PSRAM (about 10 minutes of one

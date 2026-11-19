@@ -193,7 +193,7 @@ mod soft {
         /// `None` if `secret` is not a valid P-256 scalar (zero or >= n).
         pub fn new(secret: &[u8; 32], class: KeyClass) -> Option<Self> {
             let key = SigningKey::from_bytes(secret.into()).ok()?;
-            let point = key.verifying_key().to_encoded_point(false);
+            let point = key.verifying_key().to_sec1_point(false);
             let public = point.as_bytes().try_into().ok()?;
             Some(Self { key, class, public })
         }
@@ -215,7 +215,7 @@ mod soft {
             // Low-S form: (r, s) and (r, n - s) are both valid ECDSA, so
             // anyone could turn one checkpoint into a second, byte-different
             // valid one. Only the low form is written and accepted.
-            Ok(sig.normalize_s().unwrap_or(sig).to_bytes().into())
+            Ok(sig.normalize_s().to_bytes().into())
         }
     }
 
@@ -225,13 +225,19 @@ mod soft {
     pub fn verify_digest(pubkey: &[u8; 65], digest: &[u8; 32], sig: &[u8; 64]) -> bool {
         let Ok(vk) = VerifyingKey::from_sec1_bytes(pubkey) else { return false };
         let Ok(sig) = Signature::from_slice(sig) else { return false };
-        sig.normalize_s().is_none() && vk.verify_prehash(digest, &sig).is_ok()
+        !high_s(&sig) && vk.verify_prehash(digest, &sig).is_ok()
+    }
+
+    /// s > n/2. `normalize_s` returns the low-S form of any signature, so a
+    /// signature it changes was in the high form.
+    fn high_s(sig: &Signature) -> bool {
+        sig.normalize_s().to_bytes() != sig.to_bytes()
     }
 
     /// The signature is in high-S form (s > n/2): valid ECDSA, but refused
     /// here (see [`verify_digest`]). For a clearer message.
     pub fn is_high_s(sig: &[u8; 64]) -> bool {
-        Signature::from_slice(sig).is_ok_and(|s| s.normalize_s().is_some())
+        Signature::from_slice(sig).is_ok_and(|s| high_s(&s))
     }
 
     /// The published test key's public half (see [`public_test_secret`]).
