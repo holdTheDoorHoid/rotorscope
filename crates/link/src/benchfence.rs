@@ -11,12 +11,12 @@
 //! docs/BENCH.md set it), and hands the firmware the list to print in its
 //! hello line (`ROTORSCOPE_BENCH_JSON`, a JSON array, `[]` for a normal
 //! build), and the evidence boot event (`ROTORSCOPE_BENCH_LIST`, comma
-//! separated, empty for a normal build). Every image except hub-p4
+//! separated, empty for a normal build). Every image, hub-p4 included,
 //! also carries the tag `bench-build:<list>` (`ROTORSCOPE_BENCH_TAG`,
-//! `bench-build:none` for a normal build) so tools/flash-node.sh can refuse
-//! to flash a bench image into a field node by reading the ELF. The hub-p4
-//! ELF has no tag (its hello line and evidence boot event carry the list)
-//! and no tool reads P4 ELFs.
+//! `bench-build:none` for a normal build), so tools/flash-node.sh and
+//! tools/dev-board.sh can refuse to flash a bench image without
+//! `ROTORSCOPE_BENCH=1` by reading the ELF. On hub-p4 it sits in
+//! `BUILD_TAGS` (`firmware/hub-p4/src/main.rs`) beside the source commit.
 //!
 //! Not part of the `link` library (it uses `std`); compiled in `link`'s unit
 //! tests only, which test the decision ([`decide`]).

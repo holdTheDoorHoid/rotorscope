@@ -98,7 +98,7 @@ impl Kind {
     pub fn of(f: &Frame) -> Kind {
         match f {
             Frame::Detection(_) => Kind::RidNew,
-            Frame::Hello { .. } | Frame::Status { .. } | Frame::Stats { .. } => Kind::Health,
+            Frame::Hello { .. } | Frame::Status { .. } | Frame::Stats { .. } | Frame::NodeHealth(_) => Kind::Health,
             Frame::Threat(_) => Kind::Threat,
             Frame::WifiDrone(_) => Kind::WifiDrone,
             Frame::DjiWifi { .. } => Kind::DjiWifi,
@@ -632,6 +632,8 @@ mod tests {
             Kind::of(&Frame::Stats { uptime_us: 0, frames_seen: 0, rid_found: 0, dropped: 0, by_transport: heapless::Vec::new() }),
             Kind::Health
         );
+        // Protocol 14's health report rides with the other health frames.
+        assert_eq!(Kind::of(&Frame::NodeHealth(link::NodeHealth::default())), Kind::Health);
         assert_eq!(Kind::of(&Frame::Via { node: [0; 6], rssi: 0 }), Kind::Other);
     }
 }
