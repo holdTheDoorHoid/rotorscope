@@ -1,0 +1,8 @@
+# Exceptions for tools/check-hidden-chars.py, one per line:
+#
+#   <path from the repository root> U+XXXX <reason, required>
+#
+# An entry allows that one code point anywhere in that one file. Keep each
+# reason specific (what the character is for and why it cannot be written
+# another way, such as an escape sequence). As of 2026-11-19 the repository
+# needs no exceptions.
