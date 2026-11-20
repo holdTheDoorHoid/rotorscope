@@ -67,6 +67,8 @@
   - [Jamming](JAMMING.md)
   - [Attacks on drones](DRONE-ATTACKS.md)
   - [GPS jamming and spoofing at the hub](GNSS-INTEGRITY.md)
+- [Threat levels: what a drone is doing](THREAT-PROFILES.md)
+  - [Hostile drone tactics, sourced](THREAT-TACTICS.md)
 
 # Hardware
 
