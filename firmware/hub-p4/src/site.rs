@@ -49,15 +49,17 @@ use crate::sd::Logger;
 pub const EV_PROFILE: u8 = 6;
 
 /// What the hub keeps of the site file itself: node positions, the
-/// placed home and the control-link switches. The mute rules and the
-/// places live in the tracker, so this is not a whole `SiteState` (which
-/// would put ~3.5 KB of mutes and places a second time on the main stack).
+/// placed home, the control-link switches and the screen theme lines. The
+/// mute rules and the places live in the tracker, so this is not a whole
+/// `SiteState` (which would put ~3.5 KB of mutes and places a second time
+/// on the main stack).
 #[derive(Default)]
 struct Kept {
     nodes: heapless::Vec<([u8; 6], f64, f64), { site::MAX_PLACED }>,
     control_ids: Option<bool>,
     control_content: Option<bool>,
     home: Option<(f64, f64, Option<f64>)>,
+    theme: site::ThemeSite,
 }
 
 impl Kept {

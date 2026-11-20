@@ -364,7 +364,7 @@ pub fn describe(t: &crate::threats::Threat, mac: [u8; 6]) -> heapless::String<32
     s
 }
 
-impl<const N: usize, const A: usize> Tracker<N, A> {
+impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
     /// Delivery accounting, call 1 of 2: the hub verified a batch of
     /// `frames` frames from `node` (count what it took from verified
     /// packets only, before any other check drops frames).
@@ -410,6 +410,30 @@ mod tests {
 
     fn link_loss(tr: &Tracker, node: u8, now: u64) -> Option<&crate::threats::Threat> {
         tr.threats().iter().find(|t| t.kind == ThreatKind::LinkLoss && t.node == node && t.active(now))
+    }
+
+    /// The P4 hub's tracker keeps path history (a third size, `P`): the
+    /// delivery calls must exist for it too. The 2026-11-19 merge of main
+    /// left them on `Tracker<N, A>` only, and the P4 firmware stopped
+    /// compiling while every host test passed.
+    #[test]
+    fn delivery_accounting_on_a_tracker_with_path_history() {
+        let mut tr: std::boxed::Box<crate::Tracker<8, 4, 2>> = std::boxed::Box::default();
+        let (mut up, mut sent, mut t) = (100u32, 5_000u32, 0u64);
+        for _ in 0..13 {
+            t += 5_000;
+            up += 5;
+            sent += 40;
+            tr.link_received(2, 20);
+            tr.ingest_node_health(2, &link::NodeHealth { uptime_s: up, frames_sent: sent, ..Default::default() }, t);
+        }
+        assert!(tr.threats().iter().any(|x| x.kind == ThreatKind::LinkLoss && x.node == 2 && x.active(t)));
+        let mut rows = 0;
+        tr.delivery_snapshot(t, |node, _, _, _, _, _, lossy| {
+            rows += 1;
+            assert!(node == 2 && lossy);
+        });
+        assert_eq!(rows, 1);
     }
 
     #[test]
