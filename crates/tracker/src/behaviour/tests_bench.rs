@@ -201,6 +201,14 @@ fn the_beacon_circle_with_its_pilot_and_as_a_friend() {
     let s = fly(&[HOUSE, &friend], Drone { pilot, ..Drone::new(ID, &circle) }, 200);
     std::println!("bench circle, friend: worst {:?}, rules {:?}", s.worst, s.rules);
     assert_eq!(s.worst, Some(Level::Notice));
+    // Under `profile event` a pilot nearby counts one level lower: the
+    // circle is only "in the area" (Caution) until the circling makes it
+    // two signs (a Warning, later than under the default profile).
+    let def = fly(&[HOUSE], Drone { pilot, ..Drone::new(ID, &circle) }, 200);
+    let ev = fly(&[HOUSE, "profile event"], Drone { pilot, ..Drone::new(ID, &circle) }, 200);
+    std::println!("bench circle, event: worst {:?}, first {:?}, rules {:?}", ev.worst, &ev.first[1..], ev.rules);
+    assert_eq!(ev.worst, Some(Level::Warning));
+    assert!(ev.first(Level::Warning).unwrap() > def.first(Level::Warning).unwrap() + 30, "{:?} {:?}", ev.first, def.first);
     // A friend on the beeline is still Critical (never lowered).
     let s = path(&[HOUSE, &friend], Path::Beeline, 120);
     assert_eq!(s.worst, Some(Level::Critical));
@@ -244,5 +252,73 @@ fn the_beacon_silenced_mid_beeline_is_held_then_decays() {
     assert_eq!(at_stop, Some(Level::Critical));
     let fell = fell.expect("comes down");
     std::println!("bench beeline silenced at {stop} s: held {fell} s");
+    assert!((29..=32).contains(&fell), "{fell}");
+}
+
+/// The bubble round a hub standing still (on the bench: the `gpsloop`
+/// emulated fix, at the beacon's centre), no fixed area: the beeline and
+/// the fast inbound are Critical at the bubble too; the pass 300 m off
+/// stays Notice outside a 150 m bubble and along a 300 m one's edge.
+#[test]
+fn the_beacon_paths_at_a_standing_bubble() {
+    let s = path(&["bubble 300"], Path::Beeline, 120);
+    assert_eq!(s.worst, Some(Level::Critical));
+    assert!(s.rules.contains(&Rule::Beeline), "{:?}", s.rules);
+    assert_eq!(path(&["bubble 300"], Path::Fast, 80).worst, Some(Level::Critical));
+    assert!(path(&["bubble 150"], Path::Pass, 200).worst <= Some(Level::Notice));
+    // The same pass grazes a 300 m bubble (its nearest point is on the
+    // edge, never inside it): still Notice. The bench flew it that way.
+    assert!(path(&["bubble 300"], Path::Pass, 200).worst <= Some(Level::Notice));
+}
+
+/// As the hub hears the beacon: reports at uneven times (Wi-Fi beacon and
+/// NAN through one node), judged once a second. The path keeps one point a
+/// second, so its newest point can be up to a second older than the last
+/// report, and the approach rules lapse one judgement before the position
+/// goes stale. Bench 2026-11-19: the level was still kept 30 s, but not as
+/// "last seen inbound" (`held` false, the stale "there in about 5 s" reason
+/// shown for 30 s). It must be held as the lost-track rule says.
+#[test]
+fn a_beeline_lost_between_reports_is_held_as_last_seen_inbound() {
+    use super::tests::{T0, frame};
+    use rid::Transport;
+    let f = scripted(Path::Beeline);
+    let mut sim = Sim::new(&[HOUSE]);
+    let stop_ms = 45_000;
+    let mut seen_held = None;
+    let mut fell = None;
+    for ms in (0..130_000u64).step_by(100) {
+        let now = T0 + ms;
+        // Reports at x.9 s while the beacon is on, and its last one 0.4 s
+        // after the one before (44.3 s): the path keeps 43.9 s as its newest
+        // point (one a second), the position is 44.3 s old.
+        if (ms < stop_ms - 1000 && ms % 1000 == 900) || ms == stop_ms - 700 {
+            let p = f(ms as f64 / 1000.0);
+            let d = crate::tests::det(Transport::WifiNan, [0x02, 0x52, 0x49, 0x44, 0, 0x43], -52, &frame(ID, &p, None));
+            sim.tr.ingest(1, &d, now);
+        }
+        if ms % 1000 == 0 {
+            sim.tr.set_own_fix(SITE.0, SITE.1, Some(OWN_ALT), now, Some((0.0, None)));
+            sim.tr.expire(now);
+            sim.tr.tick_behaviour(now);
+            let t = sim.tr.tracks().iter().find(|t| t.primary_id().and_then(|u| u.id.as_str()) == Some(ID));
+            let (level, held, rules) = t.map_or((None, false, Vec::new()), |t| {
+                (t.threat.level, t.threat.held, t.threat.reasons.iter().map(|r| r.rule).collect::<Vec<_>>())
+            });
+            if ms == stop_ms - 1000 {
+                assert_eq!(level, Some(Level::Critical));
+            }
+            if ms >= stop_ms + 10_000 && seen_held.is_none() {
+                seen_held = Some((held, rules));
+            }
+            if ms >= stop_ms && fell.is_none() && level < Some(Level::Critical) {
+                fell = Some((ms - stop_ms) / 1000);
+            }
+        }
+    }
+    let (held, rules) = seen_held.unwrap();
+    assert!(held, "held after it was lost: {rules:?}");
+    assert_eq!(rules, [Rule::LastSeenInbound]);
+    let fell = fell.expect("comes down");
     assert!((29..=32).contains(&fell), "{fell}");
 }

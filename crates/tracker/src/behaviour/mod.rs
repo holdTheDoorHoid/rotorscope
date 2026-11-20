@@ -575,21 +575,32 @@ impl TrackThreat {
         self.last_heard_ms = e.heard_ms;
         self.inside = e.inside;
         self.friend = e.friend;
-        self.inbound = e.reasons.iter().find(|r| matches!(r.rule, Rule::Beeline | Rule::FastInbound)).copied();
+        let inbound = e.reasons.iter().find(|r| matches!(r.rule, Rule::Beeline | Rule::FastInbound)).copied();
         match self.level {
             Some(l) if e.level < l && now_ms.saturating_sub(self.last_hit_ms) < DECAY_MS => {
                 // Coming down slowly: keep the level and the reasons that
-                // raised it.
+                // raised it, and the approach among them, so a drone lost
+                // now is still held as "last seen inbound". (Bench
+                // 2026-11-19: the path keeps one point a second, so its
+                // newest point can be up to a second older than the last
+                // report; the approach rules then lapse for one judgement
+                // before the position goes stale, and clearing the approach
+                // here lost the hold.)
+                if inbound.is_some() {
+                    self.inbound = inbound;
+                }
             }
             Some(l) if e.level <= l => {
                 if e.level < l {
                     self.since_ms = now_ms;
                 }
+                self.inbound = inbound;
                 self.set(e, now_ms);
             }
             _ => {
                 self.since_ms = now_ms;
                 self.rise |= e.level >= Level::Caution;
+                self.inbound = inbound;
                 self.set(e, now_ms);
             }
         }
