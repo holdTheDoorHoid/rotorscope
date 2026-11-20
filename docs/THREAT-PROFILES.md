@@ -1,9 +1,10 @@
 # Threat profiles: alerting on what a drone is doing, not only that it is there
 
 Status: **design accepted 2026-11-18, branch `threat-profiles`; slices 16a to 16e built
-(host tests and P4 firmware compile; not yet on the bench; 16c's sound half waits for the acoustic
-branch). See "Slice 16a as built", "Slice 16b as built", "Slice 16d as built", "Slice 16c as
-built" and "Slice 16e as built" at the end.**
+(host tests and P4 firmware compile; first bench pass 2026-11-19 over the air with the test
+beacon's scripted paths, see "Bench pass" at the end; no real drone yet; 16c's sound half waits
+for the acoustic branch). See "Slice 16a as built", "Slice 16b as built", "Slice 16d as built",
+"Slice 16c as built" and "Slice 16e as built" at the end.**
 
 Owner decisions 2026-11-18: fixed areas and the moving bubble matter equally (both in 16a);
 repeat-visitor history (drone IDs and pilot spots on the SD card) is kept **30 days**, wipeable
@@ -706,8 +707,9 @@ what it does (and that a `crowd` line still wins, when one is in force). The loa
 **Not done, or blocked:**
 
 - **Bench and field tuning.** Every number in the profile table is from scripted flights. There are
-  no recorded flight paths in the repo and the boards were held by another session. First bench
-  job: fly the matrix's flights with `rid-beacon` under each profile and compare.
+  no recorded flight paths in the repo. *Update 2026-11-19: the first bench pass flew five of the
+  hostile and ordinary shapes under four profiles ("Bench pass" below); nothing needed retuning.
+  Field tuning with a real drone is still to do.*
 - **The P4 screen strip does not show the profile.** Its caveat lines are full at 52 columns
   ("ON: control IDs, control content, audio clips" is 45); a profile there needs a layout change,
   not a few characters. The console, the evidence log and the phone page show it.
@@ -725,3 +727,28 @@ what it does (and that a `crowd` line still wins, when one is in force). The loa
 stack frame 68,128 bytes and once-a-second housekeeping frame 3,632 bytes, both unchanged. S3
 `Tracker<64, 32>` on the host 87,760 bytes, unchanged. Host tests: 1,582 passed, 5 ignored
 (16c: 1,569); tracker 335 (16c: 324).
+
+## Bench pass (2026-11-19)
+
+The full record is in [BENCH.md](BENCH.md), "Bench results, 2026-11-19 (threat profiles)".
+
+- **What ran.** The P4 hub judged `rid-beacon`'s fake drone (`TESTDRONE0000000001`, lowest power)
+  heard over the air through a listener node and the gateway, against `area bench circle ... 150`
+  round the beacon's centre. The beacon's new bench-only `scripted` build flies the paths of the
+  host flights (`firmware/rid-beacon/src/script.rs`: beeline, fast inbound, a pass 300 m off, low
+  hover, a drop, and its old circle), and `behaviour/tests_bench.rs` flies the same file through the
+  tracker on the host. The hub's GPS was the bench emulator (`gpsloop`), standing at the centre.
+- **Proven on the air** (made-up positions, real radio, the real hub): rules 1, 2, 5, 6, 8, 9, 10,
+  friends lowering place rules, the lost-track hold, profiles `home`, `patrol` and `event` (their
+  predicted differences, and the beeline still Critical under each), the bubble round a hub that
+  stands still (emulated fix), the evidence records (code 28, verified, also from the card), and
+  the visit history's file, wipe and `visits off` on a real card. Every level and reason matched
+  the host prediction; every time was within 2.5 s of it (the beeline: Warning 11.3 s, Critical
+  25.4 s; host 11 and 26).
+- **Fixed on the way:** a drone lost mid-beeline kept its level for 30 s but not as "last seen
+  inbound" (the path keeps one point a second, so the approach rules lapsed one judgement before
+  the position went stale and the remembered approach was cleared): `756774b`, with a host test at
+  uneven report times. And the P4 firmware did not compile after the merge of main: `67ec35e`.
+- **Not tried:** the threat bar on the panel (nobody could see the screen; still simulated only),
+  Snooze (screen only), a moving bubble and following, rules 3, 4, 7, 11 and 12 to 19, spotter then
+  striker (one fake ID), a real drone.

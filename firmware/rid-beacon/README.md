@@ -40,6 +40,7 @@ This is a **bench** transmitter. Metres, not kilometres.
     −80 dBm, from roughly a metre away.
 - **Simulated position.** The aircraft flies a 50 m radius circle once every 60 s, clockwise
   from due north, at about 5.2 m/s, 50 m above ground, with status "airborne".
+  A bench build with `scripted` can fly the threat-level paths instead (see "Console").
   - The operator stands fixed at the centre.
   - The centre is set at build time with `RID_TEST_LAT` / `RID_TEST_LON`. The default is
     Philadelphia City Hall (39.9526, −75.1652).
@@ -175,6 +176,33 @@ tools/dev-board.sh firmware/rid-beacon/target/xtensa-esp32s3-none-elf/release/ri
 | `?` / `h` | help (JSON) |
 
 Each command echoes a `{"t":"cmd",…}` line.
+
+**Scripted flights (bench builds only).** Built with `ROTORSCOPE_BENCH=1` and the feature
+`scripted` (`build.rs` refuses the feature without it, and the image carries
+`bench-build:scripted`, so `tools/dev-board.sh` refuses to flash it without it too), keys `0` to `5`
+change the flight; the circle is flown until one is pressed. The paths (`src/script.rs`) are the
+threat-level bench flights of `docs/THREAT-PROFILES.md`, round the same centre:
+
+| Key | Path |
+|---|---|
+| `0` | the circle (as above) |
+| `1` | beeline: from 800 m south straight at the centre at 12 m/s, 50 m up coming down to 30 m, then hovering over it |
+| `2` | fast inbound: from 1500 m east at 30 m/s, 100 m up coming down to 20 m, then hovering over the centre |
+| `3` | straight pass: west to east 300 m north of the centre at 15 m/s, 100 m up, 2 km, then hovering at the end |
+| `4` | low hover: over the centre, down from 40 m at 2 m/s to 10 m, then still |
+| `5` | drop: 30 m east, 20 m north of the centre, 50 m up; from second 40 down 30 m at 3 m/s, 5 s, back up |
+
+A key starts its path from the beginning (again, if it is the one flying). Only the Location and
+System messages change: position, speed, direction, height above ground (the geodetic height is
+the ground plus it) and climb rate; the scripted paths send **no pilot position** (unknown), as
+the host test flights of hostile drones do. Identity, transports, rates and power are the same.
+Once a second a `{"t":"path","path":"beeline","s":12,"lat":…,"lon":…,"h":…,"v":…,"hdg":…,"vs":…}`
+line says where it is. `crates/tracker/src/behaviour/tests_bench.rs` flies this very file through
+the tracker on the host.
+
+```sh
+(cd firmware/rid-beacon && ROTORSCOPE_BENCH=1 cargo +stable build --release --locked --target riscv32imac-unknown-none-elf --no-default-features --features esp32c5,scripted --target-dir target-scripted)
+```
 - To send keys, use any serial terminal on the board's USB port.
 - `tools/dev-board.sh --send KEYS` types keys after the reset; the bench runner uses it.
 

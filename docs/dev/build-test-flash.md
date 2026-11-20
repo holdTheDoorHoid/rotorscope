@@ -201,9 +201,9 @@ paste or print `tools/kit.key` (or an old `tools/link.key`).
 ### Bench builds and `ROTORSCOPE_BENCH=1`
 
 Some features exist only for the bench: they fake drones or a GPS fix, loop a board's pins back,
-or open debug commands. Every firmware's `build.rs` except the test transmitter's
-(`rid-beacon`, itself a bench tool) refuses them unless the environment has
-`ROTORSCOPE_BENCH=1`, and an image built with one says so at boot (the P4's screen is coded to show **BENCH
+or open debug commands. Every firmware's `build.rs` refuses them unless the environment has
+`ROTORSCOPE_BENCH=1` (the test transmitter `rid-beacon` is itself a bench tool; since 2026-11-19
+its one bench feature, `scripted`, is fenced the same way), and an image built with one says so at boot (the P4's screen is coded to show **BENCH
 BUILD**, not yet checked by eye). For a bench session, set it in that shell only:
 
 ```bash

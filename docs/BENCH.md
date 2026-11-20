@@ -601,8 +601,9 @@ Now:
 | node-sdr | `faulttest`, `bringup` (the bring-up console: BRINGUP.md "Bring-up builds") | `NODE_SDR_BOOT`, `NODE_SDR_ALLOW_UNVERIFIED_PHY` |
 | hub (S3/C5 web head) | `demo` (fake drones, a made-up position, the build machine's clock), `open-hotspot` (no hotspot password) | |
 | hub-p4 | `selftest`, `fakenode`, `fakedrone`, `benchlog`, `gpsloop`, `gpsloop-m10`, `webheadloop`, `embedpack`, `modesloop`, `faulttest`, `testpoint` (console `p`: own position to a fixed test point) | (`AIRSPACE_PAK` only with `embedpack`) |
+| rid-beacon | `scripted` (since 2026-11-19: keys `0`-`5` fly the threat-level paths, "Bench results, 2026-11-19 (threat profiles)") | |
 
-Not fenced, on purpose: `rid-beacon` (it is the test transmitter; nothing fields it), hub-p4
+Not fenced, on purpose: `rid-beacon`'s default build (it is the test transmitter; nothing fields it), hub-p4
 `show-link-ids` (an operator privacy choice, not a bench aid), `modes` (a field feature), node-wifi
 `ROTORSCOPE_ESPNOW_RATE` (a radio tuning). The S3 web head (`firmware/hub`) has `"bench"` in its
 `boot` line (it has no `hello` line) and in `/api/state`, where the phone page shows a striped
@@ -1352,3 +1353,151 @@ no settings changed; the snooze has expired). `c5c` on a normal gateway build fr
 (`"bench":[]`, protocol 14, roster of 2); its only change from the build before is a stricter
 address parser for `gwforge` commands. Afterwards both nodes' `delivery` lines showed `claimed`
 equal to `received`, and every refusal counter was 0.
+
+## Bench results, 2026-11-19 (threat profiles)
+
+The first hardware pass of the threat levels (Phase 16, docs/THREAT-PROFILES.md). Every level
+here was judged by the P4 hub from Remote ID it heard **over the air** from our own test
+transmitter: `rid-beacon` with its fake identity `TESTDRONE0000000001` at the lowest power, about a
+metre away, flying made-up paths round its default centre (Philadelphia City Hall, the repository's
+test point). So the radio chain and the hub's judgement are **proven on the air**; the positions are
+made up, and no real drone has been judged yet.
+
+**Set-up.** Chain as "End-to-end through the P4": beacon `c5b` -> listener node `c5a` (normal keyed
+multi-image build, given Wi-Fi 2.4 by the hub; the beacon typed `6` to send on channel 6) ->
+gateway `c5c` (normal build) -> wire -> P4 hub. The hub ran a bench build, `benchlog` and `gpsloop`
+(`ROTORSCOPE_BENCH=1`): `gpsloop` emulates a GPS receiver standing exactly at the beacon's centre,
+so the hub had a position, a height (12.5 m) and GPS time, as the host tests assume. Everything
+the hub said was read from its console (`"t":"track"` lines with `"threat"`, the `LEVEL` lines,
+streamed evidence records). Each path was flown from a fresh hub boot. Firmware: this branch at
+`4c8818f`, then `756774b` (the fix below) for the lost-track hold and the visit history.
+
+**The beacon's scripted paths** (new, bench builds only): `rid-beacon` built with
+`ROTORSCOPE_BENCH=1` and the feature `scripted` flies the threat-level paths on keys `0` to `5`
+(firmware/rid-beacon/README.md, "Console"). It was flashed into `c5b`'s first app slot with the
+node table, so the board's partition table and key record were not touched:
+
+```bash
+ROTORSCOPE_BENCH=1 tools/dev-board.sh --pt tools/partitions-node.csv --app ota_0=firmware/rid-beacon/target-scripted/riscv32imac-unknown-none-elf/release/rid-beacon --multi 15 c5b
+```
+
+The host test `crates/tracker/src/behaviour/tests_bench.rs` flies the very same file
+(`src/script.rs`, and the circle of `src/flight.rs`) through the tracker; its seconds are the
+"Host" column. Bench seconds are from the key on the beacon to the hub's track line (they include
+about 1 s for the first report to arrive through the node and gateway).
+
+Place: `area bench circle 39.9526000 -75.1652000 150`, typed on the hub with `L`. The scripted
+paths send no pilot position; the circle's pilot stands at its centre.
+
+| Path | Profile | Host | Bench | Reasons on the hub |
+|---|---|---|---|---|
+| circle, 50 m, pilot at the centre | default | Warning at once | Warning 1.1 s after the area line | in the area + pilot inside (two signs); circling added 58 s after the line |
+| the same, `friend TESTDRONE0000000001 bench beacon` | default | Notice | reasons lowered to Notice at once; level Notice 30.6 s after the line | the 30 s slow descent of the level |
+| (a) beeline from 800 m at 12 m/s | default | Warning 11 s, Critical 26 s | Warning 11.3 s, Critical 25.4 s | beeline, then fast inbound ("there in about 30 s"); in the area at 55 s; after it stopped over the centre, Caution (in the area) 31 s later |
+| (b) fast inbound from 1500 m at 30 m/s | default | Critical 6 s | Critical 8.0 s | straight from Notice to Critical, 1270 m away |
+| (c) straight pass 300 m off at 15 m/s | default | Notice | Notice for 160 s | none |
+| (d) low hover at 10 m over the centre | default | Warning 24 s | Caution 3.0 s, Warning 26.1 s | "hovering low over bench, 13 m up, for 10 s" (13 m above the hub) |
+| (e) drop: 50 m, down 30 m, 5 s, up | default | Warning 60 s | Caution 2.6 s, Warning 60.9 s | "dropped 30 m over bench (down to 23 m up) and climbed again, 5 s ago" |
+| (d) low hover | home | Warning 18 s | Warning 19.0 s | "for 6 s" (home: under 20 m for 6 s) |
+| (a) beeline | patrol | Critical 11 s | Critical 12.5 s | straight from Notice to Critical, 655 m away, "there in about 43 s" (patrol: under 45 s) |
+| (a) beeline | event | Warning 11 s, Critical 26 s | Warning 12.5 s, Critical 25.5 s | as default: event lowers no approach rule |
+| circle, pilot at the centre | event | Caution, Warning 68 s | Caution 2.9 s, Warning 72.1 s | "pilot inside" lowered to Notice; Warning only with the circling |
+| (a) beeline, `bubble 300`, no area | default | Warning 11 s, Critical 13 s | Warning 11.1 s, Critical 13.1 s | "heading for you" |
+| (c) straight pass, `bubble 300` | default | Notice | Notice | none |
+
+Every bench time is within 2.5 s of the host's, every level and reason as the host predicted.
+The safety floor held: the beeline was Critical under every profile tried (default, patrol, event),
+as on the host under all five.
+
+**Lost-track hold** (beacon silenced with `x` 45 s into the beeline, at Critical):
+
+| Firmware | Bench | Expected |
+|---|---|---|
+| `4c8818f` | Critical for 31 s after the silence, then Notice; but `"held":false` throughout, and the reasons stayed "heading for bench ... there in about 5.5 s" | held as "last seen inbound", about 30 s |
+| `756774b` (fixed) | `"held":true`, reason `last_seen_inbound` 6.3 s after the silence (once the position was 5 s old), Notice 31.4 s after the silence | as expected |
+
+**Bug found and fixed** (`756774b`): the path keeps one point a second, so its newest point can be
+up to a second older than the last report. The approach rules then lapsed for one judgement
+before the position itself went stale; that judgement kept the level (coming down slowly) but
+forgot the approach, so the hold that followed had nothing to hold. The host simulation reports on
+whole seconds and never saw it. The approach is now kept while the level is kept, with a host
+test that reports at uneven times as a node does (it fails without the fix with the bench's
+symptom).
+
+**Also found, before any board was touched** (`67ec35e`): the P4 firmware did not compile on this
+branch after the merge of main (main's delivery accounting was on trackers without path history
+only, and main's screen theme lines had no place in this branch's site state). Every host test
+passed. Fixed, with a host test on a tracker with path history.
+
+**Evidence** (code 28 `threat_level`): one record per rise to Caution or above, none for a
+Notice-only run, with the text as the console `LEVEL` line, e.g. `Warning: drone
+TESTDRONE0000000001 heading for bench, 675 m away at 12 m/s, there in about 44 s`. The records
+streamed from 13 boots were checked with `evidence-verify --allow-test-key --key <the hub's public
+test key> --list`: 0 failures in 12 of them; in the first, the 3 records printed before the
+console was opened were missing from the stream (not a fault of the hub). Each has the one
+expected gap (records after the last signed checkpoint).
+The card's own file of one boot (a beeline, then console `k` for a checkpoint and `r` to replay
+the file) was replayed over the console and checked the same way: 77 records, **VERIFIED** (0
+failures, 0 gaps), its two `threat_level` records included.
+
+**Visit history** (`VISITS.DAT`, first run on a real card; GPS time from `gpsloop`, so the dates
+are the emulator's, one day after the build date):
+
+| Step | Hub console |
+|---|---|
+| A boot of more than 5 minutes with the beeline (no pilot position) | next boot: `repeat-visitor history read from ROTORSCP/VISITS.DAT (36 bytes): 1 drone IDs, 0 pilot spots` |
+| Three more reboots | read back the same each time |
+| The circle (pilot at the centre) for 6.5 minutes | next boot: `(52 bytes): 1 drone IDs, 1 pilot spots` |
+| `W`, then `W` within 5 s | `press W again within 5 s ...`, then `repeat-visitor history wiped by the operator (console W): 1 drone IDs and 1 pilot spots erased; the card's copy emptied`; next boot `(20 bytes): 0 drone IDs, 0 pilot spots` |
+| `visits off` (console), then the circle for 5.5 minutes | `repeat-visitor history off (visits off): 0 drone IDs and 0 pilot spots erased; ROTORSCP/VISITS.DAT emptied`; next boot `site file changed: repeat-visitor history off (visits off): nothing kept, the history is wiped` |
+| `visits on`, reboot | `(20 bytes): 0 drone IDs, 0 pilot spots`: nothing was kept while it was off |
+
+Each read, the wipe and both switches are evidence `Setting` events (code 4); the wipe and the
+switches carry data byte 7 (read from the streamed records).
+
+The repeat-visitor rule itself (3 days in 2 weeks) was not tried: every boot of the emulator
+starts on the same day.
+
+**Not tested, and why:**
+
+- **The screen.** The threat bar on the 800x480 panel was not seen: nobody was at the bench and
+  the bench camera (`lab snap`) returned an all-black frame twice. Simulated only, as before.
+- **Snooze over threat levels.** There is no console command for Snooze; it needs a tap on the
+  screen (Settings, Alarms). Not tried.
+- **The bubble with a moving hub** (following, a walker rushed): the emulated fix stands still.
+  The bubble was tried standing only, and its fix is emulated, not a real GPS.
+- **Rule 12** (an FPV signal getting louder) would need the beacon's power raised above the
+  lowest; **rule 13** needs the unmerged microphone work. Neither was tried.
+- **Spotter then striker** needs two fake IDs at once; `rid-beacon` sends one. Not tried.
+- **Rules 15 to 19** (several at once, probing, repeat visitor, pilot on the move, identity
+  change) were not flown.
+- Only the Wi-Fi 2.4 GHz beacon and NAN were heard (the only node had the Wi-Fi 2.4 role).
+
+**Seen, not changed:**
+
+- Every track of the beacon has `SPOOF? ... its clock is N s off GPS time`: the beacon's Location
+  timestamp is its uptime, the hub's time is the emulator's. A bench artefact; the levels did not
+  depend on it.
+- A Critical from fast inbound repeats the beeline's words: `FAST, heading for bench, 507 m away
+  at 12 m/s, there in about 30 s; heading for bench, 507 m away at 12 m/s, there in about 30 s`
+  (rules 6 and 5 both listed, as designed, but the text reads twice).
+- The console printed the wipe's line twice (the evidence log has it once).
+- After the drop's Warning came down (30 s after the drop rule stopped) the drone, still over the
+  area but silenced, was shown at Notice with no reasons; while heard it would be Caution.
+- On this bench a node delivers a beacon report about every 0.5 to 2 s (Wi-Fi beacon and NAN at
+  1 Hz each, the node on channel 6 for 300 ms of every 400): enough for every rule.
+
+**Measured** (normal P4 build at this branch's tip): `HubTracker` 423,032 bytes on the target
+(16e: 412,904; the growth came with the merge of main); main stack frame 68,400 bytes (16e:
+68,128), once-a-second housekeeping frame 3,472 bytes (16e: 3,632). The bench build
+(`benchlog`, `gpsloop`) has a main frame of 71,344 bytes.
+
+**Site file afterwards.** The lines typed for the run stay on the card, followed by lines that
+undo them: `friend TESTDRONE0000000001 clear`, `bubble off`, `profile default`, `visits on`,
+`area bench clear`. The six lines the hub already ignored before the run (13 to 18, unknown to
+this firmware too) were left alone. The visit history is empty.
+
+**Boards afterwards**, all on normal builds from this branch's tip, keyed, protocol 14: P4 hub
+(`bench: none`), gateway `c5c`, nodes `c5a` and `c5b` (node-wifi, node-ble and node-sdr images;
+`c5b` was the beacon during the run and has its node images and key record back). The logs are
+kept off the repository.
