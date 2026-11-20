@@ -1283,8 +1283,11 @@ mod tests {
         assert!(text.starts_with("site file NOT loaded: 3500000 bytes is over the limit of 65536;"), "{text}");
         assert!(text.len() <= 192, "fits the hub's event text buffer: {}", text.len());
         assert_eq!(t.data(), [5, 0xe0, 0x67, 0x35, 0x00]);
-        // The limit leaves room for a long life of appended lines.
-        assert!(MAX_FILE_BYTES as usize / MAX_LINE >= 400);
+        // The limit leaves room for a long life of appended lines: 400 ordinary
+        // lines of 160 characters. Only `area ... poly` lines may run to
+        // MAX_LINE (384), and a file holds few of those.
+        assert!(MAX_FILE_BYTES as usize / 160 >= 400);
+        assert!(MAX_LINE <= 384 && MAX_FILE_BYTES as usize / MAX_LINE >= 160);
         assert_eq!((more_ignored(0), more_ignored(8), more_ignored(9), more_ignored(50_000)), (0, 0, 1, 49_992));
     }
 
