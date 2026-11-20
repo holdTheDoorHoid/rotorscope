@@ -52,6 +52,42 @@ pub fn messages(
     fix: &Fix,
     uptime_s: f64,
 ) -> Result<[RawMessage; N_MESSAGES], Error> {
+    // The operator "stands" at the centre of the circle.
+    let pilot = LatLon {
+        lat: centre.lat,
+        lon: centre.lon,
+    };
+    build(fix, HEIGHT_AGL_M, 0.0, Some((pilot, GROUND_M)), uptime_s)
+}
+
+/// The messages for one instant of a scripted path (feature `scripted`,
+/// bench builds only; src/script.rs): the same five messages with the same
+/// identity, but the path's height and climb rate, and no pilot position
+/// (unknown, as F3411 allows).
+#[cfg(feature = "scripted")]
+pub fn messages_scripted(
+    s: &crate::script::Sample,
+    uptime_s: f64,
+) -> Result<[RawMessage; N_MESSAGES], Error> {
+    let fix = Fix {
+        lat: s.lat,
+        lon: s.lon,
+        heading_deg: s.heading_deg,
+        speed_mps: s.speed_mps,
+    };
+    build(&fix, s.height_m, s.vspeed_mps, None, uptime_s)
+}
+
+/// The five messages: `height_agl` above the ground (the geodetic height is
+/// [`GROUND_M`] plus it), climbing at `vspeed`, the operator at `pilot`
+/// (position and its geodetic height) or unknown.
+fn build(
+    fix: &Fix,
+    height_agl: f32,
+    vspeed: f32,
+    pilot: Option<(LatLon, f32)>,
+    uptime_s: f64,
+) -> Result<[RawMessage; N_MESSAGES], Error> {
     let basic = Message::BasicId(BasicId {
         id_type: IdType::SerialNumber,
         ua_type: UaType::HelicopterOrMultirotor,
@@ -62,14 +98,14 @@ pub fn messages(
         height_type: HeightType::AboveGround,
         direction: Some(fix.heading_deg),
         speed_horizontal: Some(fix.speed_mps),
-        speed_vertical: Some(0.0),
+        speed_vertical: Some(vspeed),
         position: Some(LatLon {
             lat: fix.lat,
             lon: fix.lon,
         }),
         altitude_pressure: None,
-        altitude_geodetic: Some(GROUND_M + HEIGHT_AGL_M),
-        height: Some(HEIGHT_AGL_M),
+        altitude_geodetic: Some(GROUND_M + height_agl),
+        height: Some(height_agl),
         horizontal_accuracy: HorizontalAccuracy::M10,
         vertical_accuracy: VerticalAccuracy::M10,
         baro_accuracy: VerticalAccuracy::Unknown,
@@ -83,20 +119,16 @@ pub fn messages(
         description: FixedStr::new(SELF_ID)?,
     });
     let system = Message::System(System {
-        // The operator "stands" at the centre of the circle.
         operator_location_type: OperatorLocationType::Takeoff,
         classification_type: ClassificationType::Undeclared,
-        operator_position: Some(LatLon {
-            lat: centre.lat,
-            lon: centre.lon,
-        }),
+        operator_position: pilot.map(|(p, _)| p),
         area_count: 1,
         area_radius: 0,
         area_ceiling: None,
         area_floor: None,
         category: Category::Undeclared,
         class: UaClass::Undeclared,
-        operator_altitude: Some(GROUND_M),
+        operator_altitude: pilot.map(|(_, h)| h),
         timestamp: None,
     });
     let operator = Message::OperatorId(OperatorId {

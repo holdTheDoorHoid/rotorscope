@@ -1,4 +1,13 @@
+// The bench fence every Rotorscope firmware shares (crates/link/src/benchfence.rs):
+// a build with the bench-only feature `scripted` stops unless ROTORSCOPE_BENCH=1,
+// and the image then carries the tag `bench-build:scripted` that tools/dev-board.sh
+// looks for. The beacon itself is a bench tool; this marks the scripted flights.
+#[path = "../../crates/link/src/benchfence.rs"]
+mod benchfence;
+
 fn main() {
+    println!("cargo:rerun-if-changed=../../crates/link/src/benchfence.rs");
+    benchfence::run("rid-beacon", &["scripted"], &[]);
     linker_be_nice();
     // The C5 is RISC-V and links with the stock toolchain; only Xtensa needs espup's linker.
     if std::env::var("TARGET")

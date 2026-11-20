@@ -1439,6 +1439,8 @@ mod tests;
 #[cfg(test)]
 mod tests_across;
 #[cfg(test)]
+mod tests_bench;
+#[cfg(test)]
 mod tests_linger;
 #[cfg(test)]
 mod tests_profiles;

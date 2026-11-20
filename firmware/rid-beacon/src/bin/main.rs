@@ -44,6 +44,8 @@ use rid_beacon::control::{self, Reply, Tx};
 use rid_beacon::flight::{self, Centre};
 use rid_beacon::hci_fix::FixedTransport;
 use rid_beacon::rid_tx;
+#[cfg(feature = "scripted")]
+use rid_beacon::script;
 
 extern crate alloc;
 
@@ -121,6 +123,32 @@ extern "Rust" fn custom_halt() -> ! {
 fn uptime_s() -> f64 {
     Instant::now().as_micros() as f64 / 1e6
 }
+
+/// The five Remote ID messages for this instant: the circle, or in a bench
+/// build with `scripted` the scripted path in use (src/script.rs).
+fn messages_now(centre: &Centre) -> Result<[rid::RawMessage; rid_tx::N_MESSAGES], rid::Error> {
+    let t = uptime_s();
+    #[cfg(feature = "scripted")]
+    if let Some(s) = scripted_now(centre) {
+        return rid_tx::messages_scripted(&s, t);
+    }
+    rid_tx::messages(centre, &flight::at(centre, t), t)
+}
+
+/// Bench builds with `scripted`: where the scripted path in use is now
+/// (`None` while the circle is flown).
+#[cfg(feature = "scripted")]
+fn scripted_now(centre: &Centre) -> Option<script::Sample> {
+    let (p, secs) = script::current(Instant::now().as_millis() as u32);
+    script::at(p, centre.lat, centre.lon, secs)
+}
+
+/// Bench builds with `scripted`: the image's bench tag, which
+/// tools/dev-board.sh finds in the ELF (it refuses to flash it without
+/// ROTORSCOPE_BENCH=1), printed at boot.
+#[cfg(feature = "scripted")]
+#[used]
+static BENCH_TAG: &str = concat!(env!("ROTORSCOPE_BENCH_TAG"), "\0");
 
 #[allow(
     clippy::large_stack_frames,
@@ -206,6 +234,12 @@ async fn main(spawner: Spawner) -> ! {
         openlink::build::FAKE_WFB_LINK_ID,
         openlink::build::FAKE_RUBY_VEHICLE_ID,
         openlink::build::FAKE_DRONEBRIDGE_COMM_ID,
+    );
+
+    #[cfg(feature = "scripted")]
+    println!(
+        r#"{{"t":"warn","what":"bench_build","tag":"{}","note":"BENCH BUILD: scripted flights on keys 0-5 (0 circle, 1 beeline, 2 fast inbound, 3 straight pass, 4 low hover, 5 drop); the circle until a key is pressed"}}"#,
+        BENCH_TAG.trim_end_matches('\0')
     );
 
     spawner.spawn(wifi_task(wifi, sniffer, centre).unwrap());
@@ -369,8 +403,7 @@ fn wifi_send(
     counters: &mut [u8; 2],
     frame: &mut [u8; rid_tx::FRAME_MAX],
 ) {
-    let t = uptime_s();
-    let built = rid_tx::messages(centre, &flight::at(centre, t), t).and_then(|m| rid_tx::pack(&m));
+    let built = messages_now(centre).and_then(|m| rid_tx::pack(&m));
     let pack = match built {
         Ok(p) => p,
         Err(e) => {
@@ -489,8 +522,7 @@ impl BlePayloads {
 
     /// Next legacy payload: the next message type in rotation.
     fn next_legacy(&mut self, centre: &Centre) -> bool {
-        let t = uptime_s();
-        let Ok(msgs) = rid_tx::messages(centre, &flight::at(centre, t), t) else {
+        let Ok(msgs) = messages_now(centre) else {
             return false;
         };
         let msg = msgs[self.rotate];
@@ -508,10 +540,7 @@ impl BlePayloads {
     /// Next pack for the extended and coded sets (each has its own counter).
     #[allow(clippy::large_stack_frames, reason = "~1.5 KB of frame and message buffers; the executor stack has room and keeping them local avoids shared statics")]
     fn next_packs(&mut self, centre: &Centre) -> bool {
-        let t = uptime_s();
-        let Ok(pack) =
-            rid_tx::messages(centre, &flight::at(centre, t), t).and_then(|m| rid_tx::pack(&m))
-        else {
+        let Ok(pack) = messages_now(centre).and_then(|m| rid_tx::pack(&m)) else {
             return false;
         };
         match (
@@ -735,6 +764,11 @@ async fn console_task(mut rx: UsbSerialJtagRx<'static, Blocking>) {
         Timer::after(Duration::from_millis(50)).await;
         let n = rx.drain_rx_fifo(&mut buf);
         for &b in &buf[..n] {
+            #[cfg(feature = "scripted")]
+            if let Some(p) = script::command(b, Instant::now().as_millis() as u32) {
+                println!(r#"{{"t":"cmd","path":"{}"}}"#, p.name());
+                continue;
+            }
             match control::command(b) {
                 Reply::Ignored => {}
                 Reply::Toggled(t, on) => {
@@ -794,6 +828,25 @@ async fn summary_task(centre: Centre) {
         let d = |i: usize| now[i].wrapping_sub(last[i]);
         let t = uptime_s();
         let fix = flight::at(&centre, t);
+        #[cfg(feature = "scripted")]
+        let fix = match scripted_now(&centre) {
+            Some(s) => {
+                let (p, secs) = script::current(Instant::now().as_millis() as u32);
+                println!(
+                    r#"{{"t":"path","path":"{}","s":{:.0},"lat":{:.7},"lon":{:.7},"h":{:.1},"v":{:.1},"hdg":{:.0},"vs":{:.1}}}"#,
+                    p.name(),
+                    secs,
+                    s.lat,
+                    s.lon,
+                    s.height_m,
+                    s.speed_mps,
+                    s.heading_deg,
+                    s.vspeed_mps
+                );
+                flight::Fix { lat: s.lat, lon: s.lon, heading_deg: s.heading_deg, speed_mps: s.speed_mps }
+            }
+            None => fix,
+        };
         let five = control::band_5g();
         println!(
             r#"{{"t":"tx","up":{},"band":"{}","ch":{},"beacon":{},"nan":{},"ble4":{},"ble5":{},"ble_lr":{},"open_sys":"{}","open":{},"fail":{},"on":"{}","lat":{:.7},"lon":{:.7},"hdg":{:.0}}}"#,

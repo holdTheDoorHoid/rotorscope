@@ -42,6 +42,12 @@ esp32c5 = [
   "esp-println/esp32c5",
   "esp-radio/esp32c5",
 ]
+# Bench only (docs/BENCH.md "Bench results, 2026-11-19 (threat profiles)"):
+# console keys 0-5 fly the threat-level bench paths (src/script.rs) instead of
+# the circle. Same identity, transports and power; only the position, speed,
+# direction, height and climb fields change, and the paths send no pilot
+# position. Fenced by build.rs: the build stops unless ROTORSCOPE_BENCH=1.
+scripted = []
 
 [dependencies]
 # All Remote ID encoding goes through the shared crate (see src/rid_tx.rs), so
