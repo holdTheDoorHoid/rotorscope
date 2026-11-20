@@ -411,6 +411,14 @@ impl Reason {
         core::str::from_utf8(&self.place[..n]).unwrap_or("")
     }
 
+    /// A beeline (rule 5) that a fast-inbound reason (rule 6) in `all`
+    /// already says for the same place: both stay in the list (and the
+    /// JSON), but the words leave this one out, since the fast-inbound
+    /// line says the same thing first.
+    pub fn repeats_fast(&self, all: &[Reason]) -> bool {
+        self.rule == Rule::Beeline && all.iter().any(|o| o.rule == Rule::FastInbound && o.place == self.place)
+    }
+
     /// The bubble round the unit (not a named area).
     pub fn is_bubble(&self) -> bool {
         self.place[0] == 0
@@ -1371,7 +1379,7 @@ pub fn describe_with<'a>(t: &Track, now_ms: u64, name_of: impl Fn(TrackId) -> Op
     if th.friend {
         let _ = s.push_str(" (friend)");
     }
-    for (i, r) in th.reasons.iter().enumerate() {
+    for (i, r) in th.reasons.iter().filter(|r| !r.repeats_fast(&th.reasons)).enumerate() {
         let _ = s.push_str(if i == 0 { " " } else { "; " });
         let _ = write_reason_named(&mut s, r, r.other().and_then(&name_of));
     }

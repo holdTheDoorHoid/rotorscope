@@ -44,8 +44,10 @@ This is a **bench** transmitter. Metres, not kilometres.
   - The operator stands fixed at the centre.
   - The centre is set at build time with `RID_TEST_LAT` / `RID_TEST_LON`. The default is
     Philadelphia City Hall (39.9526, −75.1652).
-  - There is no GPS or clock. The Location timestamp is uptime, counted as seconds after the
-    hour. The System timestamp is "unknown".
+  - There is no GPS or clock, so both timestamps (Location and System) are sent as "unknown",
+    which F3411 allows. (Uptime used to stand in, and every hub with GPS time flagged the track
+    `clock_skew`.) The laptop BLE beacon (`tools/rid-ble-beacon`) shares this code and has a
+    real clock, so its Location timestamp is the true seconds after the hour.
 - **Fake open FPV links: header shape only, obviously fake IDs, off at boot.**
   - Approved by the owner 2026-11-14 for bench testing, on the same terms as the Remote ID modes.
   - IDs all start `7E57` ("TEST"): wfb-ng link ID `7e57ed` (not the real default `7505d6`),

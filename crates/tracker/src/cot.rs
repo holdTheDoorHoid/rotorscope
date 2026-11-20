@@ -273,7 +273,7 @@ fn threat(w: &mut Buf<'_>, track: &Track) -> core::fmt::Result {
     if th.friend {
         w.write_str(" (friend)")?;
     }
-    for (i, r) in th.reasons.iter().enumerate() {
+    for (i, r) in th.reasons.iter().filter(|r| !r.repeats_fast(&th.reasons)).enumerate() {
         w.write_str(if i == 0 { ": " } else { ", " })?;
         let text: heapless::String<96> = render(Reasoned(r));
         write!(w, "{}", Xml(&text))?;

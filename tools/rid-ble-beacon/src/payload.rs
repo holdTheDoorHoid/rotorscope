@@ -81,7 +81,7 @@ pub struct Frame {
 
 pub fn frame(c: &Centre, t_s: f64, counter: u8, step: usize) -> Result<Frame, Error> {
     let fix = flight::at(c, t_s);
-    let msgs = rid_tx::messages(c, &fix, t_s)?;
+    let msgs = rid_tx::messages(c, &fix, Some(t_s))?;
     let i = step % rid_tx::N_MESSAGES;
     Ok(Frame {
         kind: rid_tx::MESSAGE_NAMES[i],
@@ -139,6 +139,24 @@ mod tests {
         }
         assert_eq!(kinds, rid_tx::MESSAGE_NAMES);
         assert_eq!(frame(&c, T, 0, 5).unwrap().kind, "basic_id");
+    }
+
+    #[test]
+    fn location_timestamp_is_real_time_or_unknown() {
+        // T is 1_762_870_000.25: 1_762_870_000 % 3600 = 400 s after the hour.
+        let c = centre(None, None);
+        let fix = flight::at(&c, T);
+        let location = |utc| {
+            let raw = rid_tx::messages(&c, &fix, utc).unwrap()[1];
+            let Message::Location(l) = decode(&raw).unwrap() else { panic!("not a Location") };
+            l
+        };
+        let l = location(Some(T));
+        assert!((l.timestamp.unwrap() - 400.2).abs() < 0.11, "{:?}", l.timestamp);
+        // The board has no clock: unknown, so a hub with GPS time has
+        // nothing to call skewed.
+        let l = location(None);
+        assert_eq!((l.timestamp, l.timestamp_accuracy), (None, None));
     }
 
     #[test]

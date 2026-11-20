@@ -43,21 +43,20 @@ pub const BLE_EXT_LEN: usize = 6 + PACK_LEN;
 pub const MESSAGE_NAMES: [&str; N_MESSAGES] =
     ["basic_id", "location", "self_id", "system", "operator_id"];
 
-/// Build the five messages for one instant. `uptime_s` stands in for the
-/// clock: the beacon has no GPS or RTC, so the Location timestamp is
-/// "seconds after the hour" taken from uptime, and the System timestamp is
-/// left unknown.
-pub fn messages(
-    centre: &Centre,
-    fix: &Fix,
-    uptime_s: f64,
-) -> Result<[RawMessage; N_MESSAGES], Error> {
+/// Build the five messages for one instant. `utc_s` is the real time (Unix
+/// seconds) when the sender knows it (the laptop BLE beacon), and gives the
+/// Location timestamp as seconds after the hour. The board has no GPS or
+/// RTC and passes `None`: the timestamp is then sent as unknown, as F3411
+/// allows. (Uptime used to stand in, and every hub with GPS time flagged the
+/// track `clock_skew`, since the two clocks never agree.) The System
+/// timestamp is always unknown.
+pub fn messages(centre: &Centre, fix: &Fix, utc_s: Option<f64>) -> Result<[RawMessage; N_MESSAGES], Error> {
     // The operator "stands" at the centre of the circle.
     let pilot = LatLon {
         lat: centre.lat,
         lon: centre.lon,
     };
-    build(fix, HEIGHT_AGL_M, 0.0, Some((pilot, GROUND_M)), uptime_s)
+    build(fix, HEIGHT_AGL_M, 0.0, Some((pilot, GROUND_M)), utc_s)
 }
 
 /// The messages for one instant of a scripted path (feature `scripted`,
@@ -65,17 +64,14 @@ pub fn messages(
 /// identity, but the path's height and climb rate, and no pilot position
 /// (unknown, as F3411 allows).
 #[cfg(feature = "scripted")]
-pub fn messages_scripted(
-    s: &crate::script::Sample,
-    uptime_s: f64,
-) -> Result<[RawMessage; N_MESSAGES], Error> {
+pub fn messages_scripted(s: &crate::script::Sample) -> Result<[RawMessage; N_MESSAGES], Error> {
     let fix = Fix {
         lat: s.lat,
         lon: s.lon,
         heading_deg: s.heading_deg,
         speed_mps: s.speed_mps,
     };
-    build(&fix, s.height_m, s.vspeed_mps, None, uptime_s)
+    build(&fix, s.height_m, s.vspeed_mps, None, None)
 }
 
 /// The five messages: `height_agl` above the ground (the geodetic height is
@@ -86,7 +82,7 @@ fn build(
     height_agl: f32,
     vspeed: f32,
     pilot: Option<(LatLon, f32)>,
-    uptime_s: f64,
+    utc_s: Option<f64>,
 ) -> Result<[RawMessage; N_MESSAGES], Error> {
     let basic = Message::BasicId(BasicId {
         id_type: IdType::SerialNumber,
@@ -110,9 +106,10 @@ fn build(
         vertical_accuracy: VerticalAccuracy::M10,
         baro_accuracy: VerticalAccuracy::Unknown,
         speed_accuracy: SpeedAccuracy::Mps1,
-        // Tenths of a second resolution; 0..3600.
-        timestamp: Some(((uptime_s % 3600.0) * 10.0) as u32 as f32 / 10.0),
-        timestamp_accuracy: Some(0.1),
+        // Tenths of a second after the hour (0..3600), or unknown without
+        // a real clock (see `messages`).
+        timestamp: utc_s.map(|t| ((t % 3600.0) * 10.0) as u32 as f32 / 10.0),
+        timestamp_accuracy: utc_s.map(|_| 0.1),
     });
     let self_id = Message::SelfId(SelfId {
         desc_type: DescType::Text,

@@ -1473,15 +1473,22 @@ starts on the same day.
   change) were not flown.
 - Only the Wi-Fi 2.4 GHz beacon and NAN were heard (the only node had the Wi-Fi 2.4 role).
 
+**Seen, and fixed afterwards** (host-tested and compile-checked only; not reflown on the bench):
+
+- Every track of the beacon had `SPOOF? ... its clock is N s off GPS time`: the beacon's Location
+  timestamp was its uptime, the hub's time the emulator's. A bench artefact; the levels did not
+  depend on it. `rid-beacon` now sends both timestamps as unknown (it has no clock), which the
+  hub accepts without a flag.
+- A Critical from fast inbound repeated the beeline's words: `FAST, heading for bench, 507 m away
+  at 12 m/s, there in about 30 s; heading for bench, 507 m away at 12 m/s, there in about 30 s`.
+  Rules 6 and 5 are both still listed (evidence, JSON), but the text (console, evidence text,
+  TAK, phone page) now leaves out a beeline that a fast-inbound reason already gives for the
+  same place.
+- The wipe's line looked doubled in the session notes. It was not the hub: the hub printed it
+  once, and the bench helper's two searches of the same log both matched it.
+
 **Seen, not changed:**
 
-- Every track of the beacon has `SPOOF? ... its clock is N s off GPS time`: the beacon's Location
-  timestamp is its uptime, the hub's time is the emulator's. A bench artefact; the levels did not
-  depend on it.
-- A Critical from fast inbound repeats the beeline's words: `FAST, heading for bench, 507 m away
-  at 12 m/s, there in about 30 s; heading for bench, 507 m away at 12 m/s, there in about 30 s`
-  (rules 6 and 5 both listed, as designed, but the text reads twice).
-- The console printed the wipe's line twice (the evidence log has it once).
 - After the drop's Warning came down (30 s after the drop rule stopped) the drone, still over the
   area but silenced, was shown at Notice with no reasons; while heard it would be Caution.
 - On this bench a node delivers a beacon report about every 0.5 to 2 s (Wi-Fi beacon and NAN at

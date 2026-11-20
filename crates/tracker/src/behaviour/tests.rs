@@ -302,6 +302,8 @@ fn every_rise_is_announced_once() {
     assert!(rises[0].1.starts_with("Warning: drone SN-BEE heading for house, "), "{}", rises[0].1);
     assert!(rises[1].1.starts_with("Critical: drone SN-BEE FAST, heading for house"), "{}", rises[1].1);
     assert!(rises[1].1.contains("there in about"), "{}", rises[1].1);
+    // Rules 6 and 5 are both listed, but the words say "heading for" once.
+    assert_eq!(rises[1].1.matches("heading for").count(), 1, "{}", rises[1].1);
 }
 
 #[test]
@@ -741,6 +743,7 @@ fn level_and_reasons_reach_json_cot_and_the_strip() {
     let n = crate::cot::drone_event(t, &ctx, &mut cot).unwrap();
     let x = core::str::from_utf8(&cot[..n]).unwrap();
     assert!(x.contains("; Threat: Critical: FAST, heading for house, "), "{x}");
+    assert_eq!(x.matches("heading for").count(), 1, "the beeline is not repeated: {x}");
     assert!(x.contains("<color argb=\"-65536\"/>"), "{x}");
     let strip = strip_text(t).unwrap();
     assert!(strip.starts_with("CRITICAL OUT-1 FAST to house "), "{strip}");

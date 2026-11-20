@@ -130,9 +130,9 @@ fn messages_now(centre: &Centre) -> Result<[rid::RawMessage; rid_tx::N_MESSAGES]
     let t = uptime_s();
     #[cfg(feature = "scripted")]
     if let Some(s) = scripted_now(centre) {
-        return rid_tx::messages_scripted(&s, t);
+        return rid_tx::messages_scripted(&s);
     }
-    rid_tx::messages(centre, &flight::at(centre, t), t)
+    rid_tx::messages(centre, &flight::at(centre, t), None)
 }
 
 /// Bench builds with `scripted`: where the scripted path in use is now
@@ -177,7 +177,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     // Prove the constants encode and decode before anything is transmitted.
-    let msgs = rid_tx::messages(&centre, &flight::at(&centre, 0.0), 0.0).expect("encode");
+    let msgs = rid_tx::messages(&centre, &flight::at(&centre, 0.0), None).expect("encode");
     if let Err(e) = rid_tx::self_check(&msgs) {
         panic!("Remote ID self-check failed: {e:?}");
     }

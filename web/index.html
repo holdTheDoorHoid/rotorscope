@@ -545,6 +545,13 @@ function ordinal(n) {
   return n + (t >= 11 && t <= 13 ? 'th' : u === 1 ? 'st' : u === 2 ? 'nd' : u === 3 ? 'rd' : 'th');
 }
 const SIG_WORDS = {video: 'FPV video signal', control: 'control signal', wifi: 'drone Wi-Fi signal', open_link: 'FPV link signal', sound: 'rotor sound'};
+// The reasons to show in words: a beeline the fast-inbound line already
+// says for the same place is left out, as the hub's text does
+// (Reason::repeats_fast).
+function shownReasons(why) {
+  return why.filter(r => !(r.rule === 'beeline' && why.some(o => o.rule === 'fast_inbound' && o.place === r.place)));
+}
+
 // One reason in words, as the hub's own text (behaviour::write_reason).
 // Place names come from the site file, still esc()'d; numbers through
 // Number() and the formatters.
@@ -1315,7 +1322,7 @@ function threatSection(t) {
   if (!l) return st && st.places ? ['<h3>Threat level</h3><p class="mut">Not judged yet: it needs a confirmed, recent position.</p>'] : [];
   const th = t.threat, why = th.reasons || [], notes = threatNotes(th);
   return [`<h3>Threat level</h3><p>${lvTag(l)}${notes.length ? ' <span class="mut sm">' + notes.join('; ') + '</span>' : ''}</p>` +
-    (why.length ? `<ul class="why-list">${why.map(r => `<li>${reasonText(r)}</li>`).join('')}</ul>`
+    (why.length ? `<ul class="why-list">${shownReasons(why).map(r => `<li>${reasonText(r)}</li>`).join('')}</ul>`
       : '<p class="mut sm">Nothing unusual about what it is doing.</p>')];
 }
 

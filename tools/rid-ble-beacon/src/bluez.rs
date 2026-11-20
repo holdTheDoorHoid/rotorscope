@@ -203,7 +203,7 @@ pub fn run(o: &Options) -> Result<(), String> {
     }
     // Self-check with the receivers' decoder before anything is sent.
     let t0 = now_s();
-    let msgs = rid_tx::messages(&centre, &crate::flight::at(&centre, t0), t0)
+    let msgs = rid_tx::messages(&centre, &crate::flight::at(&centre, t0), Some(t0))
         .map_err(|e| format!("encoding: {e:?}"))?;
     rid_tx::self_check(&msgs).map_err(|e| format!("self-check: {e:?}"))?;
 
