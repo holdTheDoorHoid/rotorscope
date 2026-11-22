@@ -20,6 +20,8 @@ serde.workspace = true
 libm = "0.2"
 # JSON lines for the phone page and USB stream, written into a caller buffer.
 serde-json-core = { version = "0.6", default-features = false }
+# DRIP (RFC 9575) signature checks on authentication messages, no_std.
+remoteid = { version = "0.3.3", default-features = false, features = ["verify"] }
 
 [dev-dependencies]
 # Tests build realistic detections with the same encoder the test transmitter uses.
