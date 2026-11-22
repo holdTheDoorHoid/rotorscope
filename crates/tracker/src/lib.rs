@@ -78,6 +78,7 @@ pub mod cot;
 pub mod delivery;
 pub mod csv;
 pub mod dji;
+pub mod drip;
 pub mod geo;
 pub mod json;
 pub mod openlinks;
@@ -685,8 +686,7 @@ impl Track {
                     put(&mut self.operator_id, o, rx_ms);
                 }
             }
-            // Signatures are not verified on the hub: "auth message
-            // present, not checked" is all anything may say about them.
+            // Verified per frame with the raw pages ([`crate::drip`]).
             Message::Auth(_) => {}
         }
     }
@@ -992,6 +992,8 @@ pub struct Tracker<const N: usize = 64, const A: usize = { aircraft::MAX_AIRCRAF
     conflict_watch: conflict::ConflictWatch,
     /// UTC and node positions for the spoofing checks.
     spoof_cfg: spoof::SpoofConfig,
+    /// DRIP keys learned from Links, for verifying Wrappers and Manifests.
+    drip_keys: Option<drip::KeyStore>,
     /// Identities heard while the table was full ([`probation`]).
     candidates: probation::Candidates<N>,
     /// New drone identities a second, for the flood alarm.
@@ -1055,6 +1057,7 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
                 utc_offset_ms: None,
                 nodes: [None; spoof::MAX_NODE_POS],
             },
+            drip_keys: None,
             candidates: probation::Candidates::new(),
             flood: probation::FloodWatch::new(),
             slow_flood: probation::SlowWatch::new(),
@@ -1201,6 +1204,9 @@ impl<const N: usize, const A: usize, const P: usize> Tracker<N, A, P> {
         let r = self.ingest_decoded(&obs, &msgs, errors);
         if let Some(t) = r.track().and_then(|id| self.tracks.iter_mut().find(|t| t.id == id)) {
             spoof::auth_decode_errors(t, auth_errors);
+            let now_unix = self.spoof_cfg.utc_offset_ms.map(|o| ((now_ms as i64 + o) / 1000) as u64);
+            let keys = self.drip_keys.get_or_insert_with(drip::KeyStore::default);
+            drip::check(t, &det.messages, keys, now_unix);
         }
         r
     }

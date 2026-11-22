@@ -1470,7 +1470,7 @@ fn check_names_and_codes() {
         });
         assert!(r.len() > 10, "{c:?}: {r}");
     }
-    assert_eq!(Check::ALL.len(), 23);
+    assert_eq!(Check::ALL.len(), 24);
     assert_eq!(Check::from_code(0), None);
 }
 
@@ -1761,4 +1761,44 @@ fn spoof_memory_footprint() {
     );
     assert!(size_of::<SpoofState>() <= 128);
     let _ = String::new();
+}
+
+#[test]
+fn drip_wrapper_is_verified_and_a_forged_one_is_flagged() {
+    use remoteid::auth::DripSigner;
+    use remoteid::drip::{self as rdrip, SESSION_ID_TYPE_DRIP};
+    let hda = DripSigner::new([7; 32], 16376, 1);
+    let ua = DripSigner::new([9; 32], 16376, 1);
+    let mut id = [0u8; 20];
+    id[0] = SESSION_ID_TYPE_DRIP;
+    id[1..17].copy_from_slice(&ua.det().0);
+    let basic = rid::encode::message(&Message::BasicId(BasicId {
+        id_type: IdType::SpecificSession,
+        ua_type: UaType::HelicopterOrMultirotor,
+        uas_id: FixedStr::new(&id).unwrap(),
+    }))
+    .unwrap();
+    let pack = |data: &[u8], extra: Option<rid::RawMessage>| {
+        let pages = rdrip::paginate(remoteid::AuthType::SpecificAuthentication, 2, 0, data, false).unwrap();
+        let mut msgs = SVec::from([basic]);
+        msgs.extend(extra);
+        msgs.extend(pages.iter().map(|p| p.encode().unwrap()));
+        crate::tests::det(Transport::WifiBeacon, MAC_A, -70, &msgs)
+    };
+    let loc = crate::tests::location(CITY_HALL.0, CITY_HALL.1, 50.0);
+    let mut tr: Tracker = Tracker::default();
+    // The Link teaches the hub the aircraft's key (DET bound to HI).
+    tr.ingest(0, &pack(&hda.link(&ua.det(), &ua.hi(), 0, u32::MAX), None), 1_000);
+    assert_eq!(tr.tracks()[0].spoof.drip, crate::drip::DripStatus::Unverified);
+
+    let mut w = [0u8; 255];
+    let n = ua.wrapper(0, u32::MAX, &[loc], &mut w).unwrap();
+    tr.ingest(0, &pack(&w[..n], Some(loc)), 2_000);
+    assert_eq!(tr.tracks()[0].spoof.drip, crate::drip::DripStatus::Valid);
+    assert!(tr.tracks()[0].spoof.flag(Check::AuthInvalid).is_none());
+
+    // Same Wrapper, one signature byte changed: a forger without the key.
+    w[n - 20] ^= 1;
+    tr.ingest(0, &pack(&w[..n], Some(loc)), 3_000);
+    assert_eq!(tr.tracks()[0].spoof.flag(Check::AuthInvalid).unwrap().detail, 0);
 }

@@ -255,7 +255,7 @@ fn remarks(w: &mut Buf<'_>, track: &Track, ctx: &Context) -> core::fmt::Result {
         write!(w, "; Note: {}", Xml(&summary))?;
     }
     if track.spoof.auth_pages != 0 {
-        w.write_str("; Auth: message present, not checked")?;
+        write!(w, "; Auth: {}", track.spoof.drip.text())?;
     }
     claim(w, track, ctx.now_ms)?;
     threat(w, track)

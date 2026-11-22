@@ -231,12 +231,19 @@ Notes:
 | 21 | `dev_board` (0 BLE, 1 Wi-Fi) | The transmitter address is in an Espressif block (355 blocks, sorted table) [14]. BLE random static addresses (top bits 11) are skipped | 15 (weak) |
 | 22 | `auth_malformed` (count) | At least 2 malformed authentication pages: a page-0 header whose length the announced pages cannot hold (it does not decode), a page beyond page 0's last-page index, or a reserved auth type | 30 |
 | 23 | `identity_changed` (previous track id) | The track continues one that was flying under another ID (see Continuity) | 55; 40 when both IDs are session IDs |
+| 24 | `auth_invalid` (0 bad signature, 1 DET/HI mismatch, 2 signer not the aircraft's DET, 3 broken Manifest chain, 4 malformed) | A DRIP Link, Wrapper, Manifest or Frame that arrived whole in one message pack fails verification (`remoteid` crate, RFC 9575) | 90 |
 
 - **No DJI RF.** The RF node may simply have been scanning another band,
   so this check only adds weight to other evidence.
 - **Dev board.** Honest ArduRemoteID add-on modules also run on ESP32.
 - **Authentication.** Authentication pages are counted (`spoof.auth` in
-  JSON) but cannot be verified, because the hub has no keys.
+  JSON). DRIP messages that arrive whole in one message pack (Wi-Fi,
+  Bluetooth 5) are verified with the `remoteid` crate: a Link teaches the
+  hub the aircraft's key (its DET is bound to that key by the ORCHID hash),
+  and later Wrappers and Manifests from that DET are checked against it.
+  No key is configured, so a valid signature proves the aircraft holds the
+  key behind its DET, not who the aircraft is. Bluetooth 4 pages, sent one
+  at a time, are still only counted.
 
 ## Continuity: following a drone that changes identity
 
@@ -740,9 +747,9 @@ Tensions, and what was chosen (the owner delegated these):
   same drone on it). Because the track's position no longer follows forged
   frames, a forger moves nothing on TAK; the dispute and the other
   claimed position are in the remarks.
-- **Authentication.** The hub verifies no Remote ID signature. Where an
-  auth message was heard, the most anything says is "auth message present,
-  not checked" (page, screen detail, CoT).
+- **Authentication.** DRIP signatures in message packs are verified
+  (check 24). CoT says "DRIP signature valid", "DRIP, key not yet known" or,
+  for anything else, "message present, not checked".
 
 ### Cost
 

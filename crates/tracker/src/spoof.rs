@@ -138,10 +138,14 @@ pub enum Check {
     /// The drone appears to have changed its ID mid-flight (see
     /// [`crate::continuity`]). Detail: the previous track's id.
     IdentityChanged = 23,
+    /// A DRIP authentication message failed verification (`remoteid`).
+    /// Detail: 0 bad signature, 1 DET/HI mismatch, 2 signer is not the
+    /// aircraft's DET, 3 broken Manifest chain, 4 malformed.
+    AuthInvalid = 24,
 }
 
 impl Check {
-    pub const ALL: [Check; 23] = [
+    pub const ALL: [Check; 24] = [
         Check::PositionJump,
         Check::MotionMismatch,
         Check::AltitudeMismatch,
@@ -165,6 +169,7 @@ impl Check {
         Check::DevBoard,
         Check::AuthMalformed,
         Check::IdentityChanged,
+        Check::AuthInvalid,
     ];
 
     /// The evidence-log code.
@@ -202,6 +207,7 @@ impl Check {
             Check::DevBoard => "dev_board",
             Check::AuthMalformed => "auth_malformed",
             Check::IdentityChanged => "identity_changed",
+            Check::AuthInvalid => "auth_invalid",
         }
     }
 }
@@ -312,6 +318,7 @@ impl fmt::Display for Reason {
             Check::DevBoard => f.write_str("transmitter is an ESP32/ESP8266 (Espressif) chip"),
             Check::AuthMalformed => write!(f, "{d} malformed authentication pages"),
             Check::IdentityChanged => write!(f, "changed identity mid-flight (was track {d})"),
+            Check::AuthInvalid => f.write_str("DRIP authentication failed verification"),
         }
     }
 }
@@ -511,6 +518,8 @@ pub struct SpoofState {
     pub auth_pages: u16,
     auth_last: u8,
     auth_bad: u8,
+    /// The best DRIP verification seen ([`crate::drip`]).
+    pub drip: crate::drip::DripStatus,
     jumps: u8,
     motion_bad: u8,
     motion_ok: u8,
@@ -553,6 +562,7 @@ impl Default for SpoofState {
             auth_pages: 0,
             auth_last: 0xFF,
             auth_bad: 0,
+            drip: crate::drip::DripStatus::None,
             jumps: 0,
             motion_bad: 0,
             motion_ok: 0,
@@ -698,6 +708,7 @@ impl SpoofState {
         add(&mut self.auth_bad, o.auth_bad);
         self.loc_frames = self.loc_frames.saturating_add(o.loc_frames);
         self.auth_pages |= o.auth_pages;
+        self.drip = self.drip.max(o.drip);
         self.swarm = self.swarm.max(o.swarm);
     }
 }
